@@ -32,7 +32,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnRequestComplete);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnRequestFail);
 
 /**
- * Genaral helper class http requests via blueprints
+ * General helper class http requests via blueprints
  */
 UCLASS(BlueprintType, Blueprintable)
 class UVaRestRequestJSON : public UObject
@@ -81,6 +81,7 @@ public:
 
 	// @TODO
 
+
 	//////////////////////////////////////////////////////////////////////////
 	// Request callbacks
 
@@ -112,10 +113,10 @@ public:
 
 private:
 	/** Internal request data stored as JSON */
-	TSharedPtr<FJsonObject> RequestJsonObj;
+	UVaRestJsonObject* RequestJsonObj;
 
 	/** Responce data stored as JSON */
-	TSharedPtr<FJsonObject> ResponseJsonObj;
+	UVaRestJsonObject* ResponseJsonObj;
 
 	/** Parameters to be applied to the http request */
 	ERequestVerb::Type Verb;

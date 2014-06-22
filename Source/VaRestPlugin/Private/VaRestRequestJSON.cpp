@@ -50,22 +50,27 @@ void UVaRestRequestJSON::ResetData()
 
 void UVaRestRequestJSON::ResetRequestData()
 {
-	if (RequestJsonObj.IsValid())
+	if (RequestJsonObj != NULL)
 	{
-		RequestJsonObj.Reset();
+		RequestJsonObj->Reset();
 	}
-
-	RequestJsonObj = MakeShareable(new FJsonObject());
+	else
+	{
+		RequestJsonObj = (UVaRestJsonObject*)StaticConstructObject(UVaRestJsonObject::StaticClass());
+	}
 }
 
 void UVaRestRequestJSON::ResetResponseData()
 {
-	if (ResponseJsonObj.IsValid())
+	if (ResponseJsonObj != NULL)
 	{
-		ResponseJsonObj.Reset();
+		ResponseJsonObj->Reset();
+	}
+	else
+	{
+		ResponseJsonObj = (UVaRestJsonObject*)StaticConstructObject(UVaRestJsonObject::StaticClass());
 	}
 
-	ResponseJsonObj = MakeShareable(new FJsonObject());
 	bIsValidJsonResponse = false;
 }
 
@@ -97,15 +102,15 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 
 	// Try to deserialize data to JSON
 	TSharedRef<TJsonReader<TCHAR>> JsonReader = TJsonReaderFactory<TCHAR>::Create(ResponseContent);
-	FJsonSerializer::Deserialize(JsonReader, ResponseJsonObj);
+	FJsonSerializer::Deserialize(JsonReader, ResponseJsonObj->GetRootObject());
 
 	// Decide whether the request was successful
-	bIsValidJsonResponse = bWasSuccessful && ResponseJsonObj.IsValid();
+	bIsValidJsonResponse = bWasSuccessful && ResponseJsonObj->GetRootObject().IsValid();
 
 	// Log errors
 	if (!bIsValidJsonResponse)
 	{
-		if (!ResponseJsonObj.IsValid())
+		if (!ResponseJsonObj->GetRootObject().IsValid())
 		{
 			// As we assume it's recommended way to use current class, but not the only one,
 			// it will be the warning instead of error

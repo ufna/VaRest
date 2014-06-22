@@ -17,6 +17,13 @@ class UVaRestJsonObject : public UObject
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	void Reset();
 
+	/** Get the root Json object */
+	TSharedPtr<FJsonObject>& GetRootObject();
+
+	/** Set the root Json object */
+	void SetRootObject(TSharedPtr<FJsonObject>& JsonObject);
+
+
 	//////////////////////////////////////////////////////////////////////////
 	// FJsonObject API
 
