@@ -53,11 +53,11 @@ public:
 
 	/** Set verb to the request */
 	UFUNCTION(BlueprintCallable, Category = "VaRest")
-	void SetVerb(ERequestVerb::Type Verb);
+	void SetVerb(ERequestVerb::Type NewVerb);
 
 	/** Set content type to the request */
 	UFUNCTION(BlueprintCallable, Category = "VaRest")
-	void SetContentType(ERequestContentType::Type ContentType);
+	void SetContentType(ERequestContentType::Type NewContentType);
 
 
 	//////////////////////////////////////////////////////////////////////////
@@ -116,5 +116,9 @@ private:
 
 	/** Responce data stored as JSON */
 	TSharedPtr<FJsonObject> ResponseJsonObj;
+
+	/** Parameters to be applied to the http request */
+	ERequestVerb::Type Verb;
+	ERequestContentType::Type ContentType;
 
 };

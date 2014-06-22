@@ -5,6 +5,9 @@
 UVaRestRequestJSON::UVaRestRequestJSON(const class FPostConstructInitializeProperties& PCIP)
 	: Super(PCIP)
 {
+	Verb = ERequestVerb::GET;
+	ContentType = ERequestContentType::x_www_form_urlencoded;
+
 	ResetData();
 }
 
@@ -25,14 +28,14 @@ UVaRestRequestJSON* UVaRestRequestJSON::ConstructRequestExt(UObject* WorldContex
 	return Request;
 }
 
-void UVaRestRequestJSON::SetVerb(ERequestVerb::Type Verb)
+void UVaRestRequestJSON::SetVerb(ERequestVerb::Type NewVerb)
 {
-
+	Verb = NewVerb;
 }
 
-void UVaRestRequestJSON::SetContentType(ERequestContentType::Type ContentType)
+void UVaRestRequestJSON::SetContentType(ERequestContentType::Type NewContentType)
 {
-
+	ContentType = NewContentType;
 }
 
 
