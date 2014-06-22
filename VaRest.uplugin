@@ -1,0 +1,20 @@
+{
+    "FileVersion" : 3,
+	
+	"FriendlyName" : "VaRest",
+	"Version" : 1,
+	"VersionName" : "1.0-a1",
+	"CreatedBy" : "Vladimir Alyamkin",
+	"CreatedByURL" : "http://alyamkin.com",
+	"EngineVersion" : 1579795,
+	"Description" : "Plugin that created to make REST server communication simplier",
+	"Category" : "Network",
+	
+    "Modules" :
+	[
+		{
+			"Name" : "VaRestPlugin",
+			"Type" : "Runtime"
+		}
+	]
+}
