@@ -53,12 +53,20 @@ public:
 
 	/** Set verb to the request */
 	UFUNCTION(BlueprintCallable, Category = "VaRest")
-	void SetVerb(ERequestVerb::Type NewVerb);
+	void SetVerb(ERequestVerb::Type Verb);
 
 	/** Set content type to the request. If you're using the x-www-form-urlencoded, 
 	 * params/constaints should be defined as key=ValueString pairs from Json data */
 	UFUNCTION(BlueprintCallable, Category = "VaRest")
-	void SetContentType(ERequestContentType::Type NewContentType);
+	void SetContentType(ERequestContentType::Type ContentType);
+
+	/** Sets optional header info */
+	UFUNCTION(BlueprintCallable, Category = "VaRest")
+	void SetHeader(const FString& HeaderName, const FString& HeaderValue);
+
+	/** Applies percent-encoding to text */
+	UFUNCTION(BlueprintCallable, Category = "VaRest")
+	static FString PercentEncode(const FString& Text);
 
 
 	//////////////////////////////////////////////////////////////////////////
@@ -144,8 +152,13 @@ private:
 	/** Responce data stored as JSON */
 	UVaRestJsonObject* ResponseJsonObj;
 
-	/** Parameters to be applied to the http request */
-	ERequestVerb::Type Verb;
-	ERequestContentType::Type ContentType;
+	/** Verb for making request (GET,POST,etc) */
+	ERequestVerb::Type RequestVerb;
+
+	/** Content type to be applied for request */
+	ERequestContentType::Type RequestContentType;
+
+	/** Mapping of header section to values. Used to generate final header string for request */
+	TMap<FString, FString> RequestHeaders;
 
 };

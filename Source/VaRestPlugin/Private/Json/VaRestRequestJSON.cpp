@@ -5,8 +5,8 @@
 UVaRestRequestJSON::UVaRestRequestJSON(const class FPostConstructInitializeProperties& PCIP)
 	: Super(PCIP)
 {
-	Verb = ERequestVerb::GET;
-	ContentType = ERequestContentType::x_www_form_urlencoded;
+	RequestVerb = ERequestVerb::GET;
+	RequestContentType = ERequestContentType::x_www_form_urlencoded;
 
 	ResetData();
 }
@@ -28,14 +28,48 @@ UVaRestRequestJSON* UVaRestRequestJSON::ConstructRequestExt(UObject* WorldContex
 	return Request;
 }
 
-void UVaRestRequestJSON::SetVerb(ERequestVerb::Type NewVerb)
+void UVaRestRequestJSON::SetVerb(ERequestVerb::Type Verb)
 {
-	Verb = NewVerb;
+	RequestVerb = Verb;
 }
 
-void UVaRestRequestJSON::SetContentType(ERequestContentType::Type NewContentType)
+void UVaRestRequestJSON::SetContentType(ERequestContentType::Type ContentType)
 {
-	ContentType = NewContentType;
+	RequestContentType = ContentType;
+}
+
+void UVaRestRequestJSON::SetHeader(const FString& HeaderName, const FString& HeaderValue)
+{
+	RequestHeaders.Add(HeaderName, HeaderValue);
+}
+
+FString UVaRestRequestJSON::PercentEncode(const FString& Text)
+{
+	FString OutText = Text;
+
+	OutText = OutText.Replace(TEXT("!"), TEXT("%21"));
+	OutText = OutText.Replace(TEXT("\""), TEXT("%22"));
+	OutText = OutText.Replace(TEXT("#"), TEXT("%23"));
+	OutText = OutText.Replace(TEXT("$"), TEXT("%24"));
+	//OutText = OutText.Replace(TEXT("&"), TEXT("%26"));
+	OutText = OutText.Replace(TEXT("'"), TEXT("%27"));
+	OutText = OutText.Replace(TEXT("("), TEXT("%28"));
+	OutText = OutText.Replace(TEXT(")"), TEXT("%29"));
+	OutText = OutText.Replace(TEXT("*"), TEXT("%2A"));
+	OutText = OutText.Replace(TEXT("+"), TEXT("%2B"));
+	OutText = OutText.Replace(TEXT(","), TEXT("%2C"));
+	//OutText = OutText.Replace(TEXT("/"), TEXT("%2F"));
+	OutText = OutText.Replace(TEXT(":"), TEXT("%3A"));
+	OutText = OutText.Replace(TEXT(";"), TEXT("%3B"));
+	OutText = OutText.Replace(TEXT("="), TEXT("%3D"));
+	//OutText = OutText.Replace(TEXT("?"), TEXT("%3F"));
+	OutText = OutText.Replace(TEXT("@"), TEXT("%40"));
+	OutText = OutText.Replace(TEXT("["), TEXT("%5B"));
+	OutText = OutText.Replace(TEXT("]"), TEXT("%5D"));
+	OutText = OutText.Replace(TEXT("{"), TEXT("%7B"));
+	OutText = OutText.Replace(TEXT("}"), TEXT("%7D"));
+
+	return OutText;
 }
 
 
@@ -113,7 +147,7 @@ void UVaRestRequestJSON::ProcessURL(const FString& Url)
 void UVaRestRequestJSON::ProcessRequest(TSharedRef<IHttpRequest> HttpRequest)
 {
 	// Set verb
-	switch (Verb)
+	switch (RequestVerb)
 	{
 	case ERequestVerb::GET:
 		HttpRequest->SetVerb("GET");
@@ -132,7 +166,7 @@ void UVaRestRequestJSON::ProcessRequest(TSharedRef<IHttpRequest> HttpRequest)
 	}
 
 	// Set content-type
-	switch (ContentType)
+	switch (RequestContentType)
 	{
 	case ERequestContentType::x_www_form_urlencoded:
 	{
@@ -157,7 +191,7 @@ void UVaRestRequestJSON::ProcessRequest(TSharedRef<IHttpRequest> HttpRequest)
 		}
 
 		// Apply params to the url
-		HttpRequest->SetURL(HttpRequest->GetURL() + UrlParams);
+		HttpRequest->SetURL(HttpRequest->GetURL() + UVaRestRequestJSON::PercentEncode(UrlParams));
 
 		break;
 	}
@@ -179,6 +213,12 @@ void UVaRestRequestJSON::ProcessRequest(TSharedRef<IHttpRequest> HttpRequest)
 
 	default:
 		break;
+	}
+
+	// Apply additional headers
+	for (TMap<FString, FString>::TConstIterator It(RequestHeaders); It; ++It)
+	{
+		HttpRequest->SetHeader(It.Key(), It.Value());
 	}
 	
 	// Bind event
