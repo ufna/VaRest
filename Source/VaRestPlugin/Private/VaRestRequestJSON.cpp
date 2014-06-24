@@ -135,12 +135,47 @@ void UVaRestRequestJSON::ProcessRequest(TSharedRef<IHttpRequest> HttpRequest)
 	switch (ContentType)
 	{
 	case ERequestContentType::x_www_form_urlencoded:
+	{
 		HttpRequest->SetHeader("Content-Type", "application/x-www-form-urlencoded");
+
+		FString UrlParams = "";
+		uint16 ParamIdx = 0;
+
+		// Loop through all the values and prepare additional url part
+		for (auto RequestIt = RequestJsonObj->GetRootObject()->Values.CreateIterator(); RequestIt; ++RequestIt)
+		{
+			FString Key = RequestIt.Key();
+			FString Value = RequestIt.Value().Get()->AsString();
+
+			if (!Key.IsEmpty() && !Value.IsEmpty())
+			{
+				UrlParams += ParamIdx == 0 ? "?" : "&";
+				UrlParams += Key + "=" + Value;
+			}
+
+			ParamIdx++;
+		}
+
+		// Apply params to the url
+		HttpRequest->SetURL(HttpRequest->GetURL() + UrlParams);
+
 		break;
+	}
 
 	case ERequestContentType::json:
+	{
 		HttpRequest->SetHeader("Content-Type", "application/json");
+
+		// Serialize data to json string
+		FString OutputString;
+		TSharedRef< TJsonWriter<> > Writer = TJsonWriterFactory<>::Create(&OutputString);
+		FJsonSerializer::Serialize(RequestJsonObj->GetRootObject().ToSharedRef(), Writer);
+
+		// Set Json content
+		HttpRequest->SetContentAsString(OutputString);
+
 		break;
+	}
 
 	default:
 		break;

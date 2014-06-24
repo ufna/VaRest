@@ -55,7 +55,8 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "VaRest")
 	void SetVerb(ERequestVerb::Type NewVerb);
 
-	/** Set content type to the request */
+	/** Set content type to the request. If you're using the x-www-form-urlencoded, 
+	 * params/constaints should be defined as key=ValueString pairs from Json data */
 	UFUNCTION(BlueprintCallable, Category = "VaRest")
 	void SetContentType(ERequestContentType::Type NewContentType);
 
