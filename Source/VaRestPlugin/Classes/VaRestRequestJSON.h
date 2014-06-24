@@ -77,9 +77,34 @@ public:
 
 
 	//////////////////////////////////////////////////////////////////////////
-	// JSON API
+	// JSON data accessors
 
-	// @TODO
+	/** Get the Request Json object */
+	UFUNCTION(BlueprintCallable, Category = "VaRest")
+	UVaRestJsonObject* GetRequestObject();
+
+	/** Set the Request Json object */
+	UFUNCTION(BlueprintCallable, Category = "VaRest")
+	void SetRequestObject(UVaRestJsonObject* JsonObject);
+
+	/** Get the Response Json object */
+	UFUNCTION(BlueprintCallable, Category = "VaRest")
+	UVaRestJsonObject* GetResponseObject();
+
+	/** Set the Response Json object */
+	UFUNCTION(BlueprintCallable, Category = "VaRest")
+	void SetResponseObject(UVaRestJsonObject* JsonObject);
+
+
+	//////////////////////////////////////////////////////////////////////////
+	// URL processing
+
+	/** Open URL with current setup */
+	UFUNCTION(BlueprintCallable, Category = "VaRest")
+	virtual void ProcessURL(const FString& Url = TEXT("http://alyamkin.com"));
+
+	/** Apply current internal setup to request and process it */
+	void ProcessRequest(TSharedRef<IHttpRequest> HttpRequest);
 
 
 	//////////////////////////////////////////////////////////////////////////

@@ -76,6 +76,85 @@ void UVaRestRequestJSON::ResetResponseData()
 
 
 //////////////////////////////////////////////////////////////////////////
+// JSON data accessors
+
+UVaRestJsonObject* UVaRestRequestJSON::GetRequestObject()
+{
+	return RequestJsonObj;
+}
+
+void UVaRestRequestJSON::SetRequestObject(UVaRestJsonObject* JsonObject)
+{
+	RequestJsonObj = JsonObject;
+}
+
+UVaRestJsonObject* UVaRestRequestJSON::GetResponseObject()
+{
+	return ResponseJsonObj;
+}
+
+void UVaRestRequestJSON::SetResponseObject(UVaRestJsonObject* JsonObject)
+{
+	ResponseJsonObj = JsonObject;
+}
+
+
+//////////////////////////////////////////////////////////////////////////
+// URL processing
+
+void UVaRestRequestJSON::ProcessURL(const FString& Url)
+{
+	TSharedRef<IHttpRequest> HttpRequest = FHttpModule::Get().CreateRequest();
+	HttpRequest->SetURL(Url);
+
+	ProcessRequest(HttpRequest);
+}
+
+void UVaRestRequestJSON::ProcessRequest(TSharedRef<IHttpRequest> HttpRequest)
+{
+	// Set verb
+	switch (Verb)
+	{
+	case ERequestVerb::GET:
+		HttpRequest->SetVerb("GET");
+		break;
+
+	case ERequestVerb::POST:
+		HttpRequest->SetVerb("POST");
+		break;
+
+	case ERequestVerb::PUT:
+		HttpRequest->SetVerb("PUT");
+		break;
+
+	default:
+		break;
+	}
+
+	// Set content-type
+	switch (ContentType)
+	{
+	case ERequestContentType::x_www_form_urlencoded:
+		HttpRequest->SetHeader("Content-Type", "application/x-www-form-urlencoded");
+		break;
+
+	case ERequestContentType::json:
+		HttpRequest->SetHeader("Content-Type", "application/json");
+		break;
+
+	default:
+		break;
+	}
+	
+	// Bind event
+	HttpRequest->OnProcessRequestComplete().BindUObject(this, &UVaRestRequestJSON::OnProcessRequestComplete);
+
+	// Execute the request
+	HttpRequest->ProcessRequest();
+}
+
+
+//////////////////////////////////////////////////////////////////////////
 // Request callbacks
 
 void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bWasSuccessful)
@@ -83,22 +162,22 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 	// Be sure that we have no data from previous response
 	ResetResponseData();
 
-	// Save response data as a string
-	ResponseContent = Response->GetContentAsString();
-
-	// Log response state
-	UE_LOG(LogVaRest, Log, TEXT("Response: %s"), *Response->GetContentAsString());
-
 	// Check we have result to process futher
 	if (!bWasSuccessful)
 	{
-		UE_LOG(LogVaRest, Error, TEXT("Request failed: %d"), Response->GetResponseCode());
+		UE_LOG(LogVaRest, Error, TEXT("Request failed: %s"), *Request->GetURL());
 
 		// Broadcast the result event
 		OnRequestFail.Broadcast();
 
 		return;
 	}
+
+	// Save response data as a string
+	ResponseContent = Response->GetContentAsString();
+
+	// Log response state
+	UE_LOG(LogVaRest, Log, TEXT("Response (%d): %s"), Response->GetResponseCode(), *Response->GetContentAsString());
 
 	// Try to deserialize data to JSON
 	TSharedRef<TJsonReader<TCHAR>> JsonReader = TJsonReaderFactory<TCHAR>::Create(ResponseContent);
