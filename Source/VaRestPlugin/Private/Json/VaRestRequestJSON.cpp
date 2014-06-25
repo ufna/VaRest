@@ -16,7 +16,10 @@ UVaRestRequestJSON* UVaRestRequestJSON::ConstructRequest(UObject* WorldContextOb
 	return (UVaRestRequestJSON*)StaticConstructObject(UVaRestRequestJSON::StaticClass());
 }
 
-UVaRestRequestJSON* UVaRestRequestJSON::ConstructRequestExt(UObject* WorldContextObject, ERequestVerb::Type Verb, ERequestContentType::Type ContentType)
+UVaRestRequestJSON* UVaRestRequestJSON::ConstructRequestExt(
+	UObject* WorldContextObject, 
+	ERequestVerb::Type Verb, 
+	ERequestContentType::Type ContentType)
 {
 	UVaRestRequestJSON* Request = ConstructRequest(WorldContextObject);
 
