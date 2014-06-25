@@ -69,7 +69,7 @@ class UVaRestJsonObject : public UObject
 
 	/** Set an ObjectField named FieldName and value of JsonObject */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
-	void SetObjectField(const FString& FieldName, const UVaRestJsonObject* JsonObject);
+	void SetObjectField(const FString& FieldName, UVaRestJsonObject* JsonObject);
 
 	//////////////////////////////////////////////////////////////////////////
 	// Array fields control

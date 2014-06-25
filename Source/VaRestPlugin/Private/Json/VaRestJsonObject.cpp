@@ -132,11 +132,12 @@ UVaRestJsonObject* UVaRestJsonObject::GetObjectField(const FString& FieldName) c
 	return OutRestJsonObj;
 }
 
-void UVaRestJsonObject::SetObjectField(const FString& FieldName, const UVaRestJsonObject* JsonObject)
+void UVaRestJsonObject::SetObjectField(const FString& FieldName, UVaRestJsonObject* JsonObject)
 {
 	if (!JsonObj.IsValid())
 	{
 		return;
 	}
-}
 
+	JsonObj->SetObjectField(FieldName, JsonObject->GetRootObject());
+}
