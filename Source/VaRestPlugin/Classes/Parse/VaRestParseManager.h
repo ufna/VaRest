@@ -28,6 +28,8 @@ class UVaRestParseManager : public UVaRestRequestJSON
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Parse")
 	void ProcessParseURL(const FString& ParseModule = TEXT("classes"), const FString& ParseClass = TEXT("GameScore"), const FString& ParseObjectId = "");
 
+	//////////////////////////////////////////////////////////////////////////
+	// Internal data
 private:
 	/** Parse App Id */
 	static FString ParseAppId;

@@ -13,8 +13,6 @@ UVaRestRequestJSON::UVaRestRequestJSON(const class FPostConstructInitializePrope
 
 UVaRestRequestJSON* UVaRestRequestJSON::ConstructRequest(UObject* WorldContextObject)
 {
-	UWorld* World = GEngine->GetWorldFromContextObject(WorldContextObject);
-
 	return (UVaRestRequestJSON*)StaticConstructObject(UVaRestRequestJSON::StaticClass());
 }
 
