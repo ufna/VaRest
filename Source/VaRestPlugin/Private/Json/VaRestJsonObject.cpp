@@ -57,7 +57,7 @@ void UVaRestJsonObject::RemoveField(const FString& FieldName)
 	JsonObj->RemoveField(FieldName);
 }
 
-double UVaRestJsonObject::GetNumberField(const FString& FieldName) const
+float UVaRestJsonObject::GetNumberField(const FString& FieldName) const
 {
 	if (!JsonObj.IsValid())
 	{
@@ -67,7 +67,7 @@ double UVaRestJsonObject::GetNumberField(const FString& FieldName) const
 	return JsonObj->GetNumberField(FieldName);
 }
 
-void UVaRestJsonObject::SetNumberField(const FString& FieldName, double Number)
+void UVaRestJsonObject::SetNumberField(const FString& FieldName, float Number)
 {
 	if (!JsonObj.IsValid())
 	{
@@ -140,4 +140,83 @@ void UVaRestJsonObject::SetObjectField(const FString& FieldName, UVaRestJsonObje
 	}
 
 	JsonObj->SetObjectField(FieldName, JsonObject->GetRootObject());
+}
+
+
+//////////////////////////////////////////////////////////////////////////
+// Array fields control
+
+TArray<float> UVaRestJsonObject::GetNumberArrayField(const FString& FieldName)
+{
+	TArray<float> NumberArray;
+
+	TArray<TSharedPtr<FJsonValue> > JsonArrayValues = JsonObj->GetArrayField(FieldName);
+	for (TArray<TSharedPtr<FJsonValue> >::TConstIterator It(JsonArrayValues); It; ++It)
+	{
+		NumberArray.Add((*It)->AsNumber());
+	}
+
+	return NumberArray;
+}
+
+void UVaRestJsonObject::SetNumberArrayField(const FString& FieldName, const TArray<float>& NumberArray)
+{
+	TArray< TSharedPtr<FJsonValue> > EntriesArray;
+
+	for (auto Number : NumberArray)
+	{
+		EntriesArray.Add(MakeShareable(new FJsonValueNumber(Number)));
+	}
+
+	JsonObj->SetArrayField(FieldName, EntriesArray);
+}
+
+TArray<FString> UVaRestJsonObject::GetStringArrayField(const FString& FieldName)
+{
+	TArray<FString> StringArray;
+
+	TArray<TSharedPtr<FJsonValue> > JsonArrayValues = JsonObj->GetArrayField(FieldName);
+	for (TArray<TSharedPtr<FJsonValue> >::TConstIterator It(JsonArrayValues); It; ++It)
+	{
+		StringArray.Add((*It)->AsString());
+	}
+
+	return StringArray;
+}
+
+void UVaRestJsonObject::SetStringArrayField(const FString& FieldName, const TArray<FString>& StringArray)
+{
+	TArray< TSharedPtr<FJsonValue> > EntriesArray;
+
+	for (auto String : StringArray)
+	{
+		EntriesArray.Add(MakeShareable(new FJsonValueString(String)));
+	}
+
+	JsonObj->SetArrayField(FieldName, EntriesArray);
+}
+
+TArray<bool> UVaRestJsonObject::GetBoolArrayField(const FString& FieldName)
+{
+	TArray<bool> BoolArray;
+
+	TArray<TSharedPtr<FJsonValue> > JsonArrayValues = JsonObj->GetArrayField(FieldName);
+	for (TArray<TSharedPtr<FJsonValue> >::TConstIterator It(JsonArrayValues); It; ++It)
+	{
+		BoolArray.Add((*It)->AsBool());
+	}
+
+	return BoolArray;
+}
+
+void UVaRestJsonObject::SetBoolArrayField(const FString& FieldName, const TArray<bool>& BoolArray)
+{
+	TArray< TSharedPtr<FJsonValue> > EntriesArray;
+
+	for (auto Boolean : BoolArray)
+	{
+		EntriesArray.Add(MakeShareable(new FJsonValueBoolean(Boolean)));
+	}
+
+	JsonObj->SetArrayField(FieldName, EntriesArray);
 }

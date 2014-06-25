@@ -39,13 +39,15 @@ class UVaRestJsonObject : public UObject
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	void RemoveField(const FString& FieldName);
 
-	/** Get the field named FieldName as a number. Ensures that the field is present and is of type Json number. */
+	/** Get the field named FieldName as a number. Ensures that the field is present and is of type Json number.
+	 * Attn.!! float used instead of double to make the function blueprintable! */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
-	double GetNumberField(const FString& FieldName) const;
+	float GetNumberField(const FString& FieldName) const;
 
-	/** Add a field named FieldName with Number as value */
+	/** Add a field named FieldName with Number as value
+	 * Attn.!! float used instead of double to make the function blueprintable! */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
-	void SetNumberField(const FString& FieldName, double Number);
+	void SetNumberField(const FString& FieldName, float Number);
 
 	/** Get the field named FieldName as a string. */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
@@ -71,10 +73,35 @@ class UVaRestJsonObject : public UObject
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	void SetObjectField(const FString& FieldName, UVaRestJsonObject* JsonObject);
 
+
 	//////////////////////////////////////////////////////////////////////////
 	// Array fields control
 
-	// @TODO 
+	/** Get the field named FieldName as a Number Array
+	 * Attn.!! float used instead of double to make the function blueprintable! */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	TArray<float> GetNumberArrayField(const FString& FieldName);
+
+	/** Set an ObjectField named FieldName and value of Number Array
+	 * Attn.!! float used instead of double to make the function blueprintable! */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	void SetNumberArrayField(const FString& FieldName, const TArray<float>& NumberArray);
+
+	/** Get the field named FieldName as a String Array */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	TArray<FString> GetStringArrayField(const FString& FieldName);
+
+	/** Set an ObjectField named FieldName and value of String Array */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	void SetStringArrayField(const FString& FieldName, const TArray<FString>& StringArray);
+
+	/** Get the field named FieldName as a Bool Array */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	TArray<bool> GetBoolArrayField(const FString& FieldName);
+
+	/** Set an ObjectField named FieldName and value of Bool Array */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	void SetBoolArrayField(const FString& FieldName, const TArray<bool>& BoolArray);
 
 
 	//////////////////////////////////////////////////////////////////////////
