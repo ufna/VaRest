@@ -8,6 +8,11 @@ UVaRestJsonObject::UVaRestJsonObject(const class FPostConstructInitializePropert
 	Reset();
 }
 
+UVaRestJsonObject* UVaRestJsonObject::ConstructJsonObject(UObject* WorldContextObject)
+{
+	return (UVaRestJsonObject*)StaticConstructObject(UVaRestJsonObject::StaticClass());
+}
+
 void UVaRestJsonObject::Reset()
 {
 	if (JsonObj.IsValid())
