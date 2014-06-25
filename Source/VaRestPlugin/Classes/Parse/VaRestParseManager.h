@@ -26,7 +26,8 @@ class UVaRestParseManager : public UVaRestRequestJSON
 
 	/** Open URL with current setup (with applied Parse auth data) */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Parse")
-	void ProcessParseURL(const FString& ParseModule = TEXT("classes"), const FString& ParseClass = TEXT("GameScore"), const FString& ParseObjectId = "");
+	void ProcessParseURL(const FString& ParseModule = TEXT("classes"), const FString& ParseClass = TEXT("GameScore"), const FString& ParseObjectId = "", const FString& ParseSessionToken = "");
+
 
 	//////////////////////////////////////////////////////////////////////////
 	// Internal data

@@ -23,12 +23,19 @@ void UVaRestParseManager::SetParseAuthData(FString AppId, FString ApiKey)
 	ParseApiKey = ApiKey;
 }
 
-UVaRestParseManager* UVaRestParseManager::ConstructParseRequest(UObject* WorldContextObject, ERequestVerb::Type Verb, ERequestContentType::Type ContentType)
+UVaRestParseManager* UVaRestParseManager::ConstructParseRequest(
+	UObject* WorldContextObject, 
+	ERequestVerb::Type Verb,
+	ERequestContentType::Type ContentType)
 {
 	return (UVaRestParseManager*)ConstructRequestExt(WorldContextObject, Verb, ContentType);
 }
 
-void UVaRestParseManager::ProcessParseURL(const FString& ParseModule, const FString& ParseClass, const FString& ParseObjectId)
+void UVaRestParseManager::ProcessParseURL(
+	const FString& ParseModule, 
+	const FString& ParseClass, 
+	const FString& ParseObjectId, 
+	const FString& ParseSessionToken)
 {
 	FString RequestUrl = ParseURL;
 
@@ -53,6 +60,11 @@ void UVaRestParseManager::ProcessParseURL(const FString& ParseModule, const FStr
 
 	HttpRequest->SetHeader("X-Parse-Application-Id", ParseAppId);
 	HttpRequest->SetHeader("X-Parse-REST-API-Key", ParseApiKey);
+
+	if (!ParseSessionToken.IsEmpty())
+	{
+		HttpRequest->SetHeader("X-Parse-Session-Token", ParseSessionToken);
+	}
 
 	ProcessRequest(HttpRequest);
 }
