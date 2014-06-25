@@ -24,7 +24,7 @@ class UVaRestParseManager : public UVaRestRequestJSON
 	UFUNCTION(BlueprintPure, meta = (FriendlyName = "Construct Parse Request", HidePin = "WorldContextObject", DefaultToSelf = "WorldContextObject"), Category = "VaRest|Parse")
 	static UVaRestParseManager* ConstructParseRequest(UObject* WorldContextObject, ERequestVerb::Type Verb, ERequestContentType::Type ContentType);
 
-	/** Open URL with current setup (with applied Parse auth data) */
+	/** Open the Parse URL (Attn.!! App Id and Api Key should be set before) */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Parse")
 	void ProcessParseURL(const FString& ParseModule = TEXT("classes"), const FString& ParseClass = TEXT("GameScore"), const FString& ParseObjectId = "", const FString& ParseSessionToken = "");
 
