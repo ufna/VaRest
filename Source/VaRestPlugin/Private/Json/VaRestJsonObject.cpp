@@ -35,6 +35,40 @@ void UVaRestJsonObject::SetRootObject(TSharedPtr<FJsonObject>& JsonObject)
 
 
 //////////////////////////////////////////////////////////////////////////
+// Serialization
+
+FString UVaRestJsonObject::EncodeJson() const
+{
+	if (!JsonObj.IsValid())
+	{
+		return TEXT("");
+	}
+
+	FString OutputString;
+	TSharedRef< TJsonWriter<> > Writer = TJsonWriterFactory<>::Create(&OutputString);
+	FJsonSerializer::Serialize(JsonObj.ToSharedRef(), Writer);
+
+	return OutputString;
+}
+
+bool UVaRestJsonObject::DecodeJson(const FString& JsonString)
+{
+	TSharedRef< TJsonReader<> > Reader = TJsonReaderFactory<>::Create(*JsonString);
+	if (FJsonSerializer::Deserialize(Reader, JsonObj) && JsonObj.IsValid())
+	{
+		return true;
+	}
+
+	// If we've failed to deserialize the string, we should clear our internal data
+	Reset();
+
+	UE_LOG(LogVaRest, Error, TEXT("Json decoding failed for: %s"), *JsonString);
+
+	return false;
+}
+
+
+//////////////////////////////////////////////////////////////////////////
 // FJsonObject API
 
 bool UVaRestJsonObject::HasField(const FString& FieldName) const

@@ -29,6 +29,18 @@ class UVaRestJsonObject : public UObject
 
 
 	//////////////////////////////////////////////////////////////////////////
+	// Serialization
+
+	/** Serialize Json to string */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	FString EncodeJson() const;
+
+	/** Construct Json object from string */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	bool DecodeJson(const FString& JsonString);
+
+
+	//////////////////////////////////////////////////////////////////////////
 	// FJsonObject API
 
 	/** Checks to see if the FieldName exists in the object */
