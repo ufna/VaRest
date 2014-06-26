@@ -77,16 +77,14 @@ FString UVaRestParseManager::ConstructWhereQuerySimple(const FString& Key, const
 	return FString::Printf(TEXT("where={\"%s\":%s}"), *Key, *Value);
 }
 
-FString UVaRestParseManager::ConstructWhereQuery(const TArray<FString>& Keys, const TArray<FString>& Values)
+FString UVaRestParseManager::ConstructWhereQuery(UVaRestJsonObject* JsonObject)
 {
-	if (Keys.Num() != Values.Num())
-	{
-		UE_LOG(LogVaRest, Warning, TEXT("Keys and Values size should be equal!"));
-		return TEXT("");
-	}
+	// Serialize json data to string
+	FString OutputString;
+	TSharedRef< TJsonWriter<> > Writer = TJsonWriterFactory<>::Create(&OutputString);
+	FJsonSerializer::Serialize(JsonObject->GetRootObject().ToSharedRef(), Writer);
 
-	UE_LOG(LogVaRest, Warning, TEXT("UVaRestParseManager::ConstructWhereQuery() function is not supported yet!"));
-	return TEXT("");
+	return TEXT("where=") + OutputString;
 }
 
 FString UVaRestParseManager::GetHappyMessage()

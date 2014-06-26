@@ -37,10 +37,9 @@ class UVaRestParseManager : public UVaRestRequestJSON
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Parse")
 	static FString ConstructWhereQuerySimple(const FString& Key, const FString& Value);
 
-	/** Construct WHERE query based on set of keys and corresponding values */
-	// @TODO Query can contain different values, so it should be defined as Json
-	//UFUNCTION(BlueprintCallable, Category = "VaRest|Parse")
-	static FString ConstructWhereQuery(const TArray<FString>& Keys, const TArray<FString>& Values);
+	/** Construct WHERE query based on conditions defined as Json */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Parse")
+	static FString ConstructWhereQuery(UVaRestJsonObject* JsonObject);
 
 	/** A bit more happiness for our beautiful world */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Parse")
