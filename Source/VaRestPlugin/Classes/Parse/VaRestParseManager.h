@@ -12,14 +12,6 @@ class UVaRestParseManager : public UVaRestRequestJSON
 {
 	GENERATED_UCLASS_BODY()
 
-	/** A bit more happiness for our beautiful world */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Parse")
-	static FString GetHappyMessage();
-
-	/** Set Parse authenication data */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Parse")
-	static void SetParseAuthData(FString AppId, FString ApiKey);
-
 	/** Creates new Parse request with defined verb and content type */
 	UFUNCTION(BlueprintPure, meta = (FriendlyName = "Construct Parse Request", HidePin = "WorldContextObject", DefaultToSelf = "WorldContextObject"), Category = "VaRest|Parse")
 	static UVaRestParseManager* ConstructParseRequest(UObject* WorldContextObject, ERequestVerb::Type Verb, ERequestContentType::Type ContentType);
@@ -27,6 +19,32 @@ class UVaRestParseManager : public UVaRestRequestJSON
 	/** Open the Parse URL (Attn.!! App Id and Api Key should be set before) */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Parse")
 	void ProcessParseURL(const FString& ParseModule = TEXT("classes"), const FString& ParseClass = TEXT("GameScore"), const FString& ParseObjectId = "", const FString& ParseSessionToken = "");
+
+	/** Set Parse authenication data */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Parse")
+	static void SetParseAuthData(FString AppId, FString ApiKey);
+
+
+	//////////////////////////////////////////////////////////////////////////
+	// Quering helpers
+
+	/** Create Json record that contains Pointer to the Parse Object */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Parse")
+	static FString ConstructPointer(const FString& ClassName, const FString& ObjectId);
+
+	/** Construct simple WHERE query that contains only one condition.
+	 * Attn!! String Values should containt quotes! */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Parse")
+	static FString ConstructWhereQuerySimple(const FString& Key, const FString& Value);
+
+	/** Construct WHERE query based on set of keys and corresponding values */
+	// @TODO Query can contain different values, so it should be defined as Json
+	//UFUNCTION(BlueprintCallable, Category = "VaRest|Parse")
+	static FString ConstructWhereQuery(const TArray<FString>& Keys, const TArray<FString>& Values);
+
+	/** A bit more happiness for our beautiful world */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Parse")
+	static FString GetHappyMessage();
 
 
 	//////////////////////////////////////////////////////////////////////////

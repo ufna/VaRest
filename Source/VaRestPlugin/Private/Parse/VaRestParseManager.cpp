@@ -12,17 +12,6 @@ UVaRestParseManager::UVaRestParseManager(const class FPostConstructInitializePro
 
 }
 
-FString UVaRestParseManager::GetHappyMessage()
-{
-	return FString("Happy New Year!");
-}
-
-void UVaRestParseManager::SetParseAuthData(FString AppId, FString ApiKey)
-{
-	ParseAppId = AppId;
-	ParseApiKey = ApiKey;
-}
-
 UVaRestParseManager* UVaRestParseManager::ConstructParseRequest(
 	UObject* WorldContextObject, 
 	ERequestVerb::Type Verb,
@@ -67,4 +56,40 @@ void UVaRestParseManager::ProcessParseURL(
 	}
 
 	ProcessRequest(HttpRequest);
+}
+
+void UVaRestParseManager::SetParseAuthData(FString AppId, FString ApiKey)
+{
+	ParseAppId = AppId;
+	ParseApiKey = ApiKey;
+}
+
+//////////////////////////////////////////////////////////////////////////
+// Quering helpers
+
+FString UVaRestParseManager::ConstructPointer(const FString& ClassName, const FString& ObjectId)
+{
+	return FString::Printf(TEXT("{\"__type\":\"Pointer\",\"className\":\"%s\",\"objectId\":\"%s\"}"), *ClassName, *ObjectId);
+}
+
+FString UVaRestParseManager::ConstructWhereQuerySimple(const FString& Key, const FString& Value)
+{
+	return FString::Printf(TEXT("where={\"%s\":%s}"), *Key, *Value);
+}
+
+FString UVaRestParseManager::ConstructWhereQuery(const TArray<FString>& Keys, const TArray<FString>& Values)
+{
+	if (Keys.Num() != Values.Num())
+	{
+		UE_LOG(LogVaRest, Warning, TEXT("Keys and Values size should be equal!"));
+		return TEXT("");
+	}
+
+	UE_LOG(LogVaRest, Warning, TEXT("UVaRestParseManager::ConstructWhereQuery() function is not supported yet!"));
+	return TEXT("");
+}
+
+FString UVaRestParseManager::GetHappyMessage()
+{
+	return FString("Happy New Year!");
 }
