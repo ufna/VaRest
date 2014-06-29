@@ -5,6 +5,8 @@
 
 #include "VaRestJsonObject.generated.h"
 
+class UVaRestJsonValue;
+
 /**
  * Blueprintable FJsonObject wrapper
  */
@@ -14,7 +16,7 @@ class UVaRestJsonObject : public UObject
 	GENERATED_UCLASS_BODY()
 
 	/** Create new Json object */
-	UFUNCTION(BlueprintPure, meta = (FriendlyName = "Construct Json Object", HidePin = "WorldContextObject", DefaultToSelf = "WorldContextObject"), Category = "VaRest")
+	UFUNCTION(BlueprintPure, meta = (FriendlyName = "Construct Json Object", HidePin = "WorldContextObject", DefaultToSelf = "WorldContextObject"), Category = "VaRest|Json")
 	static UVaRestJsonObject* ConstructJsonObject(UObject* WorldContextObject);
 
 	/** Reset all internal data */
@@ -77,6 +79,14 @@ class UVaRestJsonObject : public UObject
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	void SetBoolField(const FString& FieldName, bool InValue);
 
+	/** Get the field named FieldName as a Json Array */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	TArray<UVaRestJsonValue*> GetArrayField(const FString& FieldName);
+
+	/** Set an ObjectField named FieldName and value of Json Array */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	void SetArrayField(const FString& FieldName, const TArray<UVaRestJsonValue*>& InArray);
+
 	/** Get the field named FieldName as a Json object. */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	UVaRestJsonObject* GetObjectField(const FString& FieldName) const;
@@ -87,9 +97,9 @@ class UVaRestJsonObject : public UObject
 
 
 	//////////////////////////////////////////////////////////////////////////
-	// Array fields control
+	// Array fields helpers (uniform arrays)
 
-	/** Get the field named FieldName as a Number Array
+	/** Get the field named FieldName as a Number Array. Use it only if you're sure that array is uniform!
 	 * Attn.!! float used instead of double to make the function blueprintable! */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	TArray<float> GetNumberArrayField(const FString& FieldName);
@@ -99,7 +109,7 @@ class UVaRestJsonObject : public UObject
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	void SetNumberArrayField(const FString& FieldName, const TArray<float>& NumberArray);
 
-	/** Get the field named FieldName as a String Array */
+	/** Get the field named FieldName as a String Array. Use it only if you're sure that array is uniform! */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	TArray<FString> GetStringArrayField(const FString& FieldName);
 
@@ -107,13 +117,21 @@ class UVaRestJsonObject : public UObject
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	void SetStringArrayField(const FString& FieldName, const TArray<FString>& StringArray);
 
-	/** Get the field named FieldName as a Bool Array */
+	/** Get the field named FieldName as a Bool Array. Use it only if you're sure that array is uniform! */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	TArray<bool> GetBoolArrayField(const FString& FieldName);
 
 	/** Set an ObjectField named FieldName and value of Bool Array */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	void SetBoolArrayField(const FString& FieldName, const TArray<bool>& BoolArray);
+
+	/** Get the field named FieldName as an Object Array. Use it only if you're sure that array is uniform! */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	TArray<UVaRestJsonObject*> GetObjectArrayField(const FString& FieldName);
+
+	/** Set an ObjectField named FieldName and value of Ob Array */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	void SetObjectArrayField(const FString& FieldName, const TArray<UVaRestJsonObject*>& ObjectArray);
 
 
 	//////////////////////////////////////////////////////////////////////////
