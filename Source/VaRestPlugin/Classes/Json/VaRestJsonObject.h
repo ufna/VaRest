@@ -61,6 +61,18 @@ class UVaRestJsonObject : public UObject
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	void SetField(const FString& FieldName, UVaRestJsonValue* JsonValue);
 
+	/** Get the field named FieldName as a Json Array */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	TArray<UVaRestJsonValue*> GetArrayField(const FString& FieldName);
+
+	/** Set an ObjectField named FieldName and value of Json Array */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	void SetArrayField(const FString& FieldName, const TArray<UVaRestJsonValue*>& InArray);
+
+
+	//////////////////////////////////////////////////////////////////////////
+	// FJsonObject API Helpers (easy to use with simple Json objects)
+
 	/** Get the field named FieldName as a number. Ensures that the field is present and is of type Json number.
 	 * Attn.!! float used instead of double to make the function blueprintable! */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
@@ -86,14 +98,6 @@ class UVaRestJsonObject : public UObject
 	/** Set a boolean field named FieldName and value of InValue */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	void SetBoolField(const FString& FieldName, bool InValue);
-
-	/** Get the field named FieldName as a Json Array */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
-	TArray<UVaRestJsonValue*> GetArrayField(const FString& FieldName);
-
-	/** Set an ObjectField named FieldName and value of Json Array */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
-	void SetArrayField(const FString& FieldName, const TArray<UVaRestJsonValue*>& InArray);
 
 	/** Get the field named FieldName as a Json object. */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")

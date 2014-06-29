@@ -116,6 +116,10 @@ void UVaRestJsonObject::SetField(const FString& FieldName, UVaRestJsonValue* Jso
 	JsonObj->SetField(FieldName, JsonValue->GetRootValue());
 }
 
+
+//////////////////////////////////////////////////////////////////////////
+// FJsonObject API Helpers (easy to use with simple Json objects)
+
 float UVaRestJsonObject::GetNumberField(const FString& FieldName) const
 {
 	if (!JsonObj.IsValid())
