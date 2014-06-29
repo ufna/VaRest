@@ -53,6 +53,14 @@ class UVaRestJsonObject : public UObject
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	void RemoveField(const FString& FieldName);
 
+	/** Get the field named FieldName as a JsonValue */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	UVaRestJsonValue* GetField(const FString& FieldName) const;
+
+	/** Add a field named FieldName with a Value */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	void SetField(const FString& FieldName, UVaRestJsonValue* JsonValue);
+
 	/** Get the field named FieldName as a number. Ensures that the field is present and is of type Json number.
 	 * Attn.!! float used instead of double to make the function blueprintable! */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")

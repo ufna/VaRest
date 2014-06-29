@@ -91,6 +91,31 @@ void UVaRestJsonObject::RemoveField(const FString& FieldName)
 	JsonObj->RemoveField(FieldName);
 }
 
+UVaRestJsonValue* UVaRestJsonObject::GetField(const FString& FieldName) const
+{
+	if (!JsonObj.IsValid())
+	{
+		return NULL;
+	}
+
+	TSharedPtr<FJsonValue> NewVal = JsonObj->TryGetField(FieldName);
+
+	UVaRestJsonValue* NewValue = (UVaRestJsonValue*)StaticConstructObject(UVaRestJsonValue::StaticClass());
+	NewValue->SetRootValue(NewVal);
+
+	return NewValue;
+}
+
+void UVaRestJsonObject::SetField(const FString& FieldName, UVaRestJsonValue* JsonValue)
+{
+	if (!JsonObj.IsValid())
+	{
+		return;
+	}
+
+	JsonObj->SetField(FieldName, JsonValue->GetRootValue());
+}
+
 float UVaRestJsonObject::GetNumberField(const FString& FieldName) const
 {
 	if (!JsonObj.IsValid())
