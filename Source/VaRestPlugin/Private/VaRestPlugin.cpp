@@ -8,7 +8,11 @@ class FVaRestPlugin : public IVaRestPlugin
 	/** IModuleInterface implementation */
 	virtual void StartupModule() OVERRIDE
 	{
-
+		// @HACK Force classes to be compiled on shipping build
+		UVaRestJsonObject::StaticClass();
+		UVaRestJsonValue::StaticClass();
+		UVaRestRequestJSON::StaticClass();
+		UVaRestParseManager::StaticClass();
 	}
 
 	virtual void ShutdownModule() OVERRIDE
