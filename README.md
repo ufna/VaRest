@@ -13,7 +13,7 @@ Key features:
 
 Check the [Wiki](https://github.com/ufna/VaRest/wiki) tab for plugin usage examples and installation notes.
 
-Current version: **1.0 RC 5**
+Current version: **1.1 RC 6**
 
 ![SCREENSHOT](SCREENSHOT.jpg)
 
