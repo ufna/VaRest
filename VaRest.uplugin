@@ -14,7 +14,8 @@
 	[
 		{
 			"Name" : "VaRestPlugin",
-			"Type" : "Runtime"
+			"Type" : "Runtime",
+            "LoadingPhase": "PreDefault"
 		}
 	]
 }
