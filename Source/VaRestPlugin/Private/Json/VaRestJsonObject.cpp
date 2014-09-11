@@ -2,6 +2,9 @@
 
 #include "VaRestPluginPrivatePCH.h"
 
+typedef TJsonWriterFactory< TCHAR, TCondensedJsonPrintPolicy<TCHAR> > FCondensedJsonStringWriterFactory;
+typedef TJsonWriter< TCHAR, TCondensedJsonPrintPolicy<TCHAR> > FCondensedJsonStringWriter;
+
 UVaRestJsonObject::UVaRestJsonObject(const class FPostConstructInitializeProperties& PCIP)
 	: Super(PCIP)
 {
@@ -45,7 +48,7 @@ FString UVaRestJsonObject::EncodeJson() const
 	}
 
 	FString OutputString;
-	TSharedRef< TJsonWriter<> > Writer = TJsonWriterFactory<>::Create(&OutputString);
+	TSharedRef< FCondensedJsonStringWriter > Writer = FCondensedJsonStringWriterFactory::Create(&OutputString);
 	FJsonSerializer::Serialize(JsonObj.ToSharedRef(), Writer);
 
 	return OutputString;
