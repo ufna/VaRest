@@ -418,5 +418,12 @@ void UVaRestJsonObject::SetObjectArrayField(const FString& FieldName, const TArr
 		return;
 	}
 
+	TArray< TSharedPtr<FJsonValue> > EntriesArray;
 
+	for (auto Value : ObjectArray)
+	{
+		EntriesArray.Add(MakeShareable(new FJsonValueObject(Value->GetRootObject())));
+	}
+
+	JsonObj->SetArrayField(FieldName, EntriesArray);
 }
