@@ -17,7 +17,7 @@ UVaRestParseManager* UVaRestParseManager::ConstructParseRequest(
 	ERequestVerb::Type Verb,
 	ERequestContentType::Type ContentType)
 {
-	return (UVaRestParseManager*)ConstructRequestExt(WorldContextObject, Verb, ContentType);
+	return (UVaRestParseManager*)ConstructRequestExt(WorldContextObject, Verb, ContentType,ERequestResultType::JSON);
 }
 
 void UVaRestParseManager::ProcessParseURL(
