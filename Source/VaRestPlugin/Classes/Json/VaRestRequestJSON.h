@@ -162,7 +162,7 @@ private:
 	/** Mapping of header section to values. Used to generate final header string for request */
 	TMap<FString, FString> RequestHeaders;
 
-    /** Helper function to convert raw data to UTexture.
+    /** Helper function to convert raw data to UTexture **/ 
 	UTexture2D* ImageFactory(TArray<uint8> Data); 
 
 };
