@@ -27,8 +27,22 @@ namespace ERequestContentType
 	};
 }
 
+
+/** Content type returned by the request */
+UENUM(BlueprintType)
+namespace ERequestResultType
+{
+	enum Type
+	{
+		JSON,
+		TEXTURE
+	};
+}
+
 /** Generate a delegates for callback events */
-DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnRequestComplete);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnRequestCompleteAsJSON, class UVaRestJsonObject*, JsonObject, bool, IsValid, FString, Text );
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnRequestCompleteAsTexture, class UTexture2D*, Texture, bool, IsValid );
+
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnRequestFail);
 
 /**
@@ -49,7 +63,7 @@ public:
 
 	/** Creates new request with defined verb and content type */
 	UFUNCTION(BlueprintPure, meta = (FriendlyName = "Construct Json Request", HidePin = "WorldContextObject", DefaultToSelf = "WorldContextObject"), Category = "VaRest")
-	static UVaRestRequestJSON* ConstructRequestExt(UObject* WorldContextObject, ERequestVerb::Type Verb, ERequestContentType::Type ContentType);
+	static UVaRestRequestJSON* ConstructRequestExt(UObject* WorldContextObject, ERequestVerb::Type Verb, ERequestContentType::Type ContentType, ERequestResultType::Type ResultType);
 
 	/** Set verb to the request */
 	UFUNCTION(BlueprintCallable, Category = "VaRest")
@@ -59,6 +73,11 @@ public:
 	 * params/constaints should be defined as key=ValueString pairs from Json data */
 	UFUNCTION(BlueprintCallable, Category = "VaRest")
 	void SetContentType(ERequestContentType::Type ContentType);
+
+	/** Set result type to the request. If you're using the x-www-form-urlencoded, 
+	 * params/constaints should be defined as key=ValueString pairs from Json data */
+	UFUNCTION(BlueprintCallable, Category = "VaRest")
+	void SetResultType(ERequestResultType::Type ResultType);
 
 	/** Sets optional header info */
 	UFUNCTION(BlueprintCallable, Category = "VaRest")
@@ -80,11 +99,6 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "VaRest")
 	void ResetRequestData();
 
-	/** Reset saved response data */
-	UFUNCTION(BlueprintCallable, Category = "VaRest")
-	void ResetResponseData();
-
-
 	//////////////////////////////////////////////////////////////////////////
 	// JSON data accessors
 
@@ -95,15 +109,6 @@ public:
 	/** Set the Request Json object */
 	UFUNCTION(BlueprintCallable, Category = "VaRest")
 	void SetRequestObject(UVaRestJsonObject* JsonObject);
-
-	/** Get the Response Json object */
-	UFUNCTION(BlueprintCallable, Category = "VaRest")
-	UVaRestJsonObject* GetResponseObject();
-
-	/** Set the Response Json object */
-	UFUNCTION(BlueprintCallable, Category = "VaRest")
-	void SetResponseObject(UVaRestJsonObject* JsonObject);
-
 
 	//////////////////////////////////////////////////////////////////////////
 	// URL processing
@@ -124,33 +129,26 @@ private:
 	void OnProcessRequestComplete(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bWasSuccessful);
 
 public:
-	/** Event occured when the request has been completed */
+	/** Event occured when the request has been completed successfully and JSON is expected*/
 	UPROPERTY(BlueprintAssignable, Category = "VaRest")
-	FOnRequestComplete OnRequestComplete;
+	FOnRequestCompleteAsJSON OnRequestCompleteJSON;
+
+	/** Event occured when the request has been completed successfully and Texture is expected */
+	UPROPERTY(BlueprintAssignable, Category = "VaRest")
+	FOnRequestCompleteAsTexture OnRequestCompleteTexture;
 
 	/** Event occured when the request wasn't successfull */
 	UPROPERTY(BlueprintAssignable, Category = "VaRest")
-	FOnRequestComplete OnRequestFail;
-
-
+	FOnRequestFail OnRequestFail;
+	
 	//////////////////////////////////////////////////////////////////////////
 	// Data
 
 public:
-	/** Request response stored as a string */
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "VaRest")
-	FString ResponseContent;
-
-	/** Is the response valid JSON? */
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "VaRest")
-	bool bIsValidJsonResponse;
 
 private:
 	/** Internal request data stored as JSON */
 	UVaRestJsonObject* RequestJsonObj;
-
-	/** Responce data stored as JSON */
-	UVaRestJsonObject* ResponseJsonObj;
 
 	/** Verb for making request (GET,POST,etc) */
 	ERequestVerb::Type RequestVerb;
@@ -158,7 +156,13 @@ private:
 	/** Content type to be applied for request */
 	ERequestContentType::Type RequestContentType;
 
+	/** Content type returned by request */
+	ERequestResultType::Type RequestResultType;
+
 	/** Mapping of header section to values. Used to generate final header string for request */
 	TMap<FString, FString> RequestHeaders;
+
+    /** Helper function to convert raw data to UTexture.
+	UTexture2D* ImageFactory(TArray<uint8> Data); 
 
 };

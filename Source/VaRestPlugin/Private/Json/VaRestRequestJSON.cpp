@@ -1,6 +1,7 @@
 // Copyright 2014 Vladimir Alyamkin. All Rights Reserved.
 
 #include "VaRestPluginPrivatePCH.h"
+#include "ImageWrapper.h"
 
 UVaRestRequestJSON::UVaRestRequestJSON(const class FPostConstructInitializeProperties& PCIP)
 	: Super(PCIP)
@@ -19,13 +20,14 @@ UVaRestRequestJSON* UVaRestRequestJSON::ConstructRequest(UObject* WorldContextOb
 UVaRestRequestJSON* UVaRestRequestJSON::ConstructRequestExt(
 	UObject* WorldContextObject, 
 	ERequestVerb::Type Verb, 
-	ERequestContentType::Type ContentType)
+	ERequestContentType::Type ContentType,ERequestResultType::Type ResultType)
 {
 	UVaRestRequestJSON* Request = ConstructRequest(WorldContextObject);
 
 	Request->SetVerb(Verb);
 	Request->SetContentType(ContentType);
-
+	Request->SetResultType(ResultType);
+	
 	return Request;
 }
 
@@ -38,6 +40,12 @@ void UVaRestRequestJSON::SetContentType(ERequestContentType::Type ContentType)
 {
 	RequestContentType = ContentType;
 }
+
+void UVaRestRequestJSON::SetResultType(ERequestResultType::Type ResultType)
+{
+	RequestResultType = ResultType; 
+}
+
 
 void UVaRestRequestJSON::SetHeader(const FString& HeaderName, const FString& HeaderValue)
 {
@@ -80,7 +88,6 @@ FString UVaRestRequestJSON::PercentEncode(const FString& Text)
 void UVaRestRequestJSON::ResetData()
 {
 	ResetRequestData();
-	ResetResponseData();
 }
 
 void UVaRestRequestJSON::ResetRequestData()
@@ -95,21 +102,6 @@ void UVaRestRequestJSON::ResetRequestData()
 	}
 }
 
-void UVaRestRequestJSON::ResetResponseData()
-{
-	if (ResponseJsonObj != NULL)
-	{
-		ResponseJsonObj->Reset();
-	}
-	else
-	{
-		ResponseJsonObj = (UVaRestJsonObject*)StaticConstructObject(UVaRestJsonObject::StaticClass());
-	}
-
-	bIsValidJsonResponse = false;
-}
-
-
 //////////////////////////////////////////////////////////////////////////
 // JSON data accessors
 
@@ -122,17 +114,6 @@ void UVaRestRequestJSON::SetRequestObject(UVaRestJsonObject* JsonObject)
 {
 	RequestJsonObj = JsonObject;
 }
-
-UVaRestJsonObject* UVaRestRequestJSON::GetResponseObject()
-{
-	return ResponseJsonObj;
-}
-
-void UVaRestRequestJSON::SetResponseObject(UVaRestJsonObject* JsonObject)
-{
-	ResponseJsonObj = JsonObject;
-}
-
 
 //////////////////////////////////////////////////////////////////////////
 // URL processing
@@ -235,10 +216,8 @@ void UVaRestRequestJSON::ProcessRequest(TSharedRef<IHttpRequest> HttpRequest)
 
 void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bWasSuccessful)
 {
-	// Be sure that we have no data from previous response
-	ResetResponseData();
 
-	// Check we have result to process futher
+	// Check we have result to process further
 	if (!bWasSuccessful)
 	{
 		UE_LOG(LogVaRest, Error, TEXT("Request failed: %s"), *Request->GetURL());
@@ -249,30 +228,62 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 		return;
 	}
 
-	// Save response data as a string
-	ResponseContent = Response->GetContentAsString();
-
-	// Log response state
-	UE_LOG(LogVaRest, Log, TEXT("Response (%d): %s"), Response->GetResponseCode(), *Response->GetContentAsString());
-
-	// Try to deserialize data to JSON
-	TSharedRef<TJsonReader<TCHAR>> JsonReader = TJsonReaderFactory<TCHAR>::Create(ResponseContent);
-	FJsonSerializer::Deserialize(JsonReader, ResponseJsonObj->GetRootObject());
-
-	// Decide whether the request was successful
-	bIsValidJsonResponse = bWasSuccessful && ResponseJsonObj->GetRootObject().IsValid();
-
-	// Log errors
-	if (!bIsValidJsonResponse)
+	if ( RequestResultType == ERequestResultType::JSON )
 	{
-		if (!ResponseJsonObj->GetRootObject().IsValid())
+		UVaRestJsonObject* ResponseJsonObj  = (UVaRestJsonObject*)StaticConstructObject(UVaRestJsonObject::StaticClass());
+		// Try to deserialize data to JSON
+		TSharedRef<TJsonReader<TCHAR>> JsonReader = TJsonReaderFactory<TCHAR>::Create(Response->GetContentAsString());
+		FJsonSerializer::Deserialize(JsonReader, ResponseJsonObj->GetRootObject());
+
+		// Decide whether the request was successful
+		bool bIsValidJsonResponse = bWasSuccessful && ResponseJsonObj->GetRootObject().IsValid();
+
+		// Log errors
+		if (!bIsValidJsonResponse)
 		{
-			// As we assume it's recommended way to use current class, but not the only one,
-			// it will be the warning instead of error
-			UE_LOG(LogVaRest, Warning, TEXT("JSON could not be decoded!"));
+			if (!ResponseJsonObj->GetRootObject().IsValid())
+			{
+				// As we assume it's recommended way to use current class, but not the only one,
+				// it will be the warning instead of error
+				UE_LOG(LogVaRest, Warning, TEXT("JSON could not be decoded!"));
+			}
 		}
+
+		// Broadcast the result event
+		OnRequestCompleteJSON.Broadcast(ResponseJsonObj, bIsValidJsonResponse, Response->GetContentAsString()); 
+	}
+	else if ( RequestResultType == ERequestResultType::TEXTURE )
+	{
+		UTexture2D* Texture =  ImageFactory(Response->GetContent()); 
+		OnRequestCompleteTexture.Broadcast(Texture, Texture != nullptr); 
 	}
 
-	// Broadcast the result event
-	OnRequestComplete.Broadcast();
+}
+
+UTexture2D* UVaRestRequestJSON::ImageFactory(TArray<uint8> Data)
+{
+	IImageWrapperModule& ImageWrapperModule = FModuleManager::LoadModuleChecked<IImageWrapperModule>( FName("ImageWrapper") );
+	// Note: PNG format.  Other formats are supported
+	IImageWrapperPtr ImageWrapper = ImageWrapperModule.CreateImageWrapper( EImageFormat::PNG );
+	if ( ImageWrapper.IsValid() && ImageWrapper->SetCompressed( Data.GetData(), Data.Num() ) )
+	{
+		const TArray<uint8>* UncompressedBGRA = NULL;
+		if ( ImageWrapper->GetRaw( ERGBFormat::BGRA, 8, UncompressedBGRA) )
+		{
+			// Create the UTexture for rendering
+			UTexture2D* MyTexture = UTexture2D::CreateTransient( ImageWrapper->GetWidth(), ImageWrapper->GetHeight(), PF_B8G8R8A8 );
+
+			// Fill in the source data from the file
+			uint8* TextureData = (uint8*)MyTexture->PlatformData->Mips[0].BulkData.Lock( LOCK_READ_WRITE );
+			FMemory::Memcpy( TextureData, UncompressedBGRA->GetData(), UncompressedBGRA->Num() );
+			MyTexture->PlatformData->Mips[0].BulkData.Unlock();
+
+			// Update the rendering resource from data.
+			MyTexture->UpdateResource();
+
+			return MyTexture;
+		}
+	}
+	// Add code here to support more formats. 
+	return nullptr; 
 }
