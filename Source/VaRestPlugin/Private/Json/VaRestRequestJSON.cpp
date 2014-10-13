@@ -271,17 +271,17 @@ UTexture2D* UVaRestRequestJSON::ImageFactory(TArray<uint8> Data)
 		if ( ImageWrapper->GetRaw( ERGBFormat::BGRA, 8, UncompressedBGRA) )
 		{
 			// Create the UTexture for rendering
-			UTexture2D* MyTexture = UTexture2D::CreateTransient( ImageWrapper->GetWidth(), ImageWrapper->GetHeight(), PF_B8G8R8A8 );
+			UTexture2D* Texture = UTexture2D::CreateTransient( ImageWrapper->GetWidth(), ImageWrapper->GetHeight(), PF_B8G8R8A8 );
 
 			// Fill in the source data from the file
-			uint8* TextureData = (uint8*)MyTexture->PlatformData->Mips[0].BulkData.Lock( LOCK_READ_WRITE );
+			uint8* TextureData = (uint8*)Texture->PlatformData->Mips[0].BulkData.Lock( LOCK_READ_WRITE );
 			FMemory::Memcpy( TextureData, UncompressedBGRA->GetData(), UncompressedBGRA->Num() );
-			MyTexture->PlatformData->Mips[0].BulkData.Unlock();
+			Texture->PlatformData->Mips[0].BulkData.Unlock();
 
 			// Update the rendering resource from data.
-			MyTexture->UpdateResource();
+			Texture->UpdateResource();
 
-			return MyTexture;
+			return Texture;
 		}
 	}
 	// Add code here to support more formats. 
