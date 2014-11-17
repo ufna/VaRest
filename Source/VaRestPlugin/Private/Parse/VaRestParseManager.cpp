@@ -36,11 +36,11 @@ void UVaRestParseManager::ProcessParseURL(
 		if (!ParseClass.IsEmpty())
 		{
 			RequestUrl += "/" + ParseClass;
+		}
 
-			if (!ParseObjectId.IsEmpty())
-			{
-				RequestUrl += "/" + ParseObjectId;
-			}
+		if (!ParseObjectId.IsEmpty())
+		{
+			RequestUrl += "/" + ParseObjectId;
 		}
 	}
 
