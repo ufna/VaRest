@@ -2,7 +2,7 @@
 
 #include "VaRestPluginPrivatePCH.h"
 
-UVaRestRequestJSON::UVaRestRequestJSON(const class FPostConstructInitializeProperties& PCIP)
+UVaRestRequestJSON::UVaRestRequestJSON(const class FObjectInitializer& PCIP)
 	: Super(PCIP)
 {
 	RequestVerb = ERequestVerb::GET;

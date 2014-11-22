@@ -2,7 +2,10 @@
 
 #include "VaRestPluginPrivatePCH.h"
 
-UVaRestJsonObject::UVaRestJsonObject(const class FPostConstructInitializeProperties& PCIP)
+typedef TJsonWriterFactory< TCHAR, TCondensedJsonPrintPolicy<TCHAR> > FCondensedJsonStringWriterFactory;
+typedef TJsonWriter< TCHAR, TCondensedJsonPrintPolicy<TCHAR> > FCondensedJsonStringWriter;
+
+UVaRestJsonObject::UVaRestJsonObject(const class FObjectInitializer& PCIP)
 	: Super(PCIP)
 {
 	Reset();
@@ -45,7 +48,7 @@ FString UVaRestJsonObject::EncodeJson() const
 	}
 
 	FString OutputString;
-	TSharedRef< TJsonWriter<> > Writer = TJsonWriterFactory<>::Create(&OutputString);
+	TSharedRef< FCondensedJsonStringWriter > Writer = FCondensedJsonStringWriterFactory::Create(&OutputString);
 	FJsonSerializer::Serialize(JsonObj.ToSharedRef(), Writer);
 
 	return OutputString;
@@ -415,5 +418,12 @@ void UVaRestJsonObject::SetObjectArrayField(const FString& FieldName, const TArr
 		return;
 	}
 
+	TArray< TSharedPtr<FJsonValue> > EntriesArray;
 
+	for (auto Value : ObjectArray)
+	{
+		EntriesArray.Add(MakeShareable(new FJsonValueObject(Value->GetRootObject())));
+	}
+
+	JsonObj->SetArrayField(FieldName, EntriesArray);
 }
