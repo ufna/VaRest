@@ -5,7 +5,7 @@
 typedef TJsonWriterFactory< TCHAR, TCondensedJsonPrintPolicy<TCHAR> > FCondensedJsonStringWriterFactory;
 typedef TJsonWriter< TCHAR, TCondensedJsonPrintPolicy<TCHAR> > FCondensedJsonStringWriter;
 
-UVaRestJsonObject::UVaRestJsonObject(const class FPostConstructInitializeProperties& PCIP)
+UVaRestJsonObject::UVaRestJsonObject(const class FObjectInitializer& PCIP)
 	: Super(PCIP)
 {
 	Reset();

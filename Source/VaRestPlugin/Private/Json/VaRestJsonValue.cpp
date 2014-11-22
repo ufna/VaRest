@@ -2,7 +2,7 @@
 
 #include "VaRestPluginPrivatePCH.h"
 
-UVaRestJsonValue::UVaRestJsonValue(const class FPostConstructInitializeProperties& PCIP)
+UVaRestJsonValue::UVaRestJsonValue(const class FObjectInitializer& PCIP)
 	: Super(PCIP)
 {
 

@@ -6,7 +6,7 @@ FString UVaRestParseManager::ParseURL(TEXT("https://api.parse.com/1/"));
 FString UVaRestParseManager::ParseAppId(TEXT(""));
 FString UVaRestParseManager::ParseApiKey(TEXT(""));
 
-UVaRestParseManager::UVaRestParseManager(const class FPostConstructInitializeProperties& PCIP)
+UVaRestParseManager::UVaRestParseManager(const class FObjectInitializer& PCIP)
 	: Super(PCIP)
 {
 
