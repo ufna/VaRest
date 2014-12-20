@@ -72,6 +72,17 @@ FString UVaRestParseManager::ConstructPointer(const FString& ClassName, const FS
 	return FString::Printf(TEXT("{\"__type\":\"Pointer\",\"className\":\"%s\",\"objectId\":\"%s\"}"), *ClassName, *ObjectId);
 }
 
+UVaRestJsonObject* UVaRestParseManager::ConstructPointerObject(const FString& ClassName, const FString& ObjectId)
+{
+	UVaRestJsonObject* OutRestJsonObj = (UVaRestJsonObject*)StaticConstructObject(UVaRestJsonObject::StaticClass());
+
+	OutRestJsonObj->SetStringField(TEXT("__type"), TEXT("Pointer"));
+	OutRestJsonObj->SetStringField(TEXT("className"), ClassName);
+	OutRestJsonObj->SetStringField(TEXT("objectId"), ObjectId);
+
+	return OutRestJsonObj;
+}
+
 FString UVaRestParseManager::ConstructWhereQuerySimple(const FString& Key, const FString& Value)
 {
 	return FString::Printf(TEXT("where={\"%s\":%s}"), *Key, *Value);
