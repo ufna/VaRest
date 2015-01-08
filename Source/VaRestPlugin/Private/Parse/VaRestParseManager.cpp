@@ -83,6 +83,15 @@ UVaRestJsonObject* UVaRestParseManager::ConstructPointerObject(const FString& Cl
 	return OutRestJsonObj;
 }
 
+UVaRestJsonObject* UVaRestParseManager::ConstructDeleteOperation()
+{
+	UVaRestJsonObject* OutRestJsonObj = (UVaRestJsonObject*)StaticConstructObject(UVaRestJsonObject::StaticClass());
+	
+	OutRestJsonObj->SetStringField(TEXT("__op"), TEXT("Delete"));
+	
+	return OutRestJsonObj;
+}
+
 FString UVaRestParseManager::ConstructWhereQuerySimple(const FString& Key, const FString& Value)
 {
 	return FString::Printf(TEXT("where={\"%s\":%s}"), *Key, *Value);

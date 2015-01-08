@@ -33,8 +33,12 @@ class UVaRestParseManager : public UVaRestRequestJSON
 	static FString ConstructPointer(const FString& ClassName, const FString& ObjectId);
 
 	/** Create Json object that contains Pointer to the Parse Object */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Parse")
+	UFUNCTION(BlueprintPure, Category = "VaRest|Parse")
 	static UVaRestJsonObject* ConstructPointerObject(const FString& ClassName, const FString& ObjectId);
+
+	/** Create Json object that instructs Parse to delete whatever field it is set to */
+	UFUNCTION(BlueprintPure, Category = "VaRest|Parse")
+	static UVaRestJsonObject* ConstructDeleteOperation();
 
 	/** Construct simple WHERE query that contains only one condition.
 	 * Attn!! String Values should containt quotes! */
