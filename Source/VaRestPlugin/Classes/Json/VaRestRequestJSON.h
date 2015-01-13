@@ -13,7 +13,7 @@ namespace ERequestVerb
 		GET,
 		POST,
 		PUT,
-		DELETE
+		DEL UMETA(DisplayName="DELETE")
 	};
 }
 
