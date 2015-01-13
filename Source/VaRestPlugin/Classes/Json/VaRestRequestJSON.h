@@ -12,7 +12,8 @@ namespace ERequestVerb
 	{
 		GET,
 		POST,
-		PUT
+		PUT,
+		DELETE
 	};
 }
 
