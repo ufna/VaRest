@@ -161,6 +161,10 @@ void UVaRestRequestJSON::ProcessRequest(TSharedRef<IHttpRequest> HttpRequest)
 	case ERequestVerb::PUT:
 		HttpRequest->SetVerb("PUT");
 		break;
+			
+	case ERequestVerb::DELETE:
+		HttpRequest->SetVerb("DELETE");
+		break;
 
 	default:
 		break;
