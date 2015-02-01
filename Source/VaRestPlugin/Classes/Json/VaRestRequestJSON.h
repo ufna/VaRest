@@ -105,6 +105,11 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "VaRest")
 	void SetResponseObject(UVaRestJsonObject* JsonObject);
 
+	///////////////////////////////////////////////////////////////////////////
+    // Response Code accessor
+
+	UFUNCTION(BlueprintCallable, Category = "VaRest")
+	int32 GetResponseCode();
 
 	//////////////////////////////////////////////////////////////////////////
 	// URL processing
@@ -162,4 +167,6 @@ private:
 	/** Mapping of header section to values. Used to generate final header string for request */
 	TMap<FString, FString> RequestHeaders;
 
+	/** Http Response code */
+	int32 ResponseCode;
 };
