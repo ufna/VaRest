@@ -106,8 +106,9 @@ public:
 	void SetResponseObject(UVaRestJsonObject* JsonObject);
 
 	///////////////////////////////////////////////////////////////////////////
-    // Response Code accessor
+	// Response Code accessor
 
+	/** Get the responce code of the last query */
 	UFUNCTION(BlueprintCallable, Category = "VaRest")
 	int32 GetResponseCode();
 

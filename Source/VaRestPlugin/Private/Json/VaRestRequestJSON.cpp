@@ -81,6 +81,8 @@ void UVaRestRequestJSON::ResetData()
 {
 	ResetRequestData();
 	ResetResponseData();
+
+	ResponseCode = -1;
 }
 
 void UVaRestRequestJSON::ResetRequestData()
