@@ -133,6 +133,13 @@ void UVaRestRequestJSON::SetResponseObject(UVaRestJsonObject* JsonObject)
 	ResponseJsonObj = JsonObject;
 }
 
+///////////////////////////////////////////////////////////////////////////
+// Response Code accessor
+
+int32 UVaRestRequestJSON::GetResponseCode()
+{
+	return ResponseCode;
+}
 
 //////////////////////////////////////////////////////////////////////////
 // URL processing
@@ -255,6 +262,9 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 
 	// Save response data as a string
 	ResponseContent = Response->GetContentAsString();
+
+	// Save response code as int32
+	ResponseCode = Response->GetResponseCode();
 
 	// Log response state
 	UE_LOG(LogVaRest, Log, TEXT("Response (%d): %s"), Response->GetResponseCode(), *Response->GetContentAsString());
