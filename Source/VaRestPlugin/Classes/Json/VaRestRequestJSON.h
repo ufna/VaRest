@@ -148,9 +148,11 @@ public:
 
 private:
 	/** Internal request data stored as JSON */
+	UPROPERTY()
 	UVaRestJsonObject* RequestJsonObj;
 
-	/** Responce data stored as JSON */
+	/** Response data stored as JSON */
+	UPROPERTY()
 	UVaRestJsonObject* ResponseJsonObj;
 
 	/** Verb for making request (GET,POST,etc) */
