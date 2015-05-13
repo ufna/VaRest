@@ -83,6 +83,16 @@ UVaRestJsonObject* UVaRestParseManager::ConstructPointerObject(const FString& Cl
 	return OutRestJsonObj;
 }
 
+UVaRestJsonObject* UVaRestParseManager::ConstructDateObject(const FDateTime& Date)
+{
+	UVaRestJsonObject* OutRestJsonObj = (UVaRestJsonObject*)StaticConstructObject(UVaRestJsonObject::StaticClass());
+
+	OutRestJsonObj->SetStringField(TEXT("__type"), TEXT("Date"));
+	OutRestJsonObj->SetStringField(TEXT("iso"), Date.ToIso8601());
+
+	return OutRestJsonObj;
+}
+
 UVaRestJsonObject* UVaRestParseManager::ConstructDeleteOperation()
 {
 	UVaRestJsonObject* OutRestJsonObj = (UVaRestJsonObject*)StaticConstructObject(UVaRestJsonObject::StaticClass());

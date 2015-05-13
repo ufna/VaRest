@@ -36,6 +36,10 @@ class UVaRestParseManager : public UVaRestRequestJSON
 	UFUNCTION(BlueprintPure, Category = "VaRest|Parse")
 	static UVaRestJsonObject* ConstructPointerObject(const FString& ClassName, const FString& ObjectId);
 
+	/** Create Json object that contains a date */
+	UFUNCTION(BlueprintPure, Category = "VaRest|Parse")
+	static UVaRestJsonObject* ConstructDateObject(const FDateTime& Date);
+
 	/** Create Json object that instructs Parse to delete whatever field it is set to */
 	UFUNCTION(BlueprintPure, Category = "VaRest|Parse")
 	static UVaRestJsonObject* ConstructDeleteOperation();
