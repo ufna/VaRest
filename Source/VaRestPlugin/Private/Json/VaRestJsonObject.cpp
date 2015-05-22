@@ -74,6 +74,20 @@ bool UVaRestJsonObject::DecodeJson(const FString& JsonString)
 //////////////////////////////////////////////////////////////////////////
 // FJsonObject API
 
+TArray<FString> UVaRestJsonObject::GetFieldNames()
+{
+	TArray<FString> Result;
+	
+	if (!JsonObj.IsValid())
+	{
+		return Result;
+	}
+	
+	JsonObj->Values.GetKeys(Result);
+	
+	return Result;
+}
+
 bool UVaRestJsonObject::HasField(const FString& FieldName) const
 {
 	if (!JsonObj.IsValid())

@@ -45,6 +45,10 @@ class UVaRestJsonObject : public UObject
 	//////////////////////////////////////////////////////////////////////////
 	// FJsonObject API
 
+	/** Returns a list of field names that exist in the object */
+	UFUNCTION(BlueprintPure, Category = "VaRest|Json")
+	TArray<FString> GetFieldNames();
+
 	/** Checks to see if the FieldName exists in the object */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	bool HasField(const FString& FieldName) const;
