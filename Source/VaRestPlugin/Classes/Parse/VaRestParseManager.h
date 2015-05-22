@@ -44,6 +44,10 @@ class UVaRestParseManager : public UVaRestRequestJSON
 	UFUNCTION(BlueprintPure, Category = "VaRest|Parse")
 	static UVaRestJsonObject* ConstructDeleteOperation();
 
+	/** Create Json object that contains Facebook auth data */
+	UFUNCTION(BlueprintPure, Category = "VaRest|Parse")
+	static UVaRestJsonObject* ConstructFacebookAuthDataObject(FString UserId, FString AccessToken, FString ExpirationDate);
+
 	/** Construct simple WHERE query that contains only one condition.
 	 * Attn!! String Values should containt quotes! */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Parse")

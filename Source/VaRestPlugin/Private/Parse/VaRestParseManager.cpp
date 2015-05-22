@@ -102,6 +102,21 @@ UVaRestJsonObject* UVaRestParseManager::ConstructDeleteOperation()
 	return OutRestJsonObj;
 }
 
+UVaRestJsonObject* UVaRestParseManager::ConstructFacebookAuthDataObject(FString UserId, FString AccessToken, FString ExpirationDate)
+{
+	UVaRestJsonObject* OutRestJsonObj = (UVaRestJsonObject*)StaticConstructObject(UVaRestJsonObject::StaticClass());
+	
+	UVaRestJsonObject* FacebookJsonObj = (UVaRestJsonObject*)StaticConstructObject(UVaRestJsonObject::StaticClass());
+	
+	FacebookJsonObj->SetStringField(TEXT("id"), UserId);
+	FacebookJsonObj->SetStringField(TEXT("access_token"), AccessToken);
+	FacebookJsonObj->SetStringField(TEXT("expiration_date"), ExpirationDate);
+	
+	OutRestJsonObj->SetObjectField(TEXT("facebook"), FacebookJsonObj);
+	
+	return OutRestJsonObj;
+}
+
 FString UVaRestParseManager::ConstructWhereQuerySimple(const FString& Key, const FString& Value)
 {
 	return FString::Printf(TEXT("where={\"%s\":%s}"), *Key, *Value);
