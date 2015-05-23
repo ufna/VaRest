@@ -45,6 +45,10 @@ class UVaRestJsonObject : public UObject
 	//////////////////////////////////////////////////////////////////////////
 	// FJsonObject API
 
+	/** Returns a list of field names that exist in the object */
+	UFUNCTION(BlueprintPure, Category = "VaRest|Json")
+	TArray<FString> GetFieldNames();
+
 	/** Checks to see if the FieldName exists in the object */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	bool HasField(const FString& FieldName) const;
@@ -68,6 +72,10 @@ class UVaRestJsonObject : public UObject
 	/** Set an ObjectField named FieldName and value of Json Array */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	void SetArrayField(const FString& FieldName, const TArray<UVaRestJsonValue*>& InArray);
+	
+	/** Adds all of the fields from one json object to this one */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	void MergeJsonObject(UVaRestJsonObject* InJsonObject, bool Overwrite);
 
 
 	//////////////////////////////////////////////////////////////////////////
