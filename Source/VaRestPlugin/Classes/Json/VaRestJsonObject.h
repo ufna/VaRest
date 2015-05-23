@@ -72,6 +72,10 @@ class UVaRestJsonObject : public UObject
 	/** Set an ObjectField named FieldName and value of Json Array */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	void SetArrayField(const FString& FieldName, const TArray<UVaRestJsonValue*>& InArray);
+	
+	/** Adds all of the fields from one json object to this one */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	void MergeJsonObject(UVaRestJsonObject* InJsonObject, bool Overwrite);
 
 
 	//////////////////////////////////////////////////////////////////////////

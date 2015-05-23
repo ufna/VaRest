@@ -268,6 +268,21 @@ void UVaRestJsonObject::SetArrayField(const FString& FieldName, const TArray<UVa
 	JsonObj->SetArrayField(FieldName, ValArray);
 }
 
+void UVaRestJsonObject::MergeJsonObject(UVaRestJsonObject* InJsonObject, bool Overwrite)
+{
+	TArray<FString> Keys = InJsonObject->GetFieldNames();
+	
+	for (auto Key : Keys)
+	{
+		if (Overwrite == false && HasField(Key))
+		{
+			continue;
+		}
+		
+		SetField(Key, InJsonObject->GetField(Key));
+	}
+}
+
 UVaRestJsonObject* UVaRestJsonObject::GetObjectField(const FString& FieldName) const
 {
 	if (!JsonObj.IsValid())
