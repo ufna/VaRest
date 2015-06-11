@@ -13,7 +13,7 @@ UVaRestRequestJSON::UVaRestRequestJSON(const class FObjectInitializer& PCIP)
 
 UVaRestRequestJSON* UVaRestRequestJSON::ConstructRequest(UObject* WorldContextObject)
 {
-	return (UVaRestRequestJSON*)StaticConstructObject(UVaRestRequestJSON::StaticClass());
+	return NewObject<UVaRestRequestJSON>();
 }
 
 UVaRestRequestJSON* UVaRestRequestJSON::ConstructRequestExt(
@@ -91,7 +91,7 @@ void UVaRestRequestJSON::ResetRequestData()
 	}
 	else
 	{
-		RequestJsonObj = (UVaRestJsonObject*)StaticConstructObject(UVaRestJsonObject::StaticClass());
+		RequestJsonObj = NewObject<UVaRestJsonObject>();
 	}
 }
 
@@ -103,7 +103,7 @@ void UVaRestRequestJSON::ResetResponseData()
 	}
 	else
 	{
-		ResponseJsonObj = (UVaRestJsonObject*)StaticConstructObject(UVaRestJsonObject::StaticClass());
+		ResponseJsonObj = NewObject<UVaRestJsonObject>();
 	}
 
 	bIsValidJsonResponse = false;
