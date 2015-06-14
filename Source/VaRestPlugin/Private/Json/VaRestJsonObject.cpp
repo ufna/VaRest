@@ -13,7 +13,7 @@ UVaRestJsonObject::UVaRestJsonObject(const class FObjectInitializer& PCIP)
 
 UVaRestJsonObject* UVaRestJsonObject::ConstructJsonObject(UObject* WorldContextObject)
 {
-	return (UVaRestJsonObject*)StaticConstructObject(UVaRestJsonObject::StaticClass());
+	return NewObject<UVaRestJsonObject>();
 }
 
 void UVaRestJsonObject::Reset()
@@ -117,7 +117,7 @@ UVaRestJsonValue* UVaRestJsonObject::GetField(const FString& FieldName) const
 
 	TSharedPtr<FJsonValue> NewVal = JsonObj->TryGetField(FieldName);
 
-	UVaRestJsonValue* NewValue = (UVaRestJsonValue*)StaticConstructObject(UVaRestJsonValue::StaticClass());
+	UVaRestJsonValue* NewValue = NewObject<UVaRestJsonValue>();
 	NewValue->SetRootValue(NewVal);
 
 	return NewValue;
@@ -208,7 +208,7 @@ TArray<UVaRestJsonValue*> UVaRestJsonObject::GetArrayField(const FString& FieldN
 	TArray< TSharedPtr<FJsonValue> > ValArray = JsonObj->GetArrayField(FieldName);
 	for (auto Value : ValArray)
 	{
-		UVaRestJsonValue* NewValue = (UVaRestJsonValue*)StaticConstructObject(UVaRestJsonValue::StaticClass());
+		UVaRestJsonValue* NewValue = NewObject<UVaRestJsonValue>();
 		NewValue->SetRootValue(Value);
 
 		OutArray.Add(NewValue);
@@ -292,7 +292,7 @@ UVaRestJsonObject* UVaRestJsonObject::GetObjectField(const FString& FieldName) c
 
 	TSharedPtr<FJsonObject> JsonObjField = JsonObj->GetObjectField(FieldName);
 
-	UVaRestJsonObject* OutRestJsonObj = (UVaRestJsonObject*)StaticConstructObject(UVaRestJsonObject::StaticClass());
+	UVaRestJsonObject* OutRestJsonObj = NewObject<UVaRestJsonObject>();
 	OutRestJsonObj->SetRootObject(JsonObjField);
 
 	return OutRestJsonObj;
@@ -431,7 +431,7 @@ TArray<UVaRestJsonObject*> UVaRestJsonObject::GetObjectArrayField(const FString&
 	{
 		TSharedPtr<FJsonObject> NewObj = Value->AsObject();
 
-		UVaRestJsonObject* NewJson = (UVaRestJsonObject*)StaticConstructObject(UVaRestJsonObject::StaticClass());
+		UVaRestJsonObject* NewJson = NewObject<UVaRestJsonObject>();
 		NewJson->SetRootObject(NewObj);
 
 		OutArray.Add(NewJson);

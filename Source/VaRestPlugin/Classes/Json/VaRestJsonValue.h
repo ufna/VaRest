@@ -35,23 +35,23 @@ class UVaRestJsonValue : public UObject
 
 	/** Create new Json Number value
 	 * Attn.!! float used instead of double to make the function blueprintable! */
-	UFUNCTION(BlueprintPure, meta = (FriendlyName = "Construct Json Number Value", HidePin = "WorldContextObject", DefaultToSelf = "WorldContextObject"), Category = "VaRest|Json")
+	UFUNCTION(BlueprintPure, meta = (DisplayName = "Construct Json Number Value", HidePin = "WorldContextObject", DefaultToSelf = "WorldContextObject"), Category = "VaRest|Json")
 	static UVaRestJsonValue* ConstructJsonValueNumber(UObject* WorldContextObject, float Number);
 
 	/** Create new Json String value */
-	UFUNCTION(BlueprintPure, meta = (FriendlyName = "Construct Json String Value", HidePin = "WorldContextObject", DefaultToSelf = "WorldContextObject"), Category = "VaRest|Json")
+	UFUNCTION(BlueprintPure, meta = (DisplayName = "Construct Json String Value", HidePin = "WorldContextObject", DefaultToSelf = "WorldContextObject"), Category = "VaRest|Json")
 	static UVaRestJsonValue* ConstructJsonValueString(UObject* WorldContextObject, const FString& StringValue);
 
 	/** Create new Json Bool value */
-	UFUNCTION(BlueprintPure, meta = (FriendlyName = "Construct Json Bool Value", HidePin = "WorldContextObject", DefaultToSelf = "WorldContextObject"), Category = "VaRest|Json")
+	UFUNCTION(BlueprintPure, meta = (DisplayName = "Construct Json Bool Value", HidePin = "WorldContextObject", DefaultToSelf = "WorldContextObject"), Category = "VaRest|Json")
 	static UVaRestJsonValue* ConstructJsonValueBool(UObject* WorldContextObject, bool InValue);
 
 	/** Create new Json Array value */
-	UFUNCTION(BlueprintPure, meta = (FriendlyName = "Construct Json Array Value", HidePin = "WorldContextObject", DefaultToSelf = "WorldContextObject"), Category = "VaRest|Json")
+	UFUNCTION(BlueprintPure, meta = (DisplayName = "Construct Json Array Value", HidePin = "WorldContextObject", DefaultToSelf = "WorldContextObject"), Category = "VaRest|Json")
 	static UVaRestJsonValue* ConstructJsonValueArray(UObject* WorldContextObject, const TArray<UVaRestJsonValue*>& InArray);
 
 	/** Create new Json Object value */
-	UFUNCTION(BlueprintPure, meta = (FriendlyName = "Construct Json Object Value", HidePin = "WorldContextObject", DefaultToSelf = "WorldContextObject"), Category = "VaRest|Json")
+	UFUNCTION(BlueprintPure, meta = (DisplayName = "Construct Json Object Value", HidePin = "WorldContextObject", DefaultToSelf = "WorldContextObject"), Category = "VaRest|Json")
 	static UVaRestJsonValue* ConstructJsonValueObject(UObject* WorldContextObject, UVaRestJsonObject *JsonObject);
 
 	/** Create new Json value from FJsonValue (to be used from VaRestJsonObject) */

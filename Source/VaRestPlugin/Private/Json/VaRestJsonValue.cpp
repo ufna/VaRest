@@ -12,7 +12,7 @@ UVaRestJsonValue* UVaRestJsonValue::ConstructJsonValueNumber(UObject* WorldConte
 {
 	TSharedPtr<FJsonValue> NewVal = MakeShareable(new FJsonValueNumber(Number));
 
-	UVaRestJsonValue* NewValue = (UVaRestJsonValue*)StaticConstructObject(UVaRestJsonValue::StaticClass());
+	UVaRestJsonValue* NewValue = NewObject<UVaRestJsonValue>();
 	NewValue->SetRootValue(NewVal);
 
 	return NewValue;
@@ -22,7 +22,7 @@ UVaRestJsonValue* UVaRestJsonValue::ConstructJsonValueString(UObject* WorldConte
 {
 	TSharedPtr<FJsonValue> NewVal = MakeShareable(new FJsonValueString(StringValue));
 
-	UVaRestJsonValue* NewValue = (UVaRestJsonValue*)StaticConstructObject(UVaRestJsonValue::StaticClass());
+	UVaRestJsonValue* NewValue = NewObject<UVaRestJsonValue>();
 	NewValue->SetRootValue(NewVal);
 
 	return NewValue;
@@ -32,7 +32,7 @@ UVaRestJsonValue* UVaRestJsonValue::ConstructJsonValueBool(UObject* WorldContext
 {
 	TSharedPtr<FJsonValue> NewVal = MakeShareable(new FJsonValueBoolean(InValue));
 
-	UVaRestJsonValue* NewValue = (UVaRestJsonValue*)StaticConstructObject(UVaRestJsonValue::StaticClass());
+	UVaRestJsonValue* NewValue = NewObject<UVaRestJsonValue>();
 	NewValue->SetRootValue(NewVal);
 
 	return NewValue;
@@ -49,7 +49,7 @@ UVaRestJsonValue* UVaRestJsonValue::ConstructJsonValueArray(UObject* WorldContex
 
 	TSharedPtr<FJsonValue> NewVal = MakeShareable(new FJsonValueArray(ValueArray));
 
-	UVaRestJsonValue* NewValue = (UVaRestJsonValue*)StaticConstructObject(UVaRestJsonValue::StaticClass());
+	UVaRestJsonValue* NewValue = NewObject<UVaRestJsonValue>();
 	NewValue->SetRootValue(NewVal);
 
 	return NewValue;
@@ -59,7 +59,7 @@ UVaRestJsonValue* UVaRestJsonValue::ConstructJsonValueObject(UObject* WorldConte
 {
 	TSharedPtr<FJsonValue> NewVal = MakeShareable(new FJsonValueObject(JsonObject->GetRootObject()));
 
-	UVaRestJsonValue* NewValue = (UVaRestJsonValue*)StaticConstructObject(UVaRestJsonValue::StaticClass());
+	UVaRestJsonValue* NewValue = NewObject<UVaRestJsonValue>();
 	NewValue->SetRootValue(NewVal);
 
 	return NewValue;
@@ -69,7 +69,7 @@ UVaRestJsonValue* ConstructJsonValue(UObject* WorldContextObject, const TSharedP
 {
 	TSharedPtr<FJsonValue> NewVal = InValue;
 
-	UVaRestJsonValue* NewValue = (UVaRestJsonValue*)StaticConstructObject(UVaRestJsonValue::StaticClass());
+	UVaRestJsonValue* NewValue = NewObject<UVaRestJsonValue>();
 	NewValue->SetRootValue(NewVal);
 
 	return NewValue;
@@ -215,7 +215,7 @@ TArray<UVaRestJsonValue*> UVaRestJsonValue::AsArray() const
 	TArray< TSharedPtr<FJsonValue> > ValArray = JsonVal->AsArray();
 	for (auto Value : ValArray)
 	{
-		UVaRestJsonValue* NewValue = (UVaRestJsonValue*)StaticConstructObject(UVaRestJsonValue::StaticClass());
+		UVaRestJsonValue* NewValue = NewObject<UVaRestJsonValue>();
 		NewValue->SetRootValue(Value);
 
 		OutArray.Add(NewValue);
@@ -234,7 +234,7 @@ UVaRestJsonObject* UVaRestJsonValue::AsObject()
 
 	TSharedPtr<FJsonObject> NewObj = JsonVal->AsObject();
 
-	UVaRestJsonObject* JsonObj = (UVaRestJsonObject*)StaticConstructObject(UVaRestJsonObject::StaticClass());
+	UVaRestJsonObject* JsonObj = NewObject<UVaRestJsonObject>();
 	JsonObj->SetRootObject(NewObj);
 
 	return JsonObj;
