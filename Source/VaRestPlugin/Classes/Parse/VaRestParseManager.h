@@ -13,7 +13,7 @@ class UVaRestParseManager : public UVaRestRequestJSON
 	GENERATED_UCLASS_BODY()
 
 	/** Creates new Parse request with defined verb and content type */
-	UFUNCTION(BlueprintPure, meta = (FriendlyName = "Construct Parse Request", HidePin = "WorldContextObject", DefaultToSelf = "WorldContextObject"), Category = "VaRest|Parse")
+	UFUNCTION(BlueprintPure, meta = (DisplayName = "Construct Parse Request", HidePin = "WorldContextObject", DefaultToSelf = "WorldContextObject"), Category = "VaRest|Parse")
 	static UVaRestParseManager* ConstructParseRequest(UObject* WorldContextObject, ERequestVerb::Type Verb, ERequestContentType::Type ContentType);
 
 	/** Open the Parse URL (Attn.!! App Id and Api Key should be set before) */

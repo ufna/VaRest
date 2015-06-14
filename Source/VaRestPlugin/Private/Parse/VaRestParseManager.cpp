@@ -74,7 +74,7 @@ FString UVaRestParseManager::ConstructPointer(const FString& ClassName, const FS
 
 UVaRestJsonObject* UVaRestParseManager::ConstructPointerObject(const FString& ClassName, const FString& ObjectId)
 {
-	UVaRestJsonObject* OutRestJsonObj = (UVaRestJsonObject*)StaticConstructObject(UVaRestJsonObject::StaticClass());
+	UVaRestJsonObject* OutRestJsonObj = NewObject<UVaRestJsonObject>();
 
 	OutRestJsonObj->SetStringField(TEXT("__type"), TEXT("Pointer"));
 	OutRestJsonObj->SetStringField(TEXT("className"), ClassName);
@@ -85,7 +85,7 @@ UVaRestJsonObject* UVaRestParseManager::ConstructPointerObject(const FString& Cl
 
 UVaRestJsonObject* UVaRestParseManager::ConstructDateObject(const FDateTime& Date)
 {
-	UVaRestJsonObject* OutRestJsonObj = (UVaRestJsonObject*)StaticConstructObject(UVaRestJsonObject::StaticClass());
+	UVaRestJsonObject* OutRestJsonObj = NewObject<UVaRestJsonObject>();
 
 	OutRestJsonObj->SetStringField(TEXT("__type"), TEXT("Date"));
 	OutRestJsonObj->SetStringField(TEXT("iso"), Date.ToIso8601());
@@ -95,7 +95,7 @@ UVaRestJsonObject* UVaRestParseManager::ConstructDateObject(const FDateTime& Dat
 
 UVaRestJsonObject* UVaRestParseManager::ConstructDeleteOperation()
 {
-	UVaRestJsonObject* OutRestJsonObj = (UVaRestJsonObject*)StaticConstructObject(UVaRestJsonObject::StaticClass());
+	UVaRestJsonObject* OutRestJsonObj = NewObject<UVaRestJsonObject>();
 	
 	OutRestJsonObj->SetStringField(TEXT("__op"), TEXT("Delete"));
 	
@@ -104,9 +104,9 @@ UVaRestJsonObject* UVaRestParseManager::ConstructDeleteOperation()
 
 UVaRestJsonObject* UVaRestParseManager::ConstructFacebookAuthDataObject(FString UserId, FString AccessToken, FString ExpirationDate)
 {
-	UVaRestJsonObject* OutRestJsonObj = (UVaRestJsonObject*)StaticConstructObject(UVaRestJsonObject::StaticClass());
+	UVaRestJsonObject* OutRestJsonObj = NewObject<UVaRestJsonObject>();
 	
-	UVaRestJsonObject* FacebookJsonObj = (UVaRestJsonObject*)StaticConstructObject(UVaRestJsonObject::StaticClass());
+	UVaRestJsonObject* FacebookJsonObj = NewObject<UVaRestJsonObject>();
 	
 	FacebookJsonObj->SetStringField(TEXT("id"), UserId);
 	FacebookJsonObj->SetStringField(TEXT("access_token"), AccessToken);
