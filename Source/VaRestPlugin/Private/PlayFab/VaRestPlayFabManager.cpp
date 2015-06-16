@@ -1,9 +1,10 @@
 // Copyright 2014 Vladimir Alyamkin. All Rights Reserved.
+// Update to work with PlayFab 2015 Joshua Lyons
 
 #include "VaRestPluginPrivatePCH.h"
 
-FString UVaRestPlayFabManager::PlayFabURL(TEXT("https://<AppID>.playfabapi.com/"));
-FString UVaRestPlayFabManager::PlayFabLogicURL(TEXT("https://<AppID>.playfablogic.com/"));
+FString UVaRestPlayFabManager::PlayFabURL(TEXT("https://<AppId>.playfabapi.com/"));
+FString UVaRestPlayFabManager::PlayFabLogicURL(TEXT("https://<AppId>.playfablogic.com/"));
 FString UVaRestPlayFabManager::PlayFabAppId(TEXT(""));
 FString UVaRestPlayFabManager::PlayFabApiKey(TEXT(""));
 FString UVaRestPlayFabManager::PhotonRealtimeAppId(TEXT(""));
@@ -521,6 +522,99 @@ UVaRestPlayFabManager* UVaRestPlayFabManager::ConstructGetPlayFabIDsFromFacebook
 
 	// Setup request object
 	OutRestJsonObj->SetStringArrayField(TEXT("FacebookIDs"), FacebookIDs);
+
+	// Add Request to manager
+	manager->SetRequestObject(OutRestJsonObj);
+
+	return manager;
+}
+
+/** Retrieves the unique PlayFab identifiers for the given set of Game Center identifiers (referenced in the Game Center Programming Guide as the Player Identifier) */
+UVaRestPlayFabManager* UVaRestPlayFabManager::ConstructGetPlayFabIDsFromGameCenterIDs(FString SessionTicket, TArray<FString> GameCenterIDs)
+{
+	// Object containing request data
+	UVaRestPlayFabManager* manager = NewObject<UVaRestPlayFabManager>();
+	UVaRestJsonObject* OutRestJsonObj = NewObject<UVaRestJsonObject>();
+
+	// Setup request
+	manager->SetVerb(ERequestVerb::POST);
+	manager->SetContentType(ERequestContentType::json);
+
+	// Setup the request variables based on this request
+	manager->PlayFabClass = "GetPlayFabIDsFromGameCenterIDs";
+	manager->PlayFabSessionToken = SessionTicket;
+	manager->CloudScriptVersion = "";
+	manager->isAdmin = false;
+	manager->isServer = false;
+	manager->isClient = true;
+	manager->useSecretKey = false;
+	manager->useSessionTicket = true;
+	manager->cloudScript = false;
+
+	// Setup request object
+	OutRestJsonObj->SetStringArrayField(TEXT("GameCenterIDs"), GameCenterIDs);
+
+	// Add Request to manager
+	manager->SetRequestObject(OutRestJsonObj);
+
+	return manager;
+}
+
+/** Retrieves the unique PlayFab identifiers for the given set of PlayStation Network identifiers */
+UVaRestPlayFabManager* UVaRestPlayFabManager::ConstructGetPlayFabIDsFromPSNAccountIDs(FString SessionTicket, TArray<FString> PSNAccountIDs)
+{
+	// Object containing request data
+	UVaRestPlayFabManager* manager = NewObject<UVaRestPlayFabManager>();
+	UVaRestJsonObject* OutRestJsonObj = NewObject<UVaRestJsonObject>();
+
+	// Setup request
+	manager->SetVerb(ERequestVerb::POST);
+	manager->SetContentType(ERequestContentType::json);
+
+	// Setup the request variables based on this request
+	manager->PlayFabClass = "GetPlayFabIDsFromPSNAccountIDs";
+	manager->PlayFabSessionToken = SessionTicket;
+	manager->CloudScriptVersion = "";
+	manager->isAdmin = false;
+	manager->isServer = false;
+	manager->isClient = true;
+	manager->useSecretKey = false;
+	manager->useSessionTicket = true;
+	manager->cloudScript = false;
+
+	// Setup request object
+	OutRestJsonObj->SetStringArrayField(TEXT("PSNAccountIDs"), PSNAccountIDs);
+
+	// Add Request to manager
+	manager->SetRequestObject(OutRestJsonObj);
+
+	return manager;
+}
+
+/** Retrieves the unique PlayFab identifiers for the given set of Steam identifiers. The Steam identifiers are the profile IDs for the user accounts, available as SteamId in the Steamworks Community API calls */
+UVaRestPlayFabManager* UVaRestPlayFabManager::ConstructGetPlayFabIDsFromSteamIDs(FString SessionTicket, TArray<FString> SteamIDs)
+{
+	// Object containing request data
+	UVaRestPlayFabManager* manager = NewObject<UVaRestPlayFabManager>();
+	UVaRestJsonObject* OutRestJsonObj = NewObject<UVaRestJsonObject>();
+
+	// Setup request
+	manager->SetVerb(ERequestVerb::POST);
+	manager->SetContentType(ERequestContentType::json);
+
+	// Setup the request variables based on this request
+	manager->PlayFabClass = "GetPlayFabIDsFromSteamIDs";
+	manager->PlayFabSessionToken = SessionTicket;
+	manager->CloudScriptVersion = "";
+	manager->isAdmin = false;
+	manager->isServer = false;
+	manager->isClient = true;
+	manager->useSecretKey = false;
+	manager->useSessionTicket = true;
+	manager->cloudScript = false;
+
+	// Setup request object
+	OutRestJsonObj->SetStringArrayField(TEXT("SteamIDs"), SteamIDs);
 
 	// Add Request to manager
 	manager->SetRequestObject(OutRestJsonObj);

@@ -65,382 +65,409 @@ class UVaRestPlayFabManager : public UVaRestRequestJSON
 
 	// Authentication
 
-	/** Create Json object that contains play fab login data */
+	/** Signs the user into the PlayFab account, returning a session identifier that can subsequently be used for API calls which require an authenticated user  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Authentication")
-	static UVaRestPlayFabManager* ConstructLoginWithPlayFab(FString Username, FString Password);
+		static UVaRestPlayFabManager* ConstructLoginWithPlayFab(FString Username, FString Password);
 
-	/** Create Json object that contains play fab login data */
+	/** Registers a new Playfab user account, returning a session identifier that can subsequently be used for API calls which require an authenticated user  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Authentication")
-	static UVaRestPlayFabManager* ConstructRegisterWithPlayFab(FString Username, FString Password, FString Email);
+		static UVaRestPlayFabManager* ConstructRegisterWithPlayFab(FString Username, FString Password, FString Email);
 
-	/** Create Get Photon Authentication Toeken Request */
+	/** Gets a Photon custom authentication token that can be used to securely join the player into a Photon room */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Authentication")
-	static UVaRestPlayFabManager* ConstructGetPhotonAuthenticationToken(FString SessionTicket, bool PhotonRealtime, bool PhotonTurnbased, bool PhotonChat);
+		static UVaRestPlayFabManager* ConstructGetPhotonAuthenticationToken(FString SessionTicket, bool PhotonRealtime, bool PhotonTurnbased, bool PhotonChat);
 
-	/** Create a Login with Android Device Request */
+	/** Signs the user in using the Android device identifier, returning a session identifier that can subsequently be used for API calls which require an authenticated user  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Authentication")
-	static UVaRestPlayFabManager* ConstructLoginWithAndroidDeviceID(FString AndroidDeviceId, FString OSVersion = "", FString AndroidDeviceType = "", bool CreateAccount = false);
+		static UVaRestPlayFabManager* ConstructLoginWithAndroidDeviceID(FString AndroidDeviceId, FString OSVersion = "", FString AndroidDeviceType = "", bool CreateAccount = false);
 
-	/** Create Login with email request */
+	/** Signs the user into the PlayFab account, returning a session identifier that can subsequently be used for API calls which require an authenticated user */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Authentication")
-	static UVaRestPlayFabManager* ConstructLoginWithEmail(FString Username, FString Password);
+		static UVaRestPlayFabManager* ConstructLoginWithEmail(FString Username, FString Password);
 
-	/** Create a Login with Facebook request */
+	/** Signs the user in using a Facebook access token, returning a session identifier that can subsequently be used for API calls which require an authenticated user  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Authentication")
-	static UVaRestPlayFabManager* ConstructLoginWithFacebook(FString FacebookAccessToken, bool CreateAccount = false);
+		static UVaRestPlayFabManager* ConstructLoginWithFacebook(FString FacebookAccessToken, bool CreateAccount = false);
 
-	/** Create a Login with Google request */
+	/** Signs the user in using a Google account access token, returning a session identifier that can subsequently be used for API calls which require an authenticated user  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Authentication")
-	static UVaRestPlayFabManager* ConstructLoginWithGoogle(FString GoogleAccessToken, bool CreateAccount = false);
+		static UVaRestPlayFabManager* ConstructLoginWithGoogle(FString GoogleAccessToken, bool CreateAccount = false);
 
-	/** Create a Login with IOS Device Request */
+	/** Signs the user in using the vendor-specific iOS device identifier, returning a session identifier that can subsequently be used for API calls which require an authenticated user  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Authentication")
-	static UVaRestPlayFabManager* ConstructLoginWithIOSDeviceID(FString IOSDeviceId, FString OSVersion = "", FString DeviceModel = "", bool CreateAccount = false);
+		static UVaRestPlayFabManager* ConstructLoginWithIOSDeviceID(FString IOSDeviceId, FString OSVersion = "", FString DeviceModel = "", bool CreateAccount = false);
 
-	/** Create a Login with Steam request */
+	/** Signs the user in using a Steam authentication ticket, returning a session identifier that can subsequently be used for API calls which require an authenticated user  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Authentication")
-	static UVaRestPlayFabManager* ConstructLoginWithSteam(FString SteamAccessToken, bool CreateAccount = false);
+		static UVaRestPlayFabManager* ConstructLoginWithSteam(FString SteamAccessToken, bool CreateAccount = false);
 
 	// Account Management
 
-	/** Add Username Password Request */
+	/** Adds playfab username/password auth to an existing semi-anonymous account created via a 3rd party auth method.  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Account Management")
-	static UVaRestPlayFabManager* ConstructAddUsernamePassword(FString SessionTicket, FString Email, FString Username, FString Password);
+		static UVaRestPlayFabManager* ConstructAddUsernamePassword(FString SessionTicket, FString Email, FString Username, FString Password);
 
-	/** Get Account Info Request */
+	/** Retrieves the user's PlayFab account details  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Account Management")
-	static UVaRestPlayFabManager* ConstructGetAccountInfo(FString SessionTicket, FString PlayFabId, FString Username = "", FString Email = "", FString TitleDisplayName = "");
+		static UVaRestPlayFabManager* ConstructGetAccountInfo(FString SessionTicket, FString PlayFabId, FString Username = "", FString Email = "", FString TitleDisplayName = "");
 	
-	/** Get Play Fab Ids from Facebook Ids */
+	/** Retrieves the unique PlayFab identifiers for the given set of Facebook identifiers */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Account Management")
-	static UVaRestPlayFabManager* ConstructGetPlayFabIDsFromFacebookIDs(FString SessionTicket, TArray<FString> FacebookIDs);
+		static UVaRestPlayFabManager* ConstructGetPlayFabIDsFromFacebookIDs(FString SessionTicket, TArray<FString> FacebookIDs);
 
-	/** Get User combined info all inputs are optional except the session ticket.*/
+	/** Retrieves the unique PlayFab identifiers for the given set of Game Center identifiers (referenced in the Game Center Programming Guide as the Player Identifier) */
+	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Account Management")
+		static UVaRestPlayFabManager* ConstructGetPlayFabIDsFromGameCenterIDs(FString SessionTicket, TArray<FString> GameCenterIDs);
+
+	/** Retrieves the unique PlayFab identifiers for the given set of PlayStation Network identifiers */
+	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Account Management")
+		static UVaRestPlayFabManager* ConstructGetPlayFabIDsFromPSNAccountIDs(FString SessionTicket, TArray<FString> PSNAccountIDs);
+
+	/** Retrieves the unique PlayFab identifiers for the given set of Steam identifiers. The Steam identifiers are the profile IDs for the user accounts, available as SteamId in 
+	the Steamworks Community API calls */
+	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Account Management")
+		static UVaRestPlayFabManager* ConstructGetPlayFabIDsFromSteamIDs(FString SessionTicket, TArray<FString> SteamIDs);
+
+	/** Retrieves all requested data for a user in one unified request. By default, this API returns all data for the locally signed-in user. The input parameters may be used to 
+	limit the data retrieved any any subset of the available data, as well as retrieve the available data for a different user. Note that certain data, including inventory, virtual 
+	currency balances, and personally identifying information, may only be retrieved for the locally signed-in user. In the example below, a request is made for the account details, 
+	virtual currency balances, and specified user data for the locally signed-in user */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Account Management")
 		static UVaRestPlayFabManager* ConstructGetUserCombinedInfo(FString SessionTicket, TArray<FString> UserDataKeys, 
 		TArray<FString> ReadOnlyDataKey, FString PlayFabId = "", FString Username = "",
 		FString Email = "", FString TitleDisplayName = "", bool GetAccountInfo = false, bool GetInventory = true, bool GetVirtualCurrency = true, 
 		bool GetUserData = true, bool GetReadOnlyData = true);
 
-	/** Create Link android device ID */
+	/** Links the Android device identifier to the user's PlayFab account  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Account Management")
 	static UVaRestPlayFabManager* ConstructLinkAndroidDeviceID(FString SessionTicket, FString AndroidDeviceId, FString OSVersion = "", FString AndroidDeviceType = "");
 
-	/** Create Link FacebookAccount */
+	/** Links the Facebook account associated with the provided Facebook access token to the user's PlayFab account  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Account Management")
 	static UVaRestPlayFabManager* ConstructLinkFacebookAccount(FString SessionTicket, FString FacebookAccessToken);
 
-	/** Create Link GameCenterAccount */
+	/** Links the Game Center account associated with the provided Game Center ID to the user's PlayFab account  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Account Management")
 	static UVaRestPlayFabManager* ConstructLinkGameCenterAccount(FString SessionTicket, FString GameCenterId);
 
-	/** Create Link GoogleAccount */
+	/** Links the currently signed-in user account to the Google account specified by the Google account access token  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Account Management")
 	static UVaRestPlayFabManager* ConstructLinkGoogleAccount(FString SessionTicket, FString GoogleAccessToken);
 
-	/** Create Link IOS device ID */
+	/** Links the vendor-specific iOS device identifier to the user's PlayFab account  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Account Management")
 	static UVaRestPlayFabManager* ConstructLinkIOSDeviceID(FString SessionTicket, FString IOSDeviceId, FString OSVersion = "", FString IOSDeviceModel = "");
 
-	/** Create Link SteamAccount */
+	/** Links the Steam account associated with the provided Steam authentication ticket to the user's PlayFab account  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Account Management")
 	static UVaRestPlayFabManager* ConstructLinkSteamAccount(FString SessionTicket, FString SteamAccessToken);
 
-	/** Create SendAccountRecoverEmail */
+	/** Forces an email to be sent to the registered email address for the user's account, with a link allowing the user to change the password  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Account Management")
 	static UVaRestPlayFabManager* ConstructSendAccountRecoverEmail(FString Email);
 
-	/** Create UnLink android device ID */
+	/** Unlinks the related Android device identifier from the user's PlayFab account  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Account Management")
 	static UVaRestPlayFabManager* ConstructUnlinkAndroidDeviceID(FString SessionTicket, FString AndroidDeviceId);
 
-	/** Create UnLink FacebookAccount */
+	/** Unlinks the related Facebook account from the user's PlayFab account  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Account Management")
 	static UVaRestPlayFabManager* ConstructUnlinkFacebookAccount(FString SessionTicket);
 
-	/** Create UnLink GameCenterAccount */
+	/** Unlinks the related Game Center account from the user's PlayFab account  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Account Management")
 	static UVaRestPlayFabManager* ConstructUnlinkGameCenterAccount(FString SessionTicket);
 
-	/** Create UnLink GoogleAccount */
+	/** Unlinks the related Google account from the user's PlayFab account  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Account Management")
 	static UVaRestPlayFabManager* ConstructUnlinkGoogleAccount(FString SessionTicket);
 
-	/** Create UnLink IOS device ID */
+	/** Unlinks the related iOS device identifier from the user's PlayFab account  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Account Management")
 	static UVaRestPlayFabManager* ConstructUnlinkIOSDeviceID(FString SessionTicket, FString IOSDeviceId);
 
-	/** Create UnLink SteamAccount */
+	/** Unlinks the related Steam account from the user's PlayFab account  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Account Management")
 	static UVaRestPlayFabManager* ConstructUnlinkSteamAccount(FString SessionTicket);
 
-	/** Create UpdateUserTitleDisplayName */
+	/** Updates the title specific display name for the user  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Account Management")
 	static UVaRestPlayFabManager* ConstructUpdateUserTitleDisplayName(FString SessionTicket, FString DisplayName);
 
 	// Player Data Management
 
-	/** Create GetFriendLeaderboard */
+	/** Retrieves a list of ranked friends of the current player for the given statistic, starting from the indicated point in the leaderboard  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Player Data Management")
 	static UVaRestPlayFabManager* ConstructGetFriendLeaderboard(FString SessionTicket, FString StatisticName, int32 MaxResultsCount, int32 StartPosition = 0);
 
-	/** Create GetLeaderboard */
+	/** Retrieves a list of ranked users for the given statistic, starting from the indicated point in the leaderboard  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Player Data Management")
 	static UVaRestPlayFabManager* ConstructGetLeaderboard(FString SessionTicket, FString StatisticName, int32 MaxResultsCount, int32 StartPosition = 0);
 
-	/** Create GetLeaderboardAroundCurrentUser */
+	/** Retrieves a list of ranked users for the given statistic, centered on the currently signed-in user */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Player Data Management")
 	static UVaRestPlayFabManager* ConstructGetLeaderboardAroundCurrentUser(FString SessionTicket, FString StatisticName, int32 MaxResultsCount);
 
-	/** Get User Data */
+	/** Retrieves the title-specific custom data for the user which is readable and writable by the client  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Player Data Management")
 	static UVaRestPlayFabManager* ConstructGetUserData(FString SessionTicket, TArray<FString> Keys, FString PlayFabId = "");
 
-	/** Get User Publisher Data */
+	/** Retrieves the publisher-specific custom data for the user which is readable and writable by the client  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Player Data Management")
 	static UVaRestPlayFabManager* ConstructGetUserPublisherData(FString SessionTicket, TArray<FString> Keys, FString PlayFabId = "");
 
-	/** Get User Publisher Read Only Data */
+	/** Retrieves the publisher-specific custom data for the user which can only be read by the client  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Player Data Management")
 	static UVaRestPlayFabManager* ConstructGetUserPublisherReadOnlyData(FString SessionTicket, TArray<FString> Keys, FString PlayFabId = "");
 
-	/** Get User Read Only Data */
+	/** Retrieves the title-specific custom data for the user which can only be read by the client  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Player Data Management")
 	static UVaRestPlayFabManager* ConstructGetUserReadOnlyData(FString SessionTicket, TArray<FString> Keys, FString PlayFabId = "");
 
-	/** Get User Statistics */
+	/** Retrieves the details of all title-specific statistics for the user  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Player Data Management")
 	static UVaRestPlayFabManager* ConstructGetUserStatistics(FString SessionTicket);
 
-	/** Update User Data */
+	/** Creates and updates the title-specific custom data for the user which is readable and writable by the client  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Player Data Management")
 	static UVaRestPlayFabManager* ConstructUpdateUserData(FString SessionTicket, UVaRestJsonObject* Data, EUserDataPermision::Type PermissionType);
 
-	/** Update User Publisher Data */
+	/** Creates and updates the publisher-specific custom data for the user which is readable and writable by the client  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Player Data Management")
 	static UVaRestPlayFabManager* ConstructUpdateUserPublisherData(FString SessionTicket, UVaRestJsonObject* Data, EUserDataPermision::Type PermissionType);
 
-	/** Update User Statistics */
+	/** Updates the values of the specified title-specific statistics for the user */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Player Data Management")
 	static UVaRestPlayFabManager* ConstructUpdateUserStatistics(FString SessionTicket, UVaRestJsonObject* Statistics);
 
 	// Title-Wide Data Management
 
-	/** Get Catalog Items */
-	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Title-Wide Data Management")
+	/** Retrieves the specified version of the title's catalog of virtual goods, including all defined properties  */
+	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Title Wide Data Management")
 		static UVaRestPlayFabManager* ConstructGetCatalogItems(FString SessionTicket, FString CatalogVersion);
 
-	/** Get Store Items */
-	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Title-Wide Data Management")
+	/** Retrieves the set of items defined for the specified store, including all prices defined  */
+	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Title Wide Data Management")
 		static UVaRestPlayFabManager* ConstructGetStoreItems(FString SessionTicket, FString StoreId);
 
-	/** Get Title Data */
-	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Title-Wide Data Management")
+	/** Retrieves the key-value store of custom title settings  */
+	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Title Wide Data Management")
 		static UVaRestPlayFabManager* ConstructGetTitleData(FString SessionTicket, TArray<FString> Keys);
 
-	/** Get Title News */
-	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Title-Wide Data Management")
+	/** Retrieves the title news feed, as configured in the developer portal */
+	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Title Wide Data Management")
 		static UVaRestPlayFabManager* ConstructGetTitleNews(FString SessionTicket, int32 NumberofEntries);
 
 	// Player Item Management
 
-	/** Add User Virtual Currency */
+	/** Increments the user's balance of the specified virtual currency by the stated amount  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Player Item Management")
 		static UVaRestPlayFabManager* ConstructAddUserVirtualCurrency(FString SessionTicket, FString VirtualCurrency, int32 Amount);
 
-	/** Consume Item */
+	/** Consume uses of a consumable item. When all uses are consumed, it will be removed from the player's inventory. */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Player Item Data Management")
 		static UVaRestPlayFabManager* ConstructConsumeItem(FString SessionTicket, FString ItemInstanceId, int32 ConsumeCount);
 
-	/** Get Character Inventory */
+	/** Retrieves the specified character's current inventory of virtual goods  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Player Item Data Management")
 		static UVaRestPlayFabManager* ConstructGetCharacterInventory(FString SessionTicket, FString PlayFabId, FString CharacterId, FString CatalogVersion = "");
 
-	/** Get User Inventory */
+	/** Retrieves the user's current inventory of virtual goods  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Player Item Data Management")
 		static UVaRestPlayFabManager* ConstructGetUserInventory(FString SessionTicket);
 
-	/** Redeem Coupon */
+	/** Adds the virtual goods associated with the coupon to the user's inventory  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Player Item Data Management")
 		static UVaRestPlayFabManager* ConstructRedeemCoupon(FString SessionTicket, FString CouponCode, FString CatalogVersion = "");
 
-	/** Get Report Player */
+	/** Submit a report for another player (due to bad bahavior, etc.), so that customer service representatives for the title can take 
+	action concerning potentially toxic players.  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Player Item Data Management")
 		static UVaRestPlayFabManager* ConstructReportPlayer(FString SessionTicket, FString ReportedId, FString Reason);
 
-	/** Subtract User Virtual Currency */
+	/** Decrements the user's balance of the specified virtual currency by the stated amount  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Player Item Data Management")
 		static UVaRestPlayFabManager* ConstructSubtractUserVirtualCurrency(FString SessionTicket, FString VirtualCurrency, int32 Amount);
 
-	/** Unlock Container Item */
+	/** Unlocks a container item in the user's inventory and consumes a key item of the type indicated by the container item  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Player Item Data Management")
 		static UVaRestPlayFabManager* ConstructUnlockContainerItem(FString SessionTicket, FString ContainerItemId, FString CatalogVersion = "");
 
-	/** Start Purchase */
+	/** Creates an order for a list of items from the title catalog  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Player Item Data Management")
 		static UVaRestPlayFabManager* ConstructStartPurchase(FString SessionTicket, UVaRestJsonObject* Items, FString CatalogVersion = "", FString StoreId = "");
 
-	/** Pay For Purchase */
+	/** Selects a payment option for purchase order created via StartPurchase  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Player Item Data Management")
 		static UVaRestPlayFabManager* ConstructPayForPurchase(FString SessionTicket, FString OrderId, FString ProviderName, FString Currency);
 
-	/** Confirm Purchase */
+	/** Confirms with the payment provider that the purchase was approved (if applicable) and adjusts inventory and virtual currency balances as appropriate  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Player Item Data Management")
 		static UVaRestPlayFabManager* ConstructConfirmPurchase(FString SessionTicket, FString OrderId);
 
-	/** PurchaseItem */
+	/** Buys a single item with virtual currency. You must specify both the virtual currency to use to purchase, as well as what the client believes the price to be. 
+	This lets the server fail the purchase if the price has changed.  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Player Item Data Management")
 		static UVaRestPlayFabManager* ConstructPurchaseItem(FString SessionTicket, FString ItemId, FString VirtualCurrency, int32 Price, FString CatalogVersion = "", FString StoreId = "");
 
 	// Friend List Managaement
 
-	/** Add Friend */
+	/** Adds the PlayFab user, based upon a match against a supplied unique identifier, to the friend list of the local user  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Friend List Management")
 		static UVaRestPlayFabManager* ConstructAddFriend(FString SessionTicket, FString FriendPlayFabId = "", FString FriendUsername = "",
 			FString FriendEmail = "", FString FriendTitleDisplayName = "");
 
-	/** Get Friends List */
+	/** Retrieves the current friend list for the local user, constrained to users who have PlayFab accounts. Friends from linked accounts (Facebook, Steam) are also included. 
+	You may optionally exclude some linked services' friends.  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Friend List Management")
 		static UVaRestPlayFabManager* ConstructGetFriendsList(FString SessionTicket, bool IncludeSteamFriends = true, bool IncludeFacebookFriends = true);
 
-	/** Remove Friend */
+	/** Removes a specified user from the friend list of the local user  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Friend List Management")
 		static UVaRestPlayFabManager* ConstructRemoveFriend(FString SessionTicket, FString FriendPlayFabId);
 
-	/** Set Friend Tags */
+	/** Updates the tag list for a specified user in the friend list of the local user  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Friend List Management")
 		static UVaRestPlayFabManager* ConstructSetFriendTags(FString SessionTicket, FString FriendPlayFabId, TArray<FString> Tags);
 
 	// IOS-Specific APIs
 
-	/** Register For IOS Push Notifications */
-	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | IOS-Specific")
+	/** Registers the iOS device to receive push notifications */
+	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | IOS Specific")
 		static UVaRestPlayFabManager* ConstructRegisterFORIOSPushNotifications(FString SessionTicket, FString DeviceToken, bool SendPushNotificationConfirmation = false, FString ConfirmationMessage = "");
 
-	/** Restore IOS Purchases */
-	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | IOS-Specific")
+	/** Restores all in-app purchases based on the given refresh receipt.  */
+	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | IOS Specific")
 		static UVaRestPlayFabManager* ConstructRestoreIOSPurchases(FString SessionTicket, FString Base64ReceiptData);
 
-	/** Validate IOS Reciept */
-	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | IOS-Specific")
+	/** Validates with the Apple store that the receipt for an iOS in-app purchase is valid and that it matches the purchased catalog item */
+	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | IOS Specific")
 		static UVaRestPlayFabManager* ConstructValidateIOSReceipt(FString SessionTicket, FString Base64ReceiptData, FString CurrencyCode, FString PurchasePrice);
 
 	// Matchmaking APIs
 
-	/** Get Current Games */
+	/** Get details about all current running game servers matching the given parameters.  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Matchmaking")
 		static UVaRestPlayFabManager* ConstructGetCurrentGames(FString SessionTicket, ERegion::Type Region, FString BuildVersion = "", FString GameMode = "", FString StatisticName = "");
 
-	/** Get Game Server Regions */
+	/** Get details about the regions hosting game servers matching the given parameters.  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Matchmaking")
 		static UVaRestPlayFabManager* ConstructGetGameServerRegions(FString SessionTicket, FString BuildVersion);
 
-	/** Matchmake */
+	/** Attempts to locate a game session matching the given parameters. Note that parameters specified in the search are required (they are not weighting factors). 
+	If a slot is found in a server instance matching the parameters, the slot will be assigned to that player, removing it from the availabe set. In that case, the 
+	information on the game session will be returned, otherwise the Status returned will be GameNotFound. Note that EnableQueue is deprecated at this time.  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Matchmaking")
 		static UVaRestPlayFabManager* ConstructMatchmake(FString SessionTicket, ERegion::Type Region, FString BuildVersion = "", FString GameMode = "", 
 			FString LobbyId = "", FString StatisticName = "", FString CharacterId = "");
 
-	/** Start Game */
+	/** Start a new game server with a given configuration, add the current player and return the connection information.  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Matchmaking")
 		static UVaRestPlayFabManager* ConstructStartGame(FString SessionTicket, FString BuildVersion, ERegion::Type Region, FString GameMode, FString StatisticName = "",
 			FString CharacterId = "", bool PasswordRestricted = false, FString CustomCommandLineData = "");
 
 	// Android-Specific APIs
 
-	/** Android Device Push Notification Registration */
-	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Android-Specific")
+	/** Registers the Android device to receive push notifications  */
+	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Android Specific")
 		static UVaRestPlayFabManager* ConstructAndroidDevicePushNotificationRegistration(FString SessionTicket, FString DeviceToken, bool SendPushNotificationConfirmation = false, 
 			FString ConfirmationMessage = "");
 
-	/** Validate Google Play Purchase */
-	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Android-Specific")
+	/** Validates a Google Play purchase and gives the corresponding item to the player.  */
+	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Android Specific")
 		static UVaRestPlayFabManager* ConstructValidateGooglePlayPurchase(FString SessionTicket, FString ReceiptJsonString, FString Signature);
 
 	// Analytics
 
-	/** Log Event */
+	/** Logs a custom analytics event  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Analytics")
 		static UVaRestPlayFabManager* ConstructLogEvent(FString SessionTicket, FString EventName, UVaRestJsonObject* Body, bool ProfileSetEvent = false);
 
 	// Shared Group Data
 
-	/** Add Shared Group Memebers */
+	/** Adds users to the set of those able to update both the shared data, as well as the set of users in the group. Only users in the group can add new members.  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Shared Group Data")
 		static UVaRestPlayFabManager* ConstructAddSharedGroupMembers(FString SessionTicket, FString SharedGroupId, TArray<FString> PlayFabIds);
 
-	/** Create Shared Group */
+	/** Requests the creation of a shared group object, containing key/value pairs which may be updated by all members of the group. Upon creation, 
+	the current user will be the only member of the group.  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Shared Group Data")
 		static UVaRestPlayFabManager* ConstructCreateSharedGroup(FString SessionTicket, FString SharedGroupId);
 
-	/** Get Publisher Data */
+	/** Retrieves the key-value store of custom publisher settings  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Shared Group Data")
 		static UVaRestPlayFabManager* ConstructGetPublisherData(FString SessionTicket, TArray<FString> Keys);
 
-	/** Get Shared Group Data */
+	/** Retrieves data stored in a shared group object, as well as the list of members in the group. Non-members of the group may use this to retrieve group data, 
+	including membership, but they will not receive data for keys marked as private.  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Shared Group Data")
 		static UVaRestPlayFabManager* ConstructGetSharedGroupData(FString SessionTicket, FString SharedGroupId, TArray<FString> Keys, bool GetMembers = true);
 
-	/** Remove Shared Group Memebers */
+	/** Removes users from the set of those able to update the shared data and the set of users in the group. Only users in the group can remove members. 
+	If as a result of the call, zero users remain with access, the group and its associated data will be deleted.  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Shared Group Data")
 		static UVaRestPlayFabManager* ConstructRemoveSharedGroupMembers(FString SessionTicket, FString SharedGroupId, TArray<FString> PlayFabIds);
 
-	/** Update Shared Group Data */
+	/** Adds, updates, and removes data keys for a shared group object. If the permission is set to Public, all fields updated or added in this call will be readable 
+	by users not in the group. By default, data permissions are set to Private. Regardless of the permission setting, only members of the group can update the data.  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Shared Group Data")
 		static UVaRestPlayFabManager* ConstructUpdateSharedGroupData(FString SessionTicket, FString SharedGroupId, UVaRestJsonObject* Data, EUserDataPermision::Type Permission);
 
 	// Sony Specific APIs
 	
-	/** RefreshPSNAuthToken */
+	/** Uses the supplied OAuth code to refresh the internally cached player PSN auth token  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Sony Specific")
 		static UVaRestPlayFabManager* ConstructRefreshPSNAuthToken(FString SessionTicket, FString PSNAuthCode);
 
 	// Server-Side Cloud Script
 
-	/** Get Cloud Script Url */
-	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Server-Side Cloud Script")
+	/** Retrieves the title-specific URL for Cloud Script servers. This must be queried once, prior to making any calls to RunCloudScript. */
+	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Server Side Cloud Script")
 		static UVaRestPlayFabManager* ConstructGetCloudScriptUrl(FString SessionTicket, int32 Version, bool Testing);
 
-	/** Run Cloud Script */
-	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Server-Side Cloud Script")
+	/** Triggers a particular server action, passing the provided inputs to the hosted Cloud Script. An action in this context is a handler in the JavaScript. NOTE: Before calling this API, 
+	you must call GetCloudScriptUrl to be assigned a Cloud Script server URL. When using an official PlayFab SDK, this URL is stored internally in the SDK, but GetCloudScriptUrl must still be manually called.  */
+	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Server Side Cloud Script")
 		static UVaRestPlayFabManager* ConstructRunCloudScript(FString SessionTicket, FString ActionId, UVaRestJsonObject* Params, FString ParamsEncoded = "");
 
 	// Content
 
-	/** Get Content Download Url */
+	/** Retrieves the pre-authorized URL for accessing a content file for the title. A subsequent HTTP GET to the returned URL downloads the content; or a HEAD query to the returned URL retrieves 
+	the metadata of the content. This API only generates a pre-signed URL to access the content. A success result does not guarantee the existence of the content.  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Content")
 		static UVaRestPlayFabManager* ConstructGetContentDownloadUrl(FString SessionTicket, FString Key, FString HttpMethod = "", bool ThruCDN = true);
 
 	// Characters
 
-	/** Get Character Leaderboard */
+	/** Retrieves a list of ranked characters for the given statistic, starting from the indicated point in the leaderboard  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Characters")
 		static UVaRestPlayFabManager* ConstructGetCharacterLeaderboard(FString SessionTicket, FString StatisticName, int32 MaxResultsCount, 
 			FString CharacterType = "", int32 StartPosition = 0);
 
-	/** Get Leaderboard Around Character */
+	/** Retrieves a list of ranked characters for the given statistic, centered on the currently signed-in user  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Characters")
 		static UVaRestPlayFabManager* ConstructGetLeaderboardAroundCharacter(FString SessionTicket, FString CharacterId, FString StatisticName, int32 MaxResultsCount,
 		FString CharacterType = "");
 
-	/** Get Leaderboard For User Character */
+	/** Retrieves a list of all of the user's characters for the given statistic.  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Characters")
 		static UVaRestPlayFabManager* ConstructGetLeaderboardForUserCharacters(FString SessionTicket, FString StatisticName, int32 MaxResultsCount);
 
-	/** Grant Character To User */
+	/** Grants the specified character type to the user.  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Characters")
 		static UVaRestPlayFabManager* ConstructGrantCharacterToUser(FString SessionTicket, FString ItemId, FString CharacterName, FString CatalogVersion = "");
 
 	// Character Data
 
-	/** Get Character Data */
+	/** Retrieves the title-specific custom data for the character which is readable and writable by the client  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Character Data")
 		static UVaRestPlayFabManager* ConstructGetCharacterData(FString SessionTicket, FString PlayFabId, FString CharacterId, TArray<FString> Keys);
 
-	/** Get Character ReadOnly Data */
+	/** Retrieves the title-specific custom data for the character which can only be read by the client  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Character Data")
 		static UVaRestPlayFabManager* ConstructGetCharacterReadOnlyData(FString SessionTicket, FString PlayFabId, FString CharacterId, TArray<FString> Keys);
 
-	/** Update Character Data */
+	/** Creates and updates the title-specific custom data for the user's character which is readable and writable by the client  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Client | Character Data")
 		static UVaRestPlayFabManager* ConstructUpdateCharacterData(FString SessionTicket, FString CharacterId, UVaRestJsonObject* Data, EUserDataPermision::Type Permission);
 
@@ -448,307 +475,335 @@ class UVaRestPlayFabManager : public UVaRestRequestJSON
 
 	// Authentication
 
-	/** Create Json object that contains authentication request object */
+	/** Validated a client's session ticket, and if successful, returns details for that user */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Authentication")
 	static UVaRestPlayFabManager* ConstructAuthenticateSessionTicket(FString SessionTicket);
 
 	// Account Management
 
-	/** Get User Account Info */
+	/** Retrieves the relevant details for a specified user */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Account Management")
 		static UVaRestPlayFabManager* ConstructGetUserAccountInfo(FString PlayFabId);
 
-	/** Send Push Notification */
+	/** Sends an iOS/Android Push Notification to a specific user, if that user's device has 
+	been configured for Push Notifications in PlayFab. If a user has linked both Android and iOS devices, both will be notified.  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Account Management")
 		static UVaRestPlayFabManager* ConstructSendPushNotification(FString RecipientPlayFabId, FString Message, FString Subject = "");
 
 	// Player Data Management
 
-	/** Create GetLeaderboard */
+	/** Retrieves a list of ranked users for the given statistic, starting from the indicated point in the leaderboard  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Player Data Management")
 		static UVaRestPlayFabManager* ConstructServerGetLeaderboard(FString StatisticName, int32 MaxResultsCount, int32 StartPosition = 0);
 
-	/** Create GetLeaderboardAroundUser */
+	/** Retrieves a list of ranked users for the given statistic, centered on the currently signed-in user  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Player Data Management")
 		static UVaRestPlayFabManager* ConstructGetLeaderboardAroundUser(FString StatisticName, FString PlayFabId, int32 MaxResultsCount);
 
-	/** Get User Data */
+	/** Retrieves the title-specific custom data for the user which is readable and writable by the client  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Player Data Management")
 		static UVaRestPlayFabManager* ConstructServerGetUserData(TArray<FString> Keys, FString PlayFabId);
 
-	/** Get User Internal Data */
+	/** Retrieves the title-specific custom data for the user which cannot be accessed by the client  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Player Data Management")
 		static UVaRestPlayFabManager* ConstructServerGetUserInternalData(TArray<FString> Keys, FString PlayFabId);
 
-	/** Get User Publisher Data */
+	/** Retrieves the publisher-specific custom data for the user which is readable and writable by the client  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Player Data Management")
 		static UVaRestPlayFabManager* ConstructServerGetUserPublisherData(TArray<FString> Keys, FString PlayFabId);
 
-	/** Get User Publisher Data */
+	/** Retrieves the publisher-specific custom data for the user which cannot be accessed by the client  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Player Data Management")
 		static UVaRestPlayFabManager* ConstructServerGetUserPublisherInternalData(TArray<FString> Keys, FString PlayFabId);
 
-	/** Get User Publisher Read Only Data */
+	/** Retrieves the publisher-specific custom data for the user which can only be read by the client  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Player Data Management")
 		static UVaRestPlayFabManager* ConstructServerGetUserPublisherReadOnlyData(TArray<FString> Keys, FString PlayFabId);
 
-	/** Get User Read Only Data */
+	/** Retrieves the title-specific custom data for the user which can only be read by the client  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Player Data Management")
 		static UVaRestPlayFabManager* ConstructServerGetUserReadOnlyData(TArray<FString> Keys, FString PlayFabId);
 
-	/** Get User Statistics */
+	/** Retrieves the details of all title-specific statistics for the user */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Player Data Management")
 		static UVaRestPlayFabManager* ConstructServerGetUserStatistics(FString PlayFabId);
 
-	/** Update User Data */
+	/** Updates the title-specific custom data for the user which is readable and writable by the client  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Player Data Management")
 		static UVaRestPlayFabManager* ConstructServerUpdateUserData(FString PlayFabId, UVaRestJsonObject* Data, EUserDataPermision::Type PermissionType);
 
-	/** Update User Internal Data */
+	/** Updates the title-specific custom data for the user which cannot be accessed by the client  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Player Data Management")
 		static UVaRestPlayFabManager* ConstructServerUpdateUserInternalData(FString PlayFabId, UVaRestJsonObject* Data);
 
-	/** Update User Publisher Data */
+	/** Updates the publisher-specific custom data for the user which is readable and writable by the client  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Player Data Management")
 		static UVaRestPlayFabManager* ConstructServerUpdateUserPublisherData(FString PlayFabId, UVaRestJsonObject* Data, EUserDataPermision::Type PermissionType);
 
-	/** Update User Publisher Internal Data */
+	/** Updates the publisher-specific custom data for the user which cannot be accessed by the client  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Player Data Management")
 		static UVaRestPlayFabManager* ConstructServerUpdateUserPublisherInternalData(FString PlayFabId, UVaRestJsonObject* Data);
 
-	/** Update User Publisher ReadOnly Data */
+	/** Updates the publisher-specific custom data for the user which can only be read by the client  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Player Data Management")
 		static UVaRestPlayFabManager* ConstructServerUpdateUserPublisherReadOnlyData(FString PlayFabId, UVaRestJsonObject* Data, EUserDataPermision::Type PermissionType);
 
-	/** Update User ReadOnly Data */
+	/** Updates the title-specific custom data for the user which can only be read by the client  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Player Data Management")
 		static UVaRestPlayFabManager* ConstructServerUpdateUserReadOnlyData(FString PlayFabId, UVaRestJsonObject* Data, EUserDataPermision::Type PermissionType);
 
-	/** Update User Statistics */
+	/** Updates the values of the specified title-specific statistics for the user  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Player Data Management")
 		static UVaRestPlayFabManager* ConstructServerUpdateUserStatistics(FString PlayFabId, UVaRestJsonObject* Statistics);
 
 	// Title-Wide Data Management
 
-	/** Get Catalog Items */
-	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Title-Wide Data Management")
+	/** Retrieves the specified version of the title's catalog of virtual goods, including all defined properties  */
+	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Title Wide Data Management")
 		static UVaRestPlayFabManager* ConstructServerGetCatalogItems(FString CatalogVersion);
 
-	/** Get Title Data */
-	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Title-Wide Data Management")
+	/** Retrieves the key-value store of custom title settings  */
+	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Title Wide Data Management")
 		static UVaRestPlayFabManager* ConstructServerGetTitleData(TArray<FString> Keys);
 
-	/** Get Title Internal Data */
-	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Title-Wide Data Management")
+	/** Retrieves the key-value store of custom internal title settings  */
+	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Title Wide Data Management")
 		static UVaRestPlayFabManager* ConstructServerGetTitleInternalData(TArray<FString> Keys);
 
-	/** Set Title Data */
-	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Title-Wide Data Management")
+	/** Updates the key-value store of custom title settings  */
+	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Title Wide Data Management")
 		static UVaRestPlayFabManager* ConstructServerSetTitleData(FString Key, FString Value);
 
-	/** Get Title nternal Data */
-	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Title-Wide Data Management")
+	/** Updates the key-value store of custom title settings  */
+	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Title Wide Data Management")
 		static UVaRestPlayFabManager* ConstructServerSetTitleInternalData(FString Key, FString Value);
 
 	// Player Item Management
 
-	/** Add Character Virtual Currency */
+	/** Increments the character's balance of the specified virtual currency by the stated amount  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Player Item Management")
 		static UVaRestPlayFabManager* ConstructServerAddCharacterVirtualCurrency(FString PlayFabId, FString CharacterId, FString VirtualCurrency, int32 Amount);
 
-	/** Add User Virtual Currency */
+	/** Increments the user's balance of the specified virtual currency by the stated amount */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Player Item Management")
 		static UVaRestPlayFabManager* ConstructServerAddUserVirtualCurrency(FString PlayFabId, FString VirtualCurrency, int32 Amount);
 
-	/** Get Character Inventory */
+	/** Retrieves the specified character's current inventory of virtual goods  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Player Item Management")
 		static UVaRestPlayFabManager* ConstructServerGetCharacterInventory(FString PlayFabId, FString CharacterId, FString CatalogVersion = "");
 
-	/** Get User Inventory */
+	/** Retrieves the specified user's current inventory of virtual goods  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Player Item Management")
 		static UVaRestPlayFabManager* ConstructServerGetUserInventory(FString PlayFabId, FString CatalogVersion = "");
 
-	/** Grant Items To Character */
+	/** Adds the specified items to the specified character's inventory */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Player Item Management")
 		static UVaRestPlayFabManager* ConstructServerGrantItemsToCharacter(FString PlayFabId, FString CharacterId, TArray<FString> ItemIds, FString CatalogVersion = "", 
 		FString Annotation = "");
 
-	/** Grant Items To User */
+	/** Adds the specified items to the specified user's inventory  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Player Item Management")
 		static UVaRestPlayFabManager* ConstructServerGrantItemsToUser(FString PlayFabId, TArray<FString> ItemIds, FString CatalogVersion = "",
 		FString Annotation = "");
 
-	/** Grant Items To Users */
+	/** Adds the specified items to the specified user inventories  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Player Item Management")
 		static UVaRestPlayFabManager* ConstructServerGrantItemsToUsers(UVaRestJsonObject* ItemGrants, FString CatalogVersion = "");
 
-	/** Modify Item Uses */
+	/** Modifies the number of remaining uses of a player's inventory item  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Player Item Management")
 		static UVaRestPlayFabManager* ConstructServerModifyItemUses(FString PlayFabId, FString ItemInstanceId, int32 UsesToAdd);
 
-	/** Move Item To Character From Character */
+	/** Moves an item from a character's inventory into another of the users's character's inventory.  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Player Item Management")
 		static UVaRestPlayFabManager* ConstructServerMoveItemToCharacterFromCharacter(FString PlayFabId, FString GivingCharacterId, 
 			FString ReceivingCharacterId, FString ItemInstanceId);
 
-	/** Move Item To Character From User */
+	/** Moves an item from a user's inventory into their character's inventory. */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Player Item Management")
 		static UVaRestPlayFabManager* ConstructServerMoveItemToCharacterFromUser(FString PlayFabId, FString CharacterId,
 		FString ItemInstanceId);
 
-	/** Move Item To User From Character */
+	/** Moves an item from a character's inventory into the owning user's inventory.  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Player Item Management")
 		static UVaRestPlayFabManager* ConstructServerMoveItemToUserFromCharacter(FString PlayFabId, FString CharacterId,
 		FString ItemInstanceId);
 
-	/** Report Player */
+	/** Submit a report about a player (due to bad bahavior, etc.) on behalf of another player, so that customer service 
+	representatives for the title can take action concerning potentially poxic players */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Player Item Management")
 		static UVaRestPlayFabManager* ConstructServerReportPlayer(FString ReporterPlayFabId, FString ReporteePlayFabId, 
 			FString TitleId = "", FString Comment = "");
 
-	/** Subtract Character Virtual Currency */
+	/** Decrements the character's balance of the specified virtual currency by the stated amount */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Player Item Management")
 		static UVaRestPlayFabManager* ConstructServerSubtractCharacterVirtualCurrency(FString PlayFabId, FString CharacterId, FString VirtualCurrency, int32 Amount);
 
-	/** Subtract User Virtual Currency */
+	/** Decrements the user's balance of the specified virtual currency by the stated amount  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Player Item Management")
 		static UVaRestPlayFabManager* ConstructServerSubtractUserVirtualCurrency(FString PlayFabId, FString VirtualCurrency, int32 Amount);
 
-	/** Update User Inventory Item Custom Data */
+	/** Updates the key-value pair data tagged to the specified item, which is read-only from the client.  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Player Item Management")
 		static UVaRestPlayFabManager* ConstructServerUpdateUserInventoryItemCustomData(FString PlayFabId, FString ItemInstanceId, 
 			UVaRestJsonObject* Data, FString CharacterId = "");
 	
 	// Matchmaking
 
-	/** Notify Matchmaker Player Left */
+	/** Informs the PlayFab match-making service that the user specified has left the Game Server Instance  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Matchmaking")
 		static UVaRestPlayFabManager* ConstructServerNotifyMatchmakerPlayerLeft(FString PlayFabId, FString LobbyId);
 
-	/** Redeem Matchmaker Ticket */
+	/** Validates a Game Server session ticket and returns details about the user  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Matchmaking")
 		static UVaRestPlayFabManager* ConstructServerRedeemMatchmakerTicket(FString Ticket, FString LobbyId);
 
 	// Steam-Specific
 
-	/** Award Steam Achievement */
-	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Steam-Specific")
+	/** Awards the specified users the specified Steam achievements  */
+	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Steam Specific")
 		static UVaRestPlayFabManager* ConstructServerAwardSteamAchievement(UVaRestJsonObject* Achievements);
 
 	// Analytics
 
-	/** Log Event */
+	/** Logs a custom analytics event  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Analytics")
 		static UVaRestPlayFabManager* ConstructServerLogEvent(FString EventName, UVaRestJsonObject* Body, FString PlayFabId = "", 
 			FString EntityId = "", FString EntityType = "", bool PlayerEvent = true, bool ProfileSetEvent = false);
 
 	// Shared Group Data
 
-	/** Add Shared Group Memebers */
+	/** Adds users to the set of those able to update both the shared data, as well as the set of users in the group. 
+	Only users in the group (and the server) can add new members.  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Shared Group Data")
 		static UVaRestPlayFabManager* ConstructServerAddSharedGroupMembers(FString SharedGroupId, TArray<FString> PlayFabIds);
 
-	/** Create Shared Group */
+	/** Requests the creation of a shared group object, containing key/value pairs which may be updated by all members of 
+	the group. When created by a server, the group will initially have no members.  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Shared Group Data")
 		static UVaRestPlayFabManager* ConstructServerCreateSharedGroup(FString SharedGroupId);
 
-	/** Delete Shared Group */
+	/** Deletes a shared group, freeing up the shared group ID to be reused for a new group */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Shared Group Data")
 		static UVaRestPlayFabManager* ConstructServerDeleteSharedGroup(FString SharedGroupId);
 
-	/** Get Publisher Data */
+	/** Retrieves the key-value store of custom publisher settings */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Shared Group Data")
 		static UVaRestPlayFabManager* ConstructServerGetPublisherData(TArray<FString> Keys);
 
-	/** Get Shared Group Data */
+	/** Retrieves data stored in a shared group object, as well as the list of members in the group. 
+	The server can access all public and private group data.  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Shared Group Data")
 		static UVaRestPlayFabManager* ConstructServerGetSharedGroupData(FString SharedGroupId, TArray<FString> Keys, bool GetMembers = true);
 
-	/** Remove Shared Group Memebers */
+	/** Removes users from the set of those able to update the shared data and the set of users in the group. Only users in the group can remove members. 
+	If as a result of the call, zero users remain with access, the group and its associated data will be deleted.  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Shared Group Data")
 		static UVaRestPlayFabManager* ConstructServerRemoveSharedGroupMembers(FString SharedGroupId, TArray<FString> PlayFabIds);
 
-	/** Set Publisher Data */
+	/** Updates the key-value store of custom publisher settings  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Shared Group Data")
 		static UVaRestPlayFabManager* ConstructServerSetPublisherData(FString Key, FString Value);
 
-	/** Update Shared Group Data */
+	/** Adds, updates, and removes data keys for a shared group object. If the permission is set to Public, all fields updated or added in this call will be readable 
+	by users not in the group. By default, data permissions are set to Private. Regardless of the permission setting, only members of the group (and the server) can 
+	update the data. */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Shared Group Data")
 		static UVaRestPlayFabManager* ConstructServerUpdateSharedGroupData(FString SharedGroupId, UVaRestJsonObject* Data, EUserDataPermision::Type Permission);
 	
 	// Content
 
-	/** Get Content Download Url */
+	/** Retrieves the pre-authorized URL for accessing a content file for the title. A subsequent HTTP GET to the returned URL downloads the content; or a HEAD 
+	query to the returned URL retrieves the metadata of the content. This API only generates a pre-signed URL to access the content. A success result does not 
+	guarantee the existence of the content.  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Content")
 		static UVaRestPlayFabManager* ConstructServerGetContentDownloadUrl(FString Key, FString HttpMethod = "", bool ThruCDN = true);
 
 	// Characters
 
-	/** Delete Character From User */
+	/** Deletes the specific character ID from the specified user.  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Characters")
 		static UVaRestPlayFabManager* ConstructServerDeleteCharacterFromUser(FString PlayFabId, FString CharacterId, bool SaveCharacterInventory = false);
 
-	/** Get All Users Characters */
+	/** Lists all of the characters that belong to a specific user. */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Characters")
 		static UVaRestPlayFabManager* ConstructServerGetAllUsersCharacters(FString PlayFabId);
 
-	/** Get Character Leaderboard */
+	/** Retrieves a list of ranked characters for the given statistic, starting from the indicated point in the leaderboard  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Characters")
 		static UVaRestPlayFabManager* ConstructServerGetCharacterLeaderboard(FString CharacterId, FString StatisticName, int32 MaxResultsCount,
 		FString CharacterType = "", int32 StartPosition = 0);
 
-	/** Get Character Statistics */
+	/** Retrieves the details of all title-specific statistics for the specific character */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Characters")
 		static UVaRestPlayFabManager* ConstructServerGetCharacterStatistics(FString PlayFabId, FString CharacterId);
 
-	/** Get Leaderboard Around Character */
+	/** Retrieves a list of ranked characters for the given statistic, centered on the requested user  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Characters")
 		static UVaRestPlayFabManager* ConstructServerGetLeaderboardAroundCharacter(FString PlayFabId, FString CharacterId, FString StatisticName, int32 MaxResultsCount,
 		FString CharacterType = "");
 
-	/** Get Leaderboard For User Character */
+	/** Retrieves a list of all of the user's characters for the given statistic.  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Characters")
 		static UVaRestPlayFabManager* ConstructServerGetLeaderboardForUserCharacters(FString PlayFabId, FString StatisticName, int32 MaxResultsCount);
 
-	/** Grant Character To User */
+	/** Grants the specified character type to the user. */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Characters")
 		static UVaRestPlayFabManager* ConstructServerGrantCharacterToUser(FString PlayFabId, FString CharacterType, FString CharacterName);
 
-	/** Update Character Statistics */
+	/** Updates the values of the specified title-specific statistics for the specific character  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Characters")
 		static UVaRestPlayFabManager* ConstructServerUpdateCharacterStatistics(FString PlayFabId, FString CharacterId, UVaRestJsonObject* CharacterStatistics);
 
 	// Character Data
 
-	/** Get Character Data */
+	/** Retrieves the title-specific custom data for the user which is readable and writable by the client */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Character Data")
 		static UVaRestPlayFabManager* ConstructServerGetCharacterData(FString PlayFabId, FString CharacterId, TArray<FString> Keys, int32 IfChangedFromDataVersion = 0);
 
-	/** Get Character Internal Data */
+	/** Retrieves the title-specific custom data for the user's character which cannot be accessed by the client  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Character Data")
 		static UVaRestPlayFabManager* ConstructServerGetCharacterInternalData(FString PlayFabId, FString CharacterId, TArray<FString> Keys, int32 IfChangedFromDataVersion = 0);
 
-	/** Get Character ReadOnly Data */
+	/** Retrieves the title-specific custom data for the user's character which can only be read by the client  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Character Data")
 		static UVaRestPlayFabManager* ConstructServerGetCharacterReadOnlyData(FString PlayFabId, FString CharacterId, TArray<FString> Keys, int32 IfChangedFromDataVersion = 0);
 
-	/** Update Character Data */
+	/** Updates the title-specific custom data for the user's chjaracter which is readable and writable by the client  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Character Data")
 		static UVaRestPlayFabManager* ConstructServerUpdateCharacterData(FString PlayFabId, FString CharacterId, UVaRestJsonObject* Data, EUserDataPermision::Type Permission);
 
-	/** Update Character Internal Data */
+	/** Updates the title-specific custom data for the user's character which cannot be accessed by the client  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Character Data")
 		static UVaRestPlayFabManager* ConstructServerUpdateCharacterInternalData(FString PlayFabId, FString CharacterId, UVaRestJsonObject* Data, EUserDataPermision::Type Permission);
 
-	/** Update Character ReadOnly Data */
+	/** Updates the title-specific custom data for the user's character which can only be read by the client  */
 	UFUNCTION(BlueprintPure, Category = "PlayFab | Server | Character Data")
 		static UVaRestPlayFabManager* ConstructServerUpdateCharacterReadOnlyData(FString PlayFabId, FString CharacterId, UVaRestJsonObject* Data, EUserDataPermision::Type Permission);
 
-	// Admin
+	/// Admin
 
-	/** Create Json object that contains current version request request object */
-	UFUNCTION(BlueprintPure, Category = "PlayFab | Admin | CloudScript")
+	// Account Management
+
+	// Player Data Management
+
+	// Title-Wide Management
+
+	// Player Item Management
+
+	// Matchmaking
+
+	// Custom Server Management
+
+	// Shared Group Data
+
+	// Server-Side Cloud Script
+
+	/** Gets the contents and information of a specific Cloud Script revision.  */
+	UFUNCTION(BlueprintPure, Category = "PlayFab | Admin | Server Side Cloud Script")
 	static UVaRestPlayFabManager* ConstructGetCloudScriptRevision(FString Version, FString Revision);
+
+	// Content
 
 	/** PlayFab Request Info */
 	FString PlayFabClass;
