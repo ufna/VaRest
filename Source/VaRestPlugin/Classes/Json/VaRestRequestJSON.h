@@ -29,8 +29,7 @@ namespace ERequestContentType
 }
 
 /** Generate a delegates for callback events */
-DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnRequestComplete);
-DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnRequestFail);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnRequestComplete, class UVaRestRequestJSON*, Request);
 
 /**
  * General helper class http requests via blueprints
