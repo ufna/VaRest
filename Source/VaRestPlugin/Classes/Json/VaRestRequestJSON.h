@@ -30,6 +30,7 @@ namespace ERequestContentType
 
 /** Generate a delegates for callback events */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnRequestComplete, class UVaRestRequestJSON*, Request);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnRequestFail, class UVaRestRequestJSON*, Request);
 
 /**
  * General helper class http requests via blueprints
@@ -136,7 +137,7 @@ public:
 
 	/** Event occured when the request wasn't successfull */
 	UPROPERTY(BlueprintAssignable, Category = "VaRest")
-	FOnRequestComplete OnRequestFail;
+	FOnRequestFail OnRequestFail;
 
 
 	//////////////////////////////////////////////////////////////////////////
