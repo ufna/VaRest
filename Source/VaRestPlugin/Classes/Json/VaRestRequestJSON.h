@@ -35,7 +35,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnRequestComplete, class UVaRestReq
  * General helper class http requests via blueprints
  */
 UCLASS(BlueprintType, Blueprintable)
-class UVaRestRequestJSON : public UObject
+class VARESTPLUGIN_API UVaRestRequestJSON : public UObject
 {
 	GENERATED_UCLASS_BODY()
 

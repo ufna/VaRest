@@ -11,7 +11,7 @@ class UVaRestJsonValue;
  * Blueprintable FJsonObject wrapper
  */
 UCLASS(BlueprintType, Blueprintable)
-class UVaRestJsonObject : public UObject
+class VARESTPLUGIN_API UVaRestJsonObject : public UObject
 {
 	GENERATED_UCLASS_BODY()
 
