@@ -81,6 +81,8 @@ void UVaRestRequestJSON::ResetData()
 {
 	ResetRequestData();
 	ResetResponseData();
+
+	ResponseCode = -1;
 }
 
 void UVaRestRequestJSON::ResetRequestData()
@@ -133,6 +135,13 @@ void UVaRestRequestJSON::SetResponseObject(UVaRestJsonObject* JsonObject)
 	ResponseJsonObj = JsonObject;
 }
 
+///////////////////////////////////////////////////////////////////////////
+// Response Code accessor
+
+int32 UVaRestRequestJSON::GetResponseCode()
+{
+	return ResponseCode;
+}
 
 //////////////////////////////////////////////////////////////////////////
 // URL processing
@@ -248,13 +257,16 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 		UE_LOG(LogVaRest, Error, TEXT("Request failed: %s"), *Request->GetURL());
 
 		// Broadcast the result event
-		OnRequestFail.Broadcast();
+		OnRequestFail.Broadcast(this);
 
 		return;
 	}
 
 	// Save response data as a string
 	ResponseContent = Response->GetContentAsString();
+
+	// Save response code as int32
+	ResponseCode = Response->GetResponseCode();
 
 	// Log response state
 	UE_LOG(LogVaRest, Log, TEXT("Response (%d): %s"), Response->GetResponseCode(), *Response->GetContentAsString());
@@ -278,5 +290,5 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 	}
 
 	// Broadcast the result event
-	OnRequestComplete.Broadcast();
+	OnRequestComplete.Broadcast(this);
 }
