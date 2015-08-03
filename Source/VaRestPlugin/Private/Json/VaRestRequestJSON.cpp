@@ -257,7 +257,7 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 		UE_LOG(LogVaRest, Error, TEXT("Request failed: %s"), *Request->GetURL());
 
 		// Broadcast the result event
-		OnRequestFail.Broadcast();
+		OnRequestFail.Broadcast(this);
 
 		return;
 	}
@@ -290,5 +290,5 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 	}
 
 	// Broadcast the result event
-	OnRequestComplete.Broadcast();
+	OnRequestComplete.Broadcast(this);
 }
