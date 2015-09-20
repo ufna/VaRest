@@ -48,6 +48,7 @@ FString UVaRestRequestJSON::PercentEncode(const FString& Text)
 {
 	FString OutText = Text;
 
+	OutText = OutText.Replace(TEXT(" "), TEXT("%20"));
 	OutText = OutText.Replace(TEXT("!"), TEXT("%21"));
 	OutText = OutText.Replace(TEXT("\""), TEXT("%22"));
 	OutText = OutText.Replace(TEXT("#"), TEXT("%23"));
