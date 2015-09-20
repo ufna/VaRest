@@ -45,28 +45,28 @@ public:
 	// Construction
 
 	/** Creates new request (totally empty) */
-	UFUNCTION(BlueprintPure, meta = (DisplayName = "Construct Json Request (Empty)", HidePin = "WorldContextObject", DefaultToSelf = "WorldContextObject"), Category = "VaRest")
+	UFUNCTION(BlueprintPure, meta = (DisplayName = "Construct Json Request (Empty)", HidePin = "WorldContextObject", DefaultToSelf = "WorldContextObject"), Category = "VaRest|Request")
 	static UVaRestRequestJSON* ConstructRequest(UObject* WorldContextObject);
 
 	/** Creates new request with defined verb and content type */
-	UFUNCTION(BlueprintPure, meta = (DisplayName = "Construct Json Request", HidePin = "WorldContextObject", DefaultToSelf = "WorldContextObject"), Category = "VaRest")
+	UFUNCTION(BlueprintPure, meta = (DisplayName = "Construct Json Request", HidePin = "WorldContextObject", DefaultToSelf = "WorldContextObject"), Category = "VaRest|Request")
 	static UVaRestRequestJSON* ConstructRequestExt(UObject* WorldContextObject, ERequestVerb::Type Verb, ERequestContentType::Type ContentType);
 
 	/** Set verb to the request */
-	UFUNCTION(BlueprintCallable, Category = "VaRest")
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
 	void SetVerb(ERequestVerb::Type Verb);
 
 	/** Set content type to the request. If you're using the x-www-form-urlencoded, 
 	 * params/constaints should be defined as key=ValueString pairs from Json data */
-	UFUNCTION(BlueprintCallable, Category = "VaRest")
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
 	void SetContentType(ERequestContentType::Type ContentType);
 
 	/** Sets optional header info */
-	UFUNCTION(BlueprintCallable, Category = "VaRest")
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
 	void SetHeader(const FString& HeaderName, const FString& HeaderValue);
 
 	/** Applies percent-encoding to text */
-	UFUNCTION(BlueprintCallable, Category = "VaRest")
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility")
 	static FString PercentEncode(const FString& Text);
 
 
@@ -74,15 +74,15 @@ public:
 	// Destruction and reset
 
 	/** Reset all internal saved data */
-	UFUNCTION(BlueprintCallable, Category = "VaRest")
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility")
 	void ResetData();
 
 	/** Reset saved request data */
-	UFUNCTION(BlueprintCallable, Category = "VaRest")
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
 	void ResetRequestData();
 
 	/** Reset saved response data */
-	UFUNCTION(BlueprintCallable, Category = "VaRest")
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
 	void ResetResponseData();
 
 
@@ -90,33 +90,43 @@ public:
 	// JSON data accessors
 
 	/** Get the Request Json object */
-	UFUNCTION(BlueprintCallable, Category = "VaRest")
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
 	UVaRestJsonObject* GetRequestObject();
 
 	/** Set the Request Json object */
-	UFUNCTION(BlueprintCallable, Category = "VaRest")
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
 	void SetRequestObject(UVaRestJsonObject* JsonObject);
 
 	/** Get the Response Json object */
-	UFUNCTION(BlueprintCallable, Category = "VaRest")
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
 	UVaRestJsonObject* GetResponseObject();
 
 	/** Set the Response Json object */
-	UFUNCTION(BlueprintCallable, Category = "VaRest")
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
 	void SetResponseObject(UVaRestJsonObject* JsonObject);
 
+
 	///////////////////////////////////////////////////////////////////////////
-	// Response Code accessor
+	// Response data access
 
 	/** Get the responce code of the last query */
-	UFUNCTION(BlueprintCallable, Category = "VaRest")
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
 	int32 GetResponseCode();
+
+	/** Get value of desired response header */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
+	FString GetResponseHeader(const FString HeaderName);
+	
+	/** Get list of all response headers */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
+	TArray<FString> GetAllResponseHeaders();
+
 
 	//////////////////////////////////////////////////////////////////////////
 	// URL processing
 
 	/** Open URL with current setup */
-	UFUNCTION(BlueprintCallable, Category = "VaRest")
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
 	virtual void ProcessURL(const FString& Url = TEXT("http://alyamkin.com"));
 
 	/** Apply current internal setup to request and process it */
@@ -132,11 +142,11 @@ private:
 
 public:
 	/** Event occured when the request has been completed */
-	UPROPERTY(BlueprintAssignable, Category = "VaRest")
+	UPROPERTY(BlueprintAssignable, Category = "VaRest|Event")
 	FOnRequestComplete OnRequestComplete;
 
 	/** Event occured when the request wasn't successfull */
-	UPROPERTY(BlueprintAssignable, Category = "VaRest")
+	UPROPERTY(BlueprintAssignable, Category = "VaRest|Event")
 	FOnRequestFail OnRequestFail;
 
 
@@ -145,14 +155,14 @@ public:
 
 public:
 	/** Request response stored as a string */
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "VaRest")
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "VaRest|Response")
 	FString ResponseContent;
 
 	/** Is the response valid JSON? */
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "VaRest")
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "VaRest|Response")
 	bool bIsValidJsonResponse;
 
-private:
+protected:
 	/** Internal request data stored as JSON */
 	UPROPERTY()
 	UVaRestJsonObject* RequestJsonObj;
@@ -169,6 +179,9 @@ private:
 
 	/** Mapping of header section to values. Used to generate final header string for request */
 	TMap<FString, FString> RequestHeaders;
+
+	/** Cached key/value header pairs. Parsed once request completes */
+	TMap<FString, FString> ResponseHeaders;
 
 	/** Http Response code */
 	int32 ResponseCode;
