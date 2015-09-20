@@ -52,18 +52,18 @@ FString UVaRestRequestJSON::PercentEncode(const FString& Text)
 	OutText = OutText.Replace(TEXT("\""), TEXT("%22"));
 	OutText = OutText.Replace(TEXT("#"), TEXT("%23"));
 	OutText = OutText.Replace(TEXT("$"), TEXT("%24"));
-	//OutText = OutText.Replace(TEXT("&"), TEXT("%26"));
+	OutText = OutText.Replace(TEXT("&"), TEXT("%26"));
 	OutText = OutText.Replace(TEXT("'"), TEXT("%27"));
 	OutText = OutText.Replace(TEXT("("), TEXT("%28"));
 	OutText = OutText.Replace(TEXT(")"), TEXT("%29"));
 	OutText = OutText.Replace(TEXT("*"), TEXT("%2A"));
 	OutText = OutText.Replace(TEXT("+"), TEXT("%2B"));
 	OutText = OutText.Replace(TEXT(","), TEXT("%2C"));
-	//OutText = OutText.Replace(TEXT("/"), TEXT("%2F"));
+	OutText = OutText.Replace(TEXT("/"), TEXT("%2F"));
 	OutText = OutText.Replace(TEXT(":"), TEXT("%3A"));
 	OutText = OutText.Replace(TEXT(";"), TEXT("%3B"));
 	OutText = OutText.Replace(TEXT("="), TEXT("%3D"));
-	//OutText = OutText.Replace(TEXT("?"), TEXT("%3F"));
+	OutText = OutText.Replace(TEXT("?"), TEXT("%3F"));
 	OutText = OutText.Replace(TEXT("@"), TEXT("%40"));
 	OutText = OutText.Replace(TEXT("["), TEXT("%5B"));
 	OutText = OutText.Replace(TEXT("]"), TEXT("%5D"));
@@ -81,8 +81,6 @@ void UVaRestRequestJSON::ResetData()
 {
 	ResetRequestData();
 	ResetResponseData();
-
-	ResponseCode = -1;
 }
 
 void UVaRestRequestJSON::ResetRequestData()
@@ -107,6 +105,9 @@ void UVaRestRequestJSON::ResetResponseData()
 	{
 		ResponseJsonObj = NewObject<UVaRestJsonObject>();
 	}
+
+	ResponseHeaders.Empty();
+	ResponseCode = -1;
 
 	bIsValidJsonResponse = false;
 }
@@ -135,13 +136,38 @@ void UVaRestRequestJSON::SetResponseObject(UVaRestJsonObject* JsonObject)
 	ResponseJsonObj = JsonObject;
 }
 
+
 ///////////////////////////////////////////////////////////////////////////
-// Response Code accessor
+// Response data access
 
 int32 UVaRestRequestJSON::GetResponseCode()
 {
 	return ResponseCode;
 }
+
+FString UVaRestRequestJSON::GetResponseHeader(const FString HeaderName)
+{
+	FString Result;
+
+	FString* Header = ResponseHeaders.Find(HeaderName);
+	if (Header != NULL)
+	{
+		Result = *Header;
+	}
+
+	return Result;
+}
+
+TArray<FString> UVaRestRequestJSON::GetAllResponseHeaders()
+{
+	TArray<FString> Result;
+	for (TMap<FString, FString>::TConstIterator It(ResponseHeaders); It; ++It)
+	{
+		Result.Add(It.Key() + TEXT(": ") + It.Value());
+	}
+	return Result;
+}
+
 
 //////////////////////////////////////////////////////////////////////////
 // URL processing
@@ -198,14 +224,14 @@ void UVaRestRequestJSON::ProcessRequest(TSharedRef<IHttpRequest> HttpRequest)
 			if (!Key.IsEmpty() && !Value.IsEmpty())
 			{
 				UrlParams += ParamIdx == 0 ? "?" : "&";
-				UrlParams += Key + "=" + Value;
+				UrlParams += UVaRestRequestJSON::PercentEncode(Key) + "=" + UVaRestRequestJSON::PercentEncode(Value);
 			}
 
 			ParamIdx++;
 		}
 
 		// Apply params to the url
-		HttpRequest->SetURL(HttpRequest->GetURL() + UVaRestRequestJSON::PercentEncode(UrlParams));
+		HttpRequest->SetURL(HttpRequest->GetURL() + UrlParams);
 
 		break;
 	}
@@ -270,6 +296,18 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 
 	// Log response state
 	UE_LOG(LogVaRest, Log, TEXT("Response (%d): %s"), Response->GetResponseCode(), *Response->GetContentAsString());
+
+	// Process response headers
+	TArray<FString> Headers = Response->GetAllHeaders();
+	for (FString Header : Headers)
+	{
+		FString Key;
+		FString Value;
+		if (Header.Split(TEXT(": "), &Key, &Value))
+		{
+			ResponseHeaders.Add(Key, Value);
+		}
+	}
 
 	// Try to deserialize data to JSON
 	TSharedRef<TJsonReader<TCHAR>> JsonReader = TJsonReaderFactory<TCHAR>::Create(ResponseContent);
