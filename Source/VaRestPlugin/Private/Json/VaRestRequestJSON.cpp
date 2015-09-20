@@ -52,18 +52,18 @@ FString UVaRestRequestJSON::PercentEncode(const FString& Text)
 	OutText = OutText.Replace(TEXT("\""), TEXT("%22"));
 	OutText = OutText.Replace(TEXT("#"), TEXT("%23"));
 	OutText = OutText.Replace(TEXT("$"), TEXT("%24"));
-	//OutText = OutText.Replace(TEXT("&"), TEXT("%26"));
+	OutText = OutText.Replace(TEXT("&"), TEXT("%26"));
 	OutText = OutText.Replace(TEXT("'"), TEXT("%27"));
 	OutText = OutText.Replace(TEXT("("), TEXT("%28"));
 	OutText = OutText.Replace(TEXT(")"), TEXT("%29"));
 	OutText = OutText.Replace(TEXT("*"), TEXT("%2A"));
 	OutText = OutText.Replace(TEXT("+"), TEXT("%2B"));
 	OutText = OutText.Replace(TEXT(","), TEXT("%2C"));
-	//OutText = OutText.Replace(TEXT("/"), TEXT("%2F"));
+	OutText = OutText.Replace(TEXT("/"), TEXT("%2F"));
 	OutText = OutText.Replace(TEXT(":"), TEXT("%3A"));
 	OutText = OutText.Replace(TEXT(";"), TEXT("%3B"));
 	OutText = OutText.Replace(TEXT("="), TEXT("%3D"));
-	//OutText = OutText.Replace(TEXT("?"), TEXT("%3F"));
+	OutText = OutText.Replace(TEXT("?"), TEXT("%3F"));
 	OutText = OutText.Replace(TEXT("@"), TEXT("%40"));
 	OutText = OutText.Replace(TEXT("["), TEXT("%5B"));
 	OutText = OutText.Replace(TEXT("]"), TEXT("%5D"));
@@ -224,14 +224,14 @@ void UVaRestRequestJSON::ProcessRequest(TSharedRef<IHttpRequest> HttpRequest)
 			if (!Key.IsEmpty() && !Value.IsEmpty())
 			{
 				UrlParams += ParamIdx == 0 ? "?" : "&";
-				UrlParams += Key + "=" + Value;
+				UrlParams += UVaRestRequestJSON::PercentEncode(Key) + "=" + UVaRestRequestJSON::PercentEncode(Value);
 			}
 
 			ParamIdx++;
 		}
 
 		// Apply params to the url
-		HttpRequest->SetURL(HttpRequest->GetURL() + UVaRestRequestJSON::PercentEncode(UrlParams));
+		HttpRequest->SetURL(HttpRequest->GetURL() + UrlParams);
 
 		break;
 	}
