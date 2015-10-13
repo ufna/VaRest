@@ -1,9 +1,20 @@
 // Copyright 2014 Vladimir Alyamkin. All Rights Reserved.
 
 #include "VaRestPluginPrivatePCH.h"
+#include "CoreMisc.h"
+
+template <class T> void FContinueAction<T>::Cancel()
+{
+	UObject *Obj = Request.Get();
+	if (Obj != nullptr)
+	{
+		((UVaRestRequestJSON*)Obj)->Cancel();
+	}
+}
 
 UVaRestRequestJSON::UVaRestRequestJSON(const class FObjectInitializer& PCIP)
-	: Super(PCIP)
+  : Super(PCIP),
+    BinaryContentType(TEXT("application/octet-stream"))
 {
 	RequestVerb = ERequestVerb::GET;
 	RequestContentType = ERequestContentType::x_www_form_urlencoded;
@@ -38,6 +49,17 @@ void UVaRestRequestJSON::SetContentType(ERequestContentType::Type ContentType)
 {
 	RequestContentType = ContentType;
 }
+
+void UVaRestRequestJSON::SetBinaryContentType(const FString &ContentType)
+{
+	BinaryContentType = ContentType;
+}
+
+void UVaRestRequestJSON::SetBinaryRequestContent(const TArray<uint8> &Bytes)
+{
+	RequestBytes = Bytes;
+}
+
 
 void UVaRestRequestJSON::SetHeader(const FString& HeaderName, const FString& HeaderValue)
 {
@@ -94,6 +116,12 @@ void UVaRestRequestJSON::ResetRequestData()
 	{
 		RequestJsonObj = NewObject<UVaRestJsonObject>();
 	}
+}
+
+void UVaRestRequestJSON::Cancel()
+{
+	ContinueAction = nullptr;
+	ResetResponseData();
 }
 
 void UVaRestRequestJSON::ResetResponseData()
@@ -172,6 +200,25 @@ TArray<FString> UVaRestRequestJSON::GetAllResponseHeaders()
 
 //////////////////////////////////////////////////////////////////////////
 // URL processing
+void UVaRestRequestJSON::ApplyURL(const FString& Url, UVaRestJsonObject *&Result, UObject* WorldContextObject, FLatentActionInfo LatentInfo)
+{
+  TSharedRef<IHttpRequest> HttpRequest = FHttpModule::Get().CreateRequest();
+  HttpRequest->SetURL(Url); 
+  if (UWorld* World = GEngine->GetWorldFromContextObject(WorldContextObject))
+    {
+      FLatentActionManager& LatentActionManager = World->GetLatentActionManager();
+	  FContinueAction<UVaRestJsonObject*> *Kont = LatentActionManager.FindExistingAction<FContinueAction<UVaRestJsonObject*>>(LatentInfo.CallbackTarget, LatentInfo.UUID);
+	  if (Kont != NULL)
+	  {
+		  Kont->Cancel();
+		  LatentActionManager.RemoveActionsForObject(LatentInfo.CallbackTarget);
+	  }
+      LatentActionManager.AddNewAction(LatentInfo.CallbackTarget, LatentInfo.UUID, ContinueAction = new FContinueAction<UVaRestJsonObject*>(this, Result, LatentInfo));
+    }
+  ProcessRequest(HttpRequest);
+}
+
+
 
 void UVaRestRequestJSON::ProcessURL(const FString& Url)
 {
@@ -234,6 +281,12 @@ void UVaRestRequestJSON::ProcessRequest(TSharedRef<IHttpRequest> HttpRequest)
 		// Apply params to the url
 		HttpRequest->SetURL(HttpRequest->GetURL() + UrlParams);
 
+		break;
+	}
+	case ERequestContentType::binary:
+	{
+		HttpRequest->SetHeader("Content-Type", BinaryContentType);
+		HttpRequest->SetContent(RequestBytes);
 		break;
 	}
 
@@ -330,4 +383,9 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 
 	// Broadcast the result event
 	OnRequestComplete.Broadcast(this);
+	if (ContinueAction) {
+          FContinueAction<UVaRestJsonObject*> *K = ContinueAction;
+          ContinueAction = nullptr;
+          K->Call(ResponseJsonObj);
+	}
 }
