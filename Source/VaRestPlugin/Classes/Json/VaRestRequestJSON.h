@@ -75,7 +75,7 @@ namespace ERequestContentType
 	enum Type
 	{
 		x_www_form_urlencoded,
-		json
+		json,
 		binary
 	};
 }
@@ -124,7 +124,7 @@ public:
 	/** Sets optional header info */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
 	void SetHeader(const FString& HeaderName, const FString& HeaderValue);
-Se
+
 	/** Applies percent-encoding to text */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility")
 	static FString PercentEncode(const FString& Text);
@@ -162,7 +162,7 @@ Se
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
 	UVaRestJsonObject* GetResponseObject();
 
-xo	/** Set the Response Json object */
+	/** Set the Response Json object */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
 	void SetResponseObject(UVaRestJsonObject* JsonObject);
 
@@ -190,8 +190,8 @@ xo	/** Set the Response Json object */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
 	virtual void ProcessURL(const FString& Url = TEXT("http://alyamkin.com"));
 
-        UFUNCTION(BlueprintCallable, Category = "VaRest|Request", meta = (Latent, WorldContext = "WorldContextObject", LatentInfo = "LatentInfo"))
-        virtual void ApplyURL(const FString& Url, UVaRestJsonObject *&Result, UObject* WorldContextObject, struct FLatentActionInfo LatentInfo);
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Request", meta = (Latent, WorldContext = "WorldContextObject", LatentInfo = "LatentInfo"))
+	virtual void ApplyURL(const FString& Url, UVaRestJsonObject *&Result, UObject* WorldContextObject, struct FLatentActionInfo LatentInfo);
 
 
 	/** Apply current internal setup to request and process it */
