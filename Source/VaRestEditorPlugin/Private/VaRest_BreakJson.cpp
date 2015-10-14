@@ -15,7 +15,7 @@
 
 class FKCHandler_BreakJson : public FNodeHandlingFunctor
 {
-	TArray<bool> bIsArray; // whether outputs are json arrays
+	
 public:
 	FKCHandler_BreakJson(FKismetCompilerContext& InCompilerContext)
 		: FNodeHandlingFunctor(InCompilerContext)
@@ -233,31 +233,22 @@ void UVaRest_BreakJson::CreateProjectionPins(UEdGraphPin *Source)
 	{
 		FString Type;
 		UObject *Subtype = nullptr;
-		FName FunctionName;
 		FString FieldName = (*it).Name;
-
 		switch ((*it).Type) {
 		case EVaRest_JsonType::JSON_Bool:
 			Type = K2Schema->PC_Boolean;
-			FunctionName = TEXT("GetBooleanField");
 			break;
 		case EVaRest_JsonType::JSON_Number:
 			Type = K2Schema->PC_Float;
-			FunctionName = TEXT("GetNumberField");
 			break;
 		case EVaRest_JsonType::JSON_String:
 			Type = K2Schema->PC_String;
-			FunctionName = TEXT("GetStringField");
 			break;
 		case EVaRest_JsonType::JSON_Object:
 			Type = K2Schema->PC_Object;
 			Subtype = Class;
-			FunctionName = TEXT("GetObjectField");
 			break;
 		}
-		if (FunctionName.IsNone()) {
-			continue;
-		}	
 		UEdGraphPin *OutputPin = CreatePin(EGPD_Output, Type, TEXT(""), Subtype, (*it).bIsArray, false, (*it).Name);
 	}
 }
