@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include "Http.h"
 #include "VaRestRequestJSON.generated.h"
 
 /** Verb (GET, PUT, POST) used by the request */
