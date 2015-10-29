@@ -3,7 +3,7 @@
 #include "VaRestPluginPrivatePCH.h"
 #include "CoreMisc.h"
 
-template <class T> void FContinueAction<T>::Cancel()
+template <class T> void FVaRestLatentAction<T>::Cancel()
 {
 	UObject *Obj = Request.Get();
 	if (Obj != nullptr)
@@ -118,12 +118,6 @@ void UVaRestRequestJSON::ResetRequestData()
 	}
 }
 
-void UVaRestRequestJSON::Cancel()
-{
-	ContinueAction = nullptr;
-	ResetResponseData();
-}
-
 void UVaRestRequestJSON::ResetResponseData()
 {
 	if (ResponseJsonObj != NULL)
@@ -139,6 +133,13 @@ void UVaRestRequestJSON::ResetResponseData()
 	ResponseCode = -1;
 
 	bIsValidJsonResponse = false;
+}
+
+void UVaRestRequestJSON::Cancel()
+{
+	ContinueAction = nullptr;
+
+	ResetResponseData();
 }
 
 
@@ -200,30 +201,34 @@ TArray<FString> UVaRestRequestJSON::GetAllResponseHeaders()
 
 //////////////////////////////////////////////////////////////////////////
 // URL processing
-void UVaRestRequestJSON::ApplyURL(const FString& Url, UVaRestJsonObject *&Result, UObject* WorldContextObject, FLatentActionInfo LatentInfo)
-{
-  TSharedRef<IHttpRequest> HttpRequest = FHttpModule::Get().CreateRequest();
-  HttpRequest->SetURL(Url); 
-  if (UWorld* World = GEngine->GetWorldFromContextObject(WorldContextObject))
-    {
-      FLatentActionManager& LatentActionManager = World->GetLatentActionManager();
-	  FContinueAction<UVaRestJsonObject*> *Kont = LatentActionManager.FindExistingAction<FContinueAction<UVaRestJsonObject*>>(LatentInfo.CallbackTarget, LatentInfo.UUID);
-	  if (Kont != NULL)
-	  {
-		  Kont->Cancel();
-		  LatentActionManager.RemoveActionsForObject(LatentInfo.CallbackTarget);
-	  }
-      LatentActionManager.AddNewAction(LatentInfo.CallbackTarget, LatentInfo.UUID, ContinueAction = new FContinueAction<UVaRestJsonObject*>(this, Result, LatentInfo));
-    }
-  ProcessRequest(HttpRequest);
-}
-
-
 
 void UVaRestRequestJSON::ProcessURL(const FString& Url)
 {
 	TSharedRef<IHttpRequest> HttpRequest = FHttpModule::Get().CreateRequest();
 	HttpRequest->SetURL(Url);
+
+	ProcessRequest(HttpRequest);
+}
+
+void UVaRestRequestJSON::ApplyURL(const FString& Url, UVaRestJsonObject *&Result, UObject* WorldContextObject, FLatentActionInfo LatentInfo)
+{
+	TSharedRef<IHttpRequest> HttpRequest = FHttpModule::Get().CreateRequest();
+	HttpRequest->SetURL(Url);
+
+	// Prepare latent action
+	if (UWorld* World = GEngine->GetWorldFromContextObject(WorldContextObject))
+	{
+		FLatentActionManager& LatentActionManager = World->GetLatentActionManager();
+		FVaRestLatentAction<UVaRestJsonObject*> *Kont = LatentActionManager.FindExistingAction<FVaRestLatentAction<UVaRestJsonObject*>>(LatentInfo.CallbackTarget, LatentInfo.UUID);
+
+		if (Kont != NULL)
+		{
+			Kont->Cancel();
+			LatentActionManager.RemoveActionsForObject(LatentInfo.CallbackTarget);
+		}
+
+		LatentActionManager.AddNewAction(LatentInfo.CallbackTarget, LatentInfo.UUID, ContinueAction = new FVaRestLatentAction<UVaRestJsonObject*>(this, Result, LatentInfo));
+	}
 
 	ProcessRequest(HttpRequest);
 }
@@ -287,9 +292,9 @@ void UVaRestRequestJSON::ProcessRequest(TSharedRef<IHttpRequest> HttpRequest)
 	{
 		HttpRequest->SetHeader("Content-Type", BinaryContentType);
 		HttpRequest->SetContent(RequestBytes);
+
 		break;
 	}
-
 	case ERequestContentType::json:
 	{
 		HttpRequest->SetHeader("Content-Type", "application/json");
@@ -383,9 +388,13 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 
 	// Broadcast the result event
 	OnRequestComplete.Broadcast(this);
-	if (ContinueAction) {
-          FContinueAction<UVaRestJsonObject*> *K = ContinueAction;
+
+	// Finish the latent action
+	if (ContinueAction)
+	{
+          FVaRestLatentAction<UVaRestJsonObject*> *K = ContinueAction;
           ContinueAction = nullptr;
+
           K->Call(ResponseJsonObj);
 	}
 }

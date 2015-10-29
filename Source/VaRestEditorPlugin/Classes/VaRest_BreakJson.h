@@ -1,6 +1,11 @@
+// Copyright 2015 Vladimir Alyamkin. All Rights Reserved.
+// Original code by https://github.com/unktomi
+
 #pragma once
+
 #include "Engine.h"
 #include "K2Node.h"
+
 #include "VaRest_BreakJson.generated.h"
 
 UENUM(BlueprintType)
@@ -17,21 +22,23 @@ USTRUCT(BlueprintType)
 struct FVaRest_NamedType
 {
 	GENERATED_USTRUCT_BODY();
+
 	UPROPERTY(EditAnywhere)
-		FString Name;
+	FString Name;
+
 	UPROPERTY(EditAnywhere)
-		EVaRest_JsonType Type;
+	EVaRest_JsonType Type;
+
 	UPROPERTY(EditAnywhere)
-		bool bIsArray;
+	bool bIsArray;
 };
 
 UCLASS(BlueprintType, Blueprintable)
 class VARESTEDITORPLUGIN_API UVaRest_BreakJson : public UK2Node
 {
 	GENERATED_UCLASS_BODY()
+
 public:
-	UPROPERTY(EditAnywhere, Category = PinOptions)
-		TArray<FVaRest_NamedType> Outputs;
 	// Begin UEdGraphNode interface.
 	virtual void AllocateDefaultPins() override;
 	virtual FLinearColor GetNodeTitleColor() const override;
@@ -49,5 +56,9 @@ public:
 
 protected:
 	virtual void CreateProjectionPins(UEdGraphPin *Source);
+
+public:
+	UPROPERTY(EditAnywhere, Category = PinOptions)
+	TArray<FVaRest_NamedType> Outputs;
 
 };

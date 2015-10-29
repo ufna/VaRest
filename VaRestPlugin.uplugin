@@ -2,14 +2,14 @@
     "FileVersion" : 3,
 	
 	"FriendlyName" : "VaRest",
-	"Version" : 9,
-	"VersionName" : "1.1-rc9",
+	"Version" : 10,
+	"VersionName" : "1.1-r10",
 	"CreatedBy" : "Vladimir Alyamkin",
 	"CreatedByURL" : "http://alyamkin.com",
 	"EngineVersion" : 1579795,
 	"Description" : "Plugin that makes REST (JSON) server communication easy to use. Parse API helpers included.",
 	"Category" : "Network",
-	
+
     "Modules" :
 	[
 		{
