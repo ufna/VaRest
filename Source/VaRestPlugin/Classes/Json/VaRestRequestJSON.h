@@ -1,8 +1,59 @@
 // Copyright 2014 Vladimir Alyamkin. All Rights Reserved.
 
 #pragma once
+#include "LatentActions.h"
+#include "Core.h"
+#include "Engine.h"
+#include "SharedPointer.h"
 
 #include "VaRestRequestJSON.generated.h"
+
+template <class T> class FContinueAction : public FPendingLatentAction
+{
+  bool Called;
+  FWeakObjectPtr Request;
+ public:
+  const FName ExecutionFunction;
+  const int32 OutputLink;
+  const FWeakObjectPtr CallbackTarget;
+  T &Result;
+
+  virtual void Call(const T &Value) {
+    Result = Value;
+    Called = true;
+  }
+
+  void operator()(const T &Value) {
+	  Call(Value);
+  }
+
+  void Cancel();
+  
+ FContinueAction(FWeakObjectPtr RequestObj, T& ResultParam, const FLatentActionInfo& LatentInfo) :
+  Called(false)
+    , Result(ResultParam)
+    , ExecutionFunction(LatentInfo.ExecutionFunction)
+    , OutputLink(LatentInfo.Linkage)
+    , CallbackTarget(LatentInfo.CallbackTarget)
+	, Request(RequestObj)
+    {
+    }
+  
+  virtual void UpdateOperation(FLatentResponse& Response) override
+  {
+    Response.FinishAndTriggerIf(Called, ExecutionFunction, OutputLink, CallbackTarget);
+  }
+
+  virtual void NotifyObjectDestroyed() {
+	  Cancel();
+  }
+
+  virtual void NotifyActionAborted() {
+	  Cancel();
+  }
+};
+
+
 
 /** Verb (GET, PUT, POST) used by the request */
 UENUM(BlueprintType)
@@ -24,7 +75,8 @@ namespace ERequestContentType
 	enum Type
 	{
 		x_www_form_urlencoded,
-		json
+		json,
+		binary
 	};
 }
 
@@ -61,6 +113,14 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
 	void SetContentType(ERequestContentType::Type ContentType);
 
+        /** Set content type of the request for binary post data */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
+	void SetBinaryContentType(const FString &ContentType);
+
+        /** Set content of the request for binary post data */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
+	void SetBinaryRequestContent(const TArray<uint8> &Content);
+
 	/** Sets optional header info */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
 	void SetHeader(const FString& HeaderName, const FString& HeaderValue);
@@ -85,6 +145,7 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
 	void ResetResponseData();
 
+	void Cancel();
 
 	//////////////////////////////////////////////////////////////////////////
 	// JSON data accessors
@@ -129,6 +190,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
 	virtual void ProcessURL(const FString& Url = TEXT("http://alyamkin.com"));
 
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Request", meta = (Latent, WorldContext = "WorldContextObject", LatentInfo = "LatentInfo"))
+	virtual void ApplyURL(const FString& Url, UVaRestJsonObject *&Result, UObject* WorldContextObject, struct FLatentActionInfo LatentInfo);
+
+
 	/** Apply current internal setup to request and process it */
 	void ProcessRequest(TSharedRef<IHttpRequest> HttpRequest);
 
@@ -163,9 +228,17 @@ public:
 	bool bIsValidJsonResponse;
 
 protected:
+	FContinueAction <UVaRestJsonObject*> *ContinueAction;
+
 	/** Internal request data stored as JSON */
 	UPROPERTY()
 	UVaRestJsonObject* RequestJsonObj;
+
+	UPROPERTY()
+	TArray<uint8> RequestBytes;
+
+	UPROPERTY()
+	FString BinaryContentType;
 
 	/** Response data stored as JSON */
 	UPROPERTY()
