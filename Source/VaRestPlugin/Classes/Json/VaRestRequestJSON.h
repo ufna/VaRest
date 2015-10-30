@@ -25,11 +25,11 @@ public:
   
 	FVaRestLatentAction(FWeakObjectPtr RequestObj, T& ResultParam, const FLatentActionInfo& LatentInfo) :
 		Called(false),
-		Result(ResultParam),
+		Request(RequestObj),
 		ExecutionFunction(LatentInfo.ExecutionFunction),
 		OutputLink(LatentInfo.Linkage),
-		CallbackTarget(LatentInfo.CallbackTarget), 
-		Request(RequestObj)
+		CallbackTarget(LatentInfo.CallbackTarget),
+		Result(ResultParam)
 	{
 	}
   
