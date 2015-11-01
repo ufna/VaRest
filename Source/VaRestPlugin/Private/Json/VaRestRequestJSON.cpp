@@ -276,15 +276,15 @@ void UVaRestRequestJSON::ProcessRequest(TSharedRef<IHttpRequest> HttpRequest)
 
 			if (!Key.IsEmpty() && !Value.IsEmpty())
 			{
-				UrlParams += ParamIdx == 0 ? "?" : "&";
+				UrlParams += ParamIdx == 0 ? "" : "&";
 				UrlParams += UVaRestRequestJSON::PercentEncode(Key) + "=" + UVaRestRequestJSON::PercentEncode(Value);
 			}
 
 			ParamIdx++;
 		}
 
-		// Apply params to the url
-		HttpRequest->SetURL(HttpRequest->GetURL() + UrlParams);
+		// Apply params
+		HttpRequest->SetContentAsString(UrlParams);
 
 		break;
 	}
