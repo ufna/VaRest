@@ -54,6 +54,19 @@ FString UVaRestJsonObject::EncodeJson() const
 	return OutputString;
 }
 
+FString UVaRestJsonObject::EncodeJsonToSingleString() const
+{
+	FString OutputString = EncodeJson();
+
+	// Remove line terminators
+	OutputString.Replace(LINE_TERMINATOR, TEXT(""));
+	
+	// Remove tabs
+	OutputString.Replace(LINE_TERMINATOR, TEXT("\t"));
+
+	return OutputString;
+}
+
 bool UVaRestJsonObject::DecodeJson(const FString& JsonString)
 {
 	TSharedRef< TJsonReader<> > Reader = TJsonReaderFactory<>::Create(*JsonString);

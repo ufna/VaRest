@@ -33,9 +33,13 @@ class VARESTPLUGIN_API UVaRestJsonObject : public UObject
 	//////////////////////////////////////////////////////////////////////////
 	// Serialization
 
-	/** Serialize Json to string */
+	/** Serialize Json to string (formatted with line breaks) */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	FString EncodeJson() const;
+
+	/** Serialize Json to string (signel string without line breaks) */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	FString EncodeJsonToSingleString() const;
 
 	/** Construct Json object from string */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
