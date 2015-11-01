@@ -7,13 +7,14 @@ Key features:
 
 * Flexible Http/Https request management with support of different Verbs and Content Types
 * **No C++ coding required**, everything can be managed via blueprints
-* Blueprintable FJsonObject wrapper with almost full support of Json features: different types of values, **arrays**, both ways serializarion to FString, etc.
+* Blueprintable FJsonObject wrapper with almost full support of Json features: different types of values, **arrays**, **binary data** content, both ways serializarion to FString, etc.
 * Blueprintable FJsonValue wrapper - **full Json features made for blueprints!**
+* Both bindable events and **latent functions** are provided to control the asynchronous requests
 * [Parse](https://parse.com) REST API manager to start working with Parse out of the box!
 
 Check the [Wiki](https://github.com/ufna/VaRest/wiki) tab for plugin usage examples and installation notes.
 
-Current version: **1.1 RC 9** (UE 4.8/4.9)
+Current version: **1.1 R 11** (UE 4.8-4.10)
 
 ![SCREENSHOT](SCREENSHOT.jpg)
 
