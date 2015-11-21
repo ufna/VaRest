@@ -129,7 +129,7 @@ public:
 
 	void RegisterOutputTerm(FKismetFunctionContext& Context, UEdGraphPin* OutputPin, FBPTerminal* ContextTerm)
 	{
-		FBPTerminal *Term = Context.CreateLocalTerminalFromPinAutoChooseScope(OutputPin, OutputPin->PinName);
+		FBPTerminal *Term = Context.CreateLocalTerminalFromPinAutoChooseScope(OutputPin, Context.NetNameMap->MakeValidName(OutputPin));
 		Context.NetMap.Add(OutputPin, Term);
 	}
 
