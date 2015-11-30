@@ -17,7 +17,7 @@ UVaRestRequestJSON::UVaRestRequestJSON(const class FObjectInitializer& PCIP)
     BinaryContentType(TEXT("application/octet-stream"))
 {
 	RequestVerb = ERequestVerb::GET;
-	RequestContentType = ERequestContentType::x_www_form_urlencoded;
+	RequestContentType = ERequestContentType::x_www_form_urlencoded_url;
 
 	ResetData();
 }
@@ -261,7 +261,34 @@ void UVaRestRequestJSON::ProcessRequest(TSharedRef<IHttpRequest> HttpRequest)
 	// Set content-type
 	switch (RequestContentType)
 	{
-	case ERequestContentType::x_www_form_urlencoded:
+	case ERequestContentType::x_www_form_urlencoded_url:
+	{
+		HttpRequest->SetHeader("Content-Type", "application/x-www-form-urlencoded");
+
+		FString UrlParams = "";
+		uint16 ParamIdx = 0;
+
+		// Loop through all the values and prepare additional url part
+		for (auto RequestIt = RequestJsonObj->GetRootObject()->Values.CreateIterator(); RequestIt; ++RequestIt)
+		{
+			FString Key = RequestIt.Key();
+			FString Value = RequestIt.Value().Get()->AsString();
+
+			if (!Key.IsEmpty() && !Value.IsEmpty())
+			{
+				UrlParams += ParamIdx == 0 ? "?" : "&";
+				UrlParams += UVaRestRequestJSON::PercentEncode(Key) + "=" + UVaRestRequestJSON::PercentEncode(Value);
+			}
+
+			ParamIdx++;
+		}
+
+		// Apply params
+		HttpRequest->SetURL(HttpRequest->GetURL() + UrlParams);
+
+		break;
+	}
+	case ERequestContentType::x_www_form_urlencoded_body:
 	{
 		HttpRequest->SetHeader("Content-Type", "application/x-www-form-urlencoded");
 
