@@ -79,7 +79,8 @@ namespace ERequestContentType
 {
 	enum Type
 	{
-		x_www_form_urlencoded,
+		x_www_form_urlencoded_url	UMETA(DisplayName = "x-www-form-urlencoded (URL)"),
+		x_www_form_urlencoded_body	UMETA(DisplayName = "x-www-form-urlencoded (Request Body)"),
 		json,
 		binary
 	};

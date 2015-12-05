@@ -14,7 +14,7 @@ Key features:
 
 Check the [Wiki](https://github.com/ufna/VaRest/wiki) tab for plugin usage examples and installation notes.
 
-Current version: **1.1 R 11** (UE 4.8-4.10)
+Current version: **1.1 R 12** (UE 4.8-4.10)
 
 ![SCREENSHOT](SCREENSHOT.jpg)
 
