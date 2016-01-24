@@ -45,6 +45,11 @@ void UVaRestRequestJSON::SetVerb(ERequestVerb::Type Verb)
 	RequestVerb = Verb;
 }
 
+void UVaRestRequestJSON::SetCustomVerb(FString Verb)
+{
+	CustomVerb = Verb;
+}
+
 void UVaRestRequestJSON::SetContentType(ERequestContentType::Type ContentType)
 {
 	RequestContentType = ContentType;
@@ -239,19 +244,23 @@ void UVaRestRequestJSON::ProcessRequest(TSharedRef<IHttpRequest> HttpRequest)
 	switch (RequestVerb)
 	{
 	case ERequestVerb::GET:
-		HttpRequest->SetVerb("GET");
+		HttpRequest->SetVerb(TEXT("GET"));
 		break;
 
 	case ERequestVerb::POST:
-		HttpRequest->SetVerb("POST");
+		HttpRequest->SetVerb(TEXT("POST"));
 		break;
 
 	case ERequestVerb::PUT:
-		HttpRequest->SetVerb("PUT");
+		HttpRequest->SetVerb(TEXT("PUT"));
 		break;
 			
 	case ERequestVerb::DEL:
-		HttpRequest->SetVerb("DELETE");
+		HttpRequest->SetVerb(TEXT("DELETE"));
+		break;
+
+	case ERequestVerb::CUSTOM:
+		HttpRequest->SetVerb(CustomVerb);
 		break;
 
 	default:
@@ -263,7 +272,7 @@ void UVaRestRequestJSON::ProcessRequest(TSharedRef<IHttpRequest> HttpRequest)
 	{
 	case ERequestContentType::x_www_form_urlencoded_url:
 	{
-		HttpRequest->SetHeader("Content-Type", "application/x-www-form-urlencoded");
+		HttpRequest->SetHeader(TEXT("Content-Type"), TEXT("application/x-www-form-urlencoded"));
 
 		FString UrlParams = "";
 		uint16 ParamIdx = 0;
@@ -290,7 +299,7 @@ void UVaRestRequestJSON::ProcessRequest(TSharedRef<IHttpRequest> HttpRequest)
 	}
 	case ERequestContentType::x_www_form_urlencoded_body:
 	{
-		HttpRequest->SetHeader("Content-Type", "application/x-www-form-urlencoded");
+		HttpRequest->SetHeader(TEXT("Content-Type"), TEXT("application/x-www-form-urlencoded"));
 
 		FString UrlParams = "";
 		uint16 ParamIdx = 0;
@@ -317,14 +326,14 @@ void UVaRestRequestJSON::ProcessRequest(TSharedRef<IHttpRequest> HttpRequest)
 	}
 	case ERequestContentType::binary:
 	{
-		HttpRequest->SetHeader("Content-Type", BinaryContentType);
+		HttpRequest->SetHeader(TEXT("Content-Type"), BinaryContentType);
 		HttpRequest->SetContent(RequestBytes);
 
 		break;
 	}
 	case ERequestContentType::json:
 	{
-		HttpRequest->SetHeader("Content-Type", "application/json");
+		HttpRequest->SetHeader(TEXT("Content-Type"), TEXT("application/json"));
 
 		// Serialize data to json string
 		FString OutputString;
