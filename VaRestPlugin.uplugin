@@ -1,5 +1,5 @@
 {
-    "FileVersion" : 3,
+	"FileVersion" : 3,
 	
 	"FriendlyName" : "VaRest",
 	"Version" : 12,
@@ -11,12 +11,12 @@
 	"Category" : "Network",
 	"MarketplaceURL" : "com.epicgames.launcher://ue/marketplace/offers/e47be161e7a24e928560290abd5dcc4f",
 
-    "Modules" :
+	"Modules" :
 	[
 		{
 			"Name" : "VaRestPlugin",
 			"Type" : "Runtime",
-            "LoadingPhase": "PreDefault"
+			"LoadingPhase": "PreDefault"
 		},
 		{
 			"Name": "VaRestEditorPlugin",
