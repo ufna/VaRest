@@ -6,9 +6,10 @@
 	"VersionName" : "1.1-r12",
 	"CreatedBy" : "Vladimir Alyamkin",
 	"CreatedByURL" : "http://alyamkin.com",
-	"EngineVersion" : 1579795,
+	"EngineVersion" : "4.10.0",
 	"Description" : "Plugin that makes REST (JSON) server communication easy to use. Parse API helpers included.",
 	"Category" : "Network",
+	"MarketplaceURL" : "com.epicgames.launcher://ue/marketplace/offers/e47be161e7a24e928560290abd5dcc4f",
 
     "Modules" :
 	[
