@@ -10,11 +10,10 @@ Key features:
 * Blueprintable FJsonObject wrapper with almost full support of Json features: different types of values, **arrays**, **binary data** content, both ways serializarion to FString, etc.
 * Blueprintable FJsonValue wrapper - **full Json features made for blueprints!**
 * Both bindable events and **latent functions** are provided to control the asynchronous requests
-* [Parse](https://parse.com) REST API manager to start working with Parse out of the box!
 
 Check the [Wiki](https://github.com/ufna/VaRest/wiki) tab for plugin usage examples and installation notes.
 
-Current version: **1.1 R 12** (UE 4.8-4.10)
+Current version: **1.1 R 13** (UE 4.11)
 
 ![SCREENSHOT](SCREENSHOT.jpg)
 
