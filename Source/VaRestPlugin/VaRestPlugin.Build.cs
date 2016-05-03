@@ -6,16 +6,6 @@ namespace UnrealBuildTool.Rules
 {
 	public class VaRestPlugin : ModuleRules
 	{
-        private string ModulePath
-        {
-            get { return Path.GetDirectoryName(RulesCompiler.GetModuleFilename(this.GetType().Name)); }
-        }
-
-        private string ThirdPartyPath
-        {
-            get { return Path.GetFullPath(Path.Combine(ModulePath, "../../ThirdParty/")); }
-        }
-
 		public VaRestPlugin(TargetInfo Target)
 		{
 			PrivateIncludePaths.AddRange(

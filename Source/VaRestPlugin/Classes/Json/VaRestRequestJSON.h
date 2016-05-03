@@ -69,7 +69,9 @@ namespace ERequestVerb
 		GET,
 		POST,
 		PUT,
-		DEL UMETA(DisplayName="DELETE")
+		DEL UMETA(DisplayName="DELETE"),
+		/** Set CUSTOM verb by SetCustomVerb() function */
+		CUSTOM
 	};
 }
 
@@ -113,6 +115,10 @@ public:
 	/** Set verb to the request */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
 	void SetVerb(ERequestVerb::Type Verb);
+
+	/** Set custom verb to the request */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
+	void SetCustomVerb(FString Verb);
 
 	/** Set content type to the request. If you're using the x-www-form-urlencoded, 
 	 * params/constaints should be defined as key=ValueString pairs from Json data */
@@ -268,4 +274,8 @@ protected:
 
 	/** Http Response code */
 	int32 ResponseCode;
+
+	/** Custom verb that will be used with RequestContentType == CUSTOM */
+	FString CustomVerb;
+
 };

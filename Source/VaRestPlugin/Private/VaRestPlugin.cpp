@@ -11,7 +11,6 @@ class FVaRestPlugin : public IVaRestPlugin
 		UVaRestJsonObject::StaticClass();
 		UVaRestJsonValue::StaticClass();
 		UVaRestRequestJSON::StaticClass();
-		UVaRestParseManager::StaticClass();
 	}
 
 	virtual void ShutdownModule() override

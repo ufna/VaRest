@@ -274,3 +274,5 @@ FText UVaRest_BreakJson::GetNodeTitle(ENodeTitleType::Type TitleType) const
 {
 	return LOCTEXT("VaRest_Break_Json.NodeTitle", "Break Json");
 }
+
+#undef LOCTEXT_NAMESPACE
