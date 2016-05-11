@@ -71,6 +71,10 @@ void UVaRestRequestJSON::SetHeader(const FString& HeaderName, const FString& Hea
 	RequestHeaders.Add(HeaderName, HeaderValue);
 }
 
+
+//////////////////////////////////////////////////////////////////////////
+// Helpers
+
 FString UVaRestRequestJSON::PercentEncode(const FString& Text)
 {
 	FString OutText = Text;
@@ -295,6 +299,8 @@ void UVaRestRequestJSON::ProcessRequest(TSharedRef<IHttpRequest> HttpRequest)
 		// Apply params
 		HttpRequest->SetURL(HttpRequest->GetURL() + UrlParams);
 
+		UE_LOG(LogVaRest, Log, TEXT("Request (urlencoded): %s %s %s"), *HttpRequest->GetVerb(), *HttpRequest->GetURL(), *UrlParams);
+
 		break;
 	}
 	case ERequestContentType::x_www_form_urlencoded_body:
@@ -322,12 +328,16 @@ void UVaRestRequestJSON::ProcessRequest(TSharedRef<IHttpRequest> HttpRequest)
 		// Apply params
 		HttpRequest->SetContentAsString(UrlParams);
 
+		UE_LOG(LogVaRest, Log, TEXT("Request (url body): %s %s %s"), *HttpRequest->GetVerb(), *HttpRequest->GetURL(), *UrlParams);
+
 		break;
 	}
 	case ERequestContentType::binary:
 	{
 		HttpRequest->SetHeader(TEXT("Content-Type"), BinaryContentType);
 		HttpRequest->SetContent(RequestBytes);
+
+		UE_LOG(LogVaRest, Log, TEXT("Request (binary): %s %s"), *HttpRequest->GetVerb(), *HttpRequest->GetURL());
 
 		break;
 	}
@@ -342,6 +352,8 @@ void UVaRestRequestJSON::ProcessRequest(TSharedRef<IHttpRequest> HttpRequest)
 
 		// Set Json content
 		HttpRequest->SetContentAsString(OutputString);
+
+		UE_LOG(LogVaRest, Log, TEXT("Request (json): %s %s %s"), *HttpRequest->GetVerb(), *HttpRequest->GetURL(), *OutputString);
 
 		break;
 	}

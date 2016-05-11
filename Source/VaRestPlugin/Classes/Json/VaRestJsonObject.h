@@ -37,7 +37,7 @@ class VARESTPLUGIN_API UVaRestJsonObject : public UObject
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	FString EncodeJson() const;
 
-	/** Serialize Json to string (signel string without line breaks) */
+	/** Serialize Json to string (single string without line breaks) */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	FString EncodeJsonToSingleString() const;
 

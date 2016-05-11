@@ -137,6 +137,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
 	void SetHeader(const FString& HeaderName, const FString& HeaderValue);
 
+
+	//////////////////////////////////////////////////////////////////////////
+	// Helpers
+
 	/** Applies percent-encoding to text */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility")
 	static FString PercentEncode(const FString& Text);
