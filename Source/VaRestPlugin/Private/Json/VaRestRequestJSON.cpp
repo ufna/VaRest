@@ -391,6 +391,7 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 
 		// Broadcast the result event
 		OnRequestFail.Broadcast(this);
+		OnStaticRequestFail.Broadcast(this);
 
 		return;
 	}
@@ -436,6 +437,7 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 
 	// Broadcast the result event
 	OnRequestComplete.Broadcast(this);
+	OnStaticRequestComplete.Broadcast(this);
 
 	// Finish the latent action
 	if (ContinueAction)

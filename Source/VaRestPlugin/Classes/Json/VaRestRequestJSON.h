@@ -92,6 +92,9 @@ namespace ERequestContentType
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnRequestComplete, class UVaRestRequestJSON*, Request);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnRequestFail, class UVaRestRequestJSON*, Request);
 
+DECLARE_MULTICAST_DELEGATE_OneParam(FOnStaticRequestComplete, class UVaRestRequestJSON*);
+DECLARE_MULTICAST_DELEGATE_OneParam(FOnStaticRequestFail, class UVaRestRequestJSON*);
+
 /**
  * General helper class http requests via blueprints
  */
@@ -232,8 +235,13 @@ public:
 	/** Event occured when the request wasn't successfull */
 	UPROPERTY(BlueprintAssignable, Category = "VaRest|Event")
 	FOnRequestFail OnRequestFail;
-
-
+	
+	/** Event occured when the request has been completed */
+	FOnStaticRequestComplete OnStaticRequestComplete;
+	
+	/** Event occured when the request wasn't successfull */
+	FOnStaticRequestFail OnStaticRequestFail;
+	
 	//////////////////////////////////////////////////////////////////////////
 	// Data
 
