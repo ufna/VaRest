@@ -20,7 +20,7 @@
 		},
 		{
 			"Name": "VaRestEditorPlugin",
-			"Type": "Editor"
+			"Type": "Developer"
 		}
 	]
 }
