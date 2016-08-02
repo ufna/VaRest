@@ -180,6 +180,11 @@ void UVaRestRequestJSON::SetResponseObject(UVaRestJsonObject* JsonObject)
 ///////////////////////////////////////////////////////////////////////////
 // Response data access
 
+FString UVaRestRequestJSON::GetURL()
+{
+	return HttpRequest->GetURL();
+}
+
 ERequestStatus UVaRestRequestJSON::GetStatus()
 {
 	return ERequestStatus((uint8)HttpRequest->GetStatus());

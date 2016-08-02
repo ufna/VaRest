@@ -200,13 +200,17 @@ public:
 
 
 	///////////////////////////////////////////////////////////////////////////
-	// Response data access
+	// Request/response data access
 
-	/** Get the responce code of the last query */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
+	/** Get url of http request */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
+	FString GetURL();
+
+	/** Get status of http request */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
 	ERequestStatus GetStatus();
 
-	/** Get the responce code of the last query */
+	/** Get the response code of the last query */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
 	int32 GetResponseCode();
 
