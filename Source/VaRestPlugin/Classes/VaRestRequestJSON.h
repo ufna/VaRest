@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include "VaRestTypes.h"
 #include "VaRestRequestJSON.generated.h"
 
 /**
@@ -57,46 +58,17 @@ public:
 	const int32 OutputLink;
 	const FWeakObjectPtr CallbackTarget;
 	T &Result;
-
 };
 
-/** Verb (GET, PUT, POST) used by the request */
-UENUM(BlueprintType)
-enum class ERequestVerb : uint8
+template <class T> void FVaRestLatentAction<T>::Cancel()
 {
-	GET,
-	POST,
-	PUT,
-	DEL UMETA(DisplayName="DELETE"),
-	/** Set CUSTOM verb by SetCustomVerb() function */
-	CUSTOM
-};
+	UObject *Obj = Request.Get();
+	if (Obj != nullptr)
+	{
+		((UVaRestRequestJSON*)Obj)->Cancel();
+	}
+}
 
-/** Content type (json, urlencoded, etc.) used by the request */
-UENUM(BlueprintType)
-enum class ERequestContentType : uint8
-{
-	x_www_form_urlencoded_url	UMETA(DisplayName = "x-www-form-urlencoded (URL)"),
-	x_www_form_urlencoded_body	UMETA(DisplayName = "x-www-form-urlencoded (Request Body)"),
-	json,
-	binary
-};
-
-/** Enumerates the current state of an Http request */
-UENUM(BlueprintType)
-enum class ERequestStatus : uint8
-{
-	/** Has not been started via ProcessRequest() */
-	NotStarted,
-	/** Currently being ticked and processed */
-	Processing,
-	/** Finished but failed */
-	Failed,
-	/** Failed because it was unable to connect (safe to retry) */
-	Failed_ConnectionError,
-	/** Finished and was successful */
-	Succeeded
-};
 
 /** Generate a delegates for callback events */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnRequestComplete, class UVaRestRequestJSON*, Request);
@@ -104,6 +76,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnRequestFail, class UVaRestRequest
 
 DECLARE_MULTICAST_DELEGATE_OneParam(FOnStaticRequestComplete, class UVaRestRequestJSON*);
 DECLARE_MULTICAST_DELEGATE_OneParam(FOnStaticRequestFail, class UVaRestRequestJSON*);
+
 
 /**
  * General helper class http requests via blueprints
@@ -149,14 +122,6 @@ public:
 	/** Sets optional header info */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
 	void SetHeader(const FString& HeaderName, const FString& HeaderValue);
-
-
-	//////////////////////////////////////////////////////////////////////////
-	// Helpers
-
-	/** Applies percent-encoding to text */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility")
-	static FString PercentEncode(const FString& Text);
 
 
 	//////////////////////////////////////////////////////////////////////////
@@ -275,7 +240,7 @@ public:
 
 protected:
 	/** Latent action helper */
-	FVaRestLatentAction <UVaRestJsonObject*> *ContinueAction;
+	FVaRestLatentAction<UVaRestJsonObject*>* ContinueAction;
 
 	/** Internal request data stored as JSON */
 	UPROPERTY()

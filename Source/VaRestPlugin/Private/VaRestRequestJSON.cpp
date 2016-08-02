@@ -3,15 +3,6 @@
 #include "VaRestPluginPrivatePCH.h"
 #include "CoreMisc.h"
 
-template <class T> void FVaRestLatentAction<T>::Cancel()
-{
-	UObject *Obj = Request.Get();
-	if (Obj != nullptr)
-	{
-		((UVaRestRequestJSON*)Obj)->Cancel();
-	}
-}
-
 UVaRestRequestJSON::UVaRestRequestJSON(const class FObjectInitializer& PCIP)
   : Super(PCIP),
     BinaryContentType(TEXT("application/octet-stream"))
@@ -68,40 +59,6 @@ void UVaRestRequestJSON::SetBinaryRequestContent(const TArray<uint8> &Bytes)
 void UVaRestRequestJSON::SetHeader(const FString& HeaderName, const FString& HeaderValue)
 {
 	RequestHeaders.Add(HeaderName, HeaderValue);
-}
-
-
-//////////////////////////////////////////////////////////////////////////
-// Helpers
-
-FString UVaRestRequestJSON::PercentEncode(const FString& Text)
-{
-	FString OutText = Text;
-
-	OutText = OutText.Replace(TEXT(" "), TEXT("%20"));
-	OutText = OutText.Replace(TEXT("!"), TEXT("%21"));
-	OutText = OutText.Replace(TEXT("\""), TEXT("%22"));
-	OutText = OutText.Replace(TEXT("#"), TEXT("%23"));
-	OutText = OutText.Replace(TEXT("$"), TEXT("%24"));
-	OutText = OutText.Replace(TEXT("&"), TEXT("%26"));
-	OutText = OutText.Replace(TEXT("'"), TEXT("%27"));
-	OutText = OutText.Replace(TEXT("("), TEXT("%28"));
-	OutText = OutText.Replace(TEXT(")"), TEXT("%29"));
-	OutText = OutText.Replace(TEXT("*"), TEXT("%2A"));
-	OutText = OutText.Replace(TEXT("+"), TEXT("%2B"));
-	OutText = OutText.Replace(TEXT(","), TEXT("%2C"));
-	OutText = OutText.Replace(TEXT("/"), TEXT("%2F"));
-	OutText = OutText.Replace(TEXT(":"), TEXT("%3A"));
-	OutText = OutText.Replace(TEXT(";"), TEXT("%3B"));
-	OutText = OutText.Replace(TEXT("="), TEXT("%3D"));
-	OutText = OutText.Replace(TEXT("?"), TEXT("%3F"));
-	OutText = OutText.Replace(TEXT("@"), TEXT("%40"));
-	OutText = OutText.Replace(TEXT("["), TEXT("%5B"));
-	OutText = OutText.Replace(TEXT("]"), TEXT("%5D"));
-	OutText = OutText.Replace(TEXT("{"), TEXT("%7B"));
-	OutText = OutText.Replace(TEXT("}"), TEXT("%7D"));
-
-	return OutText;
 }
 
 
@@ -299,7 +256,7 @@ void UVaRestRequestJSON::ProcessRequest()
 			if (!Key.IsEmpty() && !Value.IsEmpty())
 			{
 				UrlParams += ParamIdx == 0 ? "?" : "&";
-				UrlParams += UVaRestRequestJSON::PercentEncode(Key) + "=" + UVaRestRequestJSON::PercentEncode(Value);
+				UrlParams += UVaRestLibrary::PercentEncode(Key) + "=" + UVaRestLibrary::PercentEncode(Value);
 			}
 
 			ParamIdx++;
@@ -328,7 +285,7 @@ void UVaRestRequestJSON::ProcessRequest()
 			if (!Key.IsEmpty() && !Value.IsEmpty())
 			{
 				UrlParams += ParamIdx == 0 ? "" : "&";
-				UrlParams += UVaRestRequestJSON::PercentEncode(Key) + "=" + UVaRestRequestJSON::PercentEncode(Value);
+				UrlParams += UVaRestLibrary::PercentEncode(Key) + "=" + UVaRestLibrary::PercentEncode(Value);
 			}
 
 			ParamIdx++;
