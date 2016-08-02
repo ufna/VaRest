@@ -1,14 +1,14 @@
 // Copyright 2016 Vladimir Alyamkin. All Rights Reserved.
 
 #include "VaRestPluginPrivatePCH.h"
-
+#include "Base64.h"
 
 //////////////////////////////////////////////////////////////////////////
 // Helpers
 
-FString UVaRestLibrary::PercentEncode(const FString& Text)
+FString UVaRestLibrary::PercentEncode(const FString& Source)
 {
-	FString OutText = Text;
+	FString OutText = Source;
 
 	OutText = OutText.Replace(TEXT(" "), TEXT("%20"));
 	OutText = OutText.Replace(TEXT("!"), TEXT("%21"));
@@ -34,6 +34,16 @@ FString UVaRestLibrary::PercentEncode(const FString& Text)
 	OutText = OutText.Replace(TEXT("}"), TEXT("%7D"));
 
 	return OutText;
+}
+
+FString UVaRestLibrary::Base64Encode(const FString& Source)
+{
+	return FBase64::Encode(Source);
+}
+
+bool UVaRestLibrary::Base64Decode(const FString& Source, FString& Dest)
+{
+	return FBase64::Decode(Source, Dest);
 }
 
 
