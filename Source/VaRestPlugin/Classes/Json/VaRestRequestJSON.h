@@ -62,31 +62,41 @@ public:
 
 /** Verb (GET, PUT, POST) used by the request */
 UENUM(BlueprintType)
-namespace ERequestVerb
+enum class ERequestVerb : uint8
 {
-	enum Type
-	{
-		GET,
-		POST,
-		PUT,
-		DEL UMETA(DisplayName="DELETE"),
-		/** Set CUSTOM verb by SetCustomVerb() function */
-		CUSTOM
-	};
-}
+	GET,
+	POST,
+	PUT,
+	DEL UMETA(DisplayName="DELETE"),
+	/** Set CUSTOM verb by SetCustomVerb() function */
+	CUSTOM
+};
 
 /** Content type (json, urlencoded, etc.) used by the request */
 UENUM(BlueprintType)
-namespace ERequestContentType
+enum class ERequestContentType : uint8
 {
-	enum Type
-	{
-		x_www_form_urlencoded_url	UMETA(DisplayName = "x-www-form-urlencoded (URL)"),
-		x_www_form_urlencoded_body	UMETA(DisplayName = "x-www-form-urlencoded (Request Body)"),
-		json,
-		binary
-	};
-}
+	x_www_form_urlencoded_url	UMETA(DisplayName = "x-www-form-urlencoded (URL)"),
+	x_www_form_urlencoded_body	UMETA(DisplayName = "x-www-form-urlencoded (Request Body)"),
+	json,
+	binary
+};
+
+/** Enumerates the current state of an Http request */
+UENUM(BlueprintType)
+enum class ERequestStatus : uint8
+{
+	/** Has not been started via ProcessRequest() */
+	NotStarted,
+	/** Currently being ticked and processed */
+	Processing,
+	/** Finished but failed */
+	Failed,
+	/** Failed because it was unable to connect (safe to retry) */
+	Failed_ConnectionError,
+	/** Finished and was successful */
+	Succeeded
+};
 
 /** Generate a delegates for callback events */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnRequestComplete, class UVaRestRequestJSON*, Request);
@@ -113,11 +123,11 @@ public:
 
 	/** Creates new request with defined verb and content type */
 	UFUNCTION(BlueprintPure, meta = (DisplayName = "Construct Json Request", HidePin = "WorldContextObject", DefaultToSelf = "WorldContextObject"), Category = "VaRest|Request")
-	static UVaRestRequestJSON* ConstructRequestExt(UObject* WorldContextObject, ERequestVerb::Type Verb, ERequestContentType::Type ContentType);
+	static UVaRestRequestJSON* ConstructRequestExt(UObject* WorldContextObject, ERequestVerb Verb, ERequestContentType ContentType);
 
 	/** Set verb to the request */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
-	void SetVerb(ERequestVerb::Type Verb);
+	void SetVerb(ERequestVerb Verb);
 
 	/** Set custom verb to the request */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
@@ -126,7 +136,7 @@ public:
 	/** Set content type to the request. If you're using the x-www-form-urlencoded, 
 	 * params/constaints should be defined as key=ValueString pairs from Json data */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
-	void SetContentType(ERequestContentType::Type ContentType);
+	void SetContentType(ERequestContentType ContentType);
 
 	/** Set content type of the request for binary post data */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
@@ -191,6 +201,10 @@ public:
 
 	///////////////////////////////////////////////////////////////////////////
 	// Response data access
+
+	/** Get the responce code of the last query */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
+	ERequestStatus GetStatus();
 
 	/** Get the responce code of the last query */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
@@ -273,10 +287,10 @@ protected:
 	UVaRestJsonObject* ResponseJsonObj;
 
 	/** Verb for making request (GET,POST,etc) */
-	ERequestVerb::Type RequestVerb;
+	ERequestVerb RequestVerb;
 
 	/** Content type to be applied for request */
-	ERequestContentType::Type RequestContentType;
+	ERequestContentType RequestContentType;
 
 	/** Mapping of header section to values. Used to generate final header string for request */
 	TMap<FString, FString> RequestHeaders;

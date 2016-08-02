@@ -29,8 +29,8 @@ UVaRestRequestJSON* UVaRestRequestJSON::ConstructRequest(UObject* WorldContextOb
 
 UVaRestRequestJSON* UVaRestRequestJSON::ConstructRequestExt(
 	UObject* WorldContextObject, 
-	ERequestVerb::Type Verb, 
-	ERequestContentType::Type ContentType)
+	ERequestVerb Verb, 
+	ERequestContentType ContentType)
 {
 	UVaRestRequestJSON* Request = ConstructRequest(WorldContextObject);
 
@@ -40,7 +40,7 @@ UVaRestRequestJSON* UVaRestRequestJSON::ConstructRequestExt(
 	return Request;
 }
 
-void UVaRestRequestJSON::SetVerb(ERequestVerb::Type Verb)
+void UVaRestRequestJSON::SetVerb(ERequestVerb Verb)
 {
 	RequestVerb = Verb;
 }
@@ -50,7 +50,7 @@ void UVaRestRequestJSON::SetCustomVerb(FString Verb)
 	CustomVerb = Verb;
 }
 
-void UVaRestRequestJSON::SetContentType(ERequestContentType::Type ContentType)
+void UVaRestRequestJSON::SetContentType(ERequestContentType ContentType)
 {
 	RequestContentType = ContentType;
 }
@@ -178,6 +178,11 @@ void UVaRestRequestJSON::SetResponseObject(UVaRestJsonObject* JsonObject)
 
 ///////////////////////////////////////////////////////////////////////////
 // Response data access
+
+ERequestStatus UVaRestRequestJSON::GetStatus()
+{
+	return ERequestStatus::NotStarted;
+}
 
 int32 UVaRestRequestJSON::GetResponseCode()
 {
