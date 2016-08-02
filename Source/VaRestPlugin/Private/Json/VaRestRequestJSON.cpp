@@ -65,7 +65,6 @@ void UVaRestRequestJSON::SetBinaryRequestContent(const TArray<uint8> &Bytes)
 	RequestBytes = Bytes;
 }
 
-
 void UVaRestRequestJSON::SetHeader(const FString& HeaderName, const FString& HeaderValue)
 {
 	RequestHeaders.Add(HeaderName, HeaderValue);
@@ -125,6 +124,8 @@ void UVaRestRequestJSON::ResetRequestData()
 	{
 		RequestJsonObj = NewObject<UVaRestJsonObject>();
 	}
+
+	HttpRequest = FHttpModule::Get().CreateRequest();
 }
 
 void UVaRestRequestJSON::ResetResponseData()
@@ -181,7 +182,7 @@ void UVaRestRequestJSON::SetResponseObject(UVaRestJsonObject* JsonObject)
 
 ERequestStatus UVaRestRequestJSON::GetStatus()
 {
-	return ERequestStatus::NotStarted;
+	return ERequestStatus((uint8)HttpRequest->GetStatus());
 }
 
 int32 UVaRestRequestJSON::GetResponseCode()
@@ -218,15 +219,13 @@ TArray<FString> UVaRestRequestJSON::GetAllResponseHeaders()
 
 void UVaRestRequestJSON::ProcessURL(const FString& Url)
 {
-	TSharedRef<IHttpRequest> HttpRequest = FHttpModule::Get().CreateRequest();
 	HttpRequest->SetURL(Url);
 
-	ProcessRequest(HttpRequest);
+	ProcessRequest();
 }
 
 void UVaRestRequestJSON::ApplyURL(const FString& Url, UVaRestJsonObject *&Result, UObject* WorldContextObject, FLatentActionInfo LatentInfo)
 {
-	TSharedRef<IHttpRequest> HttpRequest = FHttpModule::Get().CreateRequest();
 	HttpRequest->SetURL(Url);
 
 	// Prepare latent action
@@ -244,10 +243,10 @@ void UVaRestRequestJSON::ApplyURL(const FString& Url, UVaRestJsonObject *&Result
 		LatentActionManager.AddNewAction(LatentInfo.CallbackTarget, LatentInfo.UUID, ContinueAction = new FVaRestLatentAction<UVaRestJsonObject*>(this, Result, LatentInfo));
 	}
 
-	ProcessRequest(HttpRequest);
+	ProcessRequest();
 }
 
-void UVaRestRequestJSON::ProcessRequest(TSharedRef<IHttpRequest> HttpRequest)
+void UVaRestRequestJSON::ProcessRequest()
 {
 	// Set verb
 	switch (RequestVerb)

@@ -231,7 +231,7 @@ public:
 	virtual void ApplyURL(const FString& Url, UVaRestJsonObject *&Result, UObject* WorldContextObject, struct FLatentActionInfo LatentInfo);
 
 	/** Apply current internal setup to request and process it */
-	void ProcessRequest(TSharedRef<IHttpRequest> HttpRequest);
+	void ProcessRequest();
 
 
 	//////////////////////////////////////////////////////////////////////////
@@ -256,6 +256,7 @@ public:
 	/** Event occured when the request wasn't successfull */
 	FOnStaticRequestFail OnStaticRequestFail;
 	
+
 	//////////////////////////////////////////////////////////////////////////
 	// Data
 
@@ -303,5 +304,8 @@ protected:
 
 	/** Custom verb that will be used with RequestContentType == CUSTOM */
 	FString CustomVerb;
+
+	/** Request we're currently processing */
+	TSharedRef<IHttpRequest> HttpRequest = FHttpModule::Get().CreateRequest();
 
 };
