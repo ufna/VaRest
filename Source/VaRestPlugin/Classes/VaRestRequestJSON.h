@@ -227,6 +227,31 @@ public:
 	
 
 	//////////////////////////////////////////////////////////////////////////
+	// Tags
+
+public:
+	/** Add tag to this request */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility")
+	void AddTag(FName Tag);
+
+	/** 
+	 * Remove tag from this request 
+	 *
+	 * @return Number of removed elements 
+	 */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility")
+	int32 RemoveTag(FName Tag);
+
+	/** See if this request contains the supplied tag */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility")
+	bool HasTag(FName Tag) const;
+
+protected:
+	/** Array of tags that can be used for grouping and categorizing */
+	TArray<FName> Tags;
+
+
+	//////////////////////////////////////////////////////////////////////////
 	// Data
 
 public:

@@ -414,3 +414,25 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
           K->Call(ResponseJsonObj);
 	}
 }
+
+
+//////////////////////////////////////////////////////////////////////////
+// Tags
+
+void UVaRestRequestJSON::AddTag(FName Tag)
+{
+	if (Tag != NAME_None)
+	{
+		Tags.AddUnique(Tag);
+	}
+}
+
+int32 UVaRestRequestJSON::RemoveTag(FName Tag)
+{
+	return Tags.Remove(Tag);
+}
+
+bool UVaRestRequestJSON::HasTag(FName Tag) const
+{
+	return (Tag != NAME_None) && Tags.Contains(Tag);
+}
