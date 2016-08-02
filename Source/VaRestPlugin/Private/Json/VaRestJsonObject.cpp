@@ -125,7 +125,7 @@ UVaRestJsonValue* UVaRestJsonObject::GetField(const FString& FieldName) const
 {
 	if (!JsonObj.IsValid())
 	{
-		return NULL;
+		return nullptr;
 	}
 
 	TSharedPtr<FJsonValue> NewVal = JsonObj->TryGetField(FieldName);
@@ -325,7 +325,7 @@ UVaRestJsonObject* UVaRestJsonObject::GetObjectField(const FString& FieldName) c
 
 	if (!JsonObj.IsValid())
 	{
-		return NULL;
+		return nullptr;
 	}
 
 	TSharedPtr<FJsonObject> JsonObjField = JsonObj->GetObjectField(FieldName);

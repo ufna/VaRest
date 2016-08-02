@@ -116,7 +116,7 @@ void UVaRestRequestJSON::ResetData()
 
 void UVaRestRequestJSON::ResetRequestData()
 {
-	if (RequestJsonObj != NULL)
+	if (RequestJsonObj != nullptr)
 	{
 		RequestJsonObj->Reset();
 	}
@@ -130,7 +130,7 @@ void UVaRestRequestJSON::ResetRequestData()
 
 void UVaRestRequestJSON::ResetResponseData()
 {
-	if (ResponseJsonObj != NULL)
+	if (ResponseJsonObj != nullptr)
 	{
 		ResponseJsonObj->Reset();
 	}
@@ -200,7 +200,7 @@ FString UVaRestRequestJSON::GetResponseHeader(const FString HeaderName)
 	FString Result;
 
 	FString* Header = ResponseHeaders.Find(HeaderName);
-	if (Header != NULL)
+	if (Header != nullptr)
 	{
 		Result = *Header;
 	}
@@ -239,7 +239,7 @@ void UVaRestRequestJSON::ApplyURL(const FString& Url, UVaRestJsonObject *&Result
 		FLatentActionManager& LatentActionManager = World->GetLatentActionManager();
 		FVaRestLatentAction<UVaRestJsonObject*> *Kont = LatentActionManager.FindExistingAction<FVaRestLatentAction<UVaRestJsonObject*>>(LatentInfo.CallbackTarget, LatentInfo.UUID);
 
-		if (Kont != NULL)
+		if (Kont != nullptr)
 		{
 			Kont->Cancel();
 			LatentActionManager.RemoveActionsForObject(LatentInfo.CallbackTarget);
