@@ -384,10 +384,13 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 	// Be sure that we have no data from previous response
 	ResetResponseData();
 
+	// Save response code first as int32
+	ResponseCode = Response->GetResponseCode();
+
 	// Check we have result to process futher
 	if (!bWasSuccessful)
 	{
-		UE_LOG(LogVaRest, Error, TEXT("Request failed: %s"), *Request->GetURL());
+		UE_LOG(LogVaRest, Error, TEXT("Request failed (%d): %s"), ResponseCode, *Request->GetURL());
 
 		// Broadcast the result event
 		OnRequestFail.Broadcast(this);
@@ -399,11 +402,8 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 	// Save response data as a string
 	ResponseContent = Response->GetContentAsString();
 
-	// Save response code as int32
-	ResponseCode = Response->GetResponseCode();
-
 	// Log response state
-	UE_LOG(LogVaRest, Log, TEXT("Response (%d): %s"), Response->GetResponseCode(), *Response->GetContentAsString());
+	UE_LOG(LogVaRest, Log, TEXT("Response (%d): %s"), ResponseCode, *ResponseContent);
 
 	// Process response headers
 	TArray<FString> Headers = Response->GetAllHeaders();
