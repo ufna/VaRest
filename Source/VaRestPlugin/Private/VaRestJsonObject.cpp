@@ -103,7 +103,7 @@ TArray<FString> UVaRestJsonObject::GetFieldNames()
 
 bool UVaRestJsonObject::HasField(const FString& FieldName) const
 {
-	if (!JsonObj.IsValid())
+	if (!JsonObj.IsValid() || FieldName.IsEmpty())
 	{
 		return false;
 	}
@@ -113,7 +113,7 @@ bool UVaRestJsonObject::HasField(const FString& FieldName) const
 
 void UVaRestJsonObject::RemoveField(const FString& FieldName)
 {
-	if (!JsonObj.IsValid())
+	if (!JsonObj.IsValid() || FieldName.IsEmpty())
 	{
 		return;
 	}
@@ -123,22 +123,26 @@ void UVaRestJsonObject::RemoveField(const FString& FieldName)
 
 UVaRestJsonValue* UVaRestJsonObject::GetField(const FString& FieldName) const
 {
-	if (!JsonObj.IsValid())
+	if (!JsonObj.IsValid() || FieldName.IsEmpty())
 	{
-		return NULL;
+		return nullptr;
 	}
 
 	TSharedPtr<FJsonValue> NewVal = JsonObj->TryGetField(FieldName);
+	if (NewVal.IsValid())
+	{
+		UVaRestJsonValue* NewValue = NewObject<UVaRestJsonValue>();
+		NewValue->SetRootValue(NewVal);
 
-	UVaRestJsonValue* NewValue = NewObject<UVaRestJsonValue>();
-	NewValue->SetRootValue(NewVal);
-
-	return NewValue;
+		return NewValue;
+	}
+	
+	return nullptr;
 }
 
 void UVaRestJsonObject::SetField(const FString& FieldName, UVaRestJsonValue* JsonValue)
 {
-	if (!JsonObj.IsValid())
+	if (!JsonObj.IsValid() || FieldName.IsEmpty())
 	{
 		return;
 	}
@@ -152,8 +156,9 @@ void UVaRestJsonObject::SetField(const FString& FieldName, UVaRestJsonValue* Jso
 
 float UVaRestJsonObject::GetNumberField(const FString& FieldName) const
 {
-	if (!JsonObj.IsValid())
+	if (!JsonObj.IsValid() || !JsonObj->HasTypedField<EJson::Number>(FieldName))
 	{
+		UE_LOG(LogVaRest, Warning, TEXT("No field with name %s of type Number"), *FieldName);
 		return 0.0f;
 	}
 
@@ -162,7 +167,7 @@ float UVaRestJsonObject::GetNumberField(const FString& FieldName) const
 
 void UVaRestJsonObject::SetNumberField(const FString& FieldName, float Number)
 {
-	if (!JsonObj.IsValid())
+	if (!JsonObj.IsValid() || FieldName.IsEmpty())
 	{
 		return;
 	}
@@ -172,17 +177,18 @@ void UVaRestJsonObject::SetNumberField(const FString& FieldName, float Number)
 
 FString UVaRestJsonObject::GetStringField(const FString& FieldName) const
 {
-	if (!JsonObj.IsValid())
+	if (!JsonObj.IsValid() || !JsonObj->HasTypedField<EJson::String>(FieldName))
 	{
+		UE_LOG(LogVaRest, Warning, TEXT("No field with name %s of type String"), *FieldName);
 		return TEXT("");
 	}
-	
+		
 	return JsonObj->GetStringField(FieldName);
 }
 
 void UVaRestJsonObject::SetStringField(const FString& FieldName, const FString& StringValue)
 {
-	if (!JsonObj.IsValid())
+	if (!JsonObj.IsValid() || FieldName.IsEmpty())
 	{
 		return;
 	}
@@ -192,8 +198,9 @@ void UVaRestJsonObject::SetStringField(const FString& FieldName, const FString& 
 
 bool UVaRestJsonObject::GetBoolField(const FString& FieldName) const
 {
-	if (!JsonObj.IsValid())
+	if (!JsonObj.IsValid() || !JsonObj->HasTypedField<EJson::Boolean>(FieldName))
 	{
+		UE_LOG(LogVaRest, Warning, TEXT("No field with name %s of type Boolean"), *FieldName);
 		return false;
 	}
 
@@ -202,7 +209,7 @@ bool UVaRestJsonObject::GetBoolField(const FString& FieldName) const
 
 void UVaRestJsonObject::SetBoolField(const FString& FieldName, bool InValue)
 {
-	if (!JsonObj.IsValid())
+	if (!JsonObj.IsValid() || FieldName.IsEmpty())
 	{
 		return;
 	}
@@ -212,8 +219,13 @@ void UVaRestJsonObject::SetBoolField(const FString& FieldName, bool InValue)
 
 TArray<UVaRestJsonValue*> UVaRestJsonObject::GetArrayField(const FString& FieldName)
 {
+	if (!JsonObj->HasTypedField<EJson::Array>(FieldName))
+	{
+		UE_LOG(LogVaRest, Warning, TEXT("No field with name %s of type Array"), *FieldName);
+	}
+
 	TArray<UVaRestJsonValue*> OutArray;
-	if (!JsonObj.IsValid())
+	if (!JsonObj.IsValid() || FieldName.IsEmpty())
 	{
 		return OutArray;
 	}
@@ -232,7 +244,7 @@ TArray<UVaRestJsonValue*> UVaRestJsonObject::GetArrayField(const FString& FieldN
 
 void UVaRestJsonObject::SetArrayField(const FString& FieldName, const TArray<UVaRestJsonValue*>& InArray)
 {
-	if (!JsonObj.IsValid())
+	if (!JsonObj.IsValid() || FieldName.IsEmpty())
 	{
 		return;
 	}
@@ -298,9 +310,10 @@ void UVaRestJsonObject::MergeJsonObject(UVaRestJsonObject* InJsonObject, bool Ov
 
 UVaRestJsonObject* UVaRestJsonObject::GetObjectField(const FString& FieldName) const
 {
-	if (!JsonObj.IsValid())
+	if (!JsonObj.IsValid() || !JsonObj->HasTypedField<EJson::Object>(FieldName))
 	{
-		return NULL;
+		UE_LOG(LogVaRest, Warning, TEXT("No field with name %s of type Object"), *FieldName);
+		return nullptr;
 	}
 
 	TSharedPtr<FJsonObject> JsonObjField = JsonObj->GetObjectField(FieldName);
@@ -313,7 +326,7 @@ UVaRestJsonObject* UVaRestJsonObject::GetObjectField(const FString& FieldName) c
 
 void UVaRestJsonObject::SetObjectField(const FString& FieldName, UVaRestJsonObject* JsonObject)
 {
-	if (!JsonObj.IsValid())
+	if (!JsonObj.IsValid() || FieldName.IsEmpty())
 	{
 		return;
 	}
@@ -327,9 +340,13 @@ void UVaRestJsonObject::SetObjectField(const FString& FieldName, UVaRestJsonObje
 
 TArray<float> UVaRestJsonObject::GetNumberArrayField(const FString& FieldName)
 {
-	TArray<float> NumberArray;
+	if (!JsonObj->HasTypedField<EJson::Array>(FieldName))
+	{
+		UE_LOG(LogVaRest, Warning, TEXT("No field with name %s of type Array"), *FieldName);
+	}
 
-	if (!JsonObj.IsValid())
+	TArray<float> NumberArray;
+	if (!JsonObj.IsValid() || FieldName.IsEmpty())
 	{
 		return NumberArray;
 	}
@@ -337,6 +354,12 @@ TArray<float> UVaRestJsonObject::GetNumberArrayField(const FString& FieldName)
 	TArray<TSharedPtr<FJsonValue> > JsonArrayValues = JsonObj->GetArrayField(FieldName);
 	for (TArray<TSharedPtr<FJsonValue> >::TConstIterator It(JsonArrayValues); It; ++It)
 	{
+		auto Value = (*It).Get();
+		if (Value->Type != EJson::Number)
+		{
+			UE_LOG(LogVaRest, Error, TEXT("Not Number element in array with field name %s"), *FieldName);
+		}
+		
 		NumberArray.Add((*It)->AsNumber());
 	}
 
@@ -345,7 +368,7 @@ TArray<float> UVaRestJsonObject::GetNumberArrayField(const FString& FieldName)
 
 void UVaRestJsonObject::SetNumberArrayField(const FString& FieldName, const TArray<float>& NumberArray)
 {
-	if (!JsonObj.IsValid())
+	if (!JsonObj.IsValid() || FieldName.IsEmpty())
 	{
 		return;
 	}
@@ -362,9 +385,13 @@ void UVaRestJsonObject::SetNumberArrayField(const FString& FieldName, const TArr
 
 TArray<FString> UVaRestJsonObject::GetStringArrayField(const FString& FieldName)
 {
-	TArray<FString> StringArray;
+	if (!JsonObj->HasTypedField<EJson::Array>(FieldName))
+	{
+		UE_LOG(LogVaRest, Warning, TEXT("No field with name %s of type Array"), *FieldName);
+	}
 
-	if (!JsonObj.IsValid())
+	TArray<FString> StringArray;
+	if (!JsonObj.IsValid() || FieldName.IsEmpty())
 	{
 		return StringArray;
 	}
@@ -372,6 +399,12 @@ TArray<FString> UVaRestJsonObject::GetStringArrayField(const FString& FieldName)
 	TArray<TSharedPtr<FJsonValue> > JsonArrayValues = JsonObj->GetArrayField(FieldName);
 	for (TArray<TSharedPtr<FJsonValue> >::TConstIterator It(JsonArrayValues); It; ++It)
 	{
+		auto Value = (*It).Get();
+		if (Value->Type != EJson::String)
+		{
+			UE_LOG(LogVaRest, Error, TEXT("Not String element in array with field name %s"), *FieldName);
+		}
+
 		StringArray.Add((*It)->AsString());
 	}
 
@@ -380,13 +413,12 @@ TArray<FString> UVaRestJsonObject::GetStringArrayField(const FString& FieldName)
 
 void UVaRestJsonObject::SetStringArrayField(const FString& FieldName, const TArray<FString>& StringArray)
 {
-	if (!JsonObj.IsValid())
+	if (!JsonObj.IsValid() || FieldName.IsEmpty())
 	{
 		return;
 	}
 
 	TArray< TSharedPtr<FJsonValue> > EntriesArray;
-
 	for (auto String : StringArray)
 	{
 		EntriesArray.Add(MakeShareable(new FJsonValueString(String)));
@@ -397,9 +429,13 @@ void UVaRestJsonObject::SetStringArrayField(const FString& FieldName, const TArr
 
 TArray<bool> UVaRestJsonObject::GetBoolArrayField(const FString& FieldName)
 {
-	TArray<bool> BoolArray;
+	if (!JsonObj->HasTypedField<EJson::Array>(FieldName))
+	{
+		UE_LOG(LogVaRest, Warning, TEXT("No field with name %s of type Array"), *FieldName);
+	}
 
-	if (!JsonObj.IsValid())
+	TArray<bool> BoolArray;
+	if (!JsonObj.IsValid() || FieldName.IsEmpty())
 	{
 		return BoolArray;
 	}
@@ -407,6 +443,12 @@ TArray<bool> UVaRestJsonObject::GetBoolArrayField(const FString& FieldName)
 	TArray<TSharedPtr<FJsonValue> > JsonArrayValues = JsonObj->GetArrayField(FieldName);
 	for (TArray<TSharedPtr<FJsonValue> >::TConstIterator It(JsonArrayValues); It; ++It)
 	{
+		auto Value = (*It).Get();
+		if (Value->Type != EJson::Boolean)
+		{
+			UE_LOG(LogVaRest, Error, TEXT("Not Boolean element in array with field name %s"), *FieldName);
+		}
+
 		BoolArray.Add((*It)->AsBool());
 	}
 
@@ -415,13 +457,12 @@ TArray<bool> UVaRestJsonObject::GetBoolArrayField(const FString& FieldName)
 
 void UVaRestJsonObject::SetBoolArrayField(const FString& FieldName, const TArray<bool>& BoolArray)
 {
-	if (!JsonObj.IsValid())
+	if (!JsonObj.IsValid() || FieldName.IsEmpty())
 	{
 		return;
 	}
 
 	TArray< TSharedPtr<FJsonValue> > EntriesArray;
-
 	for (auto Boolean : BoolArray)
 	{
 		EntriesArray.Add(MakeShareable(new FJsonValueBoolean(Boolean)));
@@ -432,9 +473,13 @@ void UVaRestJsonObject::SetBoolArrayField(const FString& FieldName, const TArray
 
 TArray<UVaRestJsonObject*> UVaRestJsonObject::GetObjectArrayField(const FString& FieldName)
 {
-	TArray<UVaRestJsonObject*> OutArray;
+	if (!JsonObj->HasTypedField<EJson::Array>(FieldName))
+	{
+		UE_LOG(LogVaRest, Warning, TEXT("No field with name %s of type Array"), *FieldName);
+	}
 
-	if (!JsonObj.IsValid())
+	TArray<UVaRestJsonObject*> OutArray;
+	if (!JsonObj.IsValid() || FieldName.IsEmpty())
 	{
 		return OutArray;
 	}
@@ -442,6 +487,11 @@ TArray<UVaRestJsonObject*> UVaRestJsonObject::GetObjectArrayField(const FString&
 	TArray< TSharedPtr<FJsonValue> > ValArray = JsonObj->GetArrayField(FieldName);
 	for (auto Value : ValArray)
 	{
+		if (Value->Type != EJson::Object)
+		{
+			UE_LOG(LogVaRest, Error, TEXT("Not Object element in array with field name %s"), *FieldName);
+		}
+
 		TSharedPtr<FJsonObject> NewObj = Value->AsObject();
 
 		UVaRestJsonObject* NewJson = NewObject<UVaRestJsonObject>();
@@ -455,13 +505,12 @@ TArray<UVaRestJsonObject*> UVaRestJsonObject::GetObjectArrayField(const FString&
 
 void UVaRestJsonObject::SetObjectArrayField(const FString& FieldName, const TArray<UVaRestJsonObject*>& ObjectArray)
 {
-	if (!JsonObj.IsValid())
+	if (!JsonObj.IsValid() || FieldName.IsEmpty())
 	{
 		return;
 	}
 
 	TArray< TSharedPtr<FJsonValue> > EntriesArray;
-
 	for (auto Value : ObjectArray)
 	{
 		EntriesArray.Add(MakeShareable(new FJsonValueObject(Value->GetRootObject())));

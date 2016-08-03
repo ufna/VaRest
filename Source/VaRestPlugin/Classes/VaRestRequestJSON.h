@@ -2,6 +2,12 @@
 
 #pragma once
 
+#include "Delegate.h"
+#include "Http.h"
+#include "Map.h"
+#include "Json.h"
+
+#include "VaRestTypes.h"
 #include "VaRestRequestJSON.generated.h"
 
 /**
@@ -57,40 +63,25 @@ public:
 	const int32 OutputLink;
 	const FWeakObjectPtr CallbackTarget;
 	T &Result;
-
 };
 
-/** Verb (GET, PUT, POST) used by the request */
-UENUM(BlueprintType)
-namespace ERequestVerb
+template <class T> void FVaRestLatentAction<T>::Cancel()
 {
-	enum Type
+	UObject *Obj = Request.Get();
+	if (Obj != nullptr)
 	{
-		GET,
-		POST,
-		PUT,
-		DEL UMETA(DisplayName="DELETE"),
-		/** Set CUSTOM verb by SetCustomVerb() function */
-		CUSTOM
-	};
+		((UVaRestRequestJSON*)Obj)->Cancel();
+	}
 }
 
-/** Content type (json, urlencoded, etc.) used by the request */
-UENUM(BlueprintType)
-namespace ERequestContentType
-{
-	enum Type
-	{
-		x_www_form_urlencoded_url	UMETA(DisplayName = "x-www-form-urlencoded (URL)"),
-		x_www_form_urlencoded_body	UMETA(DisplayName = "x-www-form-urlencoded (Request Body)"),
-		json,
-		binary
-	};
-}
 
 /** Generate a delegates for callback events */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnRequestComplete, class UVaRestRequestJSON*, Request);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnRequestFail, class UVaRestRequestJSON*, Request);
+
+DECLARE_MULTICAST_DELEGATE_OneParam(FOnStaticRequestComplete, class UVaRestRequestJSON*);
+DECLARE_MULTICAST_DELEGATE_OneParam(FOnStaticRequestFail, class UVaRestRequestJSON*);
+
 
 /**
  * General helper class http requests via blueprints
@@ -110,11 +101,11 @@ public:
 
 	/** Creates new request with defined verb and content type */
 	UFUNCTION(BlueprintPure, meta = (DisplayName = "Construct Json Request", HidePin = "WorldContextObject", DefaultToSelf = "WorldContextObject"), Category = "VaRest|Request")
-	static UVaRestRequestJSON* ConstructRequestExt(UObject* WorldContextObject, ERequestVerb::Type Verb, ERequestContentType::Type ContentType);
+	static UVaRestRequestJSON* ConstructRequestExt(UObject* WorldContextObject, ERequestVerb Verb, ERequestContentType ContentType);
 
 	/** Set verb to the request */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
-	void SetVerb(ERequestVerb::Type Verb);
+	void SetVerb(ERequestVerb Verb);
 
 	/** Set custom verb to the request */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
@@ -123,7 +114,7 @@ public:
 	/** Set content type to the request. If you're using the x-www-form-urlencoded, 
 	 * params/constaints should be defined as key=ValueString pairs from Json data */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
-	void SetContentType(ERequestContentType::Type ContentType);
+	void SetContentType(ERequestContentType ContentType);
 
 	/** Set content type of the request for binary post data */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
@@ -136,10 +127,6 @@ public:
 	/** Sets optional header info */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
 	void SetHeader(const FString& HeaderName, const FString& HeaderValue);
-
-	/** Applies percent-encoding to text */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility")
-	static FString PercentEncode(const FString& Text);
 
 
 	//////////////////////////////////////////////////////////////////////////
@@ -183,9 +170,17 @@ public:
 
 
 	///////////////////////////////////////////////////////////////////////////
-	// Response data access
+	// Request/response data access
 
-	/** Get the responce code of the last query */
+	/** Get url of http request */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
+	FString GetURL();
+
+	/** Get status of http request */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
+	ERequestStatus GetStatus();
+
+	/** Get the response code of the last query */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
 	int32 GetResponseCode();
 
@@ -210,7 +205,7 @@ public:
 	virtual void ApplyURL(const FString& Url, UVaRestJsonObject *&Result, UObject* WorldContextObject, struct FLatentActionInfo LatentInfo);
 
 	/** Apply current internal setup to request and process it */
-	void ProcessRequest(TSharedRef<IHttpRequest> HttpRequest);
+	void ProcessRequest();
 
 
 	//////////////////////////////////////////////////////////////////////////
@@ -228,6 +223,37 @@ public:
 	/** Event occured when the request wasn't successfull */
 	UPROPERTY(BlueprintAssignable, Category = "VaRest|Event")
 	FOnRequestFail OnRequestFail;
+	
+	/** Event occured when the request has been completed */
+	FOnStaticRequestComplete OnStaticRequestComplete;
+	
+	/** Event occured when the request wasn't successfull */
+	FOnStaticRequestFail OnStaticRequestFail;
+	
+
+	//////////////////////////////////////////////////////////////////////////
+	// Tags
+
+public:
+	/** Add tag to this request */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility")
+	void AddTag(FName Tag);
+
+	/** 
+	 * Remove tag from this request 
+	 *
+	 * @return Number of removed elements 
+	 */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility")
+	int32 RemoveTag(FName Tag);
+
+	/** See if this request contains the supplied tag */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility")
+	bool HasTag(FName Tag) const;
+
+protected:
+	/** Array of tags that can be used for grouping and categorizing */
+	TArray<FName> Tags;
 
 
 	//////////////////////////////////////////////////////////////////////////
@@ -244,7 +270,7 @@ public:
 
 protected:
 	/** Latent action helper */
-	FVaRestLatentAction <UVaRestJsonObject*> *ContinueAction;
+	FVaRestLatentAction<UVaRestJsonObject*>* ContinueAction;
 
 	/** Internal request data stored as JSON */
 	UPROPERTY()
@@ -261,10 +287,10 @@ protected:
 	UVaRestJsonObject* ResponseJsonObj;
 
 	/** Verb for making request (GET,POST,etc) */
-	ERequestVerb::Type RequestVerb;
+	ERequestVerb RequestVerb;
 
 	/** Content type to be applied for request */
-	ERequestContentType::Type RequestContentType;
+	ERequestContentType RequestContentType;
 
 	/** Mapping of header section to values. Used to generate final header string for request */
 	TMap<FString, FString> RequestHeaders;
@@ -277,5 +303,8 @@ protected:
 
 	/** Custom verb that will be used with RequestContentType == CUSTOM */
 	FString CustomVerb;
+
+	/** Request we're currently processing */
+	TSharedRef<IHttpRequest> HttpRequest = FHttpModule::Get().CreateRequest();
 
 };

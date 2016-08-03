@@ -3,15 +3,6 @@
 #include "VaRestPluginPrivatePCH.h"
 #include "CoreMisc.h"
 
-template <class T> void FVaRestLatentAction<T>::Cancel()
-{
-	UObject *Obj = Request.Get();
-	if (Obj != nullptr)
-	{
-		((UVaRestRequestJSON*)Obj)->Cancel();
-	}
-}
-
 UVaRestRequestJSON::UVaRestRequestJSON(const class FObjectInitializer& PCIP)
   : Super(PCIP),
     BinaryContentType(TEXT("application/octet-stream"))
@@ -29,8 +20,8 @@ UVaRestRequestJSON* UVaRestRequestJSON::ConstructRequest(UObject* WorldContextOb
 
 UVaRestRequestJSON* UVaRestRequestJSON::ConstructRequestExt(
 	UObject* WorldContextObject, 
-	ERequestVerb::Type Verb, 
-	ERequestContentType::Type ContentType)
+	ERequestVerb Verb, 
+	ERequestContentType ContentType)
 {
 	UVaRestRequestJSON* Request = ConstructRequest(WorldContextObject);
 
@@ -40,7 +31,7 @@ UVaRestRequestJSON* UVaRestRequestJSON::ConstructRequestExt(
 	return Request;
 }
 
-void UVaRestRequestJSON::SetVerb(ERequestVerb::Type Verb)
+void UVaRestRequestJSON::SetVerb(ERequestVerb Verb)
 {
 	RequestVerb = Verb;
 }
@@ -50,7 +41,7 @@ void UVaRestRequestJSON::SetCustomVerb(FString Verb)
 	CustomVerb = Verb;
 }
 
-void UVaRestRequestJSON::SetContentType(ERequestContentType::Type ContentType)
+void UVaRestRequestJSON::SetContentType(ERequestContentType ContentType)
 {
 	RequestContentType = ContentType;
 }
@@ -65,40 +56,9 @@ void UVaRestRequestJSON::SetBinaryRequestContent(const TArray<uint8> &Bytes)
 	RequestBytes = Bytes;
 }
 
-
 void UVaRestRequestJSON::SetHeader(const FString& HeaderName, const FString& HeaderValue)
 {
 	RequestHeaders.Add(HeaderName, HeaderValue);
-}
-
-FString UVaRestRequestJSON::PercentEncode(const FString& Text)
-{
-	FString OutText = Text;
-
-	OutText = OutText.Replace(TEXT(" "), TEXT("%20"));
-	OutText = OutText.Replace(TEXT("!"), TEXT("%21"));
-	OutText = OutText.Replace(TEXT("\""), TEXT("%22"));
-	OutText = OutText.Replace(TEXT("#"), TEXT("%23"));
-	OutText = OutText.Replace(TEXT("$"), TEXT("%24"));
-	OutText = OutText.Replace(TEXT("&"), TEXT("%26"));
-	OutText = OutText.Replace(TEXT("'"), TEXT("%27"));
-	OutText = OutText.Replace(TEXT("("), TEXT("%28"));
-	OutText = OutText.Replace(TEXT(")"), TEXT("%29"));
-	OutText = OutText.Replace(TEXT("*"), TEXT("%2A"));
-	OutText = OutText.Replace(TEXT("+"), TEXT("%2B"));
-	OutText = OutText.Replace(TEXT(","), TEXT("%2C"));
-	OutText = OutText.Replace(TEXT("/"), TEXT("%2F"));
-	OutText = OutText.Replace(TEXT(":"), TEXT("%3A"));
-	OutText = OutText.Replace(TEXT(";"), TEXT("%3B"));
-	OutText = OutText.Replace(TEXT("="), TEXT("%3D"));
-	OutText = OutText.Replace(TEXT("?"), TEXT("%3F"));
-	OutText = OutText.Replace(TEXT("@"), TEXT("%40"));
-	OutText = OutText.Replace(TEXT("["), TEXT("%5B"));
-	OutText = OutText.Replace(TEXT("]"), TEXT("%5D"));
-	OutText = OutText.Replace(TEXT("{"), TEXT("%7B"));
-	OutText = OutText.Replace(TEXT("}"), TEXT("%7D"));
-
-	return OutText;
 }
 
 
@@ -113,7 +73,7 @@ void UVaRestRequestJSON::ResetData()
 
 void UVaRestRequestJSON::ResetRequestData()
 {
-	if (RequestJsonObj != NULL)
+	if (RequestJsonObj != nullptr)
 	{
 		RequestJsonObj->Reset();
 	}
@@ -121,11 +81,13 @@ void UVaRestRequestJSON::ResetRequestData()
 	{
 		RequestJsonObj = NewObject<UVaRestJsonObject>();
 	}
+
+	HttpRequest = FHttpModule::Get().CreateRequest();
 }
 
 void UVaRestRequestJSON::ResetResponseData()
 {
-	if (ResponseJsonObj != NULL)
+	if (ResponseJsonObj != nullptr)
 	{
 		ResponseJsonObj->Reset();
 	}
@@ -175,6 +137,16 @@ void UVaRestRequestJSON::SetResponseObject(UVaRestJsonObject* JsonObject)
 ///////////////////////////////////////////////////////////////////////////
 // Response data access
 
+FString UVaRestRequestJSON::GetURL()
+{
+	return HttpRequest->GetURL();
+}
+
+ERequestStatus UVaRestRequestJSON::GetStatus()
+{
+	return ERequestStatus((uint8)HttpRequest->GetStatus());
+}
+
 int32 UVaRestRequestJSON::GetResponseCode()
 {
 	return ResponseCode;
@@ -185,7 +157,7 @@ FString UVaRestRequestJSON::GetResponseHeader(const FString HeaderName)
 	FString Result;
 
 	FString* Header = ResponseHeaders.Find(HeaderName);
-	if (Header != NULL)
+	if (Header != nullptr)
 	{
 		Result = *Header;
 	}
@@ -209,15 +181,13 @@ TArray<FString> UVaRestRequestJSON::GetAllResponseHeaders()
 
 void UVaRestRequestJSON::ProcessURL(const FString& Url)
 {
-	TSharedRef<IHttpRequest> HttpRequest = FHttpModule::Get().CreateRequest();
 	HttpRequest->SetURL(Url);
 
-	ProcessRequest(HttpRequest);
+	ProcessRequest();
 }
 
 void UVaRestRequestJSON::ApplyURL(const FString& Url, UVaRestJsonObject *&Result, UObject* WorldContextObject, FLatentActionInfo LatentInfo)
 {
-	TSharedRef<IHttpRequest> HttpRequest = FHttpModule::Get().CreateRequest();
 	HttpRequest->SetURL(Url);
 
 	// Prepare latent action
@@ -226,7 +196,7 @@ void UVaRestRequestJSON::ApplyURL(const FString& Url, UVaRestJsonObject *&Result
 		FLatentActionManager& LatentActionManager = World->GetLatentActionManager();
 		FVaRestLatentAction<UVaRestJsonObject*> *Kont = LatentActionManager.FindExistingAction<FVaRestLatentAction<UVaRestJsonObject*>>(LatentInfo.CallbackTarget, LatentInfo.UUID);
 
-		if (Kont != NULL)
+		if (Kont != nullptr)
 		{
 			Kont->Cancel();
 			LatentActionManager.RemoveActionsForObject(LatentInfo.CallbackTarget);
@@ -235,10 +205,10 @@ void UVaRestRequestJSON::ApplyURL(const FString& Url, UVaRestJsonObject *&Result
 		LatentActionManager.AddNewAction(LatentInfo.CallbackTarget, LatentInfo.UUID, ContinueAction = new FVaRestLatentAction<UVaRestJsonObject*>(this, Result, LatentInfo));
 	}
 
-	ProcessRequest(HttpRequest);
+	ProcessRequest();
 }
 
-void UVaRestRequestJSON::ProcessRequest(TSharedRef<IHttpRequest> HttpRequest)
+void UVaRestRequestJSON::ProcessRequest()
 {
 	// Set verb
 	switch (RequestVerb)
@@ -286,7 +256,7 @@ void UVaRestRequestJSON::ProcessRequest(TSharedRef<IHttpRequest> HttpRequest)
 			if (!Key.IsEmpty() && !Value.IsEmpty())
 			{
 				UrlParams += ParamIdx == 0 ? "?" : "&";
-				UrlParams += UVaRestRequestJSON::PercentEncode(Key) + "=" + UVaRestRequestJSON::PercentEncode(Value);
+				UrlParams += UVaRestLibrary::PercentEncode(Key) + "=" + UVaRestLibrary::PercentEncode(Value);
 			}
 
 			ParamIdx++;
@@ -294,6 +264,8 @@ void UVaRestRequestJSON::ProcessRequest(TSharedRef<IHttpRequest> HttpRequest)
 
 		// Apply params
 		HttpRequest->SetURL(HttpRequest->GetURL() + UrlParams);
+
+		UE_LOG(LogVaRest, Log, TEXT("Request (urlencoded): %s %s %s"), *HttpRequest->GetVerb(), *HttpRequest->GetURL(), *UrlParams);
 
 		break;
 	}
@@ -313,7 +285,7 @@ void UVaRestRequestJSON::ProcessRequest(TSharedRef<IHttpRequest> HttpRequest)
 			if (!Key.IsEmpty() && !Value.IsEmpty())
 			{
 				UrlParams += ParamIdx == 0 ? "" : "&";
-				UrlParams += UVaRestRequestJSON::PercentEncode(Key) + "=" + UVaRestRequestJSON::PercentEncode(Value);
+				UrlParams += UVaRestLibrary::PercentEncode(Key) + "=" + UVaRestLibrary::PercentEncode(Value);
 			}
 
 			ParamIdx++;
@@ -322,12 +294,16 @@ void UVaRestRequestJSON::ProcessRequest(TSharedRef<IHttpRequest> HttpRequest)
 		// Apply params
 		HttpRequest->SetContentAsString(UrlParams);
 
+		UE_LOG(LogVaRest, Log, TEXT("Request (url body): %s %s %s"), *HttpRequest->GetVerb(), *HttpRequest->GetURL(), *UrlParams);
+
 		break;
 	}
 	case ERequestContentType::binary:
 	{
 		HttpRequest->SetHeader(TEXT("Content-Type"), BinaryContentType);
 		HttpRequest->SetContent(RequestBytes);
+
+		UE_LOG(LogVaRest, Log, TEXT("Request (binary): %s %s"), *HttpRequest->GetVerb(), *HttpRequest->GetURL());
 
 		break;
 	}
@@ -342,6 +318,8 @@ void UVaRestRequestJSON::ProcessRequest(TSharedRef<IHttpRequest> HttpRequest)
 
 		// Set Json content
 		HttpRequest->SetContentAsString(OutputString);
+
+		UE_LOG(LogVaRest, Log, TEXT("Request (json): %s %s %s"), *HttpRequest->GetVerb(), *HttpRequest->GetURL(), *OutputString);
 
 		break;
 	}
@@ -372,13 +350,17 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 	// Be sure that we have no data from previous response
 	ResetResponseData();
 
+	// Save response code first as int32
+	ResponseCode = Response->GetResponseCode();
+
 	// Check we have result to process futher
 	if (!bWasSuccessful)
 	{
-		UE_LOG(LogVaRest, Error, TEXT("Request failed: %s"), *Request->GetURL());
+		UE_LOG(LogVaRest, Error, TEXT("Request failed (%d): %s"), ResponseCode, *Request->GetURL());
 
 		// Broadcast the result event
 		OnRequestFail.Broadcast(this);
+		OnStaticRequestFail.Broadcast(this);
 
 		return;
 	}
@@ -386,11 +368,8 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 	// Save response data as a string
 	ResponseContent = Response->GetContentAsString();
 
-	// Save response code as int32
-	ResponseCode = Response->GetResponseCode();
-
 	// Log response state
-	UE_LOG(LogVaRest, Log, TEXT("Response (%d): %s"), Response->GetResponseCode(), *Response->GetContentAsString());
+	UE_LOG(LogVaRest, Log, TEXT("Response (%d): %s"), ResponseCode, *ResponseContent);
 
 	// Process response headers
 	TArray<FString> Headers = Response->GetAllHeaders();
@@ -424,6 +403,7 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 
 	// Broadcast the result event
 	OnRequestComplete.Broadcast(this);
+	OnStaticRequestComplete.Broadcast(this);
 
 	// Finish the latent action
 	if (ContinueAction)
@@ -433,4 +413,26 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 
           K->Call(ResponseJsonObj);
 	}
+}
+
+
+//////////////////////////////////////////////////////////////////////////
+// Tags
+
+void UVaRestRequestJSON::AddTag(FName Tag)
+{
+	if (Tag != NAME_None)
+	{
+		Tags.AddUnique(Tag);
+	}
+}
+
+int32 UVaRestRequestJSON::RemoveTag(FName Tag)
+{
+	return Tags.Remove(Tag);
+}
+
+bool UVaRestRequestJSON::HasTag(FName Tag) const
+{
+	return (Tag != NAME_None) && Tags.Contains(Tag);
 }
