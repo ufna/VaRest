@@ -3,6 +3,15 @@
 #include "VaRestPluginPrivatePCH.h"
 #include "CoreMisc.h"
 
+template <class T> void FVaRestLatentAction<T>::Cancel()
+{
+	UObject *Obj = Request.Get();
+	if (Obj != nullptr)
+	{
+		((UVaRestRequestJSON*)Obj)->Cancel();
+	}
+}
+
 UVaRestRequestJSON::UVaRestRequestJSON(const class FObjectInitializer& PCIP)
   : Super(PCIP),
     BinaryContentType(TEXT("application/octet-stream"))
