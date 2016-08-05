@@ -359,6 +359,12 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 	// Be sure that we have no data from previous response
 	ResetResponseData();
 
+	// Check we have a response and save response code as int32
+	if(Response.IsValid())
+	{
+		ResponseCode = Response->GetResponseCode();
+	}
+
 	// Check we have result to process futher
 	if (!bWasSuccessful || !Response.IsValid())
 	{
@@ -370,9 +376,6 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 
 		return;
 	}
-
-	// Save response code first as int32
-	ResponseCode = Response->GetResponseCode();
 
 	// Save response data as a string
 	ResponseContent = Response->GetContentAsString();
