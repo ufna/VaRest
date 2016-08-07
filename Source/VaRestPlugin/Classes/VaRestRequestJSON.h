@@ -65,15 +65,6 @@ public:
 	T &Result;
 };
 
-template <class T> void FVaRestLatentAction<T>::Cancel()
-{
-	UObject *Obj = Request.Get();
-	if (Obj != nullptr)
-	{
-		((UVaRestRequestJSON*)Obj)->Cancel();
-	}
-}
-
 
 /** Generate a delegates for callback events */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnRequestComplete, class UVaRestRequestJSON*, Request);
