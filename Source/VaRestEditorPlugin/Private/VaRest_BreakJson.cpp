@@ -4,6 +4,8 @@
 #include "VaRestEditorPluginPrivatePCH.h"
 #include "VaRest_BreakJson.h"
 
+#include "Runtime/Launch/Resources/Version.h"
+
 #define LOCTEXT_NAMESPACE "VaRest_BreakJson"
 
 class FKCHandler_BreakJson : public FNodeHandlingFunctor
@@ -55,7 +57,11 @@ public:
 
 				FBPTerminal* FieldNameTerm = Context.CreateLocalTerminal(ETerminalSpecification::TS_Literal);
 				FieldNameTerm->Type.PinCategory = CompilerContext.GetSchema()->PC_String;
+#if ENGINE_MINOR_VERSION >= 13
+				FieldNameTerm->SourcePin = Pin;
+#else
 				FieldNameTerm->Source = Pin;
+#endif
 				FieldNameTerm->Name = FieldName;
 				FieldNameTerm->TextLiteral = FText::FromString(FieldName);
 
