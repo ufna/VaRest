@@ -328,7 +328,7 @@ void UVaRestRequestJSON::ProcessRequest()
 		// Set Json content
 		HttpRequest->SetContentAsString(OutputString);
 
-		UE_LOG(LogVaRest, Log, TEXT("Request (json): %s %s %s"), *HttpRequest->GetVerb(), *HttpRequest->GetURL(), *OutputString);
+		UE_LOG(LogVaRest, Log, TEXT("Request (json): %s %s %sJSON(%s%s%s)JSON"), *HttpRequest->GetVerb(), *HttpRequest->GetURL(), LINE_TERMINATOR, LINE_TERMINATOR, *OutputString, LINE_TERMINATOR);
 
 		break;
 	}
@@ -381,7 +381,7 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 	ResponseContent = Response->GetContentAsString();
 
 	// Log response state
-	UE_LOG(LogVaRest, Log, TEXT("Response (%d): %s"), ResponseCode, *ResponseContent);
+	UE_LOG(LogVaRest, Log, TEXT("Response (%d): %sJSON(%s%s%s)JSON"), ResponseCode, LINE_TERMINATOR, LINE_TERMINATOR, *ResponseContent, LINE_TERMINATOR);
 
 	// Process response headers
 	TArray<FString> Headers = Response->GetAllHeaders();
