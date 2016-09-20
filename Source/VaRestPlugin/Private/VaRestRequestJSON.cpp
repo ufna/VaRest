@@ -55,14 +55,19 @@ void UVaRestRequestJSON::SetContentType(ERequestContentType ContentType)
 	RequestContentType = ContentType;
 }
 
-void UVaRestRequestJSON::SetBinaryContentType(const FString &ContentType)
+void UVaRestRequestJSON::SetBinaryContentType(const FString& ContentType)
 {
 	BinaryContentType = ContentType;
 }
 
-void UVaRestRequestJSON::SetBinaryRequestContent(const TArray<uint8> &Bytes)
+void UVaRestRequestJSON::SetBinaryRequestContent(const TArray<uint8>& Bytes)
 {
 	RequestBytes = Bytes;
+}
+
+void UVaRestRequestJSON::SetStringRequestContent(const FString& Content)
+{
+	StringRequestContent = Content;
 }
 
 void UVaRestRequestJSON::SetHeader(const FString& HeaderName, const FString& HeaderValue)
@@ -92,6 +97,9 @@ void UVaRestRequestJSON::ResetRequestData()
 	}
 
 	HttpRequest = FHttpModule::Get().CreateRequest();
+
+	RequestBytes.Empty();
+	StringRequestContent.Empty();
 }
 
 void UVaRestRequestJSON::ResetResponseData()
@@ -274,7 +282,13 @@ void UVaRestRequestJSON::ProcessRequest()
 		// Apply params
 		HttpRequest->SetURL(HttpRequest->GetURL() + UrlParams);
 
-		UE_LOG(LogVaRest, Log, TEXT("Request (urlencoded): %s %s %s"), *HttpRequest->GetVerb(), *HttpRequest->GetURL(), *UrlParams);
+		// Add optional string content
+		if (!StringRequestContent.IsEmpty())
+		{
+			HttpRequest->SetContentAsString(StringRequestContent);
+		}
+
+		UE_LOG(LogVaRest, Log, TEXT("Request (urlencoded): %s %s %s"), *HttpRequest->GetVerb(), *HttpRequest->GetURL(), *UrlParams, *StringRequestContent);
 
 		break;
 	}
