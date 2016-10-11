@@ -198,14 +198,24 @@ TArray<FString> UVaRestRequestJSON::GetAllResponseHeaders()
 
 void UVaRestRequestJSON::ProcessURL(const FString& Url)
 {
-	HttpRequest->SetURL(Url);
+	// Be sure to trim URL because it can break links on iOS
+	FString TrimmedUrl = Url;
+	TrimmedUrl.Trim();
+	TrimmedUrl.TrimTrailing();
+
+	HttpRequest->SetURL(TrimmedUrl);
 
 	ProcessRequest();
 }
 
 void UVaRestRequestJSON::ApplyURL(const FString& Url, UVaRestJsonObject *&Result, UObject* WorldContextObject, FLatentActionInfo LatentInfo)
 {
-	HttpRequest->SetURL(Url);
+	// Be sure to trim URL because it can break links on iOS
+	FString TrimmedUrl = Url;
+	TrimmedUrl.Trim();
+	TrimmedUrl.TrimTrailing();
+
+	HttpRequest->SetURL(TrimmedUrl);
 
 	// Prepare latent action
 	if (UWorld* World = GEngine->GetWorldFromContextObject(WorldContextObject))
