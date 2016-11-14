@@ -34,7 +34,7 @@ struct FVaRestCallResponse
 		, WorldContextObject(nullptr)
 	{
 	}
-	
+
 };
 
 /**
@@ -72,6 +72,25 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility", meta = (DisplayName = "Base64 Decode"))
 	static bool Base64Decode(const FString& Source, FString& Dest);
+
+	/**
+	 * Encodes a byte array into a Base64 string
+	 *
+	 * @param Dara		The data to convert
+	 * @return			A string that encodes the binary data in a way that can be safely transmitted via various Internet protocols
+	 */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility", meta = (DisplayName = "Base64 Encode Data"))
+	static bool Base64EncodeData(const TArray<uint8>& Data, FString& Dest);
+
+	/**
+	 * Decodes a Base64 string into a byte array
+	 *
+	 * @param Source	The stringified data to convert
+	 * @param Dest		The out buffer that will be filled with the decoded data
+	 * @return			True if the buffer was decoded, false if it failed to decode
+	 */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility", meta = (DisplayName = "Base64 Decode Data"))
+	static bool Base64DecodeData(const FString& Source, TArray<uint8>& Dest);
 
 
 	//////////////////////////////////////////////////////////////////////////
