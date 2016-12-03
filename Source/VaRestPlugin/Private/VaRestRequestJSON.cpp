@@ -16,6 +16,8 @@ UVaRestRequestJSON::UVaRestRequestJSON(const class FObjectInitializer& PCIP)
   : Super(PCIP),
     BinaryContentType(TEXT("application/octet-stream"))
 {
+	ContinueAction = nullptr;
+
 	RequestVerb = ERequestVerb::GET;
 	RequestContentType = ERequestContentType::x_www_form_urlencoded_url;
 
