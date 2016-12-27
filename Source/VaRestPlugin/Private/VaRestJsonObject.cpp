@@ -217,7 +217,7 @@ void UVaRestJsonObject::SetBoolField(const FString& FieldName, bool InValue)
 	JsonObj->SetBoolField(FieldName, InValue);
 }
 
-TArray<UVaRestJsonValue*> UVaRestJsonObject::GetArrayField(const FString& FieldName)
+TArray<UVaRestJsonValue*> UVaRestJsonObject::GetArrayField(const FString& FieldName) const
 {
 	if (!JsonObj->HasTypedField<EJson::Array>(FieldName))
 	{
@@ -338,7 +338,7 @@ void UVaRestJsonObject::SetObjectField(const FString& FieldName, UVaRestJsonObje
 //////////////////////////////////////////////////////////////////////////
 // Array fields helpers (uniform arrays)
 
-TArray<float> UVaRestJsonObject::GetNumberArrayField(const FString& FieldName)
+TArray<float> UVaRestJsonObject::GetNumberArrayField(const FString& FieldName) const
 {
 	if (!JsonObj->HasTypedField<EJson::Array>(FieldName))
 	{
@@ -383,7 +383,7 @@ void UVaRestJsonObject::SetNumberArrayField(const FString& FieldName, const TArr
 	JsonObj->SetArrayField(FieldName, EntriesArray);
 }
 
-TArray<FString> UVaRestJsonObject::GetStringArrayField(const FString& FieldName)
+TArray<FString> UVaRestJsonObject::GetStringArrayField(const FString& FieldName) const
 {
 	if (!JsonObj->HasTypedField<EJson::Array>(FieldName))
 	{
@@ -427,7 +427,7 @@ void UVaRestJsonObject::SetStringArrayField(const FString& FieldName, const TArr
 	JsonObj->SetArrayField(FieldName, EntriesArray);
 }
 
-TArray<bool> UVaRestJsonObject::GetBoolArrayField(const FString& FieldName)
+TArray<bool> UVaRestJsonObject::GetBoolArrayField(const FString& FieldName) const
 {
 	if (!JsonObj->HasTypedField<EJson::Array>(FieldName))
 	{
@@ -471,7 +471,7 @@ void UVaRestJsonObject::SetBoolArrayField(const FString& FieldName, const TArray
 	JsonObj->SetArrayField(FieldName, EntriesArray);
 }
 
-TArray<UVaRestJsonObject*> UVaRestJsonObject::GetObjectArrayField(const FString& FieldName)
+TArray<UVaRestJsonObject*> UVaRestJsonObject::GetObjectArrayField(const FString& FieldName) const
 {
 	if (!JsonObj->HasTypedField<EJson::Array>(FieldName))
 	{
