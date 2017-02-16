@@ -2,10 +2,7 @@
 
 #pragma once
 
-#include "Delegate.h"
-#include "Http.h"
-#include "Map.h"
-#include "Json.h"
+#include "Engine/LatentActionManager.h"
 
 #include "VaRestTypes.h"
 #include "VaRestRequestJSON.generated.h"

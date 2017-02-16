@@ -3,7 +3,14 @@
 
 #pragma once
 
+#include "Runtime/Launch/Resources/Version.h"
+
+#if ENGINE_MINOR_VERSION >= 15
+#include "CoreMinimal.h"
+#else
 #include "Engine.h"
+#endif
+
 #include "K2Node.h"
 
 #include "VaRest_BreakJson.generated.h"
