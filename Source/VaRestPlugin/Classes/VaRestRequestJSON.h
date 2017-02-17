@@ -3,6 +3,7 @@
 #pragma once
 
 #include "Engine/LatentActionManager.h"
+#include "Http.h"
 
 #include "VaRestTypes.h"
 #include "VaRestRequestJSON.generated.h"
