@@ -180,7 +180,7 @@ int32 UVaRestJsonObject::GetIntegerField(const FString& FieldName) const
 	if (!JsonObj.IsValid() || !JsonObj->HasTypedField<EJson::Number>(FieldName))
 	{
 		UE_LOG(LogVaRest, Warning, TEXT("No field with name %s of type Number"), *FieldName);
-		return 0.0f;
+		return 0;
 	}
 
 	return JsonObj->GetIntegerField(FieldName);
