@@ -95,6 +95,14 @@ class VARESTPLUGIN_API UVaRestJsonObject : public UObject
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	void SetNumberField(const FString& FieldName, float Number);
 
+	/** Get the field named FieldName as an Integer. Ensures that the field is present and is of type Json number. */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	int32 GetIntegerField(const FString& FieldName) const;
+
+	/** Add a field named FieldName with Integer as value. */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	void SetIntegerField(const FString& FieldName, int32 Number);
+
 	/** Get the field named FieldName as a string. */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	FString GetStringField(const FString& FieldName) const;
