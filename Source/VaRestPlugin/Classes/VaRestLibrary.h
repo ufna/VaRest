@@ -99,12 +99,13 @@ public:
 public:
 	/** Easy way to process http requests */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility", meta = (WorldContext = "WorldContextObject"))
-	static void CallURL(UObject* WorldContextObject, const FString& URL, ERequestVerb Verb, ERequestContentType ContentType, UVaRestJsonObject* VaRestJson, const FVaRestCallDelegate& Callback);
+	void CallURL(UObject* WorldContextObject, const FString& URL, ERequestVerb Verb, ERequestContentType ContentType, UVaRestJsonObject* VaRestJson, const FVaRestCallDelegate& Callback);
 
 	/** Called when URL is processed (one for both success/unsuccess events)*/
-	static void OnCallComplete(UVaRestRequestJSON* Request);
+	void OnCallComplete(UVaRestRequestJSON* Request);
 
 private:
-	static TMap<UVaRestRequestJSON*, FVaRestCallResponse> RequestMap;
+	UPROPERTY()
+	TMap<UVaRestRequestJSON*, FVaRestCallResponse> RequestMap;
 
 };
