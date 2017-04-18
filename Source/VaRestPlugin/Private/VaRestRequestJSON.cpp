@@ -199,15 +199,19 @@ TArray<FString> UVaRestRequestJSON::GetAllResponseHeaders()
 //////////////////////////////////////////////////////////////////////////
 // URL processing
 
-void UVaRestRequestJSON::ProcessURL(const FString& Url)
+void UVaRestRequestJSON::SetURL(const FString& Url)
 {
 	// Be sure to trim URL because it can break links on iOS
 	FString TrimmedUrl = Url;
 	TrimmedUrl.Trim();
 	TrimmedUrl.TrimTrailing();
-
+	
 	HttpRequest->SetURL(TrimmedUrl);
+}
 
+void UVaRestRequestJSON::ProcessURL(const FString& Url)
+{
+	SetURL(Url);
 	ProcessRequest();
 }
 
@@ -233,6 +237,17 @@ void UVaRestRequestJSON::ApplyURL(const FString& Url, UVaRestJsonObject *&Result
 		}
 
 		LatentActionManager.AddNewAction(LatentInfo.CallbackTarget, LatentInfo.UUID, ContinueAction = new FVaRestLatentAction<UVaRestJsonObject*>(this, Result, LatentInfo));
+	}
+
+	ProcessRequest();
+}
+
+void UVaRestRequestJSON::ExecuteProcessRequest()
+{
+	if (HttpRequest->GetURL().Len() == 0)
+	{
+		UE_LOG(LogVaRest, Error, TEXT("Request execution attempt with empty URL"));
+		return;
 	}
 
 	ProcessRequest();
