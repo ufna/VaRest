@@ -194,14 +194,21 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
 	virtual void ProcessURL(const FString& Url = TEXT("http://alyamkin.com"));
 
+	/** Setting request url */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
+	void SetUrl(const FString& Url = TEXT("http://alyamkin.com"));
+
 	/** Open URL in latent mode */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request", meta = (Latent, LatentInfo = "LatentInfo", HidePin = "WorldContextObject", DefaultToSelf = "WorldContextObject"))
 	virtual void ApplyURL(const FString& Url, UVaRestJsonObject *&Result, UObject* WorldContextObject, struct FLatentActionInfo LatentInfo);
 
+	/** Check url and execute process request */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
+	virtual void ExecuteProcessRequest();
+
 protected:
 	/** Apply current internal setup to request and process it */
 	void ProcessRequest();
-
 
 	//////////////////////////////////////////////////////////////////////////
 	// Request callbacks
