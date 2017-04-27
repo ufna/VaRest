@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "VaRestEditorPluginPrivatePCH.h"
+
 #include "ModuleManager.h"
 
 class FVaRestEditorPluginModule : public IModuleInterface
