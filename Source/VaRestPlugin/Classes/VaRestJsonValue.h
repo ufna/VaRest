@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "VaRestPluginPrivatePCH.h"
+
 #include "VaRestJsonValue.generated.h"
 
 class UVaRestJsonObject;

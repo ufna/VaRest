@@ -1,6 +1,6 @@
 // Copyright 2014 Vladimir Alyamkin. All Rights Reserved.
 
-#include "VaRestPluginPrivatePCH.h"
+#include "VaRestJsonValue.h"
 
 UVaRestJsonValue::UVaRestJsonValue(const class FObjectInitializer& PCIP)
 	: Super(PCIP)

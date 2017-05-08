@@ -1,6 +1,6 @@
 // Copyright 2014 Vladimir Alyamkin. All Rights Reserved.
 
-#include "VaRestPluginPrivatePCH.h"
+#include "VaRestRequestJSON.h"
 #include "CoreMisc.h"
 
 template <class T> void FVaRestLatentAction<T>::Cancel()

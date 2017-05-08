@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "VaRestPluginPrivatePCH.h"
+
 #include "Engine/LatentActionManager.h"
 #include "Http.h"
 
