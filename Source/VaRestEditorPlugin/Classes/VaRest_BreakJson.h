@@ -3,8 +3,6 @@
 
 #pragma once
 
-#include "VaRestEditorPluginPrivatePCH.h"
-
 #include "Runtime/Launch/Resources/Version.h"
 
 #if ENGINE_MINOR_VERSION >= 15

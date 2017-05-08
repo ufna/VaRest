@@ -2,8 +2,6 @@
 
 #pragma once
 
-#include "VaRestPluginPrivatePCH.h"
-
 #include "Kismet/BlueprintFunctionLibrary.h"
 
 #include "VaRestTypes.h"
