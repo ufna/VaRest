@@ -2,8 +2,8 @@
 	"FileVersion" : 3,
 	
 	"FriendlyName" : "VaRest",
-	"Version" : 16,
-	"VersionName" : "1.1-r16",
+	"Version" : 17,
+	"VersionName" : "1.1-r17",
 	"CreatedBy" : "Vladimir Alyamkin",
 	"CreatedByURL" : "http://alyamkin.com",
 	"EngineVersion" : "4.11.0",
