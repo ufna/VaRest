@@ -69,7 +69,7 @@ public:
  				FBlueprintCompiledStatement& Statement = Context.AppendStatementForNode(Node);
 				FName FunctionName;
 
-				bool bIsArray = Pin->PinType.bIsArray;
+				bool bIsArray = Pin->PinType.IsArray();
 
 				if (FieldType == CompilerContext.GetSchema()->PC_Boolean)
 				{
