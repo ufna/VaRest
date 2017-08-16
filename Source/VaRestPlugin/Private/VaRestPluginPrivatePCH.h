@@ -2,17 +2,24 @@
 
 #pragma once
 
+#include "Runtime/Launch/Resources/Version.h"
+
+#if ENGINE_MINOR_VERSION >= 15
+#include "CoreMinimal.h"
+#include "EngineDefines.h"
+#include "Engine/Engine.h"
+#include "UObject/Object.h"
+#include "UObject/ScriptMacros.h"
+#else
 #include "CoreUObject.h"
 #include "Engine.h"
+#endif
 
-#include "Delegate.h"
 #include "Http.h"
 #include "Map.h"
 #include "Json.h"
 
 #include "LatentActions.h"
-#include "Core.h"
-#include "Engine.h"
 #include "SharedPointer.h"
 
 // You should place include statements to your module's private header files here.  You only need to

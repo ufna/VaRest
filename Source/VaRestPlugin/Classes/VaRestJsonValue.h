@@ -29,7 +29,7 @@ namespace EVaJson
  * Blueprintable FJsonValue wrapper
  */
 UCLASS(BlueprintType, Blueprintable)
-class UVaRestJsonValue : public UObject
+class VARESTPLUGIN_API UVaRestJsonValue : public UObject
 {
 	GENERATED_UCLASS_BODY()
 

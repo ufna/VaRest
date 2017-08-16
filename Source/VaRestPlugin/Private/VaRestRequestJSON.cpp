@@ -16,6 +16,8 @@ UVaRestRequestJSON::UVaRestRequestJSON(const class FObjectInitializer& PCIP)
   : Super(PCIP),
     BinaryContentType(TEXT("application/octet-stream"))
 {
+	ContinueAction = nullptr;
+
 	RequestVerb = ERequestVerb::GET;
 	RequestContentType = ERequestContentType::x_www_form_urlencoded_url;
 
@@ -55,14 +57,19 @@ void UVaRestRequestJSON::SetContentType(ERequestContentType ContentType)
 	RequestContentType = ContentType;
 }
 
-void UVaRestRequestJSON::SetBinaryContentType(const FString &ContentType)
+void UVaRestRequestJSON::SetBinaryContentType(const FString& ContentType)
 {
 	BinaryContentType = ContentType;
 }
 
-void UVaRestRequestJSON::SetBinaryRequestContent(const TArray<uint8> &Bytes)
+void UVaRestRequestJSON::SetBinaryRequestContent(const TArray<uint8>& Bytes)
 {
 	RequestBytes = Bytes;
+}
+
+void UVaRestRequestJSON::SetStringRequestContent(const FString& Content)
+{
+	StringRequestContent = Content;
 }
 
 void UVaRestRequestJSON::SetHeader(const FString& HeaderName, const FString& HeaderValue)
@@ -91,7 +98,11 @@ void UVaRestRequestJSON::ResetRequestData()
 		RequestJsonObj = NewObject<UVaRestJsonObject>();
 	}
 
-	HttpRequest = FHttpModule::Get().CreateRequest();
+	// See issue #90
+	// HttpRequest = FHttpModule::Get().CreateRequest();
+
+	RequestBytes.Empty();
+	StringRequestContent.Empty();
 }
 
 void UVaRestRequestJSON::ResetResponseData()
@@ -188,16 +199,30 @@ TArray<FString> UVaRestRequestJSON::GetAllResponseHeaders()
 //////////////////////////////////////////////////////////////////////////
 // URL processing
 
+void UVaRestRequestJSON::SetURL(const FString& Url)
+{
+	// Be sure to trim URL because it can break links on iOS
+	FString TrimmedUrl = Url;
+	TrimmedUrl.Trim();
+	TrimmedUrl.TrimTrailing();
+	
+	HttpRequest->SetURL(TrimmedUrl);
+}
+
 void UVaRestRequestJSON::ProcessURL(const FString& Url)
 {
-	HttpRequest->SetURL(Url);
-
+	SetURL(Url);
 	ProcessRequest();
 }
 
 void UVaRestRequestJSON::ApplyURL(const FString& Url, UVaRestJsonObject *&Result, UObject* WorldContextObject, FLatentActionInfo LatentInfo)
 {
-	HttpRequest->SetURL(Url);
+	// Be sure to trim URL because it can break links on iOS
+	FString TrimmedUrl = Url;
+	TrimmedUrl.Trim();
+	TrimmedUrl.TrimTrailing();
+
+	HttpRequest->SetURL(TrimmedUrl);
 
 	// Prepare latent action
 	if (UWorld* World = GEngine->GetWorldFromContextObject(WorldContextObject))
@@ -212,6 +237,17 @@ void UVaRestRequestJSON::ApplyURL(const FString& Url, UVaRestJsonObject *&Result
 		}
 
 		LatentActionManager.AddNewAction(LatentInfo.CallbackTarget, LatentInfo.UUID, ContinueAction = new FVaRestLatentAction<UVaRestJsonObject*>(this, Result, LatentInfo));
+	}
+
+	ProcessRequest();
+}
+
+void UVaRestRequestJSON::ExecuteProcessRequest()
+{
+	if (HttpRequest->GetURL().Len() == 0)
+	{
+		UE_LOG(LogVaRest, Error, TEXT("Request execution attempt with empty URL"));
+		return;
 	}
 
 	ProcessRequest();
@@ -274,7 +310,13 @@ void UVaRestRequestJSON::ProcessRequest()
 		// Apply params
 		HttpRequest->SetURL(HttpRequest->GetURL() + UrlParams);
 
-		UE_LOG(LogVaRest, Log, TEXT("Request (urlencoded): %s %s %s"), *HttpRequest->GetVerb(), *HttpRequest->GetURL(), *UrlParams);
+		// Add optional string content
+		if (!StringRequestContent.IsEmpty())
+		{
+			HttpRequest->SetContentAsString(StringRequestContent);
+		}
+
+		UE_LOG(LogVaRest, Log, TEXT("Request (urlencoded): %s %s %s"), *HttpRequest->GetVerb(), *HttpRequest->GetURL(), *UrlParams, *StringRequestContent);
 
 		break;
 	}
@@ -328,7 +370,7 @@ void UVaRestRequestJSON::ProcessRequest()
 		// Set Json content
 		HttpRequest->SetContentAsString(OutputString);
 
-		UE_LOG(LogVaRest, Log, TEXT("Request (json): %s %s %s"), *HttpRequest->GetVerb(), *HttpRequest->GetURL(), *OutputString);
+		UE_LOG(LogVaRest, Log, TEXT("Request (json): %s %s %sJSON(%s%s%s)JSON"), *HttpRequest->GetVerb(), *HttpRequest->GetURL(), LINE_TERMINATOR, LINE_TERMINATOR, *OutputString, LINE_TERMINATOR);
 
 		break;
 	}
@@ -381,7 +423,7 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 	ResponseContent = Response->GetContentAsString();
 
 	// Log response state
-	UE_LOG(LogVaRest, Log, TEXT("Response (%d): %s"), ResponseCode, *ResponseContent);
+	UE_LOG(LogVaRest, Log, TEXT("Response (%d): %sJSON(%s%s%s)JSON"), ResponseCode, LINE_TERMINATOR, LINE_TERMINATOR, *ResponseContent, LINE_TERMINATOR);
 
 	// Process response headers
 	TArray<FString> Headers = Response->GetAllHeaders();

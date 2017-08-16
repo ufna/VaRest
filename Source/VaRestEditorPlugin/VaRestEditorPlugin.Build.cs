@@ -4,7 +4,7 @@ using UnrealBuildTool;
 
 public class VaRestEditorPlugin : ModuleRules
 {
-	public VaRestEditorPlugin(TargetInfo Target)
+	public VaRestEditorPlugin(ReadOnlyTargetRules Target) : base(Target)
 	{
 		
 		PublicIncludePaths.AddRange(

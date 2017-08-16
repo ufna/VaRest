@@ -9,7 +9,7 @@
 FString UVaRestLibrary::PercentEncode(const FString& Source)
 {
 	FString OutText = Source;
-
+	
 	OutText = OutText.Replace(TEXT(" "), TEXT("%20"));
 	OutText = OutText.Replace(TEXT("!"), TEXT("%21"));
 	OutText = OutText.Replace(TEXT("\""), TEXT("%22"));
@@ -32,7 +32,7 @@ FString UVaRestLibrary::PercentEncode(const FString& Source)
 	OutText = OutText.Replace(TEXT("]"), TEXT("%5D"));
 	OutText = OutText.Replace(TEXT("{"), TEXT("%7B"));
 	OutText = OutText.Replace(TEXT("}"), TEXT("%7D"));
-
+	
 	return OutText;
 }
 
@@ -42,6 +42,22 @@ FString UVaRestLibrary::Base64Encode(const FString& Source)
 }
 
 bool UVaRestLibrary::Base64Decode(const FString& Source, FString& Dest)
+{
+	return FBase64::Decode(Source, Dest);
+}
+
+bool UVaRestLibrary::Base64EncodeData(const TArray<uint8>& Data, FString& Dest)
+{
+	if (Data.Num() > 0)
+	{
+		Dest = FBase64::Encode(Data);
+		return true;
+	}
+	
+	return false;
+}
+
+bool UVaRestLibrary::Base64DecodeData(const FString& Source, TArray<uint8>& Dest)
 {
 	return FBase64::Decode(Source, Dest);
 }
@@ -60,7 +76,7 @@ void UVaRestLibrary::CallURL(UObject* WorldContextObject, const FString& URL, ER
 		UE_LOG(LogVaRest, Error, TEXT("UVaRestLibrary: Wrong world context"))
 		return;
 	}
-
+	
 	// Check we have valid data json
 	if (VaRestJson == nullptr)
 	{

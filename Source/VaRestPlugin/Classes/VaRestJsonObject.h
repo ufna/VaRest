@@ -71,7 +71,7 @@ class VARESTPLUGIN_API UVaRestJsonObject : public UObject
 
 	/** Get the field named FieldName as a Json Array */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
-	TArray<UVaRestJsonValue*> GetArrayField(const FString& FieldName);
+	TArray<UVaRestJsonValue*> GetArrayField(const FString& FieldName) const;
 
 	/** Set an ObjectField named FieldName and value of Json Array */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
@@ -94,6 +94,14 @@ class VARESTPLUGIN_API UVaRestJsonObject : public UObject
 	 * Attn.!! float used instead of double to make the function blueprintable! */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	void SetNumberField(const FString& FieldName, float Number);
+
+	/** Get the field named FieldName as an Integer. Ensures that the field is present and is of type Json number. */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	int32 GetIntegerField(const FString& FieldName) const;
+
+	/** Add a field named FieldName with Integer as value. */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	void SetIntegerField(const FString& FieldName, int32 Number);
 
 	/** Get the field named FieldName as a string. */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
@@ -126,7 +134,7 @@ class VARESTPLUGIN_API UVaRestJsonObject : public UObject
 	/** Get the field named FieldName as a Number Array. Use it only if you're sure that array is uniform!
 	 * Attn.!! float used instead of double to make the function blueprintable! */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
-	TArray<float> GetNumberArrayField(const FString& FieldName);
+	TArray<float> GetNumberArrayField(const FString& FieldName) const;
 
 	/** Set an ObjectField named FieldName and value of Number Array
 	 * Attn.!! float used instead of double to make the function blueprintable! */
@@ -135,7 +143,7 @@ class VARESTPLUGIN_API UVaRestJsonObject : public UObject
 
 	/** Get the field named FieldName as a String Array. Use it only if you're sure that array is uniform! */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
-	TArray<FString> GetStringArrayField(const FString& FieldName);
+	TArray<FString> GetStringArrayField(const FString& FieldName) const;
 
 	/** Set an ObjectField named FieldName and value of String Array */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
@@ -143,7 +151,7 @@ class VARESTPLUGIN_API UVaRestJsonObject : public UObject
 
 	/** Get the field named FieldName as a Bool Array. Use it only if you're sure that array is uniform! */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
-	TArray<bool> GetBoolArrayField(const FString& FieldName);
+	TArray<bool> GetBoolArrayField(const FString& FieldName) const;
 
 	/** Set an ObjectField named FieldName and value of Bool Array */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
@@ -151,7 +159,7 @@ class VARESTPLUGIN_API UVaRestJsonObject : public UObject
 
 	/** Get the field named FieldName as an Object Array. Use it only if you're sure that array is uniform! */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
-	TArray<UVaRestJsonObject*> GetObjectArrayField(const FString& FieldName);
+	TArray<UVaRestJsonObject*> GetObjectArrayField(const FString& FieldName) const;
 
 	/** Set an ObjectField named FieldName and value of Ob Array */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
