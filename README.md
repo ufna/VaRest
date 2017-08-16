@@ -13,7 +13,7 @@ Key features:
 
 Check the [Wiki](https://hiazma.atlassian.net/wiki/display/VAR) for plugin usage examples and installation notes.
 
-Current version: **1.1 R 16** (UE 4.11-4.13)
+Current version: **1.1 R 18** (UE 4.16-4.17)
 
 ![SCREENSHOT](SCREENSHOT.jpg)
 
@@ -23,5 +23,5 @@ Legal info
 
 Unreal® is a trademark or registered trademark of Epic Games, Inc. in the United States of America and elsewhere.
 
-Unreal® Engine, Copyright 1998 – 2014, Epic Games, Inc. All rights reserved.
+Unreal® Engine, Copyright 1998 – 2017, Epic Games, Inc. All rights reserved.
 
