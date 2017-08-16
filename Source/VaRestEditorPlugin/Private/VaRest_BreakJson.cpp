@@ -69,7 +69,11 @@ public:
  				FBlueprintCompiledStatement& Statement = Context.AppendStatementForNode(Node);
 				FName FunctionName;
 
+#if ENGINE_MINOR_VERSION >= 17
 				bool bIsArray = Pin->PinType.IsArray();
+#else
+				bool bIsArray = Pin->PinType.bIsArray;
+#endif
 
 				if (FieldType == CompilerContext.GetSchema()->PC_Boolean)
 				{
