@@ -1,5 +1,6 @@
 // Copyright 2014 Vladimir Alyamkin. All Rights Reserved.
 
+#include "VaRestRequestJSON.h"
 #include "VaRestPluginPrivatePCH.h"
 #include "CoreMisc.h"
 
