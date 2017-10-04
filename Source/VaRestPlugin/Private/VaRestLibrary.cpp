@@ -66,8 +66,6 @@ bool UVaRestLibrary::Base64DecodeData(const FString& Source, TArray<uint8>& Dest
 //////////////////////////////////////////////////////////////////////////
 // Easy URL processing
 
-TMap<UVaRestRequestJSON*, FVaRestCallResponse> UVaRestLibrary::RequestMap;
-
 void UVaRestLibrary::CallURL(UObject* WorldContextObject, const FString& URL, ERequestVerb Verb, ERequestContentType ContentType, UVaRestJsonObject* VaRestJson, const FVaRestCallDelegate& Callback)
 {
 	UWorld* World = GEngine->GetWorldFromContextObject(WorldContextObject);
@@ -94,8 +92,8 @@ void UVaRestLibrary::CallURL(UObject* WorldContextObject, const FString& URL, ER
 	Response.WorldContextObject = WorldContextObject;
 	Response.Callback = Callback;
 	
-	Response.CompleteDelegateHandle = Request->OnStaticRequestComplete.AddStatic(&UVaRestLibrary::OnCallComplete);
-	Response.FailDelegateHandle = Request->OnStaticRequestFail.AddStatic(&UVaRestLibrary::OnCallComplete);
+	Response.CompleteDelegateHandle = Request->OnStaticRequestComplete.AddUObject(this, &UVaRestLibrary::OnCallComplete);
+	Response.FailDelegateHandle = Request->OnStaticRequestFail.AddUObject(this, &UVaRestLibrary::OnCallComplete);
 	
 	RequestMap.Add(Request, Response);
 	
