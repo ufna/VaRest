@@ -3,6 +3,8 @@
 #pragma once
 
 #include "Kismet/BlueprintFunctionLibrary.h"
+#include "Object.h"
+#include "IDelegateInstance.h"
 
 #include "VaRestTypes.h"
 #include "VaRestLibrary.generated.h"
