@@ -166,16 +166,17 @@ class VARESTPLUGIN_API UVaRestJsonObject : public UObject
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	void SetObjectArrayField(const FString& FieldName, const TArray<UVaRestJsonObject*>& ObjectArray);
 
+
 	//////////////////////////////////////////////////////////////////////////
 	// Deserialize
 	
+public:
 	/** Deserialize byte content to json */
 	void DeserializeFromUTF8Bytes(const ANSICHAR* Bytes, int32 Size);
 	
 	/** Deserialize byte content to json */
 	void DeserializeFromTCHARBytes(const TCHAR* Bytes, int32 Size);
 	
-public:
 	/** Deserialize byte stream from reader */
 	void DecodeFromArchive(TUniquePtr<FArchive>& Reader);
 	
@@ -184,6 +185,7 @@ public:
 	
 	static bool WriteStringToArchive(FArchive& Ar, const TCHAR* StrPtr, int64 Len);
 	
+
 	//////////////////////////////////////////////////////////////////////////
 	// Data
 
