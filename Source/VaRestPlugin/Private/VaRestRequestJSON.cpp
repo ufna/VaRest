@@ -419,11 +419,10 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 		return;
 	}
 
-	// Save response data as a string
-	ResponseContent = Response->GetContentAsString();
-
+#if !(PLATFORM_IOS || PLATFORM_ANDROID)
 	// Log response state
-	UE_LOG(LogVaRest, Log, TEXT("Response (%d): %sJSON(%s%s%s)JSON"), ResponseCode, LINE_TERMINATOR, LINE_TERMINATOR, *ResponseContent, LINE_TERMINATOR);
+	UE_LOG(LogVaRest, Log, TEXT("Response (%d): %sJSON(%s%s%s)JSON"), ResponseCode, LINE_TERMINATOR, LINE_TERMINATOR, *Response->GetContentAsString(), LINE_TERMINATOR);
+#endif
 
 	// Process response headers
 	TArray<FString> Headers = Response->GetAllHeaders();
@@ -436,14 +435,20 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 			ResponseHeaders.Add(Key, Value);
 		}
 	}
-
+	
 	// Try to deserialize data to JSON
-	TSharedRef<TJsonReader<TCHAR>> JsonReader = TJsonReaderFactory<TCHAR>::Create(ResponseContent);
-	FJsonSerializer::Deserialize(JsonReader, ResponseJsonObj->GetRootObject());
-
+	const TArray<uint8>& Bytes = Response->GetContent();
+	ResponseJsonObj->DeserializeFromUTF8Bytes((const ANSICHAR*) Bytes.GetData(), Bytes.Num());
+	
 	// Decide whether the request was successful
 	bIsValidJsonResponse = bWasSuccessful && ResponseJsonObj->GetRootObject().IsValid();
 
+	if (!bIsValidJsonResponse)
+	{
+		// Save response data as a string
+		ResponseContent = Response->GetContentAsString();
+	}
+	
 	// Log errors
 	if (!bIsValidJsonResponse)
 	{
