@@ -263,7 +263,7 @@ protected:
 	// Data
 
 public:
-	/** Request response stored as a string */
+	/** Request response stored as a string (Attn.! For invalid responses only, empty for valid one - use json response object instead */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "VaRest|Response")
 	FString ResponseContent;
 
