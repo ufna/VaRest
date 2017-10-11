@@ -3,6 +3,7 @@
 #pragma once
 
 #include "Engine/LatentActionManager.h"
+#include "LatentActions.h"
 #include "Http.h"
 
 #include "VaRestTypes.h"
@@ -156,6 +157,10 @@ public:
 	/** Get the Response Json object */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
 	UVaRestJsonObject* GetResponseObject();
+
+	/** @temp */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
+	UVaRestJsonObject* GetResponseRootObject();
 
 	/** Set the Response Json object */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")

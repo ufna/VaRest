@@ -145,6 +145,22 @@ void UVaRestRequestJSON::SetRequestObject(UVaRestJsonObject* JsonObject)
 
 UVaRestJsonObject* UVaRestRequestJSON::GetResponseObject()
 {
+	// @temp for tests
+	if (ResponseJsonObj && ResponseJsonObj->IsValidLowLevel())
+	{
+		if (ResponseJsonObj->HasField("body"))
+		{
+			return ResponseJsonObj->GetObjectField("body");
+		}
+
+		return ResponseJsonObj;
+	}
+
+	return ResponseJsonObj;
+}
+
+UVaRestJsonObject* UVaRestRequestJSON::GetResponseRootObject()
+{
 	return ResponseJsonObj;
 }
 
