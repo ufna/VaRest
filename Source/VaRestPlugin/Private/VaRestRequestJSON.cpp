@@ -3,6 +3,8 @@
 #include "VaRestPluginPrivatePCH.h"
 #include "CoreMisc.h"
 
+#include "Runtime/Launch/Resources/Version.h"
+
 template <class T> void FVaRestLatentAction<T>::Cancel()
 {
 	UObject *Obj = Request.Get();
@@ -203,8 +205,14 @@ void UVaRestRequestJSON::SetURL(const FString& Url)
 {
 	// Be sure to trim URL because it can break links on iOS
 	FString TrimmedUrl = Url;
+
+#if ENGINE_MINOR_VERSION >= 18
+	TrimmedUrl.TrimStartInline();
+	TrimmedUrl.TrimEndInline();
+#else
 	TrimmedUrl.Trim();
 	TrimmedUrl.TrimTrailing();
+#endif
 	
 	HttpRequest->SetURL(TrimmedUrl);
 }
@@ -219,8 +227,14 @@ void UVaRestRequestJSON::ApplyURL(const FString& Url, UVaRestJsonObject *&Result
 {
 	// Be sure to trim URL because it can break links on iOS
 	FString TrimmedUrl = Url;
+
+#if ENGINE_MINOR_VERSION >= 18
+	TrimmedUrl.TrimStartInline();
+	TrimmedUrl.TrimEndInline();
+#else
 	TrimmedUrl.Trim();
 	TrimmedUrl.TrimTrailing();
+#endif
 
 	HttpRequest->SetURL(TrimmedUrl);
 
