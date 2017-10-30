@@ -1,6 +1,5 @@
 // Copyright 2015-2017 Mail.Ru Group. All Rights Reserved.
 
-#include "VaRestPluginPrivatePCH.h"
 #include "VaRestJsonParser.h"
 #include "VaRestJsonObject.h"
 #include "Dom/JsonObject.h"

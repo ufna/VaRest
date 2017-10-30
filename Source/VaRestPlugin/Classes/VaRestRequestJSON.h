@@ -2,7 +2,7 @@
 
 #pragma once
 
-#include "Engine/LatentActionManager.h"
+#include "LatentActions.h"
 #include "Http.h"
 
 #include "VaRestTypes.h"
