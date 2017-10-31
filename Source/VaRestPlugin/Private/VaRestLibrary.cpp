@@ -2,6 +2,8 @@
 
 #include "VaRestLibrary.h"
 #include "VaRestRequestJSON.h"
+#include "VaRestJsonObject.h"
+#include "VaRestPluginPrivatePCH.h"
 #include "Base64.h"
 
 //////////////////////////////////////////////////////////////////////////
