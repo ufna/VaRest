@@ -8,6 +8,8 @@ namespace UnrealBuildTool.Rules
 	{
 		public VaRestPlugin(ReadOnlyTargetRules Target) : base(Target)
 		{
+            PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
+
             PrivateIncludePaths.AddRange(
 				new string[] {
 					"VaRestPlugin/Private",

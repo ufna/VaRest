@@ -28,6 +28,3 @@
 
 DECLARE_LOG_CATEGORY_EXTERN(LogVaRest, Log, All);
 
-#include "IVaRestPlugin.h"
-
-#include "VaRestPluginClasses.h"

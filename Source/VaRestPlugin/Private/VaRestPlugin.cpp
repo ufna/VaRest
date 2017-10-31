@@ -1,6 +1,6 @@
 // Copyright 2014 Vladimir Alyamkin. All Rights Reserved.
 
-#include "VaRestPluginPrivatePCH.h"
+#include "VaRestPlugin.h"
 
 class FVaRestPlugin : public IVaRestPlugin
 {
