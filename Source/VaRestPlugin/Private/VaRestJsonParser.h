@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "Json.h"
+
 class FJsonValueNonConstArray : public FJsonValueArray
 {
 public:
