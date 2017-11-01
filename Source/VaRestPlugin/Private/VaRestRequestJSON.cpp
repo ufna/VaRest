@@ -8,6 +8,8 @@
 #include "CoreMisc.h"
 #include "Runtime/Launch/Resources/Version.h"
 
+FString UVaRestRequestJSON::DeprecatedResponseString(TEXT("DEPRECATED: Please use GetResponseContentAsString() instead"));
+
 template <class T> void FVaRestLatentAction<T>::Cancel()
 {
 	UObject *Obj = Request.Get();
@@ -125,6 +127,9 @@ void UVaRestRequestJSON::ResetResponseData()
 	ResponseCode = -1;
 
 	bIsValidJsonResponse = false;
+
+	// #127 Reset string to deprecated state
+	ResponseContent = DeprecatedResponseString;
 }
 
 void UVaRestRequestJSON::Cancel()
@@ -511,4 +516,37 @@ int32 UVaRestRequestJSON::RemoveTag(FName Tag)
 bool UVaRestRequestJSON::HasTag(FName Tag) const
 {
 	return (Tag != NAME_None) && Tags.Contains(Tag);
+}
+
+
+//////////////////////////////////////////////////////////////////////////
+// Data
+
+FString UVaRestRequestJSON::GetResponseContentAsString(bool bCacheResponseContent)
+{
+	// Check we have valide response
+	if (!bIsValidJsonResponse || !ResponseJsonObj || !ResponseJsonObj->IsValidLowLevel())
+	{
+		// Discard previous cached string if we had one
+		ResponseContent = DeprecatedResponseString;
+
+		return TEXT("Invalid response");
+	}
+
+	// Check if we should re-genetate it in runtime
+	if (!bCacheResponseContent)
+	{
+		UE_LOG(LogVaRest, Warning, TEXT("%s: Use of uncashed getter could be slow"), *VA_FUNC_LINE);
+		return ResponseJsonObj->EncodeJson();
+	}
+	
+	// Check that we haven't cached content yet
+	if (ResponseContent == DeprecatedResponseString)
+	{
+		UE_LOG(LogVaRest, Warning, TEXT("%s: Response content string is cached"), *VA_FUNC_LINE);
+		ResponseContent = ResponseJsonObj->EncodeJson();
+	}
+
+	// Return previously cached content now
+	return ResponseContent;
 }
