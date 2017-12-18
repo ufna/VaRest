@@ -125,6 +125,7 @@ void UVaRestRequestJSON::ResetResponseData()
 
 	ResponseHeaders.Empty();
 	ResponseCode = -1;
+	ResponseSize = 0;
 
 	bIsValidJsonResponse = false;
 
@@ -247,7 +248,7 @@ void UVaRestRequestJSON::ApplyURL(const FString& Url, UVaRestJsonObject *&Result
 	HttpRequest->SetURL(TrimmedUrl);
 
 	// Prepare latent action
-	if (UWorld* World = GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::LogAndReturnNull))
+	if (UWorld* World = GEngine->GetWorldFromContextObjectChecked(WorldContextObject))
 	{
 		FLatentActionManager& LatentActionManager = World->GetLatentActionManager();
 		FVaRestLatentAction<UVaRestJsonObject*> *Kont = LatentActionManager.FindExistingAction<FVaRestLatentAction<UVaRestJsonObject*>>(LatentInfo.CallbackTarget, LatentInfo.UUID);
@@ -460,15 +461,16 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 	
 	// Try to deserialize data to JSON
 	const TArray<uint8>& Bytes = Response->GetContent();
-	ResponseJsonObj->DeserializeFromUTF8Bytes((const ANSICHAR*) Bytes.GetData(), Bytes.Num());
+	ResponseSize = ResponseJsonObj->DeserializeFromUTF8Bytes((const ANSICHAR*) Bytes.GetData(), Bytes.Num());
 	
 	// Decide whether the request was successful
 	bIsValidJsonResponse = bWasSuccessful && ResponseJsonObj->GetRootObject().IsValid();
-
+	
 	if (!bIsValidJsonResponse)
 	{
 		// Save response data as a string
 		ResponseContent = Response->GetContentAsString();
+		ResponseSize = ResponseContent.GetAllocatedSize();
 	}
 	
 	// Log errors

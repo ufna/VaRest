@@ -264,7 +264,7 @@ protected:
 	// Data
 
 public:
-	/** 
+	/**
 	 * Get request response stored as a string 
 	 * @param bCacheResponseContent - Set true if you plan to use it few times to prevent deserialization each time
 	 */
@@ -272,6 +272,10 @@ public:
 	FString GetResponseContentAsString(bool bCacheResponseContent = true);
 
 public:
+	/** Response size */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "VaRest|Response")
+	int32 ResponseSize;
+	
 	/** DEPRECATED: Please use GetResponseContentAsString() instead */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "VaRest|Response")
 	FString ResponseContent;
@@ -279,7 +283,7 @@ public:
 	/** Is the response valid JSON? */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "VaRest|Response")
 	bool bIsValidJsonResponse;
-
+	
 protected:
 	/** Default value for deprecated ResponseContent variable */
 	static FString DeprecatedResponseString;

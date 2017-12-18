@@ -547,7 +547,7 @@ void UVaRestJsonObject::SetObjectArrayField(const FString& FieldName, const TArr
 //////////////////////////////////////////////////////////////////////////
 // Deserialize
 
-void UVaRestJsonObject::DeserializeFromUTF8Bytes(const ANSICHAR* Bytes, int32 Size)
+int32 UVaRestJsonObject::DeserializeFromUTF8Bytes(const ANSICHAR* Bytes, int32 Size)
 {
 	FJSONReader Reader;
 	
@@ -568,9 +568,10 @@ void UVaRestJsonObject::DeserializeFromUTF8Bytes(const ANSICHAR* Bytes, int32 Si
 	}
 	
 	SetRootObject(Reader.State.Root);
+	return Reader.State.Size;
 }
 
-void UVaRestJsonObject::DeserializeFromTCHARBytes(const TCHAR* Bytes, int32 Size)
+int32 UVaRestJsonObject::DeserializeFromTCHARBytes(const TCHAR* Bytes, int32 Size)
 {
 	FJSONReader Reader;
 	
@@ -584,6 +585,7 @@ void UVaRestJsonObject::DeserializeFromTCHARBytes(const TCHAR* Bytes, int32 Size
 	}
 	
 	SetRootObject(Reader.State.Root);
+	return Reader.State.Size;
 }
 
 void UVaRestJsonObject::DecodeFromArchive(TUniquePtr<FArchive>& Reader)

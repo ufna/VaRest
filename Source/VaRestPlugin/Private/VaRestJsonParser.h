@@ -92,6 +92,9 @@ struct FJSONState
 	/** Las quote for string */
 	TCHAR Quote;
 	
+	/** Size */
+	int32 Size;
+	
 	/** Default constructor */
 	FJSONState();
 	

@@ -21,6 +21,8 @@ FJSONState::FJSONState()
 	Tokens.Reserve(64);
 	
 	Tokens.Add(EJSONToken::ROOT);
+	
+	Size = 0;
 }
 
 EJSONToken FJSONState::GetToken(int32 Index)
@@ -118,7 +120,10 @@ void FJSONState::PopValue(bool bCheckType)
 					}
 					case EJson::String:
 					{
-						((FJsonValueNonConstString*) Value.Get())->AsNonConstString() = Data;
+						FJsonValueNonConstString* JsonValueString = ((FJsonValueNonConstString*) Value.Get());
+						JsonValueString->AsNonConstString() = Data;
+						JsonValueString->AsNonConstString().Shrink();
+						Size += JsonValueString->AsNonConstString().GetAllocatedSize();
 						break;
 					}
 					case EJson::Number:
@@ -165,7 +170,10 @@ void FJSONState::PopValue(bool bCheckType)
 				{
 					if (Key.Len() > 0)
 					{
-						Container->AsObject()->SetField(Key, Value);
+						FString KeyCopy = Key;
+						KeyCopy.Shrink();
+						Container->AsObject()->SetField(KeyCopy, Value);
+						Size += KeyCopy.GetAllocatedSize();
 						ClearKey();
 					}
 					else
@@ -230,6 +238,7 @@ TSharedPtr<FJsonValueObject> FJSONState::PushObject()
 {
 	TSharedPtr<FJsonValueObject> Result(new FJsonValueObject(TSharedPtr<FJsonObject>(new FJsonObject())));
 	Objects.Add(Result);
+	Size += sizeof(TSharedPtr<FJsonValueObject>) + sizeof(FJsonValueObject);
 	return Result;
 }
 
@@ -237,6 +246,7 @@ TSharedPtr<FJsonValueObject> FJSONState::PushObject(TSharedPtr<FJsonObject> Obje
 {
 	TSharedPtr<FJsonValueObject> Result(new FJsonValueObject(Object));
 	Objects.Add(Result);
+	Size += sizeof(TSharedPtr<FJsonValueObject>) + sizeof(FJsonValueObject);
 	return Result;
 }
 
@@ -245,6 +255,7 @@ TSharedPtr<FJsonValueNonConstArray> FJSONState::PushArray()
 	TArray<TSharedPtr<FJsonValue>> Empty;
 	TSharedPtr<FJsonValueNonConstArray> Result(new FJsonValueNonConstArray(Empty));
 	Objects.Add(Result);
+	Size += sizeof(TSharedPtr<FJsonValueNonConstArray>) + sizeof(FJsonValueNonConstArray);
 	return Result;
 }
 
@@ -252,6 +263,7 @@ TSharedPtr<FJsonValueNonConstBoolean> FJSONState::PushBoolean()
 {
 	TSharedPtr<FJsonValueNonConstBoolean> Result(new FJsonValueNonConstBoolean(false));
 	Objects.Add(Result);
+	Size += sizeof(TSharedPtr<FJsonValueNonConstBoolean>) + sizeof(FJsonValueNonConstBoolean);
 	return Result;
 }
 
@@ -259,6 +271,7 @@ TSharedPtr<FJsonValueNull> FJSONState::PushNull()
 {
 	TSharedPtr<FJsonValueNull> Result(new FJsonValueNull());
 	Objects.Add(Result);
+	Size += sizeof(TSharedPtr<FJsonValueNull>) + sizeof(FJsonValueNull);
 	return Result;
 }
 
@@ -266,6 +279,7 @@ TSharedPtr<FJsonValueNonConstNumber> FJSONState::PushNumber()
 {
 	TSharedPtr<FJsonValueNonConstNumber> Result(new FJsonValueNonConstNumber(0.f));
 	Objects.Add(Result);
+	Size += sizeof(TSharedPtr<FJsonValueNonConstNumber>) + sizeof(FJsonValueNonConstNumber);
 	return Result;
 }
 
@@ -273,6 +287,7 @@ TSharedPtr<FJsonValueNonConstString> FJSONState::PushString()
 {
 	TSharedPtr<FJsonValueNonConstString> Result(new FJsonValueNonConstString(TEXT("")));
 	Objects.Add(Result);
+	Size += sizeof(TSharedPtr<FJsonValueNonConstString>) + sizeof(FJsonValueNonConstString);
 	return Result;
 }
 
@@ -726,6 +741,7 @@ bool FJSONReader::Read(const TCHAR Char)
 	if (State.bError)
 	{
 		State.Root = TSharedPtr<FJsonObject>(nullptr);
+		State.Size = 0;
 		return false;
 	}
 	
