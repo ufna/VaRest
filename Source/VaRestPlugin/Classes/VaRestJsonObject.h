@@ -172,10 +172,10 @@ class VARESTPLUGIN_API UVaRestJsonObject : public UObject
 	
 public:
 	/** Deserialize byte content to json */
-	void DeserializeFromUTF8Bytes(const ANSICHAR* Bytes, int32 Size);
+	int32 DeserializeFromUTF8Bytes(const ANSICHAR* Bytes, int32 Size);
 	
 	/** Deserialize byte content to json */
-	void DeserializeFromTCHARBytes(const TCHAR* Bytes, int32 Size);
+	int32 DeserializeFromTCHARBytes(const TCHAR* Bytes, int32 Size);
 	
 	/** Deserialize byte stream from reader */
 	void DecodeFromArchive(TUniquePtr<FArchive>& Reader);

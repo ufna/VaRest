@@ -268,6 +268,10 @@ protected:
 	// Data
 
 public:
+	/** Response size */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "VaRest|Response")
+	int32 ResponseSize;
+	
 	/** Request response stored as a string (Attn.! For invalid responses only, empty for valid one - use json response object instead */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "VaRest|Response")
 	FString ResponseContent;
@@ -275,7 +279,7 @@ public:
 	/** Is the response valid JSON? */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "VaRest|Response")
 	bool bIsValidJsonResponse;
-
+	
 protected:
 	/** Latent action helper */
 	FVaRestLatentAction<UVaRestJsonObject*>* ContinueAction;
