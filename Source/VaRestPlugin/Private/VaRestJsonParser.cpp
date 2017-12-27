@@ -128,10 +128,32 @@ void FJSONState::PopValue(bool bCheckType)
 					}
 					case EJson::Number:
 					{
-						auto LowerCase = Data.ToLower();
-						if (LowerCase.IsNumeric())
+						FString LowerCase = Data.ToLower();
+						int32 ePosition = INDEX_NONE;
+						LowerCase.FindChar('e', ePosition);
+						if (ePosition == INDEX_NONE)
 						{
-							((FJsonValueNonConstNumber*) Value.Get())->AsNonConstNumber() = FCString::Atod(*LowerCase);
+							if (LowerCase.IsNumeric())
+							{
+								((FJsonValueNonConstNumber*) Value.Get())->AsNonConstNumber() = FCString::Atod(*LowerCase);
+							}
+							else
+							{
+								bError = true;
+							}
+						}
+						else if (LowerCase.Len() > ePosition + 2)
+						{
+							FString Left = LowerCase.Left(ePosition);
+							FString Rigth = LowerCase.Right(LowerCase.Len() - ePosition - 1);
+							if (Left.IsNumeric() && Rigth.IsNumeric())
+							{
+								((FJsonValueNonConstNumber*) Value.Get())->AsNonConstNumber() = FCString::Atod(*Left) * FMath::Pow(10.f, FCString::Atoi(*Rigth));
+							}
+							else
+							{
+								bError = true;
+							}
 						}
 						else
 						{
