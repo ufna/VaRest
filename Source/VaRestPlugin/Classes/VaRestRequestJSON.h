@@ -329,6 +329,7 @@ protected:
 	TSharedRef<IHttpRequest> HttpRequest = FHttpModule::Get().CreateRequest();
 	
 public:
-	/** Returns reference to internal request object. */
+	/** Returns reference to internal request object */
 	TSharedRef<IHttpRequest> GetHttpRequest() const { return HttpRequest; };
+	
 };
