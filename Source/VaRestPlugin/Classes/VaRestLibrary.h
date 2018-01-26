@@ -97,7 +97,10 @@ public:
 	// File system integration
 
 public:
-	/** Load JSON from formatted text file */
+	/** 
+	 * Load JSON from formatted text file
+	 * @param Path		File name relative to the Content folder
+	 */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility", meta = (WorldContext = "WorldContextObject"))
 	static class UVaRestJsonObject* LoadJsonFromFile(UObject* WorldContextObject, const FString& Path);
 
