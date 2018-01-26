@@ -94,6 +94,15 @@ public:
 
 
 	//////////////////////////////////////////////////////////////////////////
+	// File system integration
+
+public:
+	/** Load JSON from formatted text file */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility", meta = (WorldContext = "WorldContextObject"))
+	static class UVaRestJsonObject* LoadJsonFromFile(UObject* WorldContextObject, const FString& Path);
+
+
+	//////////////////////////////////////////////////////////////////////////
 	// Easy URL processing
 
 public:
