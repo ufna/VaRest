@@ -1,7 +1,14 @@
 // Copyright 2014 Vladimir Alyamkin. All Rights Reserved.
 
+#include "VaRestRequestJSON.h"
+#include "VaRestJsonObject.h"
+#include "VaRestLibrary.h"
 #include "VaRestPluginPrivatePCH.h"
+
 #include "CoreMisc.h"
+#include "Runtime/Launch/Resources/Version.h"
+
+FString UVaRestRequestJSON::DeprecatedResponseString(TEXT("DEPRECATED: Please use GetResponseContentAsString() instead"));
 
 template <class T> void FVaRestLatentAction<T>::Cancel()
 {
@@ -118,8 +125,12 @@ void UVaRestRequestJSON::ResetResponseData()
 
 	ResponseHeaders.Empty();
 	ResponseCode = -1;
+	ResponseSize = 0;
 
 	bIsValidJsonResponse = false;
+
+	// #127 Reset string to deprecated state
+	ResponseContent = DeprecatedResponseString;
 }
 
 void UVaRestRequestJSON::Cancel()
@@ -203,8 +214,14 @@ void UVaRestRequestJSON::SetURL(const FString& Url)
 {
 	// Be sure to trim URL because it can break links on iOS
 	FString TrimmedUrl = Url;
+
+#if ENGINE_MINOR_VERSION >= 18
+	TrimmedUrl.TrimStartInline();
+	TrimmedUrl.TrimEndInline();
+#else
 	TrimmedUrl.Trim();
 	TrimmedUrl.TrimTrailing();
+#endif
 	
 	HttpRequest->SetURL(TrimmedUrl);
 }
@@ -219,13 +236,19 @@ void UVaRestRequestJSON::ApplyURL(const FString& Url, UVaRestJsonObject *&Result
 {
 	// Be sure to trim URL because it can break links on iOS
 	FString TrimmedUrl = Url;
+
+#if ENGINE_MINOR_VERSION >= 18
+	TrimmedUrl.TrimStartInline();
+	TrimmedUrl.TrimEndInline();
+#else
 	TrimmedUrl.Trim();
 	TrimmedUrl.TrimTrailing();
+#endif
 
 	HttpRequest->SetURL(TrimmedUrl);
 
 	// Prepare latent action
-	if (UWorld* World = GEngine->GetWorldFromContextObject(WorldContextObject))
+	if (UWorld* World = GEngine->GetWorldFromContextObjectChecked(WorldContextObject))
 	{
 		FLatentActionManager& LatentActionManager = World->GetLatentActionManager();
 		FVaRestLatentAction<UVaRestJsonObject*> *Kont = LatentActionManager.FindExistingAction<FVaRestLatentAction<UVaRestJsonObject*>>(LatentInfo.CallbackTarget, LatentInfo.UUID);
@@ -419,11 +442,10 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 		return;
 	}
 
-	// Save response data as a string
-	ResponseContent = Response->GetContentAsString();
-
+#if !(PLATFORM_IOS || PLATFORM_ANDROID)
 	// Log response state
-	UE_LOG(LogVaRest, Log, TEXT("Response (%d): %sJSON(%s%s%s)JSON"), ResponseCode, LINE_TERMINATOR, LINE_TERMINATOR, *ResponseContent, LINE_TERMINATOR);
+	UE_LOG(LogVaRest, Log, TEXT("Response (%d): %sJSON(%s%s%s)JSON"), ResponseCode, LINE_TERMINATOR, LINE_TERMINATOR, *Response->GetContentAsString(), LINE_TERMINATOR);
+#endif
 
 	// Process response headers
 	TArray<FString> Headers = Response->GetAllHeaders();
@@ -436,14 +458,21 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 			ResponseHeaders.Add(Key, Value);
 		}
 	}
-
+	
 	// Try to deserialize data to JSON
-	TSharedRef<TJsonReader<TCHAR>> JsonReader = TJsonReaderFactory<TCHAR>::Create(ResponseContent);
-	FJsonSerializer::Deserialize(JsonReader, ResponseJsonObj->GetRootObject());
-
+	const TArray<uint8>& Bytes = Response->GetContent();
+	ResponseSize = ResponseJsonObj->DeserializeFromUTF8Bytes((const ANSICHAR*) Bytes.GetData(), Bytes.Num());
+	
 	// Decide whether the request was successful
 	bIsValidJsonResponse = bWasSuccessful && ResponseJsonObj->GetRootObject().IsValid();
-
+	
+	if (!bIsValidJsonResponse)
+	{
+		// Save response data as a string
+		ResponseContent = Response->GetContentAsString();
+		ResponseSize = ResponseContent.GetAllocatedSize();
+	}
+	
 	// Log errors
 	if (!bIsValidJsonResponse)
 	{
@@ -489,4 +518,37 @@ int32 UVaRestRequestJSON::RemoveTag(FName Tag)
 bool UVaRestRequestJSON::HasTag(FName Tag) const
 {
 	return (Tag != NAME_None) && Tags.Contains(Tag);
+}
+
+
+//////////////////////////////////////////////////////////////////////////
+// Data
+
+FString UVaRestRequestJSON::GetResponseContentAsString(bool bCacheResponseContent)
+{
+	// Check we have valide response
+	if (!bIsValidJsonResponse || !ResponseJsonObj || !ResponseJsonObj->IsValidLowLevel())
+	{
+		// Discard previous cached string if we had one
+		ResponseContent = DeprecatedResponseString;
+
+		return TEXT("Invalid response");
+	}
+
+	// Check if we should re-genetate it in runtime
+	if (!bCacheResponseContent)
+	{
+		UE_LOG(LogVaRest, Warning, TEXT("%s: Use of uncashed getter could be slow"), *VA_FUNC_LINE);
+		return ResponseJsonObj->EncodeJson();
+	}
+	
+	// Check that we haven't cached content yet
+	if (ResponseContent == DeprecatedResponseString)
+	{
+		UE_LOG(LogVaRest, Warning, TEXT("%s: Response content string is cached"), *VA_FUNC_LINE);
+		ResponseContent = ResponseJsonObj->EncodeJson();
+	}
+
+	// Return previously cached content now
+	return ResponseContent;
 }

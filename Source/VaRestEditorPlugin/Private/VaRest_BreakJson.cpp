@@ -1,11 +1,17 @@
 // Copyright 2015 Vladimir Alyamkin. All Rights Reserved.
 // Original code by https://github.com/unktomi
 
-#include "VaRestEditorPluginPrivatePCH.h"
 #include "VaRest_BreakJson.h"
 
-#include "Runtime/Launch/Resources/Version.h"
+#include "KismetCompiler.h"
+#include "EditorCategoryUtils.h"
 #include "EdGraphUtilities.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphNodeUtils.h" // for FNodeTextCache
+#include "BlueprintNodeSpawner.h"
+#include "BlueprintActionDatabaseRegistrar.h"
+
+#include "Runtime/Launch/Resources/Version.h"
 
 #define LOCTEXT_NAMESPACE "VaRest_BreakJson"
 

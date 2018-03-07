@@ -6,6 +6,7 @@
 #include "VaRestJsonValue.generated.h"
 
 class UVaRestJsonObject;
+class FJsonValue;
 
 /**
  * Represents all the types a Json Value can be.

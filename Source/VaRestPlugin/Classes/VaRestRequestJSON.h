@@ -3,6 +3,7 @@
 #pragma once
 
 #include "Engine/LatentActionManager.h"
+#include "LatentActions.h"
 #include "Http.h"
 
 #include "VaRestTypes.h"
@@ -210,6 +211,7 @@ protected:
 	/** Apply current internal setup to request and process it */
 	void ProcessRequest();
 
+
 	//////////////////////////////////////////////////////////////////////////
 	// Request callbacks
 
@@ -262,13 +264,29 @@ protected:
 	// Data
 
 public:
-	/** Request response stored as a string */
+	/**
+	 * Get request response stored as a string 
+	 * @param bCacheResponseContent - Set true if you plan to use it few times to prevent deserialization each time
+	 */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
+	FString GetResponseContentAsString(bool bCacheResponseContent = true);
+
+public:
+	/** Response size */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "VaRest|Response")
+	int32 ResponseSize;
+	
+	/** DEPRECATED: Please use GetResponseContentAsString() instead */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "VaRest|Response")
 	FString ResponseContent;
 
 	/** Is the response valid JSON? */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "VaRest|Response")
 	bool bIsValidJsonResponse;
+	
+protected:
+	/** Default value for deprecated ResponseContent variable */
+	static FString DeprecatedResponseString;
 
 protected:
 	/** Latent action helper */
@@ -309,5 +327,9 @@ protected:
 
 	/** Request we're currently processing */
 	TSharedRef<IHttpRequest> HttpRequest = FHttpModule::Get().CreateRequest();
-
+	
+public:
+	/** Returns reference to internal request object */
+	TSharedRef<IHttpRequest> GetHttpRequest() const { return HttpRequest; };
+	
 };
