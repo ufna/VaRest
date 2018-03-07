@@ -1,6 +1,5 @@
 // Copyright 2016 Vladimir Alyamkin. All Rights Reserved.
 
-#include "VaRestLibrary.h"
 #include "VaRestPluginPrivatePCH.h"
 #include "Base64.h"
 

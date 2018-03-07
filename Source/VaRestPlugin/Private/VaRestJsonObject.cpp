@@ -1,11 +1,6 @@
 // Copyright 2014 Vladimir Alyamkin. All Rights Reserved.
 
-#include "VaRestJsonObject.h"
 #include "VaRestPluginPrivatePCH.h"
-#include "JsonSerializer.h"
-#include "JsonValue.h"
-#include "VaRestJsonValue.h"
-#include "Array.h"
 
 typedef TJsonWriterFactory< TCHAR, TCondensedJsonPrintPolicy<TCHAR> > FCondensedJsonStringWriterFactory;
 typedef TJsonWriter< TCHAR, TCondensedJsonPrintPolicy<TCHAR> > FCondensedJsonStringWriter;

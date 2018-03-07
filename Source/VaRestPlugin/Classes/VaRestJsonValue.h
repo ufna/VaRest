@@ -3,7 +3,6 @@
 
 #pragma once
 
-#include "JsonValue.h"
 #include "VaRestJsonValue.generated.h"
 
 class UVaRestJsonObject;
