@@ -548,7 +548,25 @@ void UVaRestJsonObject::SetObjectArrayField(const FString& FieldName, const TArr
 int32 UVaRestJsonObject::DeserializeFromUTF8Bytes(const ANSICHAR* Bytes, int32 Size)
 {
 	FJSONReader Reader;
-	
+#if ENGINE_MINOR_VERSION >= 19
+
+	// get destLen
+	int32 DestinationLength = FUTF8ToTCHAR_Convert::ConvertedLength(Bytes, Size);
+	TCHAR* DestinationBuffer = new TCHAR[DestinationLength];
+
+	// CONVERT to TCHAR string
+	FUTF8ToTCHAR_Convert::Convert(DestinationBuffer, DestinationLength, Bytes, Size);
+
+	int32 i = 0;
+	while (i < DestinationLength)
+	{
+		if (!Reader.Read(DestinationBuffer[i++]))
+		{
+			break;
+		}
+	}
+
+#else	
 	const ANSICHAR* EndByte = Bytes + Size;
 	while (Bytes < EndByte)
 	{
@@ -564,7 +582,7 @@ int32 UVaRestJsonObject::DeserializeFromUTF8Bytes(const ANSICHAR* Bytes, int32 S
 			break;
 		}
 	}
-	
+#endif
 	SetRootObject(Reader.State.Root);
 	return Reader.State.Size;
 }
