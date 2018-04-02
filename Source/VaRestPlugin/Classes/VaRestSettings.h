@@ -5,7 +5,7 @@
 #include "VaRestSettings.generated.h"
 
 UCLASS(config = Engine, defaultconfig)
-class UVaRestSettings : public UObject
+class VARESTPLUGIN_API UVaRestSettings : public UObject
 {
 	GENERATED_UCLASS_BODY()
 	

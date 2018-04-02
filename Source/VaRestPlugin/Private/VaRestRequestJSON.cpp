@@ -3,6 +3,7 @@
 #include "VaRestRequestJSON.h"
 #include "VaRestJsonObject.h"
 #include "VaRestLibrary.h"
+#include "VaRestSettings.h"
 #include "VaRestPluginPrivatePCH.h"
 
 #include "CoreMisc.h"
@@ -278,6 +279,9 @@ void UVaRestRequestJSON::ExecuteProcessRequest()
 
 void UVaRestRequestJSON::ProcessRequest()
 {
+	// Cache default settings for extended logs
+	const UVaRestSettings* DefaultSettings = GetDefault<UVaRestSettings>();
+
 	// Set verb
 	switch (RequestVerb)
 	{
@@ -339,7 +343,15 @@ void UVaRestRequestJSON::ProcessRequest()
 			HttpRequest->SetContentAsString(StringRequestContent);
 		}
 
-		UE_LOG(LogVaRest, Log, TEXT("Request (urlencoded): %s %s %s"), *HttpRequest->GetVerb(), *HttpRequest->GetURL(), *UrlParams, *StringRequestContent);
+		// Check extended log to avoid security vulnerability (#133)
+		if (DefaultSettings->bExtendedLog)
+		{
+			UE_LOG(LogVaRest, Log, TEXT("%s: Request (urlencoded): %s %s %s %s"), *VA_FUNC_LINE, *HttpRequest->GetVerb(), *HttpRequest->GetURL(), *UrlParams, *StringRequestContent);
+		}
+		else
+		{
+			UE_LOG(LogVaRest, Log, TEXT("%s: Request (urlencoded): %s %s (check bExtendedLog for additional data)"), *VA_FUNC_LINE, *HttpRequest->GetVerb(), *HttpRequest->GetURL());
+		}
 
 		break;
 	}
@@ -368,7 +380,15 @@ void UVaRestRequestJSON::ProcessRequest()
 		// Apply params
 		HttpRequest->SetContentAsString(UrlParams);
 
-		UE_LOG(LogVaRest, Log, TEXT("Request (url body): %s %s %s"), *HttpRequest->GetVerb(), *HttpRequest->GetURL(), *UrlParams);
+		// Check extended log to avoid security vulnerability (#133)
+		if (DefaultSettings->bExtendedLog)
+		{
+			UE_LOG(LogVaRest, Log, TEXT("%s: Request (url body): %s %s %s"), *VA_FUNC_LINE, *HttpRequest->GetVerb(), *HttpRequest->GetURL(), *UrlParams);
+		}
+		else
+		{
+			UE_LOG(LogVaRest, Log, TEXT("%s: Request (url body): %s %s (check bExtendedLog for additional data)"), *VA_FUNC_LINE, *HttpRequest->GetVerb(), *HttpRequest->GetURL());
+		}
 
 		break;
 	}
