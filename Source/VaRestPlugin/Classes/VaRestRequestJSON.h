@@ -158,6 +158,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
 	UVaRestJsonObject* GetResponseObject();
 
+	/** @temp */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
+	UVaRestJsonObject* GetResponseRootObject();
+
 	/** Set the Response Json object */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
 	void SetResponseObject(UVaRestJsonObject* JsonObject);
