@@ -59,8 +59,13 @@ public:
 
 				FBPTerminal **Target = Context.NetMap.Find(Pin);
 
+#if ENGINE_MINOR_VERSION >= 19
+				const FName &FieldName = Pin->PinName;
+				const FName &FieldType = Pin->PinType.PinCategory;
+#else
 				const FString &FieldName = Pin->PinName;
 				const FString &FieldType = Pin->PinType.PinCategory;
+#endif
 
 				FBPTerminal* FieldNameTerm = Context.CreateLocalTerminal(ETerminalSpecification::TS_Literal);
 				FieldNameTerm->Type.PinCategory = CompilerContext.GetSchema()->PC_String;
@@ -69,8 +74,14 @@ public:
 #else
 				FieldNameTerm->Source = Pin;
 #endif
+
+#if ENGINE_MINOR_VERSION >= 19
+				FieldNameTerm->Name = FieldName.ToString();
+				FieldNameTerm->TextLiteral = FText::FromName(FieldName);
+#else
 				FieldNameTerm->Name = FieldName;
 				FieldNameTerm->TextLiteral = FText::FromString(FieldName);
+#endif
 
  				FBlueprintCompiledStatement& Statement = Context.AppendStatementForNode(Node);
 				FName FunctionName;
@@ -264,7 +275,12 @@ void UVaRest_BreakJson::CreateProjectionPins(UEdGraphPin *Source)
 
 	for (TArray<FVaRest_NamedType>::TIterator it(Outputs); it; ++it)
 	{
+#if ENGINE_MINOR_VERSION >= 19
+		FName Type;
+#else
 		FString Type;
+#endif
+
 		UObject *Subtype = nullptr;
 		FString FieldName = (*it).Name;
 

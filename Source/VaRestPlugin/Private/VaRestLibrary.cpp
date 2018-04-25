@@ -67,6 +67,34 @@ bool UVaRestLibrary::Base64DecodeData(const FString& Source, TArray<uint8>& Dest
 
 
 //////////////////////////////////////////////////////////////////////////
+// File system integration
+
+class UVaRestJsonObject* UVaRestLibrary::LoadJsonFromFile(UObject* WorldContextObject, const FString& Path)
+{
+	UVaRestJsonObject* Json = UVaRestJsonObject::ConstructJsonObject(WorldContextObject);
+
+	FString JSONString;
+	if (FFileHelper::LoadFileToString(JSONString, *(FPaths::ProjectContentDir() + Path)))
+	{
+		if (Json->DecodeJson(JSONString))
+		{
+			return Json;
+		}
+		else
+		{
+			UE_LOG(LogVaRest, Error, TEXT("%s: Can't decode json from file %s"), *VA_FUNC_LINE, *Path);
+		}
+	}
+	else
+	{
+		UE_LOG(LogVaRest, Error, TEXT("%s: Can't open file %s"), *VA_FUNC_LINE, *Path);
+	}
+
+	return nullptr;
+}
+
+
+//////////////////////////////////////////////////////////////////////////
 // Easy URL processing
 
 TMap<UVaRestRequestJSON*, FVaRestCallResponse> UVaRestLibrary::RequestMap;

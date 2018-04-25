@@ -158,10 +158,6 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
 	UVaRestJsonObject* GetResponseObject();
 
-	/** @temp */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
-	UVaRestJsonObject* GetResponseRootObject();
-
 	/** Set the Response Json object */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
 	void SetResponseObject(UVaRestJsonObject* JsonObject);
@@ -268,11 +264,19 @@ protected:
 	// Data
 
 public:
+	/**
+	 * Get request response stored as a string 
+	 * @param bCacheResponseContent - Set true if you plan to use it few times to prevent deserialization each time
+	 */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
+	FString GetResponseContentAsString(bool bCacheResponseContent = true);
+
+public:
 	/** Response size */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "VaRest|Response")
 	int32 ResponseSize;
 	
-	/** Request response stored as a string (Attn.! For invalid responses only, empty for valid one - use json response object instead */
+	/** DEPRECATED: Please use GetResponseContentAsString() instead */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "VaRest|Response")
 	FString ResponseContent;
 
@@ -280,6 +284,10 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "VaRest|Response")
 	bool bIsValidJsonResponse;
 	
+protected:
+	/** Default value for deprecated ResponseContent variable */
+	static FString DeprecatedResponseString;
+
 protected:
 	/** Latent action helper */
 	FVaRestLatentAction<UVaRestJsonObject*>* ContinueAction;
@@ -319,5 +327,9 @@ protected:
 
 	/** Request we're currently processing */
 	TSharedRef<IHttpRequest> HttpRequest = FHttpModule::Get().CreateRequest();
-
+	
+public:
+	/** Returns reference to internal request object */
+	TSharedRef<IHttpRequest> GetHttpRequest() const { return HttpRequest; };
+	
 };
