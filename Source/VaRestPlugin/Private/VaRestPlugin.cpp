@@ -10,7 +10,7 @@
 //#include "UObject/Package.h"
 //#include "Misc/ConfigCacheIni.h"
 
-#include "ISettingsModule.h"
+#include "Developer/Settings/Public/ISettingsModule.h"
 
 #define LOCTEXT_NAMESPACE "VaRest"
 
