@@ -11,6 +11,6 @@ class VARESTPLUGIN_API UVaRestSettings : public UObject
 	
 public:
 	/**  */
-	UPROPERTY(Config, EditAnywhere)
+	UPROPERTY(Config, EditAnywhere, Category = "VaRest")
 	bool bExtendedLog;
 };
