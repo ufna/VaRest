@@ -546,8 +546,15 @@ bool UVaRestRequestJSON::HasTag(FName Tag) const
 
 FString UVaRestRequestJSON::GetResponseContentAsString(bool bCacheResponseContent)
 {
-	// Check we have valide response
-	if (!bIsValidJsonResponse || !ResponseJsonObj || !ResponseJsonObj->IsValidLowLevel())
+	// Check we have valid json response
+	if (!bIsValidJsonResponse)
+	{
+		// We've cached response content in OnProcessRequestComplete()
+		return ResponseContent;
+	}
+
+	// Check we have valid response object
+	if (!ResponseJsonObj || !ResponseJsonObj->IsValidLowLevel())
 	{
 		// Discard previous cached string if we had one
 		ResponseContent = DeprecatedResponseString;
