@@ -99,7 +99,7 @@ bool UVaRestJsonObject::DecodeJson(const FString& JsonString)
 //////////////////////////////////////////////////////////////////////////
 // FJsonObject API
 
-TArray<FString> UVaRestJsonObject::GetFieldNames()
+TArray<FString> UVaRestJsonObject::GetFieldNames() const
 {
 	TArray<FString> Result;
 	
