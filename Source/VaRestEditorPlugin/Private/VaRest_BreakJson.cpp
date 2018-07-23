@@ -9,6 +9,7 @@
 #include "EdGraph/EdGraphNodeUtils.h" // for FNodeTextCache
 #include "EdGraphSchema_K2.h"
 #include "BlueprintNodeSpawner.h"
+#include "BlueprintActionDatabaseRegistrar.h"
 
 #include "EdGraphUtilities.h"
 #include "Runtime/Launch/Resources/Version.h"
@@ -361,8 +362,13 @@ public:
 
 				FBPTerminal **Source = Context.NetMap.Find(FEdGraphUtilities::GetNetFromPin(Pin));
 
+#if ENGINE_MINOR_VERSION >= 19
+				const FName &FieldName = Pin->PinName;
+				const FName &FieldType = Pin->PinType.PinCategory;
+#else
 				const FString &FieldName = Pin->PinName;
 				const FString &FieldType = Pin->PinType.PinCategory;
+#endif
 
 				FBPTerminal* FieldNameTerm = Context.CreateLocalTerminal(ETerminalSpecification::TS_Literal);
 				FieldNameTerm->Type.PinCategory = CompilerContext.GetSchema()->PC_String;
@@ -371,8 +377,14 @@ public:
 #else
 				FieldNameTerm->Source = Pin;
 #endif
+				
+#if ENGINE_MINOR_VERSION >= 19
+				FieldNameTerm->Name = FieldName.ToString();
+				FieldNameTerm->TextLiteral = FText::FromName(FieldName);
+#else
 				FieldNameTerm->Name = FieldName;
 				FieldNameTerm->TextLiteral = FText::FromString(FieldName);
+#endif
 
 				FBlueprintCompiledStatement& Statement = Context.AppendStatementForNode(Node);
 				FName FunctionName;
@@ -551,31 +563,31 @@ void UVaRest_MakeJson::CreateProjectionPins(UEdGraphPin *Source)
 
 	for (TArray<FVaRest_NamedType>::TIterator it(Inputs); it; ++it)
 	{
-		FString Type;
+		FName Type;
 		UObject *Subtype = nullptr;
 		FString FieldName = (*it).Name;
 
 		switch ((*it).Type) {
-		case EVaRest_JsonType::JSON_Bool:
-			Type = K2Schema->PC_Boolean;
-			break;
+			case EVaRest_JsonType::JSON_Bool:
+				Type = K2Schema->PC_Boolean;
+				break;
 
-		case EVaRest_JsonType::JSON_Number:
-			Type = K2Schema->PC_Float;
-			break;
+			case EVaRest_JsonType::JSON_Number:
+				Type = K2Schema->PC_Float;
+				break;
 
-		case EVaRest_JsonType::JSON_String:
-			Type = K2Schema->PC_String;
-			break;
+			case EVaRest_JsonType::JSON_String:
+				Type = K2Schema->PC_String;
+				break;
 
-		case EVaRest_JsonType::JSON_Object:
-			Type = K2Schema->PC_Object;
-			Subtype = Class;
-			break;
+			case EVaRest_JsonType::JSON_Object:
+				Type = K2Schema->PC_Object;
+				Subtype = Class;
+				break;
 		}
 
 		UEdGraphPin *InputPin = CreatePin(EGPD_Input, Type, TEXT(""), Subtype, (*it).bIsArray, false, (*it).Name);
-		InputPin->bSavePinIfOrphaned = false;
+		InputPin->SetSavePinIfOrphaned(false);
 	}
 }
 
