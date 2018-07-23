@@ -13,7 +13,7 @@ Key features:
 
 Check the [Wiki](https://hiazma.atlassian.net/wiki/display/VAR) for plugin usage examples and installation notes.
 
-Current version: **1.1 R 22** (UE 4.18-4.19)
+Current version: **1.1 R 23** (UE 4.20)
 
 ![SCREENSHOT](SCREENSHOT.jpg)
 
