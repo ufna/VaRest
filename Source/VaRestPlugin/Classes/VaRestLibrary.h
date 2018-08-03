@@ -38,10 +38,10 @@ struct FVaRestCallResponse
 };
 
 /**
- * Usefull tools for REST communications
+ * Useful tools for REST communications
  */
 UCLASS()
-class UVaRestLibrary : public UBlueprintFunctionLibrary
+class VARESTPLUGIN_API UVaRestLibrary : public UBlueprintFunctionLibrary
 {
 	GENERATED_BODY()
 
