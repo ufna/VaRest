@@ -4,39 +4,14 @@
 #include "VaRestRequestJSON.h"
 #include "VaRestJsonObject.h"
 #include "VaRestPluginPrivatePCH.h"
-#include "Base64.h"
+#include "Misc/Base64.h"
 
 //////////////////////////////////////////////////////////////////////////
 // Helpers
 
 FString UVaRestLibrary::PercentEncode(const FString& Source)
 {
-	FString OutText = Source;
-	
-	OutText = OutText.Replace(TEXT(" "), TEXT("%20"));
-	OutText = OutText.Replace(TEXT("!"), TEXT("%21"));
-	OutText = OutText.Replace(TEXT("\""), TEXT("%22"));
-	OutText = OutText.Replace(TEXT("#"), TEXT("%23"));
-	OutText = OutText.Replace(TEXT("$"), TEXT("%24"));
-	OutText = OutText.Replace(TEXT("&"), TEXT("%26"));
-	OutText = OutText.Replace(TEXT("'"), TEXT("%27"));
-	OutText = OutText.Replace(TEXT("("), TEXT("%28"));
-	OutText = OutText.Replace(TEXT(")"), TEXT("%29"));
-	OutText = OutText.Replace(TEXT("*"), TEXT("%2A"));
-	OutText = OutText.Replace(TEXT("+"), TEXT("%2B"));
-	OutText = OutText.Replace(TEXT(","), TEXT("%2C"));
-	OutText = OutText.Replace(TEXT("/"), TEXT("%2F"));
-	OutText = OutText.Replace(TEXT(":"), TEXT("%3A"));
-	OutText = OutText.Replace(TEXT(";"), TEXT("%3B"));
-	OutText = OutText.Replace(TEXT("="), TEXT("%3D"));
-	OutText = OutText.Replace(TEXT("?"), TEXT("%3F"));
-	OutText = OutText.Replace(TEXT("@"), TEXT("%40"));
-	OutText = OutText.Replace(TEXT("["), TEXT("%5B"));
-	OutText = OutText.Replace(TEXT("]"), TEXT("%5D"));
-	OutText = OutText.Replace(TEXT("{"), TEXT("%7B"));
-	OutText = OutText.Replace(TEXT("}"), TEXT("%7D"));
-	
-	return OutText;
+	return FGenericPlatformHttp::UrlEncode(Source);
 }
 
 FString UVaRestLibrary::Base64Encode(const FString& Source)

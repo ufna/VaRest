@@ -4,7 +4,7 @@
 #include "VaRestJsonObject.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
-#include "LogMacros.h"
+#include "Logging/LogMacros.h"
 
 FJSONState::FJSONState()
 : Notation(EJSONNotation::NONE)

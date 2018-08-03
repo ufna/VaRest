@@ -7,15 +7,6 @@ public class VaRestEditorPlugin : ModuleRules
 	public VaRestEditorPlugin(ReadOnlyTargetRules Target) : base(Target)
 	{
         PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
-
-        PublicIncludePaths.AddRange(
-			new string[] {
-				"VaRestPlugin",
-				"VaRestPlugin/Public"
-				
-				// ... add public include paths required here ...
-			});
-				
 		
 		PrivateIncludePaths.AddRange(
 			new string[] {

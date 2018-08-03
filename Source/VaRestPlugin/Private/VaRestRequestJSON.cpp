@@ -6,7 +6,7 @@
 #include "VaRestSettings.h"
 #include "VaRestPluginPrivatePCH.h"
 
-#include "CoreMisc.h"
+#include "Misc/CoreMisc.h"
 #include "Runtime/Launch/Resources/Version.h"
 
 FString UVaRestRequestJSON::DeprecatedResponseString(TEXT("DEPRECATED: Please use GetResponseContentAsString() instead"));
