@@ -500,7 +500,7 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 	ResponseSize = ResponseJsonObj->DeserializeFromUTF8Bytes((const ANSICHAR*) Bytes.GetData(), Bytes.Num());
 	
 	// Decide whether the request was successful
-	bIsValidJsonResponse = bWasSuccessful && ResponseJsonObj->GetRootObject().IsValid();
+	bIsValidJsonResponse = bWasSuccessful && (ResponseSize > 0);
 	
 	if (!bIsValidJsonResponse)
 	{
