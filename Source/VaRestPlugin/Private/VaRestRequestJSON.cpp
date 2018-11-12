@@ -462,7 +462,7 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 		return;
 	}
 
-#if !(PLATFORM_IOS || PLATFORM_ANDROID)
+#if PLATFORM_DESKTOP
 	// Log response state
 	UE_LOG(LogVaRest, Log, TEXT("Response (%d): %sJSON(%s%s%s)JSON"), ResponseCode, LINE_TERMINATOR, LINE_TERMINATOR, *Response->GetContentAsString(), LINE_TERMINATOR);
 #endif
@@ -504,17 +504,20 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 		}
 	}
 
-	// Broadcast the result event
-	OnRequestComplete.Broadcast(this);
-	OnStaticRequestComplete.Broadcast(this);
+	// Broadcast the result events on next tick
+	AsyncTask(ENamedThreads::GameThread, [this]()
+	{
+		OnRequestComplete.Broadcast(this);
+		OnStaticRequestComplete.Broadcast(this);
+	});
 
 	// Finish the latent action
 	if (ContinueAction)
 	{
-          FVaRestLatentAction<UVaRestJsonObject*> *K = ContinueAction;
-          ContinueAction = nullptr;
+		FVaRestLatentAction<UVaRestJsonObject*> *K = ContinueAction;
+		ContinueAction = nullptr;
 
-          K->Call(ResponseJsonObj);
+		K->Call(ResponseJsonObj);
 	}
 }
 
