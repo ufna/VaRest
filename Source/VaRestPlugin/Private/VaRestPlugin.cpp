@@ -1,11 +1,11 @@
 // Copyright 2014 Vladimir Alyamkin. All Rights Reserved.
 
 #include "VaRestPlugin.h"
-#include "VaRestSettings.h"
 #include "VaRestJsonObject.h"
 #include "VaRestJsonValue.h"
-#include "VaRestRequestJSON.h"
 #include "VaRestPluginPrivatePCH.h"
+#include "VaRestRequestJSON.h"
+#include "VaRestSettings.h"
 
 //#include "UObject/Package.h"
 //#include "Misc/ConfigCacheIni.h"
@@ -30,8 +30,7 @@ class FVaRestPlugin : public IVaRestPlugin
 			SettingsModule->RegisterSettings("Project", "Plugins", "VaRest",
 				LOCTEXT("RuntimeSettingsName", "VaRest Kit"),
 				LOCTEXT("RuntimeSettingsDescription", "Configure API keys for VaRest"),
-				GetMutableDefault<UVaRestSettings>()
-			);
+				GetMutableDefault<UVaRestSettings>());
 		}
 	}
 
@@ -44,7 +43,7 @@ class FVaRestPlugin : public IVaRestPlugin
 	}
 };
 
-IMPLEMENT_MODULE( FVaRestPlugin, VaRestPlugin )
+IMPLEMENT_MODULE(FVaRestPlugin, VaRestPlugin)
 
 DEFINE_LOG_CATEGORY(LogVaRest);
 

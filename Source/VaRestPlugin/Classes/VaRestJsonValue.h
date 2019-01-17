@@ -14,16 +14,16 @@ class FJsonValue;
 UENUM(BlueprintType)
 namespace EVaJson
 {
-	enum Type
-	{
-		None,
-		Null,
-		String,
-		Number,
-		Boolean,
-		Array,
-		Object,
-	};
+enum Type
+{
+	None,
+	Null,
+	String,
+	Number,
+	Boolean,
+	Array,
+	Object,
+};
 }
 
 /**
@@ -53,7 +53,7 @@ class VARESTPLUGIN_API UVaRestJsonValue : public UObject
 
 	/** Create new Json Object value */
 	UFUNCTION(BlueprintPure, meta = (DisplayName = "Construct Json Object Value", HidePin = "WorldContextObject", DefaultToSelf = "WorldContextObject"), Category = "VaRest|Json")
-	static UVaRestJsonValue* ConstructJsonValueObject(UObject* WorldContextObject, UVaRestJsonObject *JsonObject);
+	static UVaRestJsonValue* ConstructJsonValueObject(UObject* WorldContextObject, UVaRestJsonObject* JsonObject);
 
 	/** Create new Json value from FJsonValue (to be used from VaRestJsonObject) */
 	static UVaRestJsonValue* ConstructJsonValue(UObject* WorldContextObject, const TSharedPtr<FJsonValue>& InValue);
@@ -63,7 +63,6 @@ class VARESTPLUGIN_API UVaRestJsonValue : public UObject
 
 	/** Set the root Json value */
 	void SetRootValue(TSharedPtr<FJsonValue>& JsonValue);
-
 
 	//////////////////////////////////////////////////////////////////////////
 	// FJsonValue API
@@ -101,7 +100,6 @@ class VARESTPLUGIN_API UVaRestJsonValue : public UObject
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	UVaRestJsonObject* AsObject();
 
-
 	//////////////////////////////////////////////////////////////////////////
 	// Data
 
@@ -109,12 +107,10 @@ private:
 	/** Internal JSON data */
 	TSharedPtr<FJsonValue> JsonVal;
 
-
 	//////////////////////////////////////////////////////////////////////////
 	// Helpers
 
 protected:
 	/** Simple error logger */
 	void ErrorMessage(const FString& InType) const;
-
 };

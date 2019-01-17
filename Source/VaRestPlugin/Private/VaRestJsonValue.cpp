@@ -7,7 +7,6 @@
 UVaRestJsonValue::UVaRestJsonValue(const class FObjectInitializer& PCIP)
 	: Super(PCIP)
 {
-
 }
 
 UVaRestJsonValue* UVaRestJsonValue::ConstructJsonValueNumber(UObject* WorldContextObject, float Number)
@@ -43,7 +42,7 @@ UVaRestJsonValue* UVaRestJsonValue::ConstructJsonValueBool(UObject* WorldContext
 UVaRestJsonValue* UVaRestJsonValue::ConstructJsonValueArray(UObject* WorldContextObject, const TArray<UVaRestJsonValue*>& InArray)
 {
 	// Prepare data array to create new value
-	TArray< TSharedPtr<FJsonValue> > ValueArray;
+	TArray<TSharedPtr<FJsonValue>> ValueArray;
 	for (auto InVal : InArray)
 	{
 		ValueArray.Add(InVal->GetRootValue());
@@ -57,7 +56,7 @@ UVaRestJsonValue* UVaRestJsonValue::ConstructJsonValueArray(UObject* WorldContex
 	return NewValue;
 }
 
-UVaRestJsonValue* UVaRestJsonValue::ConstructJsonValueObject(UObject* WorldContextObject, UVaRestJsonObject *JsonObject)
+UVaRestJsonValue* UVaRestJsonValue::ConstructJsonValueObject(UObject* WorldContextObject, UVaRestJsonObject* JsonObject)
 {
 	TSharedPtr<FJsonValue> NewVal = MakeShareable(new FJsonValueObject(JsonObject->GetRootObject()));
 
@@ -86,7 +85,6 @@ void UVaRestJsonValue::SetRootValue(TSharedPtr<FJsonValue>& JsonValue)
 {
 	JsonVal = JsonValue;
 }
-
 
 //////////////////////////////////////////////////////////////////////////
 // FJsonValue API
@@ -161,7 +159,7 @@ FString UVaRestJsonValue::GetTypeString() const
 	}
 }
 
-bool UVaRestJsonValue::IsNull() const 
+bool UVaRestJsonValue::IsNull() const
 {
 	if (!JsonVal.IsValid())
 	{
@@ -214,7 +212,7 @@ TArray<UVaRestJsonValue*> UVaRestJsonValue::AsArray() const
 		return OutArray;
 	}
 
-	TArray< TSharedPtr<FJsonValue> > ValArray = JsonVal->AsArray();
+	TArray<TSharedPtr<FJsonValue>> ValArray = JsonVal->AsArray();
 	for (auto Value : ValArray)
 	{
 		UVaRestJsonValue* NewValue = NewObject<UVaRestJsonValue>();
@@ -241,7 +239,6 @@ UVaRestJsonObject* UVaRestJsonValue::AsObject()
 
 	return JsonObj;
 }
-
 
 //////////////////////////////////////////////////////////////////////////
 // Helpers
