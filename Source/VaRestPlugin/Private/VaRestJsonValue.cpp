@@ -89,7 +89,7 @@ void UVaRestJsonValue::SetRootValue(TSharedPtr<FJsonValue>& JsonValue)
 //////////////////////////////////////////////////////////////////////////
 // FJsonValue API
 
-EVaJson::Type UVaRestJsonValue::GetType() const
+EVaJson UVaRestJsonValue::GetType() const
 {
 	if (!JsonVal.IsValid())
 	{

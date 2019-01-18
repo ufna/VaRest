@@ -12,9 +12,7 @@ class FJsonValue;
  * Represents all the types a Json Value can be.
  */
 UENUM(BlueprintType)
-namespace EVaJson
-{
-enum Type
+enum class EVaJson : uint8
 {
 	None,
 	Null,
@@ -24,7 +22,6 @@ enum Type
 	Array,
 	Object,
 };
-}
 
 /**
  * Blueprintable FJsonValue wrapper
@@ -69,7 +66,7 @@ class VARESTPLUGIN_API UVaRestJsonValue : public UObject
 
 	/** Get type of Json value (Enum) */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
-	EVaJson::Type GetType() const;
+	EVaJson GetType() const;
 
 	/** Get type of Json value (String) */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
