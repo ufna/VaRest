@@ -43,7 +43,7 @@ class VARESTPLUGIN_API UVaRestJsonObject : public UObject
 
 	/** Construct Json object from string */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
-	bool DecodeJson(const FString& JsonString);
+	bool DecodeJson(const FString& JsonString, bool bUseIncrementalParser = true);
 
 	//////////////////////////////////////////////////////////////////////////
 	// FJsonObject API

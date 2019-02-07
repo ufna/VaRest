@@ -77,13 +77,25 @@ FString UVaRestJsonObject::EncodeJsonToSingleString() const
 	return OutputString;
 }
 
-bool UVaRestJsonObject::DecodeJson(const FString& JsonString)
+bool UVaRestJsonObject::DecodeJson(const FString& JsonString, bool bUseIncrementalParser)
 {
-	DeserializeFromTCHARBytes(JsonString.GetCharArray().GetData(), JsonString.Len());
-
-	if (JsonObj.IsValid())
+	if (bUseIncrementalParser)
 	{
-		return true;
+		int32 BytesRead = DeserializeFromTCHARBytes(JsonString.GetCharArray().GetData(), JsonString.Len());
+
+		// JsonObj is always valid, but read bytes is zero when something went wrong
+		if (BytesRead > 0)
+		{
+			return true;
+		}
+	}
+	else
+	{
+		TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(*JsonString);
+		if (FJsonSerializer::Deserialize(Reader, JsonObj) && JsonObj.IsValid())
+		{
+			return true;
+		}
 	}
 
 	// If we've failed to deserialize the string, we should clear our internal data
