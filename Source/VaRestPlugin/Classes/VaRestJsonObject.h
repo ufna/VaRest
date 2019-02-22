@@ -28,7 +28,7 @@ class VARESTPLUGIN_API UVaRestJsonObject : public UObject
 	TSharedPtr<FJsonObject>& GetRootObject();
 
 	/** Set the root Json object */
-	void SetRootObject(TSharedPtr<FJsonObject>& JsonObject);
+	void SetRootObject(const TSharedPtr<FJsonObject>& JsonObject);
 
 	//////////////////////////////////////////////////////////////////////////
 	// Serialization
