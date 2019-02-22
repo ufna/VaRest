@@ -34,7 +34,7 @@ TSharedPtr<FJsonObject>& UVaRestJsonObject::GetRootObject()
 	return JsonObj;
 }
 
-void UVaRestJsonObject::SetRootObject(TSharedPtr<FJsonObject>& JsonObject)
+void UVaRestJsonObject::SetRootObject(const TSharedPtr<FJsonObject>& JsonObject)
 {
 	if (JsonObject.IsValid())
 	{
