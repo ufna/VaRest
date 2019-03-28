@@ -3,10 +3,11 @@
 
 #pragma once
 
+#include "Dom/JsonObject.h"
+
 #include "VaRestJsonObject.generated.h"
 
 class UVaRestJsonValue;
-class FJsonObject;
 
 /**
  * Blueprintable FJsonObject wrapper
