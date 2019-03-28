@@ -25,7 +25,7 @@ class VARESTPLUGIN_API UVaRestJsonObject : public UObject
 	void Reset();
 
 	/** Get the root Json object */
-	TSharedPtr<FJsonObject>& GetRootObject();
+	TSharedRef<FJsonObject>& GetRootObject();
 
 	/** Set the root Json object */
 	void SetRootObject(const TSharedPtr<FJsonObject>& JsonObject);
@@ -185,5 +185,5 @@ public:
 
 private:
 	/** Internal JSON data */
-	TSharedPtr<FJsonObject> JsonObj;
+	TSharedRef<FJsonObject> JsonObj;
 };

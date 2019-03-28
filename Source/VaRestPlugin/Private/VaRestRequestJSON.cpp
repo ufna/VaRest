@@ -405,7 +405,7 @@ void UVaRestRequestJSON::ProcessRequest()
 		// Serialize data to json string
 		FString OutputString;
 		TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&OutputString);
-		FJsonSerializer::Serialize(RequestJsonObj->GetRootObject().ToSharedRef(), Writer);
+		FJsonSerializer::Serialize(RequestJsonObj->GetRootObject(), Writer);
 
 		// Set Json content
 		HttpRequest->SetContentAsString(OutputString);
@@ -479,6 +479,14 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 	const TArray<uint8>& Bytes = Response->GetContent();
 	ResponseSize = ResponseJsonObj->DeserializeFromUTF8Bytes((const ANSICHAR*)Bytes.GetData(), Bytes.Num());
 
+	// Log errors
+	if (ResponseSize == 0)
+	{
+		// As we assume it's recommended way to use current class, but not the only one,
+		// it will be the warning instead of error
+		UE_LOG(LogVaRest, Warning, TEXT("JSON could not be decoded!"));
+	}
+
 	// Decide whether the request was successful
 	bIsValidJsonResponse = bWasSuccessful && (ResponseSize > 0);
 
@@ -487,17 +495,6 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 		// Save response data as a string
 		ResponseContent = Response->GetContentAsString();
 		ResponseSize = ResponseContent.GetAllocatedSize();
-	}
-
-	// Log errors
-	if (!bIsValidJsonResponse)
-	{
-		if (!ResponseJsonObj->GetRootObject().IsValid())
-		{
-			// As we assume it's recommended way to use current class, but not the only one,
-			// it will be the warning instead of error
-			UE_LOG(LogVaRest, Warning, TEXT("JSON could not be decoded!"));
-		}
 	}
 
 	// Broadcast the result events on next tick
