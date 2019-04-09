@@ -5,13 +5,13 @@
 #include "VaRestJsonValue.h"
 #include "VaRestPluginPrivatePCH.h"
 
-typedef TJsonWriterFactory< TCHAR, TCondensedJsonPrintPolicy<TCHAR> > FCondensedJsonStringWriterFactory;
-typedef TJsonWriter< TCHAR, TCondensedJsonPrintPolicy<TCHAR> > FCondensedJsonStringWriter;
+typedef TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>> FCondensedJsonStringWriterFactory;
+typedef TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>> FCondensedJsonStringWriter;
 
 UVaRestJsonObject::UVaRestJsonObject(const class FObjectInitializer& PCIP)
 	: Super(PCIP)
+	, JsonObj(MakeShared<FJsonObject>())
 {
-	Reset();
 }
 
 UVaRestJsonObject* UVaRestJsonObject::ConstructJsonObject(UObject* WorldContextObject)
@@ -21,24 +21,19 @@ UVaRestJsonObject* UVaRestJsonObject::ConstructJsonObject(UObject* WorldContextO
 
 void UVaRestJsonObject::Reset()
 {
-	if (JsonObj.IsValid())
-	{
-		JsonObj.Reset();
-	}
-
-	JsonObj = MakeShareable(new FJsonObject());
+	JsonObj = MakeShared<FJsonObject>();
 }
 
-TSharedPtr<FJsonObject>& UVaRestJsonObject::GetRootObject()
+TSharedRef<FJsonObject>& UVaRestJsonObject::GetRootObject()
 {
 	return JsonObj;
 }
 
-void UVaRestJsonObject::SetRootObject(TSharedPtr<FJsonObject>& JsonObject)
+void UVaRestJsonObject::SetRootObject(const TSharedPtr<FJsonObject>& JsonObject)
 {
 	if (JsonObject.IsValid())
 	{
-		JsonObj = JsonObject;
+		JsonObj = JsonObject.ToSharedRef();
 	}
 	else
 	{
@@ -47,20 +42,14 @@ void UVaRestJsonObject::SetRootObject(TSharedPtr<FJsonObject>& JsonObject)
 	}
 }
 
-
 //////////////////////////////////////////////////////////////////////////
 // Serialization
 
 FString UVaRestJsonObject::EncodeJson() const
 {
-	if (!JsonObj.IsValid())
-	{
-		return TEXT("");
-	}
-
 	FString OutputString;
-	TSharedRef< FCondensedJsonStringWriter > Writer = FCondensedJsonStringWriterFactory::Create(&OutputString);
-	FJsonSerializer::Serialize(JsonObj.ToSharedRef(), Writer);
+	TSharedRef<FCondensedJsonStringWriter> Writer = FCondensedJsonStringWriterFactory::Create(&OutputString);
+	FJsonSerializer::Serialize(JsonObj, Writer);
 
 	return OutputString;
 }
@@ -71,20 +60,34 @@ FString UVaRestJsonObject::EncodeJsonToSingleString() const
 
 	// Remove line terminators
 	OutputString.Replace(LINE_TERMINATOR, TEXT(""));
-	
+
 	// Remove tabs
 	OutputString.Replace(LINE_TERMINATOR, TEXT("\t"));
 
 	return OutputString;
 }
 
-bool UVaRestJsonObject::DecodeJson(const FString& JsonString)
+bool UVaRestJsonObject::DecodeJson(const FString& JsonString, bool bUseIncrementalParser)
 {
-	DeserializeFromTCHARBytes(JsonString.GetCharArray().GetData(), JsonString.Len());
-	
-	if (JsonObj.IsValid())
+	if (bUseIncrementalParser)
 	{
-		return true;
+		int32 BytesRead = DeserializeFromTCHARBytes(JsonString.GetCharArray().GetData(), JsonString.Len());
+
+		// JsonObj is always valid, but read bytes is zero when something went wrong
+		if (BytesRead > 0)
+		{
+			return true;
+		}
+	}
+	else
+	{
+		TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(*JsonString);
+		TSharedPtr<FJsonObject> OutJsonObj;
+		if (FJsonSerializer::Deserialize(Reader, OutJsonObj))
+		{
+			JsonObj = OutJsonObj.ToSharedRef();
+			return true;
+		}
 	}
 
 	// If we've failed to deserialize the string, we should clear our internal data
@@ -95,27 +98,20 @@ bool UVaRestJsonObject::DecodeJson(const FString& JsonString)
 	return false;
 }
 
-
 //////////////////////////////////////////////////////////////////////////
 // FJsonObject API
 
 TArray<FString> UVaRestJsonObject::GetFieldNames() const
 {
 	TArray<FString> Result;
-	
-	if (!JsonObj.IsValid())
-	{
-		return Result;
-	}
-	
 	JsonObj->Values.GetKeys(Result);
-	
+
 	return Result;
 }
 
 bool UVaRestJsonObject::HasField(const FString& FieldName) const
 {
-	if (!JsonObj.IsValid() || FieldName.IsEmpty())
+	if (FieldName.IsEmpty())
 	{
 		return false;
 	}
@@ -125,7 +121,7 @@ bool UVaRestJsonObject::HasField(const FString& FieldName) const
 
 void UVaRestJsonObject::RemoveField(const FString& FieldName)
 {
-	if (!JsonObj.IsValid() || FieldName.IsEmpty())
+	if (FieldName.IsEmpty())
 	{
 		return;
 	}
@@ -135,7 +131,7 @@ void UVaRestJsonObject::RemoveField(const FString& FieldName)
 
 UVaRestJsonValue* UVaRestJsonObject::GetField(const FString& FieldName) const
 {
-	if (!JsonObj.IsValid() || FieldName.IsEmpty())
+	if (FieldName.IsEmpty())
 	{
 		return nullptr;
 	}
@@ -148,13 +144,13 @@ UVaRestJsonValue* UVaRestJsonObject::GetField(const FString& FieldName) const
 
 		return NewValue;
 	}
-	
+
 	return nullptr;
 }
 
 void UVaRestJsonObject::SetField(const FString& FieldName, UVaRestJsonValue* JsonValue)
 {
-	if (!JsonObj.IsValid() || FieldName.IsEmpty())
+	if (FieldName.IsEmpty())
 	{
 		return;
 	}
@@ -162,13 +158,12 @@ void UVaRestJsonObject::SetField(const FString& FieldName, UVaRestJsonValue* Jso
 	JsonObj->SetField(FieldName, JsonValue->GetRootValue());
 }
 
-
 //////////////////////////////////////////////////////////////////////////
 // FJsonObject API Helpers (easy to use with simple Json objects)
 
 float UVaRestJsonObject::GetNumberField(const FString& FieldName) const
 {
-	if (!JsonObj.IsValid() || !JsonObj->HasTypedField<EJson::Number>(FieldName))
+	if (!JsonObj->HasTypedField<EJson::Number>(FieldName))
 	{
 		UE_LOG(LogVaRest, Warning, TEXT("No field with name %s of type Number"), *FieldName);
 		return 0.0f;
@@ -179,7 +174,7 @@ float UVaRestJsonObject::GetNumberField(const FString& FieldName) const
 
 void UVaRestJsonObject::SetNumberField(const FString& FieldName, float Number)
 {
-	if (!JsonObj.IsValid() || FieldName.IsEmpty())
+	if (FieldName.IsEmpty())
 	{
 		return;
 	}
@@ -189,7 +184,7 @@ void UVaRestJsonObject::SetNumberField(const FString& FieldName, float Number)
 
 int32 UVaRestJsonObject::GetIntegerField(const FString& FieldName) const
 {
-	if (!JsonObj.IsValid() || !JsonObj->HasTypedField<EJson::Number>(FieldName))
+	if (!JsonObj->HasTypedField<EJson::Number>(FieldName))
 	{
 		UE_LOG(LogVaRest, Warning, TEXT("No field with name %s of type Number"), *FieldName);
 		return 0;
@@ -200,7 +195,7 @@ int32 UVaRestJsonObject::GetIntegerField(const FString& FieldName) const
 
 void UVaRestJsonObject::SetIntegerField(const FString& FieldName, int32 Number)
 {
-	if (!JsonObj.IsValid() || FieldName.IsEmpty())
+	if (FieldName.IsEmpty())
 	{
 		return;
 	}
@@ -210,18 +205,18 @@ void UVaRestJsonObject::SetIntegerField(const FString& FieldName, int32 Number)
 
 FString UVaRestJsonObject::GetStringField(const FString& FieldName) const
 {
-	if (!JsonObj.IsValid() || !JsonObj->HasTypedField<EJson::String>(FieldName))
+	if (!JsonObj->HasTypedField<EJson::String>(FieldName))
 	{
 		UE_LOG(LogVaRest, Warning, TEXT("No field with name %s of type String"), *FieldName);
 		return TEXT("");
 	}
-		
+
 	return JsonObj->GetStringField(FieldName);
 }
 
 void UVaRestJsonObject::SetStringField(const FString& FieldName, const FString& StringValue)
 {
-	if (!JsonObj.IsValid() || FieldName.IsEmpty())
+	if (FieldName.IsEmpty())
 	{
 		return;
 	}
@@ -231,7 +226,7 @@ void UVaRestJsonObject::SetStringField(const FString& FieldName, const FString& 
 
 bool UVaRestJsonObject::GetBoolField(const FString& FieldName) const
 {
-	if (!JsonObj.IsValid() || !JsonObj->HasTypedField<EJson::Boolean>(FieldName))
+	if (!JsonObj->HasTypedField<EJson::Boolean>(FieldName))
 	{
 		UE_LOG(LogVaRest, Warning, TEXT("No field with name %s of type Boolean"), *FieldName);
 		return false;
@@ -242,7 +237,7 @@ bool UVaRestJsonObject::GetBoolField(const FString& FieldName) const
 
 void UVaRestJsonObject::SetBoolField(const FString& FieldName, bool InValue)
 {
-	if (!JsonObj.IsValid() || FieldName.IsEmpty())
+	if (FieldName.IsEmpty())
 	{
 		return;
 	}
@@ -253,7 +248,7 @@ void UVaRestJsonObject::SetBoolField(const FString& FieldName, bool InValue)
 TArray<UVaRestJsonValue*> UVaRestJsonObject::GetArrayField(const FString& FieldName) const
 {
 	TArray<UVaRestJsonValue*> OutArray;
-	if (!JsonObj.IsValid() || FieldName.IsEmpty())
+	if (FieldName.IsEmpty())
 	{
 		return OutArray;
 	}
@@ -264,7 +259,7 @@ TArray<UVaRestJsonValue*> UVaRestJsonObject::GetArrayField(const FString& FieldN
 		return OutArray;
 	}
 
-	TArray< TSharedPtr<FJsonValue> > ValArray = JsonObj->GetArrayField(FieldName);
+	TArray<TSharedPtr<FJsonValue>> ValArray = JsonObj->GetArrayField(FieldName);
 	for (auto Value : ValArray)
 	{
 		UVaRestJsonValue* NewValue = NewObject<UVaRestJsonValue>();
@@ -278,12 +273,12 @@ TArray<UVaRestJsonValue*> UVaRestJsonObject::GetArrayField(const FString& FieldN
 
 void UVaRestJsonObject::SetArrayField(const FString& FieldName, const TArray<UVaRestJsonValue*>& InArray)
 {
-	if (!JsonObj.IsValid() || FieldName.IsEmpty())
+	if (FieldName.IsEmpty())
 	{
 		return;
 	}
 
-	TArray< TSharedPtr<FJsonValue> > ValArray;
+	TArray<TSharedPtr<FJsonValue>> ValArray;
 
 	// Process input array and COPY original values
 	for (auto InVal : InArray)
@@ -335,21 +330,21 @@ void UVaRestJsonObject::MergeJsonObject(UVaRestJsonObject* InJsonObject, bool Ov
 	}
 
 	TArray<FString> Keys = InJsonObject->GetFieldNames();
-	
+
 	for (auto Key : Keys)
 	{
 		if (Overwrite == false && HasField(Key))
 		{
 			continue;
 		}
-		
+
 		SetField(Key, InJsonObject->GetField(Key));
 	}
 }
 
 UVaRestJsonObject* UVaRestJsonObject::GetObjectField(const FString& FieldName) const
 {
-	if (!JsonObj.IsValid() || !JsonObj->HasTypedField<EJson::Object>(FieldName))
+	if (!JsonObj->HasTypedField<EJson::Object>(FieldName))
 	{
 		UE_LOG(LogVaRest, Warning, TEXT("%s: No field with name %s of type Object"), *VA_FUNC_LINE, *FieldName);
 		return nullptr;
@@ -365,7 +360,7 @@ UVaRestJsonObject* UVaRestJsonObject::GetObjectField(const FString& FieldName) c
 
 void UVaRestJsonObject::SetObjectField(const FString& FieldName, UVaRestJsonObject* JsonObject)
 {
-	if (!JsonObj.IsValid() || FieldName.IsEmpty() || !JsonObject || !JsonObject->IsValidLowLevel())
+	if (FieldName.IsEmpty() || !JsonObject || !JsonObject->IsValidLowLevel())
 	{
 		return;
 	}
@@ -373,28 +368,27 @@ void UVaRestJsonObject::SetObjectField(const FString& FieldName, UVaRestJsonObje
 	JsonObj->SetObjectField(FieldName, JsonObject->GetRootObject());
 }
 
-
 //////////////////////////////////////////////////////////////////////////
 // Array fields helpers (uniform arrays)
 
 TArray<float> UVaRestJsonObject::GetNumberArrayField(const FString& FieldName) const
 {
 	TArray<float> NumberArray;
-	if (!JsonObj.IsValid() || !JsonObj->HasTypedField<EJson::Array>(FieldName) || FieldName.IsEmpty())
+	if (!JsonObj->HasTypedField<EJson::Array>(FieldName) || FieldName.IsEmpty())
 	{
 		UE_LOG(LogVaRest, Warning, TEXT("%s: No field with name %s of type Array"), *VA_FUNC_LINE, *FieldName);
 		return NumberArray;
 	}
 
-	TArray<TSharedPtr<FJsonValue> > JsonArrayValues = JsonObj->GetArrayField(FieldName);
-	for (TArray<TSharedPtr<FJsonValue> >::TConstIterator It(JsonArrayValues); It; ++It)
+	TArray<TSharedPtr<FJsonValue>> JsonArrayValues = JsonObj->GetArrayField(FieldName);
+	for (TArray<TSharedPtr<FJsonValue>>::TConstIterator It(JsonArrayValues); It; ++It)
 	{
 		auto Value = (*It).Get();
 		if (Value->Type != EJson::Number)
 		{
 			UE_LOG(LogVaRest, Error, TEXT("Not Number element in array with field name %s"), *FieldName);
 		}
-		
+
 		NumberArray.Add((*It)->AsNumber());
 	}
 
@@ -403,12 +397,12 @@ TArray<float> UVaRestJsonObject::GetNumberArrayField(const FString& FieldName) c
 
 void UVaRestJsonObject::SetNumberArrayField(const FString& FieldName, const TArray<float>& NumberArray)
 {
-	if (!JsonObj.IsValid() || FieldName.IsEmpty())
+	if (FieldName.IsEmpty())
 	{
 		return;
 	}
 
-	TArray< TSharedPtr<FJsonValue> > EntriesArray;
+	TArray<TSharedPtr<FJsonValue>> EntriesArray;
 
 	for (auto Number : NumberArray)
 	{
@@ -421,14 +415,14 @@ void UVaRestJsonObject::SetNumberArrayField(const FString& FieldName, const TArr
 TArray<FString> UVaRestJsonObject::GetStringArrayField(const FString& FieldName) const
 {
 	TArray<FString> StringArray;
-	if (!JsonObj.IsValid() || !JsonObj->HasTypedField<EJson::Array>(FieldName) || FieldName.IsEmpty())
+	if (!JsonObj->HasTypedField<EJson::Array>(FieldName) || FieldName.IsEmpty())
 	{
 		UE_LOG(LogVaRest, Warning, TEXT("%s: No field with name %s of type Array"), *VA_FUNC_LINE, *FieldName);
 		return StringArray;
 	}
 
-	TArray<TSharedPtr<FJsonValue> > JsonArrayValues = JsonObj->GetArrayField(FieldName);
-	for (TArray<TSharedPtr<FJsonValue> >::TConstIterator It(JsonArrayValues); It; ++It)
+	TArray<TSharedPtr<FJsonValue>> JsonArrayValues = JsonObj->GetArrayField(FieldName);
+	for (TArray<TSharedPtr<FJsonValue>>::TConstIterator It(JsonArrayValues); It; ++It)
 	{
 		auto Value = (*It).Get();
 		if (Value->Type != EJson::String)
@@ -444,12 +438,12 @@ TArray<FString> UVaRestJsonObject::GetStringArrayField(const FString& FieldName)
 
 void UVaRestJsonObject::SetStringArrayField(const FString& FieldName, const TArray<FString>& StringArray)
 {
-	if (!JsonObj.IsValid() || FieldName.IsEmpty())
+	if (FieldName.IsEmpty())
 	{
 		return;
 	}
 
-	TArray< TSharedPtr<FJsonValue> > EntriesArray;
+	TArray<TSharedPtr<FJsonValue>> EntriesArray;
 	for (auto String : StringArray)
 	{
 		EntriesArray.Add(MakeShareable(new FJsonValueString(String)));
@@ -461,14 +455,14 @@ void UVaRestJsonObject::SetStringArrayField(const FString& FieldName, const TArr
 TArray<bool> UVaRestJsonObject::GetBoolArrayField(const FString& FieldName) const
 {
 	TArray<bool> BoolArray;
-	if (!JsonObj.IsValid() || !JsonObj->HasTypedField<EJson::Array>(FieldName) || FieldName.IsEmpty())
+	if (!JsonObj->HasTypedField<EJson::Array>(FieldName) || FieldName.IsEmpty())
 	{
 		UE_LOG(LogVaRest, Warning, TEXT("%s: No field with name %s of type Array"), *VA_FUNC_LINE, *FieldName);
 		return BoolArray;
 	}
 
-	TArray<TSharedPtr<FJsonValue> > JsonArrayValues = JsonObj->GetArrayField(FieldName);
-	for (TArray<TSharedPtr<FJsonValue> >::TConstIterator It(JsonArrayValues); It; ++It)
+	TArray<TSharedPtr<FJsonValue>> JsonArrayValues = JsonObj->GetArrayField(FieldName);
+	for (TArray<TSharedPtr<FJsonValue>>::TConstIterator It(JsonArrayValues); It; ++It)
 	{
 		auto Value = (*It).Get();
 		if (Value->Type != EJson::Boolean)
@@ -484,12 +478,12 @@ TArray<bool> UVaRestJsonObject::GetBoolArrayField(const FString& FieldName) cons
 
 void UVaRestJsonObject::SetBoolArrayField(const FString& FieldName, const TArray<bool>& BoolArray)
 {
-	if (!JsonObj.IsValid() || FieldName.IsEmpty())
+	if (FieldName.IsEmpty())
 	{
 		return;
 	}
 
-	TArray< TSharedPtr<FJsonValue> > EntriesArray;
+	TArray<TSharedPtr<FJsonValue>> EntriesArray;
 	for (auto Boolean : BoolArray)
 	{
 		EntriesArray.Add(MakeShareable(new FJsonValueBoolean(Boolean)));
@@ -501,13 +495,13 @@ void UVaRestJsonObject::SetBoolArrayField(const FString& FieldName, const TArray
 TArray<UVaRestJsonObject*> UVaRestJsonObject::GetObjectArrayField(const FString& FieldName) const
 {
 	TArray<UVaRestJsonObject*> OutArray;
-	if (!JsonObj.IsValid() || !JsonObj->HasTypedField<EJson::Array>(FieldName) || FieldName.IsEmpty())
+	if (!JsonObj->HasTypedField<EJson::Array>(FieldName) || FieldName.IsEmpty())
 	{
 		UE_LOG(LogVaRest, Warning, TEXT("%s: No field with name %s of type Array"), *VA_FUNC_LINE, *FieldName);
 		return OutArray;
 	}
 
-	TArray< TSharedPtr<FJsonValue> > ValArray = JsonObj->GetArrayField(FieldName);
+	TArray<TSharedPtr<FJsonValue>> ValArray = JsonObj->GetArrayField(FieldName);
 	for (auto Value : ValArray)
 	{
 		if (Value->Type != EJson::Object)
@@ -528,12 +522,12 @@ TArray<UVaRestJsonObject*> UVaRestJsonObject::GetObjectArrayField(const FString&
 
 void UVaRestJsonObject::SetObjectArrayField(const FString& FieldName, const TArray<UVaRestJsonObject*>& ObjectArray)
 {
-	if (!JsonObj.IsValid() || FieldName.IsEmpty())
+	if (FieldName.IsEmpty())
 	{
 		return;
 	}
 
-	TArray< TSharedPtr<FJsonValue> > EntriesArray;
+	TArray<TSharedPtr<FJsonValue>> EntriesArray;
 	for (auto Value : ObjectArray)
 	{
 		EntriesArray.Add(MakeShareable(new FJsonValueObject(Value->GetRootObject())));
@@ -570,19 +564,19 @@ int32 UVaRestJsonObject::DeserializeFromUTF8Bytes(const ANSICHAR* Bytes, int32 S
 	while (Bytes < EndByte)
 	{
 		TCHAR Char = FUTF8ToTCHAR_Convert::utf8codepoint(&Bytes);
-		
+
 		if (Char > 0xFFFF)
 		{
 			Char = UNICODE_BOGUS_CHAR_CODEPOINT;
 		}
-		
+
 		if (!Reader.Read(Char))
 		{
 			break;
 		}
 	}
 #endif
-	
+
 	SetRootObject(Reader.State.Root);
 	return Reader.State.Size;
 }
@@ -590,7 +584,7 @@ int32 UVaRestJsonObject::DeserializeFromUTF8Bytes(const ANSICHAR* Bytes, int32 S
 int32 UVaRestJsonObject::DeserializeFromTCHARBytes(const TCHAR* Bytes, int32 Size)
 {
 	FJSONReader Reader;
-	
+
 	int32 i = 0;
 	while (i < Size)
 	{
@@ -599,7 +593,7 @@ int32 UVaRestJsonObject::DeserializeFromTCHARBytes(const TCHAR* Bytes, int32 Siz
 			break;
 		}
 	}
-	
+
 	SetRootObject(Reader.State.Root);
 	return Reader.State.Size;
 }
@@ -608,38 +602,38 @@ void UVaRestJsonObject::DecodeFromArchive(TUniquePtr<FArchive>& Reader)
 {
 	FArchive& Ar = (*Reader.Get());
 	uint8 SymbolBytes[2];
-	
+
 	// Read first two bytes
 	Ar << SymbolBytes[0];
 	Ar << SymbolBytes[1];
-	
+
 	bool bIsIntelByteOrder = true;
-	
-	if(SymbolBytes[0] == 0xff && SymbolBytes[1] == 0xfe)
+
+	if (SymbolBytes[0] == 0xff && SymbolBytes[1] == 0xfe)
 	{
 		// Unicode Intel byte order. Less 1 for the FFFE header, additional 1 for null terminator.
 		bIsIntelByteOrder = true;
 	}
-	else if(SymbolBytes[0] == 0xfe && SymbolBytes[1] == 0xff)
+	else if (SymbolBytes[0] == 0xfe && SymbolBytes[1] == 0xff)
 	{
 		// Unicode non-Intel byte order. Less 1 for the FFFE header, additional 1 for null terminator.
 		bIsIntelByteOrder = false;
 	}
-	
+
 	FJSONReader JsonReader;
 	TCHAR Char;
-	
+
 	while (!Ar.AtEnd())
 	{
 		Ar << SymbolBytes[0];
-		
+
 		if (Ar.AtEnd())
 		{
 			break;
 		}
-		
+
 		Ar << SymbolBytes[1];
-		
+
 		if (bIsIntelByteOrder)
 		{
 			Char = CharCast<TCHAR>((UCS2CHAR)((uint16)SymbolBytes[0] + (uint16)SymbolBytes[1] * 256));
@@ -648,87 +642,78 @@ void UVaRestJsonObject::DecodeFromArchive(TUniquePtr<FArchive>& Reader)
 		{
 			Char = CharCast<TCHAR>((UCS2CHAR)((uint16)SymbolBytes[1] + (uint16)SymbolBytes[0] * 256));
 		}
-		
+
 		if (!JsonReader.Read(Char))
 		{
 			break;
 		}
 	}
-	
+
 	SetRootObject(JsonReader.State.Root);
-	
+
 	if (!Ar.Close())
 	{
 		UE_LOG(LogVaRest, Error, TEXT("UVaRestJsonObject::DecodeFromArchive: Error! Can't close file!"));
 	}
-	
 }
 
 bool UVaRestJsonObject::WriteToFile(const FString& Path)
 {
-	if (JsonObj.IsValid())
+	TUniquePtr<FArchive> FileWriter(IFileManager::Get().CreateFileWriter(*Path));
+	if (!FileWriter)
 	{
-		TUniquePtr<FArchive> FileWriter(IFileManager::Get().CreateFileWriter(*Path));
-		if (!FileWriter)
-		{
-			return false;
-		}
-		
-		FArchive& Ar = *FileWriter.Get();
-		
-		UCS2CHAR BOM = UNICODE_BOM;
-		Ar.Serialize( &BOM, sizeof(UCS2CHAR) );
-		
-        FString Str = FString(TEXT("{"));
-		WriteStringToArchive(Ar, *Str, Str.Len());
-		
-		int32 ElementCount = 0;
-		FJSONWriter JsonWriter;
-		for (auto JsonObjectValuePair : JsonObj->Values)
-		{
-			Str = FString(TEXT("\""));
-			WriteStringToArchive(Ar, *Str, Str.Len());
-			
-			const TCHAR* BufferPtr = *JsonObjectValuePair.Key;
-			for (int i = 0; i < JsonObjectValuePair.Key.Len(); ++i)
-			{
-                Str = FString(1, &BufferPtr[i]);
-#if PLATFORM_WINDOWS
-				WriteStringToArchive(Ar, *Str, Str.Len() - 1);
-#else
-				WriteStringToArchive(Ar, *Str, Str.Len());
-#endif
-			}
-			
-			Str = FString(TEXT("\""));
-			WriteStringToArchive(Ar, *Str, Str.Len());
-			
-			Str = FString(TEXT(":"));
-			WriteStringToArchive(Ar, *Str, Str.Len());
-			
-			++ElementCount;
-			
-			JsonWriter.Write(JsonObjectValuePair.Value, FileWriter.Get(), ElementCount >= JsonObj->Values.Num());
-		}
-		
-		Str = FString(TEXT("}"));
-		WriteStringToArchive(Ar, *Str, Str.Len());
-		
-		FileWriter->Close();
-		
-		return true;
-	}
-	else
-	{
-		UE_LOG(LogVaRest, Error, TEXT("UVaRestJsonObject::WriteToFile: Root object is invalid!"));
 		return false;
 	}
+
+	FArchive& Ar = *FileWriter.Get();
+
+	UCS2CHAR BOM = UNICODE_BOM;
+	Ar.Serialize(&BOM, sizeof(UCS2CHAR));
+
+	FString Str = FString(TEXT("{"));
+	WriteStringToArchive(Ar, *Str, Str.Len());
+
+	int32 ElementCount = 0;
+	FJSONWriter JsonWriter;
+	for (auto JsonObjectValuePair : JsonObj->Values)
+	{
+		Str = FString(TEXT("\""));
+		WriteStringToArchive(Ar, *Str, Str.Len());
+
+		const TCHAR* BufferPtr = *JsonObjectValuePair.Key;
+		for (int i = 0; i < JsonObjectValuePair.Key.Len(); ++i)
+		{
+			Str = FString(1, &BufferPtr[i]);
+#if PLATFORM_WINDOWS
+			WriteStringToArchive(Ar, *Str, Str.Len() - 1);
+#else
+			WriteStringToArchive(Ar, *Str, Str.Len());
+#endif
+		}
+
+		Str = FString(TEXT("\""));
+		WriteStringToArchive(Ar, *Str, Str.Len());
+
+		Str = FString(TEXT(":"));
+		WriteStringToArchive(Ar, *Str, Str.Len());
+
+		++ElementCount;
+
+		JsonWriter.Write(JsonObjectValuePair.Value, FileWriter.Get(), ElementCount >= JsonObj->Values.Num());
+	}
+
+	Str = FString(TEXT("}"));
+	WriteStringToArchive(Ar, *Str, Str.Len());
+
+	FileWriter->Close();
+
+	return true;
 }
 
-bool UVaRestJsonObject::WriteStringToArchive( FArchive& Ar, const TCHAR* StrPtr, int64 Len)
+bool UVaRestJsonObject::WriteStringToArchive(FArchive& Ar, const TCHAR* StrPtr, int64 Len)
 {
 	auto Src = StringCast<UCS2CHAR>(StrPtr, Len);
-	Ar.Serialize( (UCS2CHAR*)Src.Get(), Src.Length() * sizeof(UCS2CHAR) );
-	
+	Ar.Serialize((UCS2CHAR*)Src.Get(), Src.Length() * sizeof(UCS2CHAR));
+
 	return true;
 }

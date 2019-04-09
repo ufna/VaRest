@@ -3,10 +3,11 @@
 
 #pragma once
 
+#include "Dom/JsonObject.h"
+
 #include "VaRestJsonObject.generated.h"
 
 class UVaRestJsonValue;
-class FJsonObject;
 
 /**
  * Blueprintable FJsonObject wrapper
@@ -25,11 +26,10 @@ class VARESTPLUGIN_API UVaRestJsonObject : public UObject
 	void Reset();
 
 	/** Get the root Json object */
-	TSharedPtr<FJsonObject>& GetRootObject();
+	TSharedRef<FJsonObject>& GetRootObject();
 
 	/** Set the root Json object */
-	void SetRootObject(TSharedPtr<FJsonObject>& JsonObject);
-
+	void SetRootObject(const TSharedPtr<FJsonObject>& JsonObject);
 
 	//////////////////////////////////////////////////////////////////////////
 	// Serialization
@@ -44,8 +44,7 @@ class VARESTPLUGIN_API UVaRestJsonObject : public UObject
 
 	/** Construct Json object from string */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
-	bool DecodeJson(const FString& JsonString);
-
+	bool DecodeJson(const FString& JsonString, bool bUseIncrementalParser = true);
 
 	//////////////////////////////////////////////////////////////////////////
 	// FJsonObject API
@@ -77,11 +76,10 @@ class VARESTPLUGIN_API UVaRestJsonObject : public UObject
 	/** Set an ObjectField named FieldName and value of Json Array */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	void SetArrayField(const FString& FieldName, const TArray<UVaRestJsonValue*>& InArray);
-	
+
 	/** Adds all of the fields from one json object to this one */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	void MergeJsonObject(UVaRestJsonObject* InJsonObject, bool Overwrite);
-
 
 	//////////////////////////////////////////////////////////////////////////
 	// FJsonObject API Helpers (easy to use with simple Json objects)
@@ -128,7 +126,6 @@ class VARESTPLUGIN_API UVaRestJsonObject : public UObject
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	void SetObjectField(const FString& FieldName, UVaRestJsonObject* JsonObject);
 
-
 	//////////////////////////////////////////////////////////////////////////
 	// Array fields helpers (uniform arrays)
 
@@ -166,31 +163,28 @@ class VARESTPLUGIN_API UVaRestJsonObject : public UObject
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	void SetObjectArrayField(const FString& FieldName, const TArray<UVaRestJsonObject*>& ObjectArray);
 
-
 	//////////////////////////////////////////////////////////////////////////
 	// Deserialize
-	
+
 public:
 	/** Deserialize byte content to json */
 	int32 DeserializeFromUTF8Bytes(const ANSICHAR* Bytes, int32 Size);
-	
+
 	/** Deserialize byte content to json */
 	int32 DeserializeFromTCHARBytes(const TCHAR* Bytes, int32 Size);
-	
+
 	/** Deserialize byte stream from reader */
 	void DecodeFromArchive(TUniquePtr<FArchive>& Reader);
-	
+
 	/** Save json to file */
 	bool WriteToFile(const FString& Path);
-	
+
 	static bool WriteStringToArchive(FArchive& Ar, const TCHAR* StrPtr, int64 Len);
-	
 
 	//////////////////////////////////////////////////////////////////////////
 	// Data
 
 private:
 	/** Internal JSON data */
-	TSharedPtr<FJsonObject> JsonObj;
-
+	TSharedRef<FJsonObject> JsonObj;
 };

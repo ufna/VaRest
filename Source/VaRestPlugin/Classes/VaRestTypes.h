@@ -14,6 +14,7 @@ enum class ERequestVerb : uint8
 	CUSTOM
 };
 
+// clang-format off
 /** Content type (json, urlencoded, etc.) used by the request */
 UENUM(BlueprintType)
 enum class ERequestContentType : uint8
@@ -23,6 +24,7 @@ enum class ERequestContentType : uint8
 	json,
 	binary
 };
+// clang-format on
 
 /** Enumerates the current state of an Http request */
 UENUM(BlueprintType)

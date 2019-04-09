@@ -61,14 +61,12 @@ public:
 	// End UK2Node interface.
 
 protected:
-	virtual void CreateProjectionPins(UEdGraphPin *Source);
+	virtual void CreateProjectionPins(UEdGraphPin* Source);
 
 public:
 	UPROPERTY(EditAnywhere, Category = PinOptions)
 	TArray<FVaRest_NamedType> Inputs;
-
 };
-
 
 UCLASS(BlueprintType, Blueprintable)
 class VARESTEDITORPLUGIN_API UVaRest_BreakJson : public UK2Node
@@ -92,10 +90,9 @@ public:
 	// End UK2Node interface.
 
 protected:
-	virtual void CreateProjectionPins(UEdGraphPin *Source);
+	virtual void CreateProjectionPins(UEdGraphPin* Source);
 
 public:
 	UPROPERTY(EditAnywhere, Category = PinOptions)
 	TArray<FVaRest_NamedType> Outputs;
-
 };

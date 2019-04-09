@@ -5,6 +5,7 @@
 #include "Kismet/BlueprintFunctionLibrary.h"
 
 #include "VaRestTypes.h"
+
 #include "VaRestLibrary.generated.h"
 
 class UVaRestRequestJSON;
@@ -16,25 +17,24 @@ USTRUCT()
 struct FVaRestCallResponse
 {
 	GENERATED_USTRUCT_BODY()
-	
+
 	UPROPERTY()
 	UVaRestRequestJSON* Request;
-	
+
 	UPROPERTY()
 	UObject* WorldContextObject;
-	
+
 	UPROPERTY()
 	FVaRestCallDelegate Callback;
-	
+
 	FDelegateHandle CompleteDelegateHandle;
 	FDelegateHandle FailDelegateHandle;
-	
+
 	FVaRestCallResponse()
 		: Request(nullptr)
 		, WorldContextObject(nullptr)
 	{
 	}
-
 };
 
 /**
@@ -44,7 +44,6 @@ UCLASS()
 class VARESTPLUGIN_API UVaRestLibrary : public UBlueprintFunctionLibrary
 {
 	GENERATED_BODY()
-
 
 	//////////////////////////////////////////////////////////////////////////
 	// Helpers
@@ -92,7 +91,6 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility", meta = (DisplayName = "Base64 Decode Data"))
 	static bool Base64DecodeData(const FString& Source, TArray<uint8>& Dest);
 
-
 	//////////////////////////////////////////////////////////////////////////
 	// File system integration
 
@@ -103,7 +101,6 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility", meta = (WorldContext = "WorldContextObject"))
 	static class UVaRestJsonObject* LoadJsonFromFile(UObject* WorldContextObject, const FString& Path);
-
 
 	//////////////////////////////////////////////////////////////////////////
 	// Easy URL processing
@@ -118,5 +115,4 @@ public:
 
 private:
 	static TMap<UVaRestRequestJSON*, FVaRestCallResponse> RequestMap;
-
 };

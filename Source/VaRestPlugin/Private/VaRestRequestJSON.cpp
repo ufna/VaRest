@@ -3,17 +3,18 @@
 #include "VaRestRequestJSON.h"
 #include "VaRestJsonObject.h"
 #include "VaRestLibrary.h"
-#include "VaRestSettings.h"
 #include "VaRestPluginPrivatePCH.h"
+#include "VaRestSettings.h"
 
 #include "Misc/CoreMisc.h"
 #include "Runtime/Launch/Resources/Version.h"
 
 FString UVaRestRequestJSON::DeprecatedResponseString(TEXT("DEPRECATED: Please use GetResponseContentAsString() instead"));
 
-template <class T> void FVaRestLatentAction<T>::Cancel()
+template <class T>
+void FVaRestLatentAction<T>::Cancel()
 {
-	UObject *Obj = Request.Get();
+	UObject* Obj = Request.Get();
 	if (Obj != nullptr)
 	{
 		((UVaRestRequestJSON*)Obj)->Cancel();
@@ -21,8 +22,8 @@ template <class T> void FVaRestLatentAction<T>::Cancel()
 }
 
 UVaRestRequestJSON::UVaRestRequestJSON(const class FObjectInitializer& PCIP)
-  : Super(PCIP),
-    BinaryContentType(TEXT("application/octet-stream"))
+	: Super(PCIP)
+	, BinaryContentType(TEXT("application/octet-stream"))
 {
 	ContinueAction = nullptr;
 
@@ -38,8 +39,8 @@ UVaRestRequestJSON* UVaRestRequestJSON::ConstructRequest(UObject* WorldContextOb
 }
 
 UVaRestRequestJSON* UVaRestRequestJSON::ConstructRequestExt(
-	UObject* WorldContextObject, 
-	ERequestVerb Verb, 
+	UObject* WorldContextObject,
+	ERequestVerb Verb,
 	ERequestContentType ContentType)
 {
 	UVaRestRequestJSON* Request = ConstructRequest(WorldContextObject);
@@ -84,7 +85,6 @@ void UVaRestRequestJSON::SetHeader(const FString& HeaderName, const FString& Hea
 {
 	RequestHeaders.Add(HeaderName, HeaderValue);
 }
-
 
 //////////////////////////////////////////////////////////////////////////
 // Destruction and reset
@@ -141,7 +141,6 @@ void UVaRestRequestJSON::Cancel()
 	ResetResponseData();
 }
 
-
 //////////////////////////////////////////////////////////////////////////
 // JSON data accessors
 
@@ -164,7 +163,6 @@ void UVaRestRequestJSON::SetResponseObject(UVaRestJsonObject* JsonObject)
 {
 	ResponseJsonObj = JsonObject;
 }
-
 
 ///////////////////////////////////////////////////////////////////////////
 // Response data access
@@ -207,7 +205,6 @@ TArray<FString> UVaRestRequestJSON::GetAllResponseHeaders()
 	return Result;
 }
 
-
 //////////////////////////////////////////////////////////////////////////
 // URL processing
 
@@ -223,7 +220,7 @@ void UVaRestRequestJSON::SetURL(const FString& Url)
 	TrimmedUrl.Trim();
 	TrimmedUrl.TrimTrailing();
 #endif
-	
+
 	HttpRequest->SetURL(TrimmedUrl);
 }
 
@@ -233,7 +230,7 @@ void UVaRestRequestJSON::ProcessURL(const FString& Url)
 	ProcessRequest();
 }
 
-void UVaRestRequestJSON::ApplyURL(const FString& Url, UVaRestJsonObject *&Result, UObject* WorldContextObject, FLatentActionInfo LatentInfo)
+void UVaRestRequestJSON::ApplyURL(const FString& Url, UVaRestJsonObject*& Result, UObject* WorldContextObject, FLatentActionInfo LatentInfo)
 {
 	// Be sure to trim URL because it can break links on iOS
 	FString TrimmedUrl = Url;
@@ -252,7 +249,7 @@ void UVaRestRequestJSON::ApplyURL(const FString& Url, UVaRestJsonObject *&Result
 	if (UWorld* World = GEngine->GetWorldFromContextObjectChecked(WorldContextObject))
 	{
 		FLatentActionManager& LatentActionManager = World->GetLatentActionManager();
-		FVaRestLatentAction<UVaRestJsonObject*> *Kont = LatentActionManager.FindExistingAction<FVaRestLatentAction<UVaRestJsonObject*>>(LatentInfo.CallbackTarget, LatentInfo.UUID);
+		FVaRestLatentAction<UVaRestJsonObject*>* Kont = LatentActionManager.FindExistingAction<FVaRestLatentAction<UVaRestJsonObject*>>(LatentInfo.CallbackTarget, LatentInfo.UUID);
 
 		if (Kont != nullptr)
 		{
@@ -296,7 +293,7 @@ void UVaRestRequestJSON::ProcessRequest()
 	case ERequestVerb::PUT:
 		HttpRequest->SetVerb(TEXT("PUT"));
 		break;
-			
+
 	case ERequestVerb::DEL:
 		HttpRequest->SetVerb(TEXT("DELETE"));
 		break;
@@ -407,8 +404,8 @@ void UVaRestRequestJSON::ProcessRequest()
 
 		// Serialize data to json string
 		FString OutputString;
-		TSharedRef< TJsonWriter<> > Writer = TJsonWriterFactory<>::Create(&OutputString);
-		FJsonSerializer::Serialize(RequestJsonObj->GetRootObject().ToSharedRef(), Writer);
+		TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&OutputString);
+		FJsonSerializer::Serialize(RequestJsonObj->GetRootObject(), Writer);
 
 		// Set Json content
 		HttpRequest->SetContentAsString(OutputString);
@@ -427,14 +424,13 @@ void UVaRestRequestJSON::ProcessRequest()
 	{
 		HttpRequest->SetHeader(It.Key(), It.Value());
 	}
-	
+
 	// Bind event
 	HttpRequest->OnProcessRequestComplete().BindUObject(this, &UVaRestRequestJSON::OnProcessRequestComplete);
 
 	// Execute the request
 	HttpRequest->ProcessRequest();
 }
-
 
 //////////////////////////////////////////////////////////////////////////
 // Request callbacks
@@ -445,7 +441,7 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 	ResetResponseData();
 
 	// Check we have a response and save response code as int32
-	if(Response.IsValid())
+	if (Response.IsValid())
 	{
 		ResponseCode = Response->GetResponseCode();
 	}
@@ -478,35 +474,31 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 			ResponseHeaders.Add(Key, Value);
 		}
 	}
-	
+
 	// Try to deserialize data to JSON
 	const TArray<uint8>& Bytes = Response->GetContent();
-	ResponseSize = ResponseJsonObj->DeserializeFromUTF8Bytes((const ANSICHAR*) Bytes.GetData(), Bytes.Num());
-	
+	ResponseSize = ResponseJsonObj->DeserializeFromUTF8Bytes((const ANSICHAR*)Bytes.GetData(), Bytes.Num());
+
+	// Log errors
+	if (ResponseSize == 0)
+	{
+		// As we assume it's recommended way to use current class, but not the only one,
+		// it will be the warning instead of error
+		UE_LOG(LogVaRest, Warning, TEXT("JSON could not be decoded!"));
+	}
+
 	// Decide whether the request was successful
 	bIsValidJsonResponse = bWasSuccessful && (ResponseSize > 0);
-	
+
 	if (!bIsValidJsonResponse)
 	{
 		// Save response data as a string
 		ResponseContent = Response->GetContentAsString();
 		ResponseSize = ResponseContent.GetAllocatedSize();
 	}
-	
-	// Log errors
-	if (!bIsValidJsonResponse)
-	{
-		if (!ResponseJsonObj->GetRootObject().IsValid())
-		{
-			// As we assume it's recommended way to use current class, but not the only one,
-			// it will be the warning instead of error
-			UE_LOG(LogVaRest, Warning, TEXT("JSON could not be decoded!"));
-		}
-	}
 
 	// Broadcast the result events on next tick
-	AsyncTask(ENamedThreads::GameThread, [this]()
-	{
+	AsyncTask(ENamedThreads::GameThread, [this]() {
 		OnRequestComplete.Broadcast(this);
 		OnStaticRequestComplete.Broadcast(this);
 	});
@@ -514,13 +506,12 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 	// Finish the latent action
 	if (ContinueAction)
 	{
-		FVaRestLatentAction<UVaRestJsonObject*> *K = ContinueAction;
+		FVaRestLatentAction<UVaRestJsonObject*>* K = ContinueAction;
 		ContinueAction = nullptr;
 
 		K->Call(ResponseJsonObj);
 	}
 }
-
 
 //////////////////////////////////////////////////////////////////////////
 // Tags
@@ -542,7 +533,6 @@ bool UVaRestRequestJSON::HasTag(FName Tag) const
 {
 	return (Tag != NAME_None) && Tags.Contains(Tag);
 }
-
 
 //////////////////////////////////////////////////////////////////////////
 // Data
@@ -571,7 +561,7 @@ FString UVaRestRequestJSON::GetResponseContentAsString(bool bCacheResponseConten
 		UE_LOG(LogVaRest, Warning, TEXT("%s: Use of uncashed getter could be slow"), *VA_FUNC_LINE);
 		return ResponseJsonObj->EncodeJson();
 	}
-	
+
 	// Check that we haven't cached content yet
 	if (ResponseContent == DeprecatedResponseString)
 	{

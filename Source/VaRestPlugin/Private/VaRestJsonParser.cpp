@@ -1,27 +1,27 @@
-// Copyright 2015-2017 Mail.Ru Group. All Rights Reserved.
+// Copyright 2015-2019 Mail.Ru Group. All Rights Reserved.
 
 #include "VaRestJsonParser.h"
-#include "VaRestJsonObject.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Logging/LogMacros.h"
+#include "VaRestJsonObject.h"
 
 FJSONState::FJSONState()
-: Notation(EJSONNotation::NONE)
-, bEscape(false)
-, bError(false)
-, Quote(UNICODE_BOGUS_CHAR_CODEPOINT)
+	: Notation(EJSONNotation::NONE)
+	, bEscape(false)
+	, bError(false)
+	, Quote(UNICODE_BOGUS_CHAR_CODEPOINT)
 {
 	Key.Reserve(1024);
 	Data.Reserve(4096);
-	
+
 	Root = TSharedPtr<FJsonObject>(nullptr);
-	
+
 	Objects.Reserve(64);
 	Tokens.Reserve(64);
-	
+
 	Tokens.Add(EJSONToken::ROOT);
-	
+
 	Size = 0;
 }
 
@@ -58,7 +58,7 @@ void FJSONState::PopToken(int32 Num)
 			bError = true;
 		}
 	}
-	
+
 	Notation = EJSONNotation::NONE;
 }
 
@@ -72,7 +72,7 @@ void FJSONState::PopObject()
 			return;
 		}
 	}
-	
+
 	bError = true;
 }
 
@@ -86,7 +86,7 @@ void FJSONState::PopArray()
 			return;
 		}
 	}
-	
+
 	bError = true;
 }
 
@@ -107,86 +107,86 @@ void FJSONState::PopValue(bool bCheckType)
 			Objects.Pop(false);
 			if (Objects.Num() > 0)
 			{
-				switch(Value->Type)
+				switch (Value->Type)
 				{
-					case EJson::Null:
-					{
-						auto LowerCase = Data.ToLower();
-						if (LowerCase != TEXT("null"))
-						{
-							bError = true;
-						}
-						break;
-					}
-					case EJson::String:
-					{
-						FJsonValueNonConstString* JsonValueString = ((FJsonValueNonConstString*) Value.Get());
-						JsonValueString->AsNonConstString() = Data;
-						JsonValueString->AsNonConstString().Shrink();
-						Size += JsonValueString->AsNonConstString().GetAllocatedSize();
-						break;
-					}
-					case EJson::Number:
-					{
-						FString LowerCase = Data.ToLower();
-						int32 ePosition = INDEX_NONE;
-						LowerCase.FindChar('e', ePosition);
-						if (ePosition == INDEX_NONE)
-						{
-							if (LowerCase.IsNumeric())
-							{
-								((FJsonValueNonConstNumber*) Value.Get())->AsNonConstNumber() = FCString::Atod(*LowerCase);
-							}
-							else
-							{
-								bError = true;
-							}
-						}
-						else if (LowerCase.Len() > ePosition + 2)
-						{
-							FString Left = LowerCase.Left(ePosition);
-							FString Rigth = LowerCase.Right(LowerCase.Len() - ePosition - 1);
-							if (Left.IsNumeric() && Rigth.IsNumeric())
-							{
-								((FJsonValueNonConstNumber*) Value.Get())->AsNonConstNumber() = FCString::Atod(*Left) * FMath::Pow(10.f, FCString::Atoi(*Rigth));
-							}
-							else
-							{
-								bError = true;
-							}
-						}
-						else
-						{
-							bError = true;
-						}
-						break;
-					}
-					case EJson::Boolean:
-					{
-						auto LowerCase = Data.ToLower();
-						if (LowerCase == TEXT("true"))
-						{
-							((FJsonValueNonConstBoolean*) Value.Get())->AsNonConstBool() = true;
-						}
-						else if (LowerCase == TEXT("false"))
-						{
-							((FJsonValueNonConstBoolean*) Value.Get())->AsNonConstBool() = false;
-						}
-						else
-						{
-							bError = true;
-						}
-						break;
-					}
-					default:
+				case EJson::Null:
+				{
+					auto LowerCase = Data.ToLower();
+					if (LowerCase != TEXT("null"))
 					{
 						bError = true;
-						return;
 					}
+					break;
 				}
-				
+				case EJson::String:
+				{
+					FJsonValueNonConstString* JsonValueString = ((FJsonValueNonConstString*)Value.Get());
+					JsonValueString->AsNonConstString() = Data;
+					JsonValueString->AsNonConstString().Shrink();
+					Size += JsonValueString->AsNonConstString().GetAllocatedSize();
+					break;
+				}
+				case EJson::Number:
+				{
+					FString LowerCase = Data.ToLower();
+					int32 ePosition = INDEX_NONE;
+					LowerCase.FindChar('e', ePosition);
+					if (ePosition == INDEX_NONE)
+					{
+						if (LowerCase.IsNumeric())
+						{
+							((FJsonValueNonConstNumber*)Value.Get())->AsNonConstNumber() = FCString::Atod(*LowerCase);
+						}
+						else
+						{
+							bError = true;
+						}
+					}
+					else if (LowerCase.Len() > ePosition + 2)
+					{
+						FString Left = LowerCase.Left(ePosition);
+						FString Rigth = LowerCase.Right(LowerCase.Len() - ePosition - 1);
+						if (Left.IsNumeric() && Rigth.IsNumeric())
+						{
+							((FJsonValueNonConstNumber*)Value.Get())->AsNonConstNumber() = FCString::Atod(*Left) * FMath::Pow(10.f, FCString::Atoi(*Rigth));
+						}
+						else
+						{
+							bError = true;
+						}
+					}
+					else
+					{
+						bError = true;
+					}
+					break;
+				}
+				case EJson::Boolean:
+				{
+					auto LowerCase = Data.ToLower();
+					if (LowerCase == TEXT("true"))
+					{
+						((FJsonValueNonConstBoolean*)Value.Get())->AsNonConstBool() = true;
+					}
+					else if (LowerCase == TEXT("false"))
+					{
+						((FJsonValueNonConstBoolean*)Value.Get())->AsNonConstBool() = false;
+					}
+					else
+					{
+						bError = true;
+					}
+					break;
+				}
+				default:
+				{
+					bError = true;
+					return;
+				}
+				}
+
 				ClearData();
-				
+
 				auto Container = Objects.Last(0);
 				if (Container->Type == EJson::Object)
 				{
@@ -205,7 +205,7 @@ void FJSONState::PopValue(bool bCheckType)
 				}
 				else if (Container->Type == EJson::Array)
 				{
-					((FJsonValueNonConstArray*) Container.Get())->AsNonConstArray().Add(Value);
+					((FJsonValueNonConstArray*)Container.Get())->AsNonConstArray().Add(Value);
 				}
 				else
 				{
@@ -239,7 +239,7 @@ FJsonValueObject* FJSONState::GetObject()
 	FJsonValue* Value = GetLast();
 	if (Value != nullptr && Value->Type == EJson::Object)
 	{
-		return (FJsonValueObject*) Value;
+		return (FJsonValueObject*)Value;
 	}
 	bError = true;
 	return nullptr;
@@ -250,7 +250,7 @@ FJsonValueNonConstArray* FJSONState::GetArray()
 	FJsonValue* Value = GetLast();
 	if (Value != nullptr && Value->Type == EJson::Array)
 	{
-		return (FJsonValueNonConstArray*) Value;
+		return (FJsonValueNonConstArray*)Value;
 	}
 	bError = true;
 	return nullptr;
@@ -337,7 +337,6 @@ void FJSONState::Error()
 
 FJSONReader::FJSONReader()
 {
-
 }
 
 bool FJSONReader::IsNewLine(const TCHAR& Char)
@@ -356,17 +355,17 @@ bool FJSONReader::FindToken(const TCHAR& Char)
 	{
 		return false;
 	}
-	
+
 	if (State.Notation != EJSONNotation::STRING)
 	{
-		switch(Char)
+		switch (Char)
 		{
-			case '{': State.Tokens.Add(EJSONToken::CURLY_BEGIN);  return true;
-			case '}': State.Tokens.Add(EJSONToken::CURLY_END);    return true;
-			case '[': State.Tokens.Add(EJSONToken::SQUARE_BEGIN); return true;
-			case ']': State.Tokens.Add(EJSONToken::SQUARE_END);   return true;
-			case ',': State.Tokens.Add(EJSONToken::COMMA);        return true;
-			case ':': State.Tokens.Add(EJSONToken::COLON);        return true;
+		case '{': State.Tokens.Add(EJSONToken::CURLY_BEGIN); return true;
+		case '}': State.Tokens.Add(EJSONToken::CURLY_END); return true;
+		case '[': State.Tokens.Add(EJSONToken::SQUARE_BEGIN); return true;
+		case ']': State.Tokens.Add(EJSONToken::SQUARE_END); return true;
+		case ',': State.Tokens.Add(EJSONToken::COMMA); return true;
+		case ':': State.Tokens.Add(EJSONToken::COLON); return true;
 		}
 	}
 	return false;
@@ -374,214 +373,214 @@ bool FJSONReader::FindToken(const TCHAR& Char)
 
 void FJSONReader::UpdateNotation()
 {
-	switch(State.GetToken())
+	switch (State.GetToken())
 	{
-		case EJSONToken::ROOT:
+	case EJSONToken::ROOT:
+	{
+		return;
+	}
+	case EJSONToken::CURLY_BEGIN:
+	{
+		if (State.CheckTokens(EJSONToken::SQUARE_BEGIN, EJSONToken::CURLY_BEGIN)) // Object in array "[{"
 		{
-			return;
+			State.Notation = EJSONNotation::OBJECT;
+			auto Value = State.GetArray();
+			if (Value != nullptr)
+			{
+				Value->AsNonConstArray().Add(State.PushObject());
+			}
+			else
+			{
+				State.Error();
+			}
 		}
-		case EJSONToken::CURLY_BEGIN:
+		else if (State.CheckTokens(EJSONToken::CURLY_BEGIN, EJSONToken::COLON, EJSONToken::CURLY_BEGIN)) // Object in key "{:{"
 		{
-			if (State.CheckTokens(EJSONToken::SQUARE_BEGIN, EJSONToken::CURLY_BEGIN)) // Object in array "[{"
+			if (State.Key.Len() > 0)
 			{
 				State.Notation = EJSONNotation::OBJECT;
-				auto Value = State.GetArray();
+				auto Value = State.GetObject();
 				if (Value != nullptr)
 				{
-					Value->AsNonConstArray().Add(State.PushObject());
+					Value->AsObject()->SetField(State.Key, State.PushObject());
+					State.ClearKey();
 				}
 				else
 				{
 					State.Error();
-				}
-			}
-			else if (State.CheckTokens(EJSONToken::CURLY_BEGIN, EJSONToken::COLON, EJSONToken::CURLY_BEGIN)) // Object in key "{:{"
-			{
-				if (State.Key.Len() > 0)
-				{
-					State.Notation = EJSONNotation::OBJECT;
-					auto Value = State.GetObject();
-					if (Value != nullptr)
-					{
-						Value->AsObject()->SetField(State.Key, State.PushObject());
-						State.ClearKey();
-					}
-					else
-					{
-						State.Error();
-					}
-				}
-				else
-				{
-					State.Error();
-				}
-			}
-			else if (State.CheckTokens(EJSONToken::ROOT, EJSONToken::CURLY_BEGIN)) // Root object "{"
-			{
-				if (State.Root.IsValid())
-				{
-					State.Error();
-				}
-				else
-				{
-					State.Root = TSharedPtr<FJsonObject>(new FJsonObject());
-					State.PushObject(State.Root); // add root object
-					State.Notation = EJSONNotation::OBJECT;
 				}
 			}
 			else
 			{
 				State.Error();
 			}
-			break;
 		}
-		case EJSONToken::CURLY_END:
+		else if (State.CheckTokens(EJSONToken::ROOT, EJSONToken::CURLY_BEGIN)) // Root object "{"
 		{
-			if (State.CheckTokens(EJSONToken::CURLY_BEGIN, EJSONToken::CURLY_END)) // Close object "{}"
+			if (State.Root.IsValid())
 			{
-				State.PopToken(2); // pop "{}"
-				State.PopObject(); // remove object
+				State.Error();
 			}
-			else if (State.CheckTokens(EJSONToken::CURLY_BEGIN, EJSONToken::COLON, EJSONToken::CURLY_END)) // Close object "{:}"
+			else
 			{
-				State.PopToken(3); // pop "{:}"
-				State.PopValue(); // remove value
-				State.PopObject(); // remove object
+				State.Root = TSharedPtr<FJsonObject>(new FJsonObject());
+				State.PushObject(State.Root); // add root object
+				State.Notation = EJSONNotation::OBJECT;
+			}
+		}
+		else
+		{
+			State.Error();
+		}
+		break;
+	}
+	case EJSONToken::CURLY_END:
+	{
+		if (State.CheckTokens(EJSONToken::CURLY_BEGIN, EJSONToken::CURLY_END)) // Close object "{}"
+		{
+			State.PopToken(2); // pop "{}"
+			State.PopObject(); // remove object
+		}
+		else if (State.CheckTokens(EJSONToken::CURLY_BEGIN, EJSONToken::COLON, EJSONToken::CURLY_END)) // Close object "{:}"
+		{
+			State.PopToken(3); // pop "{:}"
+			State.PopValue();  // remove value
+			State.PopObject(); // remove object
+		}
+		else
+		{
+			State.Error();
+		}
+
+		if (State.CheckTokens(EJSONToken::COLON)) // Object in object ":"
+		{
+			State.PopToken(1); // pop ":"
+		}
+
+		State.Notation = EJSONNotation::SKIP;
+
+		break;
+	}
+	case EJSONToken::SQUARE_BEGIN:
+	{
+		if (State.CheckTokens(EJSONToken::SQUARE_BEGIN, EJSONToken::SQUARE_BEGIN)) // Array in array "[["
+		{
+			State.Notation = EJSONNotation::ARRAY;
+			auto Value = State.GetArray();
+			if (Value != nullptr)
+			{
+				Value->AsNonConstArray().Add(State.PushArray());
 			}
 			else
 			{
 				State.Error();
 			}
-			
-			if (State.CheckTokens(EJSONToken::COLON)) // Object in object ":"
+		}
+		else if (State.CheckTokens(EJSONToken::CURLY_BEGIN, EJSONToken::COLON, EJSONToken::SQUARE_BEGIN)) // Array in key "{:["
+		{
+			State.Notation = EJSONNotation::ARRAY;
+			if (State.Key.Len() > 0)
+			{
+				auto Value = State.GetObject();
+				if (Value != nullptr)
+				{
+					Value->AsObject()->SetField(State.Key, State.PushArray());
+					State.ClearKey();
+				}
+				else
+				{
+					State.Error();
+				}
+			}
+			else
+			{
+				State.Error();
+			}
+		}
+		else if (State.CheckTokens(EJSONToken::ROOT, EJSONToken::SQUARE_BEGIN)) // Root array "{"
+		{
+			State.Error(); // Not support
+		}
+		else
+		{
+			State.Error();
+		}
+		break;
+	}
+	case EJSONToken::SQUARE_END:
+	{
+		if (State.CheckTokens(EJSONToken::SQUARE_BEGIN, EJSONToken::SQUARE_END)) // Close array "[]"
+		{
+			State.PopToken(2);	 // remove token "[]"
+			State.PopValue(false); // remove value if exists
+			State.PopArray();	  // remove array
+
+			if (State.CheckTokens(EJSONToken::COLON)) // Array in object ":"
 			{
 				State.PopToken(1); // pop ":"
 			}
-			
-			State.Notation = EJSONNotation::SKIP;
-			
-			break;
 		}
-		case EJSONToken::SQUARE_BEGIN:
-		{
-			if (State.CheckTokens(EJSONToken::SQUARE_BEGIN, EJSONToken::SQUARE_BEGIN)) // Array in array "[["
-			{
-				State.Notation = EJSONNotation::ARRAY;
-				auto Value = State.GetArray();
-				if (Value != nullptr)
-				{
-					Value->AsNonConstArray().Add(State.PushArray());
-				}
-				else
-				{
-					State.Error();
-				}
-			}
-			else if (State.CheckTokens(EJSONToken::CURLY_BEGIN, EJSONToken::COLON, EJSONToken::SQUARE_BEGIN)) // Array in key "{:["
-			{
-				State.Notation = EJSONNotation::ARRAY;
-				if (State.Key.Len() > 0)
-				{
-					auto Value = State.GetObject();
-					if (Value != nullptr)
-					{
-						Value->AsObject()->SetField(State.Key, State.PushArray());
-						State.ClearKey();
-					}
-					else
-					{
-						State.Error();
-					}
-				}
-				else
-				{
-					State.Error();
-				}
-			}
-			else if (State.CheckTokens(EJSONToken::ROOT, EJSONToken::SQUARE_BEGIN)) // Root array "{"
-			{
-				State.Error(); // Not support
-			}
-			else
-			{
-				State.Error();
-			}
-			break;
-		}
-		case EJSONToken::SQUARE_END:
-		{
-			if (State.CheckTokens(EJSONToken::SQUARE_BEGIN, EJSONToken::SQUARE_END)) // Close array "[]"
-			{
-				State.PopToken(2); // remove token "[]"
-				State.PopValue(false); // remove value if exists
-				State.PopArray(); // remove array
-				
-				if (State.CheckTokens(EJSONToken::COLON)) // Array in object ":"
-				{
-					State.PopToken(1); // pop ":"
-				}
-			}
-			else
-			{
-				State.Error();
-			}
-			
-			State.Notation = EJSONNotation::SKIP;
-			
-			break;
-		}
-		case EJSONToken::COMMA:
-		{
-			if (State.CheckTokens(EJSONToken::CURLY_BEGIN, EJSONToken::COLON, EJSONToken::COMMA)) // Next record in object "{:,"
-			{
-				State.PopToken(2); // remove token ":,"
-				State.PopValue(false); // remove value
-				State.Notation = EJSONNotation::OBJECT;
-			}
-			else if (State.CheckTokens(EJSONToken::CURLY_BEGIN, EJSONToken::COMMA)) // Next record in object "{,"
-			{
-				State.PopToken(1); // remove token ","
-				State.Notation = EJSONNotation::OBJECT;
-			}
-			else if (State.CheckTokens(EJSONToken::SQUARE_BEGIN, EJSONToken::COMMA)) // Next record in array "[,"
-			{
-				State.PopToken(1); // remove token ","
-				State.PopValue(false); // remove value
-				State.Notation = EJSONNotation::ARRAY;
-			}
-			else
-			{
-				State.Error();
-			}
-			break;
-		}
-		case EJSONToken::COLON:
-		{
-			if (State.CheckTokens(EJSONToken::CURLY_BEGIN, EJSONToken::COLON)) // Object key close "{:"
-			{
-				State.Notation = EJSONNotation::OBJECT;
-				if (State.Data.Len() > 0)
-				{
-					State.DataToKey();
-				}
-				else
-				{
-					State.Error();
-				}
-			}
-			else
-			{
-				State.Error();
-			}
-			break;
-		}
-		case EJSONToken::ERROR:
+		else
 		{
 			State.Error();
-			break;
 		}
+
+		State.Notation = EJSONNotation::SKIP;
+
+		break;
 	}
-	
+	case EJSONToken::COMMA:
+	{
+		if (State.CheckTokens(EJSONToken::CURLY_BEGIN, EJSONToken::COLON, EJSONToken::COMMA)) // Next record in object "{:,"
+		{
+			State.PopToken(2);	 // remove token ":,"
+			State.PopValue(false); // remove value
+			State.Notation = EJSONNotation::OBJECT;
+		}
+		else if (State.CheckTokens(EJSONToken::CURLY_BEGIN, EJSONToken::COMMA)) // Next record in object "{,"
+		{
+			State.PopToken(1); // remove token ","
+			State.Notation = EJSONNotation::OBJECT;
+		}
+		else if (State.CheckTokens(EJSONToken::SQUARE_BEGIN, EJSONToken::COMMA)) // Next record in array "[,"
+		{
+			State.PopToken(1);	 // remove token ","
+			State.PopValue(false); // remove value
+			State.Notation = EJSONNotation::ARRAY;
+		}
+		else
+		{
+			State.Error();
+		}
+		break;
+	}
+	case EJSONToken::COLON:
+	{
+		if (State.CheckTokens(EJSONToken::CURLY_BEGIN, EJSONToken::COLON)) // Object key close "{:"
+		{
+			State.Notation = EJSONNotation::OBJECT;
+			if (State.Data.Len() > 0)
+			{
+				State.DataToKey();
+			}
+			else
+			{
+				State.Error();
+			}
+		}
+		else
+		{
+			State.Error();
+		}
+		break;
+	}
+	case EJSONToken::ERROR:
+	{
+		State.Error();
+		break;
+	}
+	}
+
 	if (!State.bError && State.Notation == EJSONNotation::NONE)
 	{
 		UpdateNotation();
@@ -595,7 +594,7 @@ void FJSONReader::ReadAsString(const TCHAR& Char)
 		State.Error();
 		return;
 	}
-	
+
 	if (!State.bEscape && State.Quote == Char)
 	{
 		State.Quote = UNICODE_BOGUS_CHAR_CODEPOINT;
@@ -605,11 +604,11 @@ void FJSONReader::ReadAsString(const TCHAR& Char)
 	{
 		if (State.bEscape)
 		{
-			switch(Char)
+			switch (Char)
 			{
-				case 'n': State.Data.AppendChar('\n'); break;
-				case 't': State.Data.AppendChar('\t'); break;
-				default:  State.Data.AppendChar(Char); break;
+			case 'n': State.Data.AppendChar('\n'); break;
+			case 't': State.Data.AppendChar('\t'); break;
+			default: State.Data.AppendChar(Char); break;
 			}
 		}
 		else
@@ -626,7 +625,7 @@ void FJSONReader::ReadAsStringSpecial(const TCHAR& Char)
 		State.Notation = EJSONNotation::SKIP;
 		return;
 	}
-	
+
 	State.Data.AppendChar(Char);
 }
 
@@ -637,7 +636,7 @@ void FJSONReader::ReadAsNumber(const TCHAR& Char)
 		State.Notation = EJSONNotation::SKIP;
 		return;
 	}
-	
+
 	if ((Char >= '0' && Char <= '9') || Char == '-' || Char == '.' || Char == '+' || Char == 'e' || Char == 'E')
 	{
 		State.Data.AppendChar(Char);
@@ -650,36 +649,36 @@ void FJSONReader::ReadAsNumber(const TCHAR& Char)
 
 void FJSONReader::ReadBasicValue(const TCHAR& Char)
 {
-	switch(Char)
+	switch (Char)
 	{
-		case 'T':
-		case 't':
-		case 'F':
-		case 'f':
-		{
-			State.PushBoolean();
-			State.Notation = EJSONNotation::STRING_SPECIAL;
-			ReadAsStringSpecial(Char);
-			return;
-		}
-		case 'N':
-		case 'n':
-		{
-			State.PushNull();
-			State.Notation = EJSONNotation::STRING_SPECIAL;
-			ReadAsStringSpecial(Char);
-			return;
-		}
-		case '\'':
-		case '"':
-		{
-			State.PushString();
-			State.Notation = EJSONNotation::STRING;
-			State.Quote = Char;
-			return;
-		}
+	case 'T':
+	case 't':
+	case 'F':
+	case 'f':
+	{
+		State.PushBoolean();
+		State.Notation = EJSONNotation::STRING_SPECIAL;
+		ReadAsStringSpecial(Char);
+		return;
 	}
-	
+	case 'N':
+	case 'n':
+	{
+		State.PushNull();
+		State.Notation = EJSONNotation::STRING_SPECIAL;
+		ReadAsStringSpecial(Char);
+		return;
+	}
+	case '\'':
+	case '"':
+	{
+		State.PushString();
+		State.Notation = EJSONNotation::STRING;
+		State.Quote = Char;
+		return;
+	}
+	}
+
 	if ((Char >= '0' && Char <= '9') || Char == '-')
 	{
 		State.PushNumber();
@@ -704,7 +703,7 @@ void FJSONReader::ReadAsObject(const TCHAR& Char)
 	{
 		return;
 	}
-	
+
 	if (State.CheckTokens(EJSONToken::CURLY_BEGIN)) // read key "{"
 	{
 		if (Char == '\'' || Char == '"')
@@ -739,62 +738,61 @@ bool FJSONReader::Read(const TCHAR Char)
 		State.bEscape = true;
 		return true;
 	}
-	
+
 	if (FindToken(Char))
 	{
 		State.Notation = EJSONNotation::NONE;
 		UpdateNotation();
 		return true;
 	}
-	
-	switch(State.Notation)
+
+	switch (State.Notation)
 	{
-		case EJSONNotation::NONE:			UpdateNotation();			break;
-			
-		case EJSONNotation::STRING:			ReadAsString(Char);			break;
-		case EJSONNotation::STRING_SPECIAL: ReadAsStringSpecial(Char);	break;
-		case EJSONNotation::NUMBER:			ReadAsNumber(Char);			break;
-		case EJSONNotation::ARRAY:			ReadAsArray(Char);			break;
-		case EJSONNotation::OBJECT:			ReadAsObject(Char);			break;
-			
-		case EJSONNotation::SKIP:			Skip(Char);					break;
+	case EJSONNotation::NONE: UpdateNotation(); break;
+
+	case EJSONNotation::STRING: ReadAsString(Char); break;
+	case EJSONNotation::STRING_SPECIAL: ReadAsStringSpecial(Char); break;
+	case EJSONNotation::NUMBER: ReadAsNumber(Char); break;
+	case EJSONNotation::ARRAY: ReadAsArray(Char); break;
+	case EJSONNotation::OBJECT: ReadAsObject(Char); break;
+
+	case EJSONNotation::SKIP: Skip(Char); break;
 	}
-	
+
 	if (State.bError)
 	{
 		State.Root = TSharedPtr<FJsonObject>(nullptr);
 		State.Size = 0;
 		return false;
 	}
-	
+
 	State.bEscape = false;
-	
+
 	return true;
 }
 
 FJSONWriter::FJSONWriter()
 {
-	
 }
 
 bool FJSONWriter::GetStartChar(const TSharedPtr<FJsonValue>& JsonValue, FString& Str)
 {
 	switch (JsonValue->Type)
 	{
-		case EJson::Object:
-			Str = FString(TEXT("{"));
-			break;
-		case EJson::Array:
-			Str = FString(TEXT("["));
-			break;
-		case EJson::String:
-			Str = FString(TEXT("\""));
-			break;
-		default:
-			return false;
-			break;
+	case EJson::Object:
+		Str = FString(TEXT("{"));
+		break;
+	case EJson::Array:
+		Str = FString(TEXT("["));
+		break;
+	case EJson::String:
+		Str = FString(TEXT("\""));
+		break;
+	default:
+		return false;
+		break;
 	}
-	
+
 	return true;
 }
 
@@ -802,20 +800,20 @@ bool FJSONWriter::GetEndChar(const TSharedPtr<FJsonValue>& JsonValue, FString& S
 {
 	switch (JsonValue->Type)
 	{
-		case EJson::Object:
-			Str = FString(TEXT("}"));
-			break;
-		case EJson::Array:
-			Str = FString(TEXT("]"));
-			break;
-		case EJson::String:
-			Str = FString(TEXT("\""));
-			break;
-		default:
-			return false;
-			break;
+	case EJson::Object:
+		Str = FString(TEXT("}"));
+		break;
+	case EJson::Array:
+		Str = FString(TEXT("]"));
+		break;
+	case EJson::String:
+		Str = FString(TEXT("\""));
+		break;
+	default:
+		return false;
+		break;
 	}
-	
+
 	return true;
 }
 
@@ -823,108 +821,108 @@ void FJSONWriter::Write(TSharedPtr<FJsonValue> JsonValue, FArchive* Writer, bool
 {
 	FString Str;
 	FArchive& Ar = *Writer;
-	
+
 	if (GetStartChar(JsonValue, Str))
 	{
 		UVaRestJsonObject::WriteStringToArchive(Ar, *Str, Str.Len());
 	}
-	
+
 	switch (JsonValue->Type)
 	{
-		case EJson::Object:
+	case EJson::Object:
+	{
+		int ElementsCount = 0;
+		auto Values = JsonValue->AsObject()->Values;
+
+		for (auto& ChildJsonPair : Values)
 		{
-			int ElementsCount = 0;
-			auto Values = JsonValue->AsObject()->Values;
-			
-			for (auto& ChildJsonPair : Values)
+			Str = FString(TEXT("\""));
+			UVaRestJsonObject::WriteStringToArchive(Ar, *Str, Str.Len());
+
+			const TCHAR* BufferPtr = *ChildJsonPair.Key;
+			for (int i = 0; i < ChildJsonPair.Key.Len(); ++i)
 			{
-				Str = FString(TEXT("\""));
-				UVaRestJsonObject::WriteStringToArchive(Ar, *Str, Str.Len());
-				
-				const TCHAR* BufferPtr = *ChildJsonPair.Key;
-				for (int i = 0; i < ChildJsonPair.Key.Len(); ++i)
-				{
-                    Str = FString(1, &ChildJsonPair.Key[i]);
+				Str = FString(1, &ChildJsonPair.Key[i]);
 #if PLATFORM_WINDOWS
-					UVaRestJsonObject::WriteStringToArchive(Ar, *Str, Str.Len() - 1);
+				UVaRestJsonObject::WriteStringToArchive(Ar, *Str, Str.Len() - 1);
 #else
-					UVaRestJsonObject::WriteStringToArchive(Ar, *Str, Str.Len());
-#endif
-				}
-				
-				Str = FString(TEXT("\""));
 				UVaRestJsonObject::WriteStringToArchive(Ar, *Str, Str.Len());
-				
-				Str = FString(TEXT(":"));
-                UVaRestJsonObject::WriteStringToArchive(Ar, *Str, Str.Len());
-				
-				++ElementsCount;
-				
-				Write(ChildJsonPair.Value, Writer, ElementsCount >= Values.Num());
-			}
-			break;
-		}
-		case EJson::Array:
-		{
-			int ElementsCount = 0;
-			auto Array = JsonValue->AsArray();
-			
-			for (auto& ChildJsonValue : Array)
-			{
-				++ElementsCount;
-				Write(ChildJsonValue, Writer, ElementsCount >= Array.Num());
-			}
-			break;
-		}
-		default:
-		{
-			FString Value = JsonValue->AsString();
-			
-			const TCHAR* BufferPtr = *Value;
-			for (int i = 0; i < Value.Len(); ++i)
-			{
-				Str = FString(1, &BufferPtr[i]);
-				if (Str == TEXT("\""))
-				{
-					Str = FString(TEXT("\\"));
-					UVaRestJsonObject::WriteStringToArchive(Ar, *Str, Str.Len());
-                    Str = FString(1, &BufferPtr[i]);
-				}
-				if (Str == TEXT("\n"))
-				{
-					Str = FString(TEXT("\\"));
-					UVaRestJsonObject::WriteStringToArchive(Ar, *Str, Str.Len());
-					Str = FString(TEXT("n"));
-					UVaRestJsonObject::WriteStringToArchive(Ar, *Str, Str.Len());
-                    Str = FString(1, &BufferPtr[i]);
-				}
-				else if (Str == TEXT("\t"))
-				{
-					Str = FString(TEXT("\\"));
-					UVaRestJsonObject::WriteStringToArchive(Ar, *Str, Str.Len());
-					Str = FString(TEXT("t"));
-					UVaRestJsonObject::WriteStringToArchive(Ar, *Str, Str.Len());
-                    Str = FString(1, &BufferPtr[i]);
-				}
-				else
-				{
-#if PLATFORM_WINDOWS
-					UVaRestJsonObject::WriteStringToArchive(Ar, *Str, Str.Len() - 1);
-#else
-					UVaRestJsonObject::WriteStringToArchive(Ar, *Str, Str.Len());
 #endif
-				}
 			}
-			
-			break;
+
+			Str = FString(TEXT("\""));
+			UVaRestJsonObject::WriteStringToArchive(Ar, *Str, Str.Len());
+
+			Str = FString(TEXT(":"));
+			UVaRestJsonObject::WriteStringToArchive(Ar, *Str, Str.Len());
+
+			++ElementsCount;
+
+			Write(ChildJsonPair.Value, Writer, ElementsCount >= Values.Num());
 		}
+		break;
 	}
-	
+	case EJson::Array:
+	{
+		int ElementsCount = 0;
+		auto Array = JsonValue->AsArray();
+
+		for (auto& ChildJsonValue : Array)
+		{
+			++ElementsCount;
+			Write(ChildJsonValue, Writer, ElementsCount >= Array.Num());
+		}
+		break;
+	}
+	default:
+	{
+		FString Value = JsonValue->AsString();
+
+		const TCHAR* BufferPtr = *Value;
+		for (int i = 0; i < Value.Len(); ++i)
+		{
+			Str = FString(1, &BufferPtr[i]);
+			if (Str == TEXT("\""))
+			{
+				Str = FString(TEXT("\\"));
+				UVaRestJsonObject::WriteStringToArchive(Ar, *Str, Str.Len());
+				Str = FString(1, &BufferPtr[i]);
+			}
+			if (Str == TEXT("\n"))
+			{
+				Str = FString(TEXT("\\"));
+				UVaRestJsonObject::WriteStringToArchive(Ar, *Str, Str.Len());
+				Str = FString(TEXT("n"));
+				UVaRestJsonObject::WriteStringToArchive(Ar, *Str, Str.Len());
+				Str = FString(1, &BufferPtr[i]);
+			}
+			else if (Str == TEXT("\t"))
+			{
+				Str = FString(TEXT("\\"));
+				UVaRestJsonObject::WriteStringToArchive(Ar, *Str, Str.Len());
+				Str = FString(TEXT("t"));
+				UVaRestJsonObject::WriteStringToArchive(Ar, *Str, Str.Len());
+				Str = FString(1, &BufferPtr[i]);
+			}
+			else
+			{
+#if PLATFORM_WINDOWS
+				UVaRestJsonObject::WriteStringToArchive(Ar, *Str, Str.Len() - 1);
+#else
+				UVaRestJsonObject::WriteStringToArchive(Ar, *Str, Str.Len());
+#endif
+			}
+		}
+
+		break;
+	}
+	}
+
 	if (GetEndChar(JsonValue, Str))
 	{
 		UVaRestJsonObject::WriteStringToArchive(Ar, *Str, Str.Len());
 	}
-	
+
 	if (!IsLastElement)
 	{
 		Str = FString(TEXT(","));
