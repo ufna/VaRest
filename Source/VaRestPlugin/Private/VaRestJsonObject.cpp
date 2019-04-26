@@ -657,7 +657,8 @@ void UVaRestJsonObject::DecodeFromArchive(TUniquePtr<FArchive>& Reader)
 	}
 }
 
-
+//////////////////////////////////////////////////////////////////////////
+// Serialize
 
 bool UVaRestJsonObject::WriteToFile(const FString& Path)
 {
