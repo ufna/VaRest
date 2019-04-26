@@ -657,6 +657,8 @@ void UVaRestJsonObject::DecodeFromArchive(TUniquePtr<FArchive>& Reader)
 	}
 }
 
+
+
 bool UVaRestJsonObject::WriteToFile(const FString& Path)
 {
 	TUniquePtr<FArchive> FileWriter(IFileManager::Get().CreateFileWriter(*Path));
@@ -708,6 +710,17 @@ bool UVaRestJsonObject::WriteToFile(const FString& Path)
 	FileWriter->Close();
 
 	return true;
+}
+
+bool UVaRestJsonObject::WriteToFileAbsolute(const FString& AbsPath)
+{
+	return WriteToFile(AbsPath);
+}
+
+bool UVaRestJsonObject::WriteToFileRelative(const FString& RelPath)
+{
+	FString FullJsonPath = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir() / RelPath);
+	return WriteToFile(FullJsonPath);
 }
 
 bool UVaRestJsonObject::WriteStringToArchive(FArchive& Ar, const TCHAR* StrPtr, int64 Len)
