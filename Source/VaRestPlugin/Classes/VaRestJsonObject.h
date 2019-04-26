@@ -179,6 +179,11 @@ public:
 	/** Save json to file */
 	bool WriteToFile(const FString& Path);
 
+	/** Blueprint Save json to filepath */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	bool WriteToFilePath(const FString& Path, bool bIsRelativePath = true);
+
+
 	static bool WriteStringToArchive(FArchive& Ar, const TCHAR* StrPtr, int64 Len);
 
 	//////////////////////////////////////////////////////////////////////////
