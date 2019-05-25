@@ -43,12 +43,12 @@ bool UVaRestLibrary::Base64DecodeData(const FString& Source, TArray<uint8>& Dest
 //////////////////////////////////////////////////////////////////////////
 // File system integration
 
-class UVaRestJsonObject* UVaRestLibrary::LoadJsonFromFile(UObject* WorldContextObject, const FString& Path)
+class UVaRestJsonObject* UVaRestLibrary::LoadJsonFromFile(UObject* WorldContextObject, const FString& Path, const FString& BasePath)
 {
 	UVaRestJsonObject* Json = UVaRestJsonObject::ConstructJsonObject(WorldContextObject);
-
+	
 	FString JSONString;
-	if (FFileHelper::LoadFileToString(JSONString, *(FPaths::ProjectContentDir() + Path)))
+	if (FFileHelper::LoadFileToString(JSONString, *(BasePath / Path)))
 	{
 		if (Json->DecodeJson(JSONString))
 		{

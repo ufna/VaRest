@@ -183,9 +183,11 @@ public:
 	/** Save json to file */
 	bool WriteToFile(const FString& Path);
 
-	/** Blueprint Save json to filepath */
+	/** Blueprint Save json to filepath 
+	 * @param    BasePath    prepended to the Path, leave empty if absolute Path is used
+	 */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
-	bool WriteToFilePath(const FString& Path, bool bIsRelativePath = true);
+	bool WriteToFilePath(const FString& Path, const FString& BasePath);
 
 	static bool WriteStringToArchive(FArchive& Ar, const TCHAR* StrPtr, int64 Len);
 
