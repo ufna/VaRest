@@ -97,10 +97,10 @@ public:
 public:
 	/** 
 	 * Load JSON from formatted text file
-	 * @param BasePath  Prepended to the Path, leave empty if absolute Path is used
+	 * @param    bIsRelativeToContentDir    if set to 'false' path is treated as absolute
 	 */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility", meta = (WorldContext = "WorldContextObject"))
-	static class UVaRestJsonObject* LoadJsonFromFile(UObject* WorldContextObject, const FString& Path, const FString& BasePath);
+	static class UVaRestJsonObject* LoadJsonFromFile(UObject* WorldContextObject, const FString& Path, const bool bIsRelativeToContentDir = true);
 
 	//////////////////////////////////////////////////////////////////////////
 	// Easy URL processing
