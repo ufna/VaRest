@@ -713,17 +713,9 @@ bool UVaRestJsonObject::WriteToFile(const FString& Path)
 	return true;
 }
 
-bool UVaRestJsonObject::WriteToFilePath(const FString& Path, bool bIsRelativePath)
+bool UVaRestJsonObject::WriteToFilePath(const FString& Path, const bool bIsRelativeToProjectDir)
 {
-	if (bIsRelativePath)
-	{
-		FString FullJsonPath = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir() / Path);
-		return WriteToFile(FullJsonPath);
-	}
-	else
-	{
-		return WriteToFile(Path);
-	}
+	return WriteToFile(bIsRelativeToProjectDir ? FPaths::ProjectDir() / Path : Path);
 }
 
 bool UVaRestJsonObject::WriteStringToArchive(FArchive& Ar, const TCHAR* StrPtr, int64 Len)
