@@ -46,7 +46,7 @@ bool UVaRestLibrary::Base64DecodeData(const FString& Source, TArray<uint8>& Dest
 class UVaRestJsonObject* UVaRestLibrary::LoadJsonFromFile(UObject* WorldContextObject, const FString& Path, const bool bIsRelativeToContentDir)
 {
 	UVaRestJsonObject* Json = UVaRestJsonObject::ConstructJsonObject(WorldContextObject);
-	
+
 	FString JSONString;
 	if (FFileHelper::LoadFileToString(JSONString, *(bIsRelativeToContentDir ? FPaths::ProjectContentDir() / Path : Path)))
 	{
