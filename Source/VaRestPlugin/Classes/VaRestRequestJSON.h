@@ -3,41 +3,43 @@
 #pragma once
 
 #include "Engine/LatentActionManager.h"
-#include "LatentActions.h"
 #include "Http.h"
+#include "LatentActions.h"
 
 #include "VaRestTypes.h"
+
 #include "VaRestRequestJSON.generated.h"
 
 /**
  * @author Original latent action class by https://github.com/unktomi
  */
-template <class T> class FVaRestLatentAction : public FPendingLatentAction
+template <class T>
+class FVaRestLatentAction : public FPendingLatentAction
 {
 public:
-	virtual void Call(const T &Value) 
+	virtual void Call(const T& Value)
 	{
 		Result = Value;
 		Called = true;
 	}
 
-	void operator()(const T &Value)
+	void operator()(const T& Value)
 	{
 		Call(Value);
 	}
 
 	void Cancel();
-  
-	FVaRestLatentAction(FWeakObjectPtr RequestObj, T& ResultParam, const FLatentActionInfo& LatentInfo) :
-		Called(false),
-		Request(RequestObj),
-		ExecutionFunction(LatentInfo.ExecutionFunction),
-		OutputLink(LatentInfo.Linkage),
-		CallbackTarget(LatentInfo.CallbackTarget),
-		Result(ResultParam)
+
+	FVaRestLatentAction(FWeakObjectPtr RequestObj, T& ResultParam, const FLatentActionInfo& LatentInfo)
+		: Called(false)
+		, Request(RequestObj)
+		, ExecutionFunction(LatentInfo.ExecutionFunction)
+		, OutputLink(LatentInfo.Linkage)
+		, CallbackTarget(LatentInfo.CallbackTarget)
+		, Result(ResultParam)
 	{
 	}
-  
+
 	virtual void UpdateOperation(FLatentResponse& Response) override
 	{
 		Response.FinishAndTriggerIf(Called, ExecutionFunction, OutputLink, CallbackTarget);
@@ -61,9 +63,8 @@ public:
 	const FName ExecutionFunction;
 	const int32 OutputLink;
 	const FWeakObjectPtr CallbackTarget;
-	T &Result;
+	T& Result;
 };
-
 
 /** Generate a delegates for callback events */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnRequestComplete, class UVaRestRequestJSON*, Request);
@@ -71,7 +72,6 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnRequestFail, class UVaRestRequest
 
 DECLARE_MULTICAST_DELEGATE_OneParam(FOnStaticRequestComplete, class UVaRestRequestJSON*);
 DECLARE_MULTICAST_DELEGATE_OneParam(FOnStaticRequestFail, class UVaRestRequestJSON*);
-
 
 /**
  * General helper class http requests via blueprints
@@ -108,20 +108,19 @@ public:
 
 	/** Set content type of the request for binary post data */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
-	void SetBinaryContentType(const FString &ContentType);
+	void SetBinaryContentType(const FString& ContentType);
 
 	/** Set content of the request for binary post data */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
-	void SetBinaryRequestContent(const TArray<uint8> &Content);
+	void SetBinaryRequestContent(const TArray<uint8>& Content);
 
 	/** Set content of the request as a plain string */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
-	void SetStringRequestContent(const FString &Content);
+	void SetStringRequestContent(const FString& Content);
 
 	/** Sets optional header info */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
 	void SetHeader(const FString& HeaderName, const FString& HeaderValue);
-
 
 	//////////////////////////////////////////////////////////////////////////
 	// Destruction and reset
@@ -141,7 +140,6 @@ public:
 	/** Cancel latent response waiting  */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
 	void Cancel();
-
 
 	//////////////////////////////////////////////////////////////////////////
 	// JSON data accessors
@@ -166,7 +164,6 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
 	void SetResponseObject(UVaRestJsonObject* JsonObject);
 
-
 	///////////////////////////////////////////////////////////////////////////
 	// Request/response data access
 
@@ -185,11 +182,10 @@ public:
 	/** Get value of desired response header */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
 	FString GetResponseHeader(const FString HeaderName);
-	
+
 	/** Get list of all response headers */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
 	TArray<FString> GetAllResponseHeaders();
-
 
 	//////////////////////////////////////////////////////////////////////////
 	// URL processing
@@ -205,7 +201,7 @@ public:
 
 	/** Open URL in latent mode */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request", meta = (Latent, LatentInfo = "LatentInfo", HidePin = "WorldContextObject", DefaultToSelf = "WorldContextObject"))
-	virtual void ApplyURL(const FString& Url, UVaRestJsonObject *&Result, UObject* WorldContextObject, struct FLatentActionInfo LatentInfo);
+	virtual void ApplyURL(const FString& Url, UVaRestJsonObject*& Result, UObject* WorldContextObject, struct FLatentActionInfo LatentInfo);
 
 	/** Check URL and execute process request */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
@@ -214,7 +210,6 @@ public:
 protected:
 	/** Apply current internal setup to request and process it */
 	void ProcessRequest();
-
 
 	//////////////////////////////////////////////////////////////////////////
 	// Request callbacks
@@ -231,13 +226,12 @@ public:
 	/** Event occured when the request wasn't successfull */
 	UPROPERTY(BlueprintAssignable, Category = "VaRest|Event")
 	FOnRequestFail OnRequestFail;
-	
+
 	/** Event occured when the request has been completed */
 	FOnStaticRequestComplete OnStaticRequestComplete;
-	
+
 	/** Event occured when the request wasn't successfull */
 	FOnStaticRequestFail OnStaticRequestFail;
-	
 
 	//////////////////////////////////////////////////////////////////////////
 	// Tags
@@ -263,7 +257,6 @@ protected:
 	/** Array of tags that can be used for grouping and categorizing */
 	TArray<FName> Tags;
 
-
 	//////////////////////////////////////////////////////////////////////////
 	// Data
 
@@ -279,7 +272,7 @@ public:
 	/** Response size */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "VaRest|Response")
 	int32 ResponseSize;
-	
+
 	/** DEPRECATED: Please use GetResponseContentAsString() instead */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "VaRest|Response")
 	FString ResponseContent;
@@ -287,7 +280,7 @@ public:
 	/** Is the response valid JSON? */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "VaRest|Response")
 	bool bIsValidJsonResponse;
-	
+
 protected:
 	/** Default value for deprecated ResponseContent variable */
 	static FString DeprecatedResponseString;
@@ -331,9 +324,8 @@ protected:
 
 	/** Request we're currently processing */
 	TSharedRef<IHttpRequest> HttpRequest = FHttpModule::Get().CreateRequest();
-	
+
 public:
 	/** Returns reference to internal request object */
 	TSharedRef<IHttpRequest> GetHttpRequest() const { return HttpRequest; };
-	
 };

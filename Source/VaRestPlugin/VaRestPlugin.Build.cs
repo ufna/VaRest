@@ -1,4 +1,4 @@
-// Copyright 2014 Vladimir Alyamkin. All Rights Reserved.
+// Copyright 2014-2018 Vladimir Alyamkin. All Rights Reserved.
 
 using System.IO;
 
@@ -8,9 +8,9 @@ namespace UnrealBuildTool.Rules
 	{
 		public VaRestPlugin(ReadOnlyTargetRules Target) : base(Target)
 		{
-            PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
+			PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 
-            PrivateIncludePaths.AddRange(
+			PrivateIncludePaths.AddRange(
 				new string[] {
 					"VaRestPlugin/Private",
 					// ... add other private include paths required here ...
@@ -22,8 +22,8 @@ namespace UnrealBuildTool.Rules
 					"Core",
 					"CoreUObject",
 					"Engine",
-                    "HTTP",
-                    "Json"
+					"HTTP",
+					"Json"
 					// ... add other public dependencies that you statically link with here ...
 				});
 		}

@@ -6,8 +6,8 @@
 
 #if ENGINE_MINOR_VERSION >= 15
 #include "CoreMinimal.h"
-#include "EngineDefines.h"
 #include "Engine/Engine.h"
+#include "EngineDefines.h"
 #include "UObject/Object.h"
 #include "UObject/ScriptMacros.h"
 #else
@@ -15,8 +15,8 @@
 #include "Engine.h"
 #endif
 
-#include "Http.h"
 #include "Containers/Map.h"
+#include "Http.h"
 #include "Json.h"
 
 #include "LatentActions.h"
@@ -28,6 +28,6 @@
 
 DECLARE_LOG_CATEGORY_EXTERN(LogVaRest, Log, All);
 
-#define VA_FUNC (FString(__FUNCTION__))								// Current Class Name + Function Name where this is called
-#define VA_LINE (FString::FromInt(__LINE__))						// Current Line Number in the code where this is called
-#define VA_FUNC_LINE (VA_FUNC + "(" + VA_LINE + ")")				// Current Class and Line Number where this is called!
+#define VA_FUNC (FString(__FUNCTION__))				 // Current Class Name + Function Name where this is called
+#define VA_LINE (FString::FromInt(__LINE__))		 // Current Line Number in the code where this is called
+#define VA_FUNC_LINE (VA_FUNC + "(" + VA_LINE + ")") // Current Class and Line Number where this is called!

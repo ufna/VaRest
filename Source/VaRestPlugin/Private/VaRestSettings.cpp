@@ -5,5 +5,4 @@
 UVaRestSettings::UVaRestSettings(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
-
 }

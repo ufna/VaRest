@@ -17,5 +17,5 @@ void FVaRestEditorPluginModule::ShutdownModule()
 }
 
 #undef LOCTEXT_NAMESPACE
-	
+
 IMPLEMENT_MODULE(FVaRestEditorPluginModule, VaRestEditorPlugin)
