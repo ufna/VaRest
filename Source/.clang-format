@@ -16,7 +16,6 @@ BreakConstructorInitializersBeforeComma:        true
 ColumnLimit:                                    0
 PointerAlignment:                               Left
 SpacesInAngles:                                 false
-...
 ---
 Language:                                       ObjC
 ...

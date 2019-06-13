@@ -4,7 +4,236 @@
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Logging/LogMacros.h"
+#include "Runtime/Launch/Resources/Version.h"
 #include "VaRestJsonObject.h"
+
+#if ENGINE_MINOR_VERSION >= 19
+uint32 FUtf8Helper::CodepointFromUtf8(const ANSICHAR*& SourceString, const uint32 SourceLengthRemaining)
+{
+	checkSlow(SourceLengthRemaining > 0);
+
+	const ANSICHAR* OctetPtr = SourceString;
+
+	uint32 Codepoint = 0;
+	uint32 Octet = (uint32)((uint8)*SourceString);
+	uint32 Octet2, Octet3, Octet4;
+
+	if (Octet < 128) // one octet char: 0 to 127
+	{
+		++SourceString; // skip to next possible start of codepoint.
+		return Octet;
+	}
+	else if (Octet < 192) // bad (starts with 10xxxxxx).
+	{
+		// Apparently each of these is supposed to be flagged as a bogus
+		//  char, instead of just resyncing to the next valid codepoint.
+		++SourceString; // skip to next possible start of codepoint.
+		return UNICODE_BOGUS_CHAR_CODEPOINT;
+	}
+	else if (Octet < 224) // two octets
+	{
+		// Ensure our string has enough characters to read from
+		if (SourceLengthRemaining < 2)
+		{
+			// Skip to end and write out a single char (we always have room for at least 1 char)
+			SourceString += SourceLengthRemaining;
+			return UNICODE_BOGUS_CHAR_CODEPOINT;
+		}
+
+		Octet -= (128 + 64);
+		Octet2 = (uint32)((uint8) * (++OctetPtr));
+		if ((Octet2 & (128 + 64)) != 128) // Format isn't 10xxxxxx?
+		{
+			++SourceString; // Sequence was not valid UTF-8. Skip the first byte and continue.
+			return UNICODE_BOGUS_CHAR_CODEPOINT;
+		}
+
+		Codepoint = ((Octet << 6) | (Octet2 - 128));
+		if ((Codepoint >= 0x80) && (Codepoint <= 0x7FF))
+		{
+			SourceString += 2; // skip to next possible start of codepoint.
+			return Codepoint;
+		}
+	}
+	else if (Octet < 240) // three octets
+	{
+		// Ensure our string has enough characters to read from
+		if (SourceLengthRemaining < 3)
+		{
+			// Skip to end and write out a single char (we always have room for at least 1 char)
+			SourceString += SourceLengthRemaining;
+			return UNICODE_BOGUS_CHAR_CODEPOINT;
+		}
+
+		Octet -= (128 + 64 + 32);
+		Octet2 = (uint32)((uint8) * (++OctetPtr));
+		if ((Octet2 & (128 + 64)) != 128) // Format isn't 10xxxxxx?
+		{
+			++SourceString; // Sequence was not valid UTF-8. Skip the first byte and continue.
+			return UNICODE_BOGUS_CHAR_CODEPOINT;
+		}
+
+		Octet3 = (uint32)((uint8) * (++OctetPtr));
+		if ((Octet3 & (128 + 64)) != 128) // Format isn't 10xxxxxx?
+		{
+			++SourceString; // Sequence was not valid UTF-8. Skip the first byte and continue.
+			return UNICODE_BOGUS_CHAR_CODEPOINT;
+		}
+
+		Codepoint = (((Octet << 12)) | ((Octet2 - 128) << 6) | ((Octet3 - 128)));
+
+		// UTF-8 characters cannot be in the UTF-16 surrogates range
+		if (UE4StringConv_Private::IsHighSurrogate(Codepoint) || UE4StringConv_Private::IsLowSurrogate(Codepoint))
+		{
+			++SourceString; // Sequence was not valid UTF-8. Skip the first byte and continue.
+			return UNICODE_BOGUS_CHAR_CODEPOINT;
+		}
+
+		// 0xFFFE and 0xFFFF are illegal, too, so we check them at the edge.
+		if ((Codepoint >= 0x800) && (Codepoint <= 0xFFFD))
+		{
+			SourceString += 3; // skip to next possible start of codepoint.
+			return Codepoint;
+		}
+	}
+	else if (Octet < 248) // four octets
+	{
+		// Ensure our string has enough characters to read from
+		if (SourceLengthRemaining < 4)
+		{
+			// Skip to end and write out a single char (we always have room for at least 1 char)
+			SourceString += SourceLengthRemaining;
+			return UNICODE_BOGUS_CHAR_CODEPOINT;
+		}
+
+		Octet -= (128 + 64 + 32 + 16);
+		Octet2 = (uint32)((uint8) * (++OctetPtr));
+		if ((Octet2 & (128 + 64)) != 128) // Format isn't 10xxxxxx?
+		{
+			++SourceString; // Sequence was not valid UTF-8. Skip the first byte and continue.
+			return UNICODE_BOGUS_CHAR_CODEPOINT;
+		}
+
+		Octet3 = (uint32)((uint8) * (++OctetPtr));
+		if ((Octet3 & (128 + 64)) != 128) // Format isn't 10xxxxxx?
+		{
+			++SourceString; // Sequence was not valid UTF-8. Skip the first byte and continue.
+			return UNICODE_BOGUS_CHAR_CODEPOINT;
+		}
+
+		Octet4 = (uint32)((uint8) * (++OctetPtr));
+		if ((Octet4 & (128 + 64)) != 128) // Format isn't 10xxxxxx?
+		{
+			++SourceString; // Sequence was not valid UTF-8. Skip the first byte and continue.
+			return UNICODE_BOGUS_CHAR_CODEPOINT;
+		}
+
+		Codepoint = (((Octet << 18)) | ((Octet2 - 128) << 12) |
+					 ((Octet3 - 128) << 6) | ((Octet4 - 128)));
+		if ((Codepoint >= 0x10000) && (Codepoint <= 0x10FFFF))
+		{
+			SourceString += 4; // skip to next possible start of codepoint.
+			return Codepoint;
+		}
+	}
+	// Five and six octet sequences became illegal in rfc3629.
+	//  We throw the codepoint away, but parse them to make sure we move
+	//  ahead the right number of bytes and don't overflow the buffer.
+	else if (Octet < 252) // five octets
+	{
+		// Ensure our string has enough characters to read from
+		if (SourceLengthRemaining < 5)
+		{
+			// Skip to end and write out a single char (we always have room for at least 1 char)
+			SourceString += SourceLengthRemaining;
+			return UNICODE_BOGUS_CHAR_CODEPOINT;
+		}
+
+		Octet = (uint32)((uint8) * (++OctetPtr));
+		if ((Octet & (128 + 64)) != 128) // Format isn't 10xxxxxx?
+		{
+			++SourceString; // Sequence was not valid UTF-8. Skip the first byte and continue.
+			return UNICODE_BOGUS_CHAR_CODEPOINT;
+		}
+
+		Octet = (uint32)((uint8) * (++OctetPtr));
+		if ((Octet & (128 + 64)) != 128) // Format isn't 10xxxxxx?
+		{
+			++SourceString; // Sequence was not valid UTF-8. Skip the first byte and continue.
+			return UNICODE_BOGUS_CHAR_CODEPOINT;
+		}
+
+		Octet = (uint32)((uint8) * (++OctetPtr));
+		if ((Octet & (128 + 64)) != 128) // Format isn't 10xxxxxx?
+		{
+			++SourceString; // Sequence was not valid UTF-8. Skip the first byte and continue.
+			return UNICODE_BOGUS_CHAR_CODEPOINT;
+		}
+
+		Octet = (uint32)((uint8) * (++OctetPtr));
+		if ((Octet & (128 + 64)) != 128) // Format isn't 10xxxxxx?
+		{
+			++SourceString; // Sequence was not valid UTF-8. Skip the first byte and continue.
+			return UNICODE_BOGUS_CHAR_CODEPOINT;
+		}
+
+		SourceString += 5; // skip to next possible start of codepoint.
+		return UNICODE_BOGUS_CHAR_CODEPOINT;
+	}
+
+	else // six octets
+	{
+		// Ensure our string has enough characters to read from
+		if (SourceLengthRemaining < 6)
+		{
+			// Skip to end and write out a single char (we always have room for at least 1 char)
+			SourceString += SourceLengthRemaining;
+			return UNICODE_BOGUS_CHAR_CODEPOINT;
+		}
+
+		Octet = (uint32)((uint8) * (++OctetPtr));
+		if ((Octet & (128 + 64)) != 128) // Format isn't 10xxxxxx?
+		{
+			++SourceString; // Sequence was not valid UTF-8. Skip the first byte and continue.
+			return UNICODE_BOGUS_CHAR_CODEPOINT;
+		}
+
+		Octet = (uint32)((uint8) * (++OctetPtr));
+		if ((Octet & (128 + 64)) != 128) // Format isn't 10xxxxxx?
+		{
+			++SourceString; // Sequence was not valid UTF-8. Skip the first byte and continue.
+			return UNICODE_BOGUS_CHAR_CODEPOINT;
+		}
+
+		Octet = (uint32)((uint8) * (++OctetPtr));
+		if ((Octet & (128 + 64)) != 128) // Format isn't 10xxxxxx?
+		{
+			++SourceString; // Sequence was not valid UTF-8. Skip the first byte and continue.
+			return UNICODE_BOGUS_CHAR_CODEPOINT;
+		}
+
+		Octet = (uint32)((uint8) * (++OctetPtr));
+		if ((Octet & (128 + 64)) != 128) // Format isn't 10xxxxxx?
+		{
+			++SourceString; // Sequence was not valid UTF-8. Skip the first byte and continue.
+			return UNICODE_BOGUS_CHAR_CODEPOINT;
+		}
+
+		Octet = (uint32)((uint8) * (++OctetPtr));
+		if ((Octet & (128 + 64)) != 128) // Format isn't 10xxxxxx?
+		{
+			++SourceString; // Sequence was not valid UTF-8. Skip the first byte and continue.
+			return UNICODE_BOGUS_CHAR_CODEPOINT;
+		}
+
+		SourceString += 6; // skip to next possible start of codepoint.
+		return UNICODE_BOGUS_CHAR_CODEPOINT;
+	}
+
+	++SourceString;						 // Sequence was not valid UTF-8. Skip the first byte and continue.
+	return UNICODE_BOGUS_CHAR_CODEPOINT; // catch everything else.
+}
+#endif
 
 FJSONState::FJSONState()
 	: Notation(EJSONNotation::NONE)

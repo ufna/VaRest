@@ -4,6 +4,14 @@
 
 #include "Json.h"
 
+#if ENGINE_MINOR_VERSION >= 19
+struct FUtf8Helper
+{
+	/** @See FUTF8ToTCHAR_Convert::CodepointFromUtf8 */
+	static uint32 CodepointFromUtf8(const ANSICHAR*& SourceString, const uint32 SourceLengthRemaining);
+};
+#endif
+
 class FJsonValueNonConstArray : public FJsonValueArray
 {
 public:
