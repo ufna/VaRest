@@ -559,6 +559,8 @@ int32 UVaRestJsonObject::DeserializeFromUTF8Bytes(const ANSICHAR* Bytes, int32 S
 			break;
 		}
 	}
+
+	delete[] DestinationBuffer;
 #else
 	const ANSICHAR* EndByte = Bytes + Size;
 	while (Bytes < EndByte)
