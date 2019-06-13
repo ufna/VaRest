@@ -543,30 +543,14 @@ int32 UVaRestJsonObject::DeserializeFromUTF8Bytes(const ANSICHAR* Bytes, int32 S
 {
 	FJSONReader Reader;
 
-#if ENGINE_MINOR_VERSION >= 19
-	// Get destLen
-	int32 DestinationLength = FUTF8ToTCHAR_Convert::ConvertedLength(Bytes, Size);
-	TCHAR* DestinationBuffer = new TCHAR[DestinationLength];
-
-	// CONVERT to TCHAR string
-	FUTF8ToTCHAR_Convert::Convert(DestinationBuffer, DestinationLength, Bytes, Size);
-
-	int32 i = 0;
-	while (i < DestinationLength)
-	{
-		if (!Reader.Read(DestinationBuffer[i++]))
-		{
-			break;
-		}
-	}
-
-	delete[] DestinationBuffer;
-#else
 	const ANSICHAR* EndByte = Bytes + Size;
 	while (Bytes < EndByte)
 	{
+#if ENGINE_MINOR_VERSION >= 19
+		TCHAR Char = FUtf8Helper::CodepointFromUtf8(Bytes, EndByte - Bytes);
+#else
 		TCHAR Char = FUTF8ToTCHAR_Convert::utf8codepoint(&Bytes);
-
+#endif
 		if (Char > 0xFFFF)
 		{
 			Char = UNICODE_BOGUS_CHAR_CODEPOINT;
@@ -577,7 +561,6 @@ int32 UVaRestJsonObject::DeserializeFromUTF8Bytes(const ANSICHAR* Bytes, int32 S
 			break;
 		}
 	}
-#endif
 
 	SetRootObject(Reader.State.Root);
 	return Reader.State.Size;
