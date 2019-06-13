@@ -4,6 +4,7 @@
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Logging/LogMacros.h"
+#include "Runtime/Launch/Resources/Version.h"
 #include "VaRestJsonObject.h"
 
 #if ENGINE_MINOR_VERSION >= 19
