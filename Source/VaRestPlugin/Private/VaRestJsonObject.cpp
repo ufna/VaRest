@@ -1,9 +1,12 @@
 // Copyright 2014 Vladimir Alyamkin. All Rights Reserved.
 
 #include "VaRestJsonObject.h"
+
 #include "VaRestJsonParser.h"
 #include "VaRestJsonValue.h"
 #include "VaRestPluginPrivatePCH.h"
+
+#include "Runtime/Launch/Resources/Version.h"
 
 typedef TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>> FCondensedJsonStringWriterFactory;
 typedef TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>> FCondensedJsonStringWriter;
@@ -543,28 +546,14 @@ int32 UVaRestJsonObject::DeserializeFromUTF8Bytes(const ANSICHAR* Bytes, int32 S
 {
 	FJSONReader Reader;
 
-#if ENGINE_MINOR_VERSION >= 19
-	// Get destLen
-	int32 DestinationLength = FUTF8ToTCHAR_Convert::ConvertedLength(Bytes, Size);
-	TCHAR* DestinationBuffer = new TCHAR[DestinationLength];
-
-	// CONVERT to TCHAR string
-	FUTF8ToTCHAR_Convert::Convert(DestinationBuffer, DestinationLength, Bytes, Size);
-
-	int32 i = 0;
-	while (i < DestinationLength)
-	{
-		if (!Reader.Read(DestinationBuffer[i++]))
-		{
-			break;
-		}
-	}
-#else
 	const ANSICHAR* EndByte = Bytes + Size;
 	while (Bytes < EndByte)
 	{
+#if ENGINE_MINOR_VERSION >= 19
+		TCHAR Char = FUtf8Helper::CodepointFromUtf8(Bytes, EndByte - Bytes);
+#else
 		TCHAR Char = FUTF8ToTCHAR_Convert::utf8codepoint(&Bytes);
-
+#endif
 		if (Char > 0xFFFF)
 		{
 			Char = UNICODE_BOGUS_CHAR_CODEPOINT;
@@ -575,7 +564,6 @@ int32 UVaRestJsonObject::DeserializeFromUTF8Bytes(const ANSICHAR* Bytes, int32 S
 			break;
 		}
 	}
-#endif
 
 	SetRootObject(Reader.State.Root);
 	return Reader.State.Size;
@@ -657,6 +645,9 @@ void UVaRestJsonObject::DecodeFromArchive(TUniquePtr<FArchive>& Reader)
 	}
 }
 
+//////////////////////////////////////////////////////////////////////////
+// Serialize
+
 bool UVaRestJsonObject::WriteToFile(const FString& Path)
 {
 	TUniquePtr<FArchive> FileWriter(IFileManager::Get().CreateFileWriter(*Path));
@@ -708,6 +699,11 @@ bool UVaRestJsonObject::WriteToFile(const FString& Path)
 	FileWriter->Close();
 
 	return true;
+}
+
+bool UVaRestJsonObject::WriteToFilePath(const FString& Path, const bool bIsRelativeToProjectDir)
+{
+	return WriteToFile(bIsRelativeToProjectDir ? FPaths::ProjectDir() / Path : Path);
 }
 
 bool UVaRestJsonObject::WriteStringToArchive(FArchive& Ar, const TCHAR* StrPtr, int64 Len)

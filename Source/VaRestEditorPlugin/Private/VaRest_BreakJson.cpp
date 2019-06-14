@@ -592,7 +592,12 @@ void UVaRest_MakeJson::CreateProjectionPins(UEdGraphPin* Source)
 		UEdGraphNode::FCreatePinParams InputPinParams;
 		InputPinParams.ContainerType = (*it).bIsArray ? EPinContainerType::Array : EPinContainerType::None;
 		UEdGraphPin* InputPin = CreatePin(EGPD_Input, Type, TEXT(""), Subtype, FName(*(*it).Name), InputPinParams);
+
+#if ENGINE_MINOR_VERSION >= 20
 		InputPin->SetSavePinIfOrphaned(false);
+#else
+		InputPin->bSavePinIfOrphaned = false;
+#endif
 	}
 }
 
