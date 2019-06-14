@@ -1,13 +1,13 @@
 // Copyright 2015-2019 Mail.Ru Group. All Rights Reserved.
 
 #include "VaRestJsonParser.h"
+
+#include "VaRestJsonObject.h"
+
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Logging/LogMacros.h"
-#include "Runtime/Launch/Resources/Version.h"
-#include "VaRestJsonObject.h"
 
-#if ENGINE_MINOR_VERSION >= 19
 uint32 FUtf8Helper::CodepointFromUtf8(const ANSICHAR*& SourceString, const uint32 SourceLengthRemaining)
 {
 	checkSlow(SourceLengthRemaining > 0);
@@ -233,7 +233,6 @@ uint32 FUtf8Helper::CodepointFromUtf8(const ANSICHAR*& SourceString, const uint3
 	++SourceString;						 // Sequence was not valid UTF-8. Skip the first byte and continue.
 	return UNICODE_BOGUS_CHAR_CODEPOINT; // catch everything else.
 }
-#endif
 
 FJSONState::FJSONState()
 	: Notation(EJSONNotation::NONE)
