@@ -594,7 +594,7 @@ void UVaRest_MakeJson::CreateProjectionPins(UEdGraphPin* Source)
 		UEdGraphPin* InputPin = CreatePin(EGPD_Input, Type, TEXT(""), Subtype, FName(*(*it).Name), InputPinParams);
 
 #if ENGINE_MINOR_VERSION >= 20
-		InputPin->SetSavePidfnIfOrphaned(false);
+		InputPin->SetSavePinIfOrphaned(false);
 #else
 		InputPin->bSavePinIfOrphaned = false;
 #endif
