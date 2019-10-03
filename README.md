@@ -11,7 +11,7 @@ Key features:
 * Blueprintable FJsonValue wrapper - **full Json features made for blueprints!**
 * Both bindable events and **latent functions** are provided to control the asynchronous requests
 
-Check the [Wiki](https://hiazma.atlassian.net/wiki/display/VAR) for plugin usage examples and installation notes.
+Check the [Wiki](http://bit.ly/VaRest-Docs) for plugin usage examples and installation notes.
 
 Current version: **1.1 R 26** (UE 4.19-4.23)
 
