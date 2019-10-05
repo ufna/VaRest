@@ -213,15 +213,11 @@ FLinearColor UVaRest_BreakJson::GetNodeTitleColor() const
 
 void UVaRest_BreakJson::PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent)
 {
-	bool bIsDirty = false;
-
 	FName PropertyName = (PropertyChangedEvent.Property != NULL) ? PropertyChangedEvent.Property->GetFName() : NAME_None;
-	if (true || PropertyName == TEXT("Outputs"))
-	{
-		bIsDirty = true;
-	}
-
-	if (bIsDirty)
+	if (PropertyName == GET_MEMBER_NAME_STRING_CHECKED(UVaRest_BreakJson, Outputs) ||
+		PropertyName == GET_MEMBER_NAME_STRING_CHECKED(FVaRest_NamedType, Name) ||
+		PropertyName == GET_MEMBER_NAME_STRING_CHECKED(FVaRest_NamedType, Type) ||
+		PropertyName == GET_MEMBER_NAME_STRING_CHECKED(FVaRest_NamedType, bIsArray))
 	{
 		ReconstructNode();
 		GetGraph()->NotifyGraphChanged();
@@ -508,15 +504,11 @@ FLinearColor UVaRest_MakeJson::GetNodeTitleColor() const
 
 void UVaRest_MakeJson::PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent)
 {
-	bool bIsDirty = false;
-
 	FName PropertyName = (PropertyChangedEvent.Property != NULL) ? PropertyChangedEvent.Property->GetFName() : NAME_None;
-	if (true || PropertyName == TEXT("Inputs"))
-	{
-		bIsDirty = true;
-	}
-
-	if (bIsDirty)
+	if (PropertyName == GET_MEMBER_NAME_STRING_CHECKED(UVaRest_MakeJson, Inputs) ||
+		PropertyName == GET_MEMBER_NAME_STRING_CHECKED(FVaRest_NamedType, Name) ||
+		PropertyName == GET_MEMBER_NAME_STRING_CHECKED(FVaRest_NamedType, Type) ||
+		PropertyName == GET_MEMBER_NAME_STRING_CHECKED(FVaRest_NamedType, bIsArray))
 	{
 		ReconstructNode();
 		GetGraph()->NotifyGraphChanged();
