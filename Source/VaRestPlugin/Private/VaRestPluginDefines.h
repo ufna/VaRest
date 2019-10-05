@@ -15,6 +15,7 @@
 #include "Engine.h"
 #endif
 
+#include "Delegates/DelegateCombinations.h"
 #include "Logging/LogCategory.h"
 #include "Logging/LogMacros.h"
 #include "Logging/LogVerbosity.h"
