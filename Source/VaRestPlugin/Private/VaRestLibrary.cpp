@@ -1,4 +1,4 @@
-// Copyright 2016 Vladimir Alyamkin. All Rights Reserved.
+// Copyright 2014-2019 Vladimir Alyamkin. All Rights Reserved.
 
 #include "VaRestLibrary.h"
 #include "Misc/Base64.h"

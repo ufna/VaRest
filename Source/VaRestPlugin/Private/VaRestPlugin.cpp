@@ -1,4 +1,4 @@
-// Copyright 2014 Vladimir Alyamkin. All Rights Reserved.
+// Copyright 2014-2019 Vladimir Alyamkin. All Rights Reserved.
 
 #include "VaRestPlugin.h"
 #include "VaRestJsonObject.h"
