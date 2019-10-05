@@ -4,9 +4,10 @@
 
 #include "VaRestJsonObject.h"
 #include "VaRestLibrary.h"
-#include "VaRestPluginPrivatePCH.h"
+#include "VaRestPluginDefines.h"
 #include "VaRestSettings.h"
 
+#include "Json.h"
 #include "Misc/CoreMisc.h"
 #include "Runtime/Launch/Resources/Version.h"
 

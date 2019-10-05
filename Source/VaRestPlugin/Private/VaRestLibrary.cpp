@@ -1,10 +1,14 @@
 // Copyright 2014-2019 Vladimir Alyamkin. All Rights Reserved.
 
 #include "VaRestLibrary.h"
-#include "Misc/Base64.h"
+
 #include "VaRestJsonObject.h"
-#include "VaRestPluginPrivatePCH.h"
+#include "VaRestPluginDefines.h"
 #include "VaRestRequestJSON.h"
+
+#include "Misc/Base64.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
 
 //////////////////////////////////////////////////////////////////////////
 // Helpers

@@ -4,15 +4,15 @@
 
 #include "VaRestJsonParser.h"
 #include "VaRestJsonValue.h"
-#include "VaRestPluginPrivatePCH.h"
+#include "VaRestPluginDefines.h"
 
 #include "Runtime/Launch/Resources/Version.h"
 
 typedef TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>> FCondensedJsonStringWriterFactory;
 typedef TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>> FCondensedJsonStringWriter;
 
-UVaRestJsonObject::UVaRestJsonObject(const class FObjectInitializer& PCIP)
-	: Super(PCIP)
+UVaRestJsonObject::UVaRestJsonObject(const FObjectInitializer& ObjectInitializer)
+	: Super(ObjectInitializer)
 	, JsonObj(MakeShared<FJsonObject>())
 {
 }

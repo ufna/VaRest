@@ -2,15 +2,15 @@
 // Original code by https://github.com/unktomi
 
 #include "VaRest_BreakJson.h"
+
 #include "BlueprintActionDatabaseRegistrar.h"
 #include "BlueprintNodeSpawner.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNodeUtils.h" // for FNodeTextCache
 #include "EdGraphSchema_K2.h"
+#include "EdGraphUtilities.h"
 #include "EditorCategoryUtils.h"
 #include "KismetCompiler.h"
-
-#include "EdGraphUtilities.h"
 #include "Runtime/Launch/Resources/Version.h"
 
 #define LOCTEXT_NAMESPACE "VaRest_BreakJson"

@@ -1,14 +1,12 @@
 // Copyright 2014-2019 Vladimir Alyamkin. All Rights Reserved.
 
 #include "VaRestPlugin.h"
+
 #include "VaRestJsonObject.h"
 #include "VaRestJsonValue.h"
-#include "VaRestPluginPrivatePCH.h"
+#include "VaRestPluginDefines.h"
 #include "VaRestRequestJSON.h"
 #include "VaRestSettings.h"
-
-//#include "UObject/Package.h"
-//#include "Misc/ConfigCacheIni.h"
 
 #include "Developer/Settings/Public/ISettingsModule.h"
 
