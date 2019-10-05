@@ -1,11 +1,12 @@
-// Copyright 2014 Vladimir Alyamkin. All Rights Reserved.
+// Copyright 2014-2019 Vladimir Alyamkin. All Rights Reserved.
 
 #include "VaRestJsonValue.h"
-#include "VaRestJsonObject.h"
-#include "VaRestPluginPrivatePCH.h"
 
-UVaRestJsonValue::UVaRestJsonValue(const class FObjectInitializer& PCIP)
-	: Super(PCIP)
+#include "VaRestJsonObject.h"
+#include "VaRestPluginDefines.h"
+
+UVaRestJsonValue::UVaRestJsonValue(const FObjectInitializer& ObjectInitializer)
+	: Super(ObjectInitializer)
 {
 }
 

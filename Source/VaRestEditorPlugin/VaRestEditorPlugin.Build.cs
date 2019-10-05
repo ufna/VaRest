@@ -1,4 +1,4 @@
-// Copyright 2015 Vladimir Alyamkin. All Rights Reserved.
+// Copyright 2014-2019 Vladimir Alyamkin. All Rights Reserved.
 
 using UnrealBuildTool;
 
