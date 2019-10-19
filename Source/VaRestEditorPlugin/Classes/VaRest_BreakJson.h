@@ -30,7 +30,7 @@ struct FVaRest_NamedType
 	GENERATED_USTRUCT_BODY();
 
 	UPROPERTY(EditAnywhere, Category = NamedType)
-	FString Name;
+	FText Name;
 
 	UPROPERTY(EditAnywhere, Category = NamedType)
 	EVaRest_JsonType Type;

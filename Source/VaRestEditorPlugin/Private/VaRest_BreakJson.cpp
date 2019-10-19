@@ -273,7 +273,7 @@ void UVaRest_BreakJson::CreateProjectionPins(UEdGraphPin* Source)
 #endif
 
 		UObject* Subtype = nullptr;
-		FString FieldName = (*it).Name;
+		FString FieldName = (*it).Name.ToString();
 
 		switch ((*it).Type)
 		{
@@ -297,7 +297,7 @@ void UVaRest_BreakJson::CreateProjectionPins(UEdGraphPin* Source)
 
 		UEdGraphNode::FCreatePinParams OutputPinParams;
 		OutputPinParams.ContainerType = (*it).bIsArray ? EPinContainerType::Array : EPinContainerType::None;
-		UEdGraphPin* OutputPin = CreatePin(EGPD_Output, Type, TEXT(""), Subtype, FName(*(*it).Name), OutputPinParams);
+		UEdGraphPin* OutputPin = CreatePin(EGPD_Output, Type, TEXT(""), Subtype, FName((*(*it).Name.ToString())), OutputPinParams);
 	}
 }
 
@@ -559,7 +559,7 @@ void UVaRest_MakeJson::CreateProjectionPins(UEdGraphPin* Source)
 	{
 		FName Type;
 		UObject* Subtype = nullptr;
-		FString FieldName = (*it).Name;
+		FString FieldName = (*it).Name.ToString();
 
 		switch ((*it).Type)
 		{
@@ -583,7 +583,7 @@ void UVaRest_MakeJson::CreateProjectionPins(UEdGraphPin* Source)
 
 		UEdGraphNode::FCreatePinParams InputPinParams;
 		InputPinParams.ContainerType = (*it).bIsArray ? EPinContainerType::Array : EPinContainerType::None;
-		UEdGraphPin* InputPin = CreatePin(EGPD_Input, Type, TEXT(""), Subtype, FName(*(*it).Name), InputPinParams);
+		UEdGraphPin* InputPin = CreatePin(EGPD_Input, Type, TEXT(""), Subtype, FName((*(*it).Name.ToString())), InputPinParams);
 
 #if ENGINE_MINOR_VERSION >= 20
 		InputPin->SetSavePinIfOrphaned(false);
