@@ -1,10 +1,10 @@
 // Copyright 2014-2019 Vladimir Alyamkin. All Rights Reserved.
 
-#include "VaRestPlugin.h"
+#include "VaRest.h"
 
 #include "VaRestJsonObject.h"
 #include "VaRestJsonValue.h"
-#include "VaRestPluginDefines.h"
+#include "VaRestDefines.h"
 #include "VaRestRequestController.h"
 #include "VaRestRequestJSON.h"
 #include "VaRestSettings.h"
@@ -13,7 +13,7 @@
 
 #define LOCTEXT_NAMESPACE "VaRest"
 
-class FVaRestPlugin : public IVaRestPlugin
+class FVaRest : public IVaRest
 {
 	/** IModuleInterface implementation */
 	virtual void StartupModule() override
@@ -82,18 +82,18 @@ class FVaRestPlugin : public IVaRestPlugin
 	}
 };
 
-UVaRestSettings* IVaRestPlugin::GetSettings() const
+UVaRestSettings* IVaRest::GetSettings() const
 {
 	check(VaRestSettings);
 	return VaRestSettings;
 }
 
-UVaRestRequestController* IVaRestPlugin::GetRequestController(UWorld* World) const
+UVaRestRequestController* IVaRest::GetRequestController(UWorld* World) const
 {
 	return RequestControllers.FindChecked(World);
 }
 
-IMPLEMENT_MODULE(FVaRestPlugin, VaRestPlugin)
+IMPLEMENT_MODULE(FVaRest, VaRest)
 
 DEFINE_LOG_CATEGORY(LogVaRest);
 

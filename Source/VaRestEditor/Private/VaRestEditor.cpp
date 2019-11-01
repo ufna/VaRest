@@ -1,16 +1,15 @@
 // Copyright 2014-2019 Vladimir Alyamkin. All Rights Reserved.
-// Original code by https://github.com/unktomi
 
-#include "VaRestEditorPlugin.h"
+#include "VaRestEditor.h"
 
-#define LOCTEXT_NAMESPACE "FVaRestEditorPluginModule"
+#define LOCTEXT_NAMESPACE "FVaRestEditorModule"
 
-void FVaRestEditorPluginModule::StartupModule()
+void FVaRestEditorModule::StartupModule()
 {
 	// This code will execute after your module is loaded into memory; the exact timing is specified in the .uplugin file per-module
 }
 
-void FVaRestEditorPluginModule::ShutdownModule()
+void FVaRestEditorModule::ShutdownModule()
 {
 	// This function may be called during shutdown to clean up your module.  For modules that support dynamic reloading,
 	// we call this function before unloading the module.
@@ -18,4 +17,4 @@ void FVaRestEditorPluginModule::ShutdownModule()
 
 #undef LOCTEXT_NAMESPACE
 
-IMPLEMENT_MODULE(FVaRestEditorPluginModule, VaRestEditorPlugin)
+IMPLEMENT_MODULE(FVaRestEditorModule, VaRestEditor)

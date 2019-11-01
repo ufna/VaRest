@@ -4,7 +4,7 @@
 
 #include "VaRestJsonParser.h"
 #include "VaRestJsonValue.h"
-#include "VaRestPluginDefines.h"
+#include "VaRestDefines.h"
 
 #include "Runtime/Launch/Resources/Version.h"
 

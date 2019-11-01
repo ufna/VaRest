@@ -2,7 +2,7 @@
 
 #pragma once
 
-#include "VaRestPluginDefines.h"
+#include "VaRestDefines.h"
 
 #include "VaRestJsonValue.generated.h"
 
@@ -28,7 +28,7 @@ enum class EVaJson : uint8
  * Blueprintable FJsonValue wrapper
  */
 UCLASS(BlueprintType, Blueprintable)
-class VARESTPLUGIN_API UVaRestJsonValue : public UObject
+class VAREST_API UVaRestJsonValue : public UObject
 {
 	GENERATED_UCLASS_BODY()
 

@@ -4,7 +4,7 @@
 
 #include "Kismet/BlueprintFunctionLibrary.h"
 
-#include "VaRestPluginDefines.h"
+#include "VaRestDefines.h"
 #include "VaRestTypes.h"
 
 #include "VaRestLibrary.generated.h"
@@ -42,7 +42,7 @@ struct FVaRestCallResponse
  * Useful tools for REST communications
  */
 UCLASS()
-class VARESTPLUGIN_API UVaRestLibrary : public UBlueprintFunctionLibrary
+class VAREST_API UVaRestLibrary : public UBlueprintFunctionLibrary
 {
 	GENERATED_BODY()
 

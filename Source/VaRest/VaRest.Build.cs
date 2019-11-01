@@ -4,15 +4,15 @@ using System.IO;
 
 namespace UnrealBuildTool.Rules
 {
-	public class VaRestPlugin : ModuleRules
+	public class VaRest : ModuleRules
 	{
-		public VaRestPlugin(ReadOnlyTargetRules Target) : base(Target)
+		public VaRest(ReadOnlyTargetRules Target) : base(Target)
 		{
 			PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 
 			PrivateIncludePaths.AddRange(
 				new string[] {
-					"VaRestPlugin/Private",
+					"VaRest/Private",
 					// ... add other private include paths required here ...
 				});
 

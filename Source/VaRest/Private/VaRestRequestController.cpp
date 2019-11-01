@@ -2,7 +2,7 @@
 
 #include "VaRestRequestController.h"
 
-#include "VaRestPluginDefines.h"
+#include "VaRestDefines.h"
 
 UVaRestRequestController::UVaRestRequestController(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)

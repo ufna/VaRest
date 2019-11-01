@@ -40,7 +40,7 @@ struct FVaRest_NamedType
 };
 
 UCLASS(BlueprintType, Blueprintable)
-class VARESTEDITORPLUGIN_API UVaRest_MakeJson : public UK2Node
+class VARESTEDITOR_API UVaRest_MakeJson : public UK2Node
 {
 	GENERATED_UCLASS_BODY()
 
@@ -69,7 +69,7 @@ public:
 };
 
 UCLASS(BlueprintType, Blueprintable)
-class VARESTEDITORPLUGIN_API UVaRest_BreakJson : public UK2Node
+class VARESTEDITOR_API UVaRest_BreakJson : public UK2Node
 {
 	GENERATED_UCLASS_BODY()
 

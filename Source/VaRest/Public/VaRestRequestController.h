@@ -2,12 +2,12 @@
 
 #pragma once
 
-#include "VaRestPluginDefines.h"
+#include "VaRestDefines.h"
 
 #include "VaRestRequestController.generated.h"
 
 UCLASS()
-class VARESTPLUGIN_API UVaRestRequestController : public UObject
+class VAREST_API UVaRestRequestController : public UObject
 {
 	GENERATED_UCLASS_BODY()
 

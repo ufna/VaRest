@@ -77,7 +77,7 @@ DECLARE_MULTICAST_DELEGATE_OneParam(FOnStaticRequestFail, class UVaRestRequestJS
  * General helper class http requests via blueprints
  */
 UCLASS(BlueprintType, Blueprintable)
-class VARESTPLUGIN_API UVaRestRequestJSON : public UObject
+class VAREST_API UVaRestRequestJSON : public UObject
 {
 	GENERATED_UCLASS_BODY()
 

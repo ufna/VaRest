@@ -11,7 +11,7 @@ class UVaRestSettings;
  * The public interface to this module.  In most cases, this interface is only public to sibling modules 
  * within this plugin.
  */
-class IVaRestPlugin : public IModuleInterface
+class IVaRest : public IModuleInterface
 {
 
 public:
@@ -21,9 +21,9 @@ public:
 	 *
 	 * @return Returns singleton instance, loading the module on demand if needed
 	 */
-	static inline IVaRestPlugin& Get()
+	static inline IVaRest& Get()
 	{
-		return FModuleManager::LoadModuleChecked<IVaRestPlugin>("VaRestPlugin");
+		return FModuleManager::LoadModuleChecked<IVaRest>("VaRest");
 	}
 
 	/**
@@ -33,7 +33,7 @@ public:
 	 */
 	static inline bool IsAvailable()
 	{
-		return FModuleManager::Get().IsModuleLoaded("VaRestPlugin");
+		return FModuleManager::Get().IsModuleLoaded("VaRest");
 	}
 
 	/** Getter for internal settings object to support runtime configuration changes */

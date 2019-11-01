@@ -3,7 +3,7 @@
 #include "VaRestLibrary.h"
 
 #include "VaRestJsonObject.h"
-#include "VaRestPluginDefines.h"
+#include "VaRestDefines.h"
 #include "VaRestRequestJSON.h"
 
 #include "Misc/Base64.h"
