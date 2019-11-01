@@ -1,8 +1,6 @@
 # VaRest
 
-<a href="https://teamcity.ufna.dev/viewType.html?buildTypeId=UfnaDev_VaRest_ClangFormatCheck&guest=1">
-<img src="https://teamcity.ufna.dev/app/rest/builds/buildType:(id:UfnaDev_VaRest_ClangFormatCheck)/statusIcon"/>
-</a>
+[![statusIcon](https://teamcity.ufna.dev/app/rest/builds/buildType:(id:UfnaDev_VaRest_ClangFormatCheck)/statusIcon.svg)](https://teamcity.ufna.dev/viewType.html?buildTypeId=UfnaDev_VaRest_ClangFormatCheck&guest=1)
 
 VaRest is the plugin for [Unreal Engine 4](https://www.unrealengine.com/) that makes REST server communications easier to use.
 
