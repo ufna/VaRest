@@ -7,23 +7,22 @@
 class UVaRestRequestController;
 class UVaRestSettings;
 
-/**
- * The public interface to this module.  In most cases, this interface is only public to sibling modules 
- * within this plugin.
- */
-class IVaRest : public IModuleInterface
+class FVaRestModule : public IModuleInterface
 {
-
 public:
+	/** IModuleInterface implementation */
+	virtual void StartupModule() override;
+	virtual void ShutdownModule() override;
+
 	/**
 	 * Singleton-like access to this module's interface.  This is just for convenience!
 	 * Beware of calling this during the shutdown phase, though.  Your module might have been unloaded already.
 	 *
 	 * @return Returns singleton instance, loading the module on demand if needed
 	 */
-	static inline IVaRest& Get()
+	static inline FVaRestModule& Get()
 	{
-		return FModuleManager::LoadModuleChecked<IVaRest>("VaRest");
+		return FModuleManager::LoadModuleChecked<FVaRestModule>("VaRest");
 	}
 
 	/**
