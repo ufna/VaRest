@@ -4,6 +4,9 @@
 
 #include "Modules/ModuleManager.h"
 
+class UVaRestRequestController;
+class UVaRestSettings;
+
 /**
  * The public interface to this module.  In most cases, this interface is only public to sibling modules 
  * within this plugin.
@@ -32,4 +35,17 @@ public:
 	{
 		return FModuleManager::Get().IsModuleLoaded("VaRestPlugin");
 	}
+
+	/** Getter for internal settings object to support runtime configuration changes */
+	UVaRestSettings* GetSettings() const;
+
+	/** Get global request controller */
+	UVaRestRequestController* GetRequestController(UWorld* World) const;
+
+protected:
+	/** Module settings */
+	UVaRestSettings* VaRestSettings;
+
+	/** Request controllers (one for each World we have) */
+	TMap<UWorld*, UVaRestRequestController*> RequestControllers;
 };
