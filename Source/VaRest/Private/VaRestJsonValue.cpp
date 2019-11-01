@@ -2,8 +2,8 @@
 
 #include "VaRestJsonValue.h"
 
-#include "VaRestJsonObject.h"
 #include "VaRestDefines.h"
+#include "VaRestJsonObject.h"
 
 UVaRestJsonValue::UVaRestJsonValue(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)

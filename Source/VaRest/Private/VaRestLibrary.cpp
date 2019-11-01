@@ -2,8 +2,8 @@
 
 #include "VaRestLibrary.h"
 
-#include "VaRestJsonObject.h"
 #include "VaRestDefines.h"
+#include "VaRestJsonObject.h"
 #include "VaRestRequestJSON.h"
 
 #include "Misc/Base64.h"

@@ -2,9 +2,9 @@
 
 #include "VaRestJsonObject.h"
 
+#include "VaRestDefines.h"
 #include "VaRestJsonParser.h"
 #include "VaRestJsonValue.h"
-#include "VaRestDefines.h"
 
 #include "Runtime/Launch/Resources/Version.h"
 
