@@ -20,7 +20,7 @@
 		},
 		{
 			"Name": "VaRestEditor",
-			"Type": "Developer"
+			"Type": "UncookedOnly"
 		}
 	]
 }
