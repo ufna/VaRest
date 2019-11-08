@@ -2,10 +2,10 @@
 	"FileVersion" : 3,
 	
 	"FriendlyName" : "VaRest",
-	"Version" : 26,
-	"VersionName" : "1.1-r26",
+	"Version" : 27,
+	"VersionName" : "1.1-r27",
 	"CreatedBy" : "Vladimir Alyamkin",
-	"CreatedByURL" : "http://alyamkin.com",
+	"CreatedByURL" : "https://alyamkin.com",
 	"EngineVersion" : "4.23.0",
 	"Description" : "Plugin that makes REST (JSON) server communication easy to use",
 	"Category" : "Network",
@@ -14,12 +14,12 @@
 	"Modules" :
 	[
 		{
-			"Name" : "VaRestPlugin",
+			"Name" : "VaRest",
 			"Type" : "Runtime",
 			"LoadingPhase": "PreDefault"
 		},
 		{
-			"Name": "VaRestEditorPlugin",
+			"Name": "VaRestEditor",
 			"Type": "Developer"
 		}
 	]

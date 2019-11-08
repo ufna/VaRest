@@ -39,7 +39,7 @@ public:
 		}
 
 		UEdGraphPin* InNet = FEdGraphUtilities::GetNetFromPin(InputPin);
-		UClass* Class = Cast<UClass>(StaticLoadObject(UClass::StaticClass(), NULL, TEXT("class'VaRestPlugin.VaRestJsonObject'")));
+		UClass* Class = Cast<UClass>(StaticLoadObject(UClass::StaticClass(), NULL, TEXT("class'VaRest.VaRestJsonObject'")));
 
 		FBPTerminal** SourceTerm = Context.NetMap.Find(InNet);
 		if (SourceTerm == nullptr)
@@ -194,7 +194,7 @@ void UVaRest_BreakJson::AllocateDefaultPins()
 {
 	const UEdGraphSchema_K2* K2Schema = GetDefault<UEdGraphSchema_K2>();
 
-	UClass* Class = Cast<UClass>(StaticLoadObject(UClass::StaticClass(), NULL, TEXT("class'VaRestPlugin.VaRestJsonObject'")));
+	UClass* Class = Cast<UClass>(StaticLoadObject(UClass::StaticClass(), NULL, TEXT("class'VaRest.VaRestJsonObject'")));
 	UEdGraphPin* Pin = CreatePin(EGPD_Input, K2Schema->PC_Object, TEXT(""), Class, TEXT("Target"));
 
 #if ENGINE_MINOR_VERSION >= 17
@@ -262,7 +262,7 @@ FText UVaRest_BreakJson::GetMenuCategory() const
 void UVaRest_BreakJson::CreateProjectionPins(UEdGraphPin* Source)
 {
 	const UEdGraphSchema_K2* K2Schema = GetDefault<UEdGraphSchema_K2>();
-	UClass* Class = Cast<UClass>(StaticLoadObject(UClass::StaticClass(), NULL, TEXT("class'VaRestPlugin.VaRestJsonObject'")));
+	UClass* Class = Cast<UClass>(StaticLoadObject(UClass::StaticClass(), NULL, TEXT("class'VaRest.VaRestJsonObject'")));
 
 	for (TArray<FVaRest_NamedType>::TIterator it(Outputs); it; ++it)
 	{
@@ -329,7 +329,7 @@ public:
 			}
 		}
 
-		UClass* Class = Cast<UClass>(StaticLoadObject(UClass::StaticClass(), NULL, TEXT("class'VaRestPlugin.VaRestJsonObject'")));
+		UClass* Class = Cast<UClass>(StaticLoadObject(UClass::StaticClass(), NULL, TEXT("class'VaRest.VaRestJsonObject'")));
 
 		FBPTerminal** TargetTerm = Context.NetMap.Find(OutputPin);
 		if (TargetTerm == nullptr)
@@ -485,7 +485,7 @@ void UVaRest_MakeJson::AllocateDefaultPins()
 {
 	const UEdGraphSchema_K2* K2Schema = GetDefault<UEdGraphSchema_K2>();
 
-	UClass* Class = Cast<UClass>(StaticLoadObject(UClass::StaticClass(), NULL, TEXT("class'VaRestPlugin.VaRestJsonObject'")));
+	UClass* Class = Cast<UClass>(StaticLoadObject(UClass::StaticClass(), NULL, TEXT("class'VaRest.VaRestJsonObject'")));
 	UEdGraphPin* Pin = CreatePin(EGPD_Output, K2Schema->PC_Object, TEXT(""), Class, TEXT("Target"));
 
 #if ENGINE_MINOR_VERSION >= 17
@@ -553,7 +553,7 @@ FText UVaRest_MakeJson::GetMenuCategory() const
 void UVaRest_MakeJson::CreateProjectionPins(UEdGraphPin* Source)
 {
 	const UEdGraphSchema_K2* K2Schema = GetDefault<UEdGraphSchema_K2>();
-	UClass* Class = Cast<UClass>(StaticLoadObject(UClass::StaticClass(), NULL, TEXT("class'VaRestPlugin.VaRestJsonObject'")));
+	UClass* Class = Cast<UClass>(StaticLoadObject(UClass::StaticClass(), NULL, TEXT("class'VaRest.VaRestJsonObject'")));
 
 	for (TArray<FVaRest_NamedType>::TIterator it(Inputs); it; ++it)
 	{

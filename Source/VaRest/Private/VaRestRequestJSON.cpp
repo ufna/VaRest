@@ -2,9 +2,9 @@
 
 #include "VaRestRequestJSON.h"
 
+#include "VaRestDefines.h"
 #include "VaRestJsonObject.h"
 #include "VaRestLibrary.h"
-#include "VaRestPluginDefines.h"
 #include "VaRestSettings.h"
 
 #include "Json.h"
