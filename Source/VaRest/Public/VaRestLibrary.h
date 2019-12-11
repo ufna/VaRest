@@ -1,9 +1,10 @@
-// Copyright 2016 Vladimir Alyamkin. All Rights Reserved.
+// Copyright 2014-2019 Vladimir Alyamkin. All Rights Reserved.
 
 #pragma once
 
 #include "Kismet/BlueprintFunctionLibrary.h"
 
+#include "VaRestDefines.h"
 #include "VaRestTypes.h"
 
 #include "VaRestLibrary.generated.h"
@@ -41,7 +42,7 @@ struct FVaRestCallResponse
  * Useful tools for REST communications
  */
 UCLASS()
-class VARESTPLUGIN_API UVaRestLibrary : public UBlueprintFunctionLibrary
+class VAREST_API UVaRestLibrary : public UBlueprintFunctionLibrary
 {
 	GENERATED_BODY()
 
@@ -101,18 +102,4 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility", meta = (WorldContext = "WorldContextObject"))
 	static class UVaRestJsonObject* LoadJsonFromFile(UObject* WorldContextObject, const FString& Path, const bool bIsRelativeToContentDir = true);
-
-	//////////////////////////////////////////////////////////////////////////
-	// Easy URL processing
-
-public:
-	/** Easy way to process http requests */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility", meta = (WorldContext = "WorldContextObject"))
-	static void CallURL(UObject* WorldContextObject, const FString& URL, ERequestVerb Verb, ERequestContentType ContentType, UVaRestJsonObject* VaRestJson, const FVaRestCallDelegate& Callback);
-
-	/** Called when URL is processed (one for both success/unsuccess events)*/
-	static void OnCallComplete(UVaRestRequestJSON* Request);
-
-private:
-	static TMap<UVaRestRequestJSON*, FVaRestCallResponse> RequestMap;
 };

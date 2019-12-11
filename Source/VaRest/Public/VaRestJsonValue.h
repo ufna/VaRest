@@ -1,7 +1,8 @@
-// Copyright 1998-2014 Epic Games, Inc. All Rights Reserved.
-// Copyright 2014 Vladimir Alyamkin. All Rights Reserved.
+// Copyright 2014-2019 Vladimir Alyamkin. All Rights Reserved.
 
 #pragma once
+
+#include "VaRestDefines.h"
 
 #include "VaRestJsonValue.generated.h"
 
@@ -27,7 +28,7 @@ enum class EVaJson : uint8
  * Blueprintable FJsonValue wrapper
  */
 UCLASS(BlueprintType, Blueprintable)
-class VARESTPLUGIN_API UVaRestJsonValue : public UObject
+class VAREST_API UVaRestJsonValue : public UObject
 {
 	GENERATED_UCLASS_BODY()
 

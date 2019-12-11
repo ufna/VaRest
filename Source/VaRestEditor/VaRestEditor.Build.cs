@@ -1,16 +1,16 @@
-// Copyright 2015 Vladimir Alyamkin. All Rights Reserved.
+// Copyright 2014-2019 Vladimir Alyamkin. All Rights Reserved.
 
 using UnrealBuildTool;
 
-public class VaRestEditorPlugin : ModuleRules
+public class VaRestEditor : ModuleRules
 {
-	public VaRestEditorPlugin(ReadOnlyTargetRules Target) : base(Target)
+	public VaRestEditor(ReadOnlyTargetRules Target) : base(Target)
 	{
         PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 		
 		PrivateIncludePaths.AddRange(
 			new string[] {
-				"VaRestEditorPlugin/Private",
+				"VaRestEditor/Private",
 				
 				// ... add other private include paths required here ...
 			});
@@ -20,7 +20,7 @@ public class VaRestEditorPlugin : ModuleRules
 			new string[]
 			{
 				"Core",
-                "VaRestPlugin"
+                "VaRest"
 
 				// ... add other public dependencies that you statically link with here ...
 			});

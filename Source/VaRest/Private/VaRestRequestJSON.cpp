@@ -1,12 +1,13 @@
-// Copyright 2014 Vladimir Alyamkin. All Rights Reserved.
+// Copyright 2014-2019 Vladimir Alyamkin. All Rights Reserved.
 
 #include "VaRestRequestJSON.h"
 
+#include "VaRestDefines.h"
 #include "VaRestJsonObject.h"
 #include "VaRestLibrary.h"
-#include "VaRestPluginPrivatePCH.h"
 #include "VaRestSettings.h"
 
+#include "Json.h"
 #include "Misc/CoreMisc.h"
 #include "Runtime/Launch/Resources/Version.h"
 

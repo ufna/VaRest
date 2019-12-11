@@ -1,4 +1,4 @@
-// Copyright 2015 Vladimir Alyamkin. All Rights Reserved.
+// Copyright 2014-2019 Vladimir Alyamkin. All Rights Reserved.
 // Original code by https://github.com/unktomi
 
 #pragma once
@@ -30,7 +30,7 @@ struct FVaRest_NamedType
 	GENERATED_USTRUCT_BODY();
 
 	UPROPERTY(EditAnywhere, Category = NamedType)
-	FString Name;
+	FText Name;
 
 	UPROPERTY(EditAnywhere, Category = NamedType)
 	EVaRest_JsonType Type;
@@ -40,7 +40,7 @@ struct FVaRest_NamedType
 };
 
 UCLASS(BlueprintType, Blueprintable)
-class VARESTEDITORPLUGIN_API UVaRest_MakeJson : public UK2Node
+class VARESTEDITOR_API UVaRest_MakeJson : public UK2Node
 {
 	GENERATED_UCLASS_BODY()
 
@@ -69,7 +69,7 @@ public:
 };
 
 UCLASS(BlueprintType, Blueprintable)
-class VARESTEDITORPLUGIN_API UVaRest_BreakJson : public UK2Node
+class VARESTEDITOR_API UVaRest_BreakJson : public UK2Node
 {
 	GENERATED_UCLASS_BODY()
 

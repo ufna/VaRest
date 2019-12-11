@@ -83,7 +83,7 @@ uint32 FUtf8Helper::CodepointFromUtf8(const ANSICHAR*& SourceString, const uint3
 		Codepoint = (((Octet << 12)) | ((Octet2 - 128) << 6) | ((Octet3 - 128)));
 
 		// UTF-8 characters cannot be in the UTF-16 surrogates range
-		if (UE4StringConv_Private::IsHighSurrogate(Codepoint) || UE4StringConv_Private::IsLowSurrogate(Codepoint))
+		if (StringConv::IsHighSurrogate(Codepoint) || StringConv::IsLowSurrogate(Codepoint))
 		{
 			++SourceString; // Sequence was not valid UTF-8. Skip the first byte and continue.
 			return UNICODE_BOGUS_CHAR_CODEPOINT;

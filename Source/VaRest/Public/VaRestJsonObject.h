@@ -1,5 +1,4 @@
-// Copyright 1998-2014 Epic Games, Inc. All Rights Reserved.
-// Copyright 2014 Vladimir Alyamkin. All Rights Reserved.
+// Copyright 2014-2019 Vladimir Alyamkin. All Rights Reserved.
 
 #pragma once
 
@@ -13,12 +12,12 @@ class UVaRestJsonValue;
  * Blueprintable FJsonObject wrapper
  */
 UCLASS(BlueprintType, Blueprintable)
-class VARESTPLUGIN_API UVaRestJsonObject : public UObject
+class VAREST_API UVaRestJsonObject : public UObject
 {
 	GENERATED_UCLASS_BODY()
 
 	/** Create new Json object */
-	UFUNCTION(BlueprintPure, meta = (DisplayName = "Construct Json Object", HidePin = "WorldContextObject", DefaultToSelf = "WorldContextObject"), Category = "VaRest|Json")
+	UFUNCTION(BlueprintCallable, meta = (DisplayName = "Construct Json Object", HidePin = "WorldContextObject", DefaultToSelf = "WorldContextObject"), Category = "VaRest|Json")
 	static UVaRestJsonObject* ConstructJsonObject(UObject* WorldContextObject);
 
 	/** Reset all internal data */

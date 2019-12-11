@@ -1,18 +1,18 @@
-// Copyright 2014 Vladimir Alyamkin. All Rights Reserved.
+// Copyright 2014-2019 Vladimir Alyamkin. All Rights Reserved.
 
 #include "VaRestJsonObject.h"
 
+#include "VaRestDefines.h"
 #include "VaRestJsonParser.h"
 #include "VaRestJsonValue.h"
-#include "VaRestPluginPrivatePCH.h"
 
 #include "Runtime/Launch/Resources/Version.h"
 
 typedef TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>> FCondensedJsonStringWriterFactory;
 typedef TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>> FCondensedJsonStringWriter;
 
-UVaRestJsonObject::UVaRestJsonObject(const class FObjectInitializer& PCIP)
-	: Super(PCIP)
+UVaRestJsonObject::UVaRestJsonObject(const FObjectInitializer& ObjectInitializer)
+	: Super(ObjectInitializer)
 	, JsonObj(MakeShared<FJsonObject>())
 {
 }
