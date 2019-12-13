@@ -146,7 +146,7 @@ public:
 
 	/** Get the Request Json object */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
-	UVaRestJsonObject* GetRequestObject();
+	UVaRestJsonObject* GetRequestObject() const;
 
 	/** Set the Request Json object */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
@@ -154,7 +154,7 @@ public:
 
 	/** Get the Response Json object */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
-	UVaRestJsonObject* GetResponseObject();
+	UVaRestJsonObject* GetResponseObject() const;
 
 	/** Set the Response Json object */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
@@ -165,23 +165,23 @@ public:
 
 	/** Get url of http request */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
-	FString GetURL();
+	FString GetURL() const;
 
 	/** Get status of http request */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
-	ERequestStatus GetStatus();
+	ERequestStatus GetStatus() const;
 
 	/** Get the response code of the last query */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
-	int32 GetResponseCode();
+	int32 GetResponseCode() const;
 
 	/** Get value of desired response header */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
-	FString GetResponseHeader(const FString HeaderName);
+	UFUNCTION(BlueprintPure, Category = "VaRest|Response")
+	FString GetResponseHeader(const FString& HeaderName);
 
 	/** Get list of all response headers */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
-	TArray<FString> GetAllResponseHeaders();
+	TArray<FString> GetAllResponseHeaders() const;
 
 	//////////////////////////////////////////////////////////////////////////
 	// URL processing
