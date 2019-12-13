@@ -17,7 +17,7 @@ UVaRestJsonObject::UVaRestJsonObject(const FObjectInitializer& ObjectInitializer
 {
 }
 
-UVaRestJsonObject* UVaRestJsonObject::ConstructJsonObject(UObject* WorldContextObject)
+UVaRestJsonObject* UVaRestJsonObject::ConstructVaRestJsonObject(UObject* WorldContextObject)
 {
 	return NewObject<UVaRestJsonObject>();
 }

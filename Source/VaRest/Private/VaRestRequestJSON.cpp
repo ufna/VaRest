@@ -35,17 +35,17 @@ UVaRestRequestJSON::UVaRestRequestJSON(const class FObjectInitializer& PCIP)
 	ResetData();
 }
 
-UVaRestRequestJSON* UVaRestRequestJSON::ConstructRequest(UObject* WorldContextObject)
+UVaRestRequestJSON* UVaRestRequestJSON::ConstructVaRestRequest(UObject* WorldContextObject)
 {
 	return NewObject<UVaRestRequestJSON>();
 }
 
-UVaRestRequestJSON* UVaRestRequestJSON::ConstructRequestExt(
+UVaRestRequestJSON* UVaRestRequestJSON::ConstructVaRestRequestExt(
 	UObject* WorldContextObject,
 	ERequestVerb Verb,
 	ERequestContentType ContentType)
 {
-	UVaRestRequestJSON* Request = ConstructRequest(WorldContextObject);
+	UVaRestRequestJSON* Request = ConstructVaRestRequest(WorldContextObject);
 
 	Request->SetVerb(Verb);
 	Request->SetContentType(ContentType);
