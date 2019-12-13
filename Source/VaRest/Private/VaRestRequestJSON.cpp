@@ -35,17 +35,17 @@ UVaRestRequestJSON::UVaRestRequestJSON(const class FObjectInitializer& PCIP)
 	ResetData();
 }
 
-UVaRestRequestJSON* UVaRestRequestJSON::ConstructRequest(UObject* WorldContextObject)
+UVaRestRequestJSON* UVaRestRequestJSON::ConstructVaRestRequest(UObject* WorldContextObject)
 {
 	return NewObject<UVaRestRequestJSON>();
 }
 
-UVaRestRequestJSON* UVaRestRequestJSON::ConstructRequestExt(
+UVaRestRequestJSON* UVaRestRequestJSON::ConstructVaRestRequestExt(
 	UObject* WorldContextObject,
 	ERequestVerb Verb,
 	ERequestContentType ContentType)
 {
-	UVaRestRequestJSON* Request = ConstructRequest(WorldContextObject);
+	UVaRestRequestJSON* Request = ConstructVaRestRequest(WorldContextObject);
 
 	Request->SetVerb(Verb);
 	Request->SetContentType(ContentType);
@@ -146,7 +146,7 @@ void UVaRestRequestJSON::Cancel()
 //////////////////////////////////////////////////////////////////////////
 // JSON data accessors
 
-UVaRestJsonObject* UVaRestRequestJSON::GetRequestObject()
+UVaRestJsonObject* UVaRestRequestJSON::GetRequestObject() const
 {
 	return RequestJsonObj;
 }
@@ -156,7 +156,7 @@ void UVaRestRequestJSON::SetRequestObject(UVaRestJsonObject* JsonObject)
 	RequestJsonObj = JsonObject;
 }
 
-UVaRestJsonObject* UVaRestRequestJSON::GetResponseObject()
+UVaRestJsonObject* UVaRestRequestJSON::GetResponseObject() const
 {
 	return ResponseJsonObj;
 }
@@ -169,22 +169,22 @@ void UVaRestRequestJSON::SetResponseObject(UVaRestJsonObject* JsonObject)
 ///////////////////////////////////////////////////////////////////////////
 // Response data access
 
-FString UVaRestRequestJSON::GetURL()
+FString UVaRestRequestJSON::GetURL() const
 {
 	return HttpRequest->GetURL();
 }
 
-ERequestStatus UVaRestRequestJSON::GetStatus()
+ERequestStatus UVaRestRequestJSON::GetStatus() const
 {
 	return ERequestStatus((uint8)HttpRequest->GetStatus());
 }
 
-int32 UVaRestRequestJSON::GetResponseCode()
+int32 UVaRestRequestJSON::GetResponseCode() const
 {
 	return ResponseCode;
 }
 
-FString UVaRestRequestJSON::GetResponseHeader(const FString HeaderName)
+FString UVaRestRequestJSON::GetResponseHeader(const FString& HeaderName)
 {
 	FString Result;
 
@@ -197,7 +197,7 @@ FString UVaRestRequestJSON::GetResponseHeader(const FString HeaderName)
 	return Result;
 }
 
-TArray<FString> UVaRestRequestJSON::GetAllResponseHeaders()
+TArray<FString> UVaRestRequestJSON::GetAllResponseHeaders() const
 {
 	TArray<FString> Result;
 	for (TMap<FString, FString>::TConstIterator It(ResponseHeaders); It; ++It)
