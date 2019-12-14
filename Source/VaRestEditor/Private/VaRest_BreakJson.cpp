@@ -337,7 +337,7 @@ public:
 			return;
 		}
 		{
-			FName FunctionName = TEXT("ConstructJsonObject");
+			FName FunctionName = TEXT("ConstructVaRestJsonObject");
 			UFunction* FunctionPtr = Class->FindFunctionByName(FunctionName);
 			FBlueprintCompiledStatement& Statement = Context.AppendStatementForNode(Node);
 			Statement.Type = KCST_CallFunction;
