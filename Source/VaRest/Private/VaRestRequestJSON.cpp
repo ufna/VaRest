@@ -148,21 +148,35 @@ void UVaRestRequestJSON::Cancel()
 
 UVaRestJsonObject* UVaRestRequestJSON::GetRequestObject() const
 {
+	check(RequestJsonObj);
 	return RequestJsonObj;
 }
 
 void UVaRestRequestJSON::SetRequestObject(UVaRestJsonObject* JsonObject)
 {
+	if (JsonObject == nullptr)
+	{
+		UE_LOG(LogVaRest, Error, TEXT("%s: Provided JsonObject is nullptr"), *VA_FUNC_LINE);
+		return;
+	}
+
 	RequestJsonObj = JsonObject;
 }
 
 UVaRestJsonObject* UVaRestRequestJSON::GetResponseObject() const
 {
+	check(ResponseJsonObj);
 	return ResponseJsonObj;
 }
 
 void UVaRestRequestJSON::SetResponseObject(UVaRestJsonObject* JsonObject)
 {
+	if (JsonObject == nullptr)
+	{
+		UE_LOG(LogVaRest, Error, TEXT("%s: Provided JsonObject is nullptr"), *VA_FUNC_LINE);
+		return;
+	}
+
 	ResponseJsonObj = JsonObject;
 }
 
