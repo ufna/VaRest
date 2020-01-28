@@ -1071,11 +1071,7 @@ void FJSONWriter::Write(TSharedPtr<FJsonValue> JsonValue, FArchive* Writer, bool
 			for (int i = 0; i < ChildJsonPair.Key.Len(); ++i)
 			{
 				Str = FString(1, &ChildJsonPair.Key[i]);
-#if PLATFORM_WINDOWS
-				UVaRestJsonObject::WriteStringToArchive(Ar, *Str, Str.Len() - 1);
-#else
 				UVaRestJsonObject::WriteStringToArchive(Ar, *Str, Str.Len());
-#endif
 			}
 
 			Str = FString(TEXT("\""));
@@ -1134,11 +1130,7 @@ void FJSONWriter::Write(TSharedPtr<FJsonValue> JsonValue, FArchive* Writer, bool
 			}
 			else
 			{
-#if PLATFORM_WINDOWS
-				UVaRestJsonObject::WriteStringToArchive(Ar, *Str, Str.Len() - 1);
-#else
 				UVaRestJsonObject::WriteStringToArchive(Ar, *Str, Str.Len());
-#endif
 			}
 		}
 
