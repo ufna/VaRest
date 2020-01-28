@@ -491,16 +491,31 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 		}
 	}
 
-	// Try to deserialize data to JSON
-	const TArray<uint8>& Bytes = Response->GetContent();
-	ResponseSize = ResponseJsonObj->DeserializeFromUTF8Bytes((const ANSICHAR*)Bytes.GetData(), Bytes.Num());
-
-	// Log errors
-	if (ResponseSize == 0)
+	const UVaRestSettings* DefaultSettings = GetDefault<UVaRestSettings>();
+	if (DefaultSettings->bUseChunkedParser)
 	{
-		// As we assume it's recommended way to use current class, but not the only one,
-		// it will be the warning instead of error
-		UE_LOG(LogVaRest, Warning, TEXT("JSON could not be decoded!"));
+		// Try to deserialize data to JSON
+		const TArray<uint8>& Bytes = Response->GetContent();
+		ResponseSize = ResponseJsonObj->DeserializeFromUTF8Bytes((const ANSICHAR*)Bytes.GetData(), Bytes.Num());
+
+		// Log errors
+		if (ResponseSize == 0)
+		{
+			// As we assume it's recommended way to use current class, but not the only one,
+			// it will be the warning instead of error
+			UE_LOG(LogVaRest, Warning, TEXT("JSON could not be decoded!"));
+		}
+	}
+	else
+	{
+		// Use default unreal one
+		TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(*Response->GetContentAsString());
+		TSharedPtr<FJsonObject> OutJsonObj;
+		if (FJsonSerializer::Deserialize(Reader, OutJsonObj))
+		{
+			ResponseJsonObj->SetRootObject(OutJsonObj.ToSharedRef());
+			ResponseSize = Response->GetContentLength();
+		}
 	}
 
 	// Decide whether the request was successful
