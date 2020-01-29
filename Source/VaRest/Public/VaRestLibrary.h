@@ -102,4 +102,17 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility", meta = (WorldContext = "WorldContextObject"))
 	static class UVaRestJsonObject* LoadJsonFromFile(UObject* WorldContextObject, const FString& Path, const bool bIsRelativeToContentDir = true);
+
+public:
+	//////////////////////////////////////////////////////////////////////////
+	// Easy URL processing
+	/** Easy way to process http requests */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility", meta = (WorldContext = "WorldContextObject"))
+	static void CallURL(UObject* WorldContextObject, const FString& URL, ERequestVerb Verb, ERequestContentType ContentType, UVaRestJsonObject* VaRestJson, const FVaRestCallDelegate& Callback);
+
+	/** Called when URL is processed (one for both success/unsuccess events)*/
+	static void OnCallComplete(UVaRestRequestJSON* Request);
+
+private:
+	static TMap<UVaRestRequestJSON*, FVaRestCallResponse> RequestMap;
 };
