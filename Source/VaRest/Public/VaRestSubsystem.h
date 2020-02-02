@@ -24,9 +24,6 @@ struct FVaRestCallResponse
 	UVaRestRequestJSON* Request;
 
 	UPROPERTY()
-	UObject* WorldContextObject;
-
-	UPROPERTY()
 	FVaRestCallDelegate Callback;
 
 	FDelegateHandle CompleteDelegateHandle;
@@ -34,7 +31,6 @@ struct FVaRestCallResponse
 
 	FVaRestCallResponse()
 		: Request(nullptr)
-		, WorldContextObject(nullptr)
 	{
 	}
 };
@@ -63,7 +59,7 @@ public:
 	/** Called when URL is processed (one for both success/unsuccess events)*/
 	void OnCallComplete(UVaRestRequestJSON* Request);
 
-private:
+protected:
 	UPROPERTY()
 	TMap<UVaRestRequestJSON*, FVaRestCallResponse> RequestMap;
 

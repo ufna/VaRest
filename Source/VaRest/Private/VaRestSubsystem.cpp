@@ -60,11 +60,10 @@ void UVaRestSubsystem::CallURL(const FString& URL, ERequestVerb Verb, ERequestCo
 
 	FVaRestCallResponse Response;
 	Response.Request = Request;
-	//Response.WorldContextObject = WorldContextObject;
 	Response.Callback = Callback;
 
-	//Response.CompleteDelegateHandle = Request->OnStaticRequestComplete.AddStatic(&UVaRestLibrary::OnCallComplete);
-	//Response.FailDelegateHandle = Request->OnStaticRequestFail.AddStatic(&UVaRestLibrary::OnCallComplete);
+	Response.CompleteDelegateHandle = Request->OnStaticRequestComplete.AddUObject(this, &UVaRestSubsystem::OnCallComplete);
+	Response.FailDelegateHandle = Request->OnStaticRequestFail.AddUObject(this, &UVaRestSubsystem::OnCallComplete);
 
 	RequestMap.Add(Request, Response);
 
@@ -79,14 +78,11 @@ void UVaRestSubsystem::OnCallComplete(UVaRestRequestJSON* Request)
 		return;
 	}
 
-	FVaRestCallResponse* Response = RequestMap.Find(Request);
-
+	auto Response = RequestMap.Find(Request);
 	Request->OnStaticRequestComplete.Remove(Response->CompleteDelegateHandle);
 	Request->OnStaticRequestFail.Remove(Response->FailDelegateHandle);
 
 	Response->Callback.ExecuteIfBound(Request);
-
-	Response->WorldContextObject = nullptr;
 	Response->Request = nullptr;
 	RequestMap.Remove(Request);
 }
