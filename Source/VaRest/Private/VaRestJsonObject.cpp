@@ -17,11 +17,6 @@ UVaRestJsonObject::UVaRestJsonObject(const FObjectInitializer& ObjectInitializer
 {
 }
 
-UVaRestJsonObject* UVaRestJsonObject::ConstructVaRestJsonObject(UObject* WorldContextObject)
-{
-	return NewObject<UVaRestJsonObject>();
-}
-
 void UVaRestJsonObject::Reset()
 {
 	JsonObj = MakeShared<FJsonObject>();

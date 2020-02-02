@@ -37,24 +37,6 @@ UVaRestRequestJSON::UVaRestRequestJSON(const class FObjectInitializer& PCIP)
 	ResetData();
 }
 
-UVaRestRequestJSON* UVaRestRequestJSON::ConstructVaRestRequest(UObject* WorldContextObject)
-{
-	return NewObject<UVaRestRequestJSON>(WorldContextObject);
-}
-
-UVaRestRequestJSON* UVaRestRequestJSON::ConstructVaRestRequestExt(
-	UObject* WorldContextObject,
-	ERequestVerb Verb,
-	ERequestContentType ContentType)
-{
-	UVaRestRequestJSON* Request = ConstructVaRestRequest(WorldContextObject);
-
-	Request->SetVerb(Verb);
-	Request->SetContentType(ContentType);
-
-	return Request;
-}
-
 void UVaRestRequestJSON::SetVerb(ERequestVerb Verb)
 {
 	RequestVerb = Verb;
@@ -294,9 +276,6 @@ void UVaRestRequestJSON::ExecuteProcessRequest()
 
 void UVaRestRequestJSON::ProcessRequest()
 {
-	// Cache default settings for extended logs
-	const auto Settings = UGameInstance::GetSubsystem<UVaRestSubsystem>(UGameplayStatics::GetGameInstance(this))->GetSettings();
-
 	// Set verb
 	switch (RequestVerb)
 	{
@@ -359,7 +338,7 @@ void UVaRestRequestJSON::ProcessRequest()
 		}
 
 		// Check extended log to avoid security vulnerability (#133)
-		if (Settings->bExtendedLog)
+		if (GetSettings()->bExtendedLog)
 		{
 			UE_LOG(LogVaRest, Log, TEXT("%s: Request (urlencoded): %s %s %s %s"), *VA_FUNC_LINE, *HttpRequest->GetVerb(), *HttpRequest->GetURL(), *UrlParams, *StringRequestContent);
 		}
@@ -396,7 +375,7 @@ void UVaRestRequestJSON::ProcessRequest()
 		HttpRequest->SetContentAsString(UrlParams);
 
 		// Check extended log to avoid security vulnerability (#133)
-		if (Settings->bExtendedLog)
+		if (GetSettings()->bExtendedLog)
 		{
 			UE_LOG(LogVaRest, Log, TEXT("%s: Request (url body): %s %s %s"), *VA_FUNC_LINE, *HttpRequest->GetVerb(), *HttpRequest->GetURL(), *UrlParams);
 		}
@@ -493,8 +472,7 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 		}
 	}
 
-	const auto Settings = UGameInstance::GetSubsystem<UVaRestSubsystem>(UGameplayStatics::GetGameInstance(this))->GetSettings();
-	if (Settings->bUseChunkedParser)
+	if (GetSettings()->bUseChunkedParser)
 	{
 		// Try to deserialize data to JSON
 		const TArray<uint8>& Bytes = Response->GetContent();
@@ -604,4 +582,16 @@ FString UVaRestRequestJSON::GetResponseContentAsString(bool bCacheResponseConten
 
 	// Return previously cached content now
 	return ResponseContent;
+}
+
+const UVaRestSettings* UVaRestRequestJSON::GetSettings() const
+{
+	auto GI = UGameplayStatics::GetGameInstance(this);
+	if (GI)
+	{
+		return GI->GetSubsystem<UVaRestSubsystem>()->GetSettings();
+	}
+
+	UE_LOG(LogVaRest, Warning, TEXT("%s: No World is provided for Outer object, Default settings will be used"), *VA_FUNC_LINE);
+	return GetDefault<UVaRestSettings>();
 }

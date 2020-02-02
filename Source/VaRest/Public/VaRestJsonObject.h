@@ -16,10 +16,6 @@ class VAREST_API UVaRestJsonObject : public UObject
 {
 	GENERATED_UCLASS_BODY()
 
-	/** Create new Json object */
-	UFUNCTION(BlueprintCallable, meta = (DisplayName = "Construct Json Object", HidePin = "WorldContextObject", DefaultToSelf = "WorldContextObject"), Category = "VaRest|Json")
-	static UVaRestJsonObject* ConstructVaRestJsonObject(UObject* WorldContextObject);
-
 	/** Reset all internal data */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	void Reset();
