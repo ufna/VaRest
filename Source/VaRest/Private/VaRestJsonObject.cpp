@@ -17,11 +17,6 @@ UVaRestJsonObject::UVaRestJsonObject(const FObjectInitializer& ObjectInitializer
 {
 }
 
-UVaRestJsonObject* UVaRestJsonObject::ConstructVaRestJsonObject(UObject* WorldContextObject)
-{
-	return NewObject<UVaRestJsonObject>();
-}
-
 void UVaRestJsonObject::Reset()
 {
 	JsonObj = MakeShared<FJsonObject>();
@@ -675,11 +670,7 @@ bool UVaRestJsonObject::WriteToFile(const FString& Path)
 		for (int i = 0; i < JsonObjectValuePair.Key.Len(); ++i)
 		{
 			Str = FString(1, &BufferPtr[i]);
-#if PLATFORM_WINDOWS
-			WriteStringToArchive(Ar, *Str, Str.Len() - 1);
-#else
 			WriteStringToArchive(Ar, *Str, Str.Len());
-#endif
 		}
 
 		Str = FString(TEXT("\""));

@@ -1,9 +1,9 @@
----
+﻿---
 Language:                                       Cpp
 BasedOnStyle:                                   LLVM
 IndentWidth:                                    4
 TabWidth:                                       4
-UseTab:                                         Always
+UseTab:                                         ForContinuationAndIndentation
 Standard:                                       Cpp11
 AccessModifierOffset:                           -4
 AlignAfterOpenBracket:                          DontAlign
@@ -17,5 +17,6 @@ ColumnLimit:                                    0
 PointerAlignment:                               Left
 SpacesInAngles:                                 false
 ---
-Language:                                       ObjC
+Language: ObjC
+DisableFormat: true
 ...

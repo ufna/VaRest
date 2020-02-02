@@ -230,7 +230,7 @@ uint32 FUtf8Helper::CodepointFromUtf8(const ANSICHAR*& SourceString, const uint3
 		return UNICODE_BOGUS_CHAR_CODEPOINT;
 	}
 
-	++SourceString;						 // Sequence was not valid UTF-8. Skip the first byte and continue.
+	++SourceString;                      // Sequence was not valid UTF-8. Skip the first byte and continue.
 	return UNICODE_BOGUS_CHAR_CODEPOINT; // catch everything else.
 }
 
@@ -739,9 +739,9 @@ void FJSONReader::UpdateNotation()
 	{
 		if (State.CheckTokens(EJSONToken::SQUARE_BEGIN, EJSONToken::SQUARE_END)) // Close array "[]"
 		{
-			State.PopToken(2);	 // remove token "[]"
+			State.PopToken(2);     // remove token "[]"
 			State.PopValue(false); // remove value if exists
-			State.PopArray();	  // remove array
+			State.PopArray();      // remove array
 
 			if (State.CheckTokens(EJSONToken::COLON)) // Array in object ":"
 			{
@@ -761,7 +761,7 @@ void FJSONReader::UpdateNotation()
 	{
 		if (State.CheckTokens(EJSONToken::CURLY_BEGIN, EJSONToken::COLON, EJSONToken::COMMA)) // Next record in object "{:,"
 		{
-			State.PopToken(2);	 // remove token ":,"
+			State.PopToken(2);     // remove token ":,"
 			State.PopValue(false); // remove value
 			State.Notation = EJSONNotation::OBJECT;
 		}
@@ -772,7 +772,7 @@ void FJSONReader::UpdateNotation()
 		}
 		else if (State.CheckTokens(EJSONToken::SQUARE_BEGIN, EJSONToken::COMMA)) // Next record in array "[,"
 		{
-			State.PopToken(1);	 // remove token ","
+			State.PopToken(1);     // remove token ","
 			State.PopValue(false); // remove value
 			State.Notation = EJSONNotation::ARRAY;
 		}
@@ -1071,11 +1071,7 @@ void FJSONWriter::Write(TSharedPtr<FJsonValue> JsonValue, FArchive* Writer, bool
 			for (int i = 0; i < ChildJsonPair.Key.Len(); ++i)
 			{
 				Str = FString(1, &ChildJsonPair.Key[i]);
-#if PLATFORM_WINDOWS
-				UVaRestJsonObject::WriteStringToArchive(Ar, *Str, Str.Len() - 1);
-#else
 				UVaRestJsonObject::WriteStringToArchive(Ar, *Str, Str.Len());
-#endif
 			}
 
 			Str = FString(TEXT("\""));
@@ -1134,11 +1130,7 @@ void FJSONWriter::Write(TSharedPtr<FJsonValue> JsonValue, FArchive* Writer, bool
 			}
 			else
 			{
-#if PLATFORM_WINDOWS
-				UVaRestJsonObject::WriteStringToArchive(Ar, *Str, Str.Len() - 1);
-#else
 				UVaRestJsonObject::WriteStringToArchive(Ar, *Str, Str.Len());
-#endif
 			}
 		}
 

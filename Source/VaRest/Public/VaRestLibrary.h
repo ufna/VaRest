@@ -9,35 +9,6 @@
 
 #include "VaRestLibrary.generated.h"
 
-class UVaRestRequestJSON;
-class UVaRestJsonObject;
-
-DECLARE_DYNAMIC_DELEGATE_OneParam(FVaRestCallDelegate, UVaRestRequestJSON*, Request);
-
-USTRUCT()
-struct FVaRestCallResponse
-{
-	GENERATED_USTRUCT_BODY()
-
-	UPROPERTY()
-	UVaRestRequestJSON* Request;
-
-	UPROPERTY()
-	UObject* WorldContextObject;
-
-	UPROPERTY()
-	FVaRestCallDelegate Callback;
-
-	FDelegateHandle CompleteDelegateHandle;
-	FDelegateHandle FailDelegateHandle;
-
-	FVaRestCallResponse()
-		: Request(nullptr)
-		, WorldContextObject(nullptr)
-	{
-	}
-};
-
 /**
  * Useful tools for REST communications
  */
@@ -91,15 +62,4 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility", meta = (DisplayName = "Base64 Decode Data"))
 	static bool Base64DecodeData(const FString& Source, TArray<uint8>& Dest);
-
-	//////////////////////////////////////////////////////////////////////////
-	// File system integration
-
-public:
-	/** 
-	 * Load JSON from formatted text file
-	 * @param    bIsRelativeToContentDir    if set to 'false' path is treated as absolute
-	 */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility", meta = (WorldContext = "WorldContextObject"))
-	static class UVaRestJsonObject* LoadJsonFromFile(UObject* WorldContextObject, const FString& Path, const bool bIsRelativeToContentDir = true);
 };

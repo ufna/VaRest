@@ -6,8 +6,10 @@
 #include "VaRestJsonObject.h"
 #include "VaRestLibrary.h"
 #include "VaRestSettings.h"
+#include "VaRestSubsystem.h"
 
 #include "Json.h"
+#include "Kismet/GameplayStatics.h"
 #include "Misc/CoreMisc.h"
 #include "Runtime/Launch/Resources/Version.h"
 
@@ -33,24 +35,6 @@ UVaRestRequestJSON::UVaRestRequestJSON(const class FObjectInitializer& PCIP)
 	RequestContentType = ERequestContentType::x_www_form_urlencoded_url;
 
 	ResetData();
-}
-
-UVaRestRequestJSON* UVaRestRequestJSON::ConstructVaRestRequest(UObject* WorldContextObject)
-{
-	return NewObject<UVaRestRequestJSON>();
-}
-
-UVaRestRequestJSON* UVaRestRequestJSON::ConstructVaRestRequestExt(
-	UObject* WorldContextObject,
-	ERequestVerb Verb,
-	ERequestContentType ContentType)
-{
-	UVaRestRequestJSON* Request = ConstructVaRestRequest(WorldContextObject);
-
-	Request->SetVerb(Verb);
-	Request->SetContentType(ContentType);
-
-	return Request;
 }
 
 void UVaRestRequestJSON::SetVerb(ERequestVerb Verb)
@@ -148,21 +132,35 @@ void UVaRestRequestJSON::Cancel()
 
 UVaRestJsonObject* UVaRestRequestJSON::GetRequestObject() const
 {
+	check(RequestJsonObj);
 	return RequestJsonObj;
 }
 
 void UVaRestRequestJSON::SetRequestObject(UVaRestJsonObject* JsonObject)
 {
+	if (JsonObject == nullptr)
+	{
+		UE_LOG(LogVaRest, Error, TEXT("%s: Provided JsonObject is nullptr"), *VA_FUNC_LINE);
+		return;
+	}
+
 	RequestJsonObj = JsonObject;
 }
 
 UVaRestJsonObject* UVaRestRequestJSON::GetResponseObject() const
 {
+	check(ResponseJsonObj);
 	return ResponseJsonObj;
 }
 
 void UVaRestRequestJSON::SetResponseObject(UVaRestJsonObject* JsonObject)
 {
+	if (JsonObject == nullptr)
+	{
+		UE_LOG(LogVaRest, Error, TEXT("%s: Provided JsonObject is nullptr"), *VA_FUNC_LINE);
+		return;
+	}
+
 	ResponseJsonObj = JsonObject;
 }
 
@@ -278,9 +276,6 @@ void UVaRestRequestJSON::ExecuteProcessRequest()
 
 void UVaRestRequestJSON::ProcessRequest()
 {
-	// Cache default settings for extended logs
-	const UVaRestSettings* DefaultSettings = GetDefault<UVaRestSettings>();
-
 	// Set verb
 	switch (RequestVerb)
 	{
@@ -343,7 +338,7 @@ void UVaRestRequestJSON::ProcessRequest()
 		}
 
 		// Check extended log to avoid security vulnerability (#133)
-		if (DefaultSettings->bExtendedLog)
+		if (GetSettings()->bExtendedLog)
 		{
 			UE_LOG(LogVaRest, Log, TEXT("%s: Request (urlencoded): %s %s %s %s"), *VA_FUNC_LINE, *HttpRequest->GetVerb(), *HttpRequest->GetURL(), *UrlParams, *StringRequestContent);
 		}
@@ -380,7 +375,7 @@ void UVaRestRequestJSON::ProcessRequest()
 		HttpRequest->SetContentAsString(UrlParams);
 
 		// Check extended log to avoid security vulnerability (#133)
-		if (DefaultSettings->bExtendedLog)
+		if (GetSettings()->bExtendedLog)
 		{
 			UE_LOG(LogVaRest, Log, TEXT("%s: Request (url body): %s %s %s"), *VA_FUNC_LINE, *HttpRequest->GetVerb(), *HttpRequest->GetURL(), *UrlParams);
 		}
@@ -477,16 +472,30 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 		}
 	}
 
-	// Try to deserialize data to JSON
-	const TArray<uint8>& Bytes = Response->GetContent();
-	ResponseSize = ResponseJsonObj->DeserializeFromUTF8Bytes((const ANSICHAR*)Bytes.GetData(), Bytes.Num());
-
-	// Log errors
-	if (ResponseSize == 0)
+	if (GetSettings()->bUseChunkedParser)
 	{
-		// As we assume it's recommended way to use current class, but not the only one,
-		// it will be the warning instead of error
-		UE_LOG(LogVaRest, Warning, TEXT("JSON could not be decoded!"));
+		// Try to deserialize data to JSON
+		const TArray<uint8>& Bytes = Response->GetContent();
+		ResponseSize = ResponseJsonObj->DeserializeFromUTF8Bytes((const ANSICHAR*)Bytes.GetData(), Bytes.Num());
+
+		// Log errors
+		if (ResponseSize == 0)
+		{
+			// As we assume it's recommended way to use current class, but not the only one,
+			// it will be the warning instead of error
+			UE_LOG(LogVaRest, Warning, TEXT("JSON could not be decoded!"));
+		}
+	}
+	else
+	{
+		// Use default unreal one
+		TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(*Response->GetContentAsString());
+		TSharedPtr<FJsonObject> OutJsonObj;
+		if (FJsonSerializer::Deserialize(Reader, OutJsonObj))
+		{
+			ResponseJsonObj->SetRootObject(OutJsonObj.ToSharedRef());
+			ResponseSize = Response->GetContentLength();
+		}
 	}
 
 	// Decide whether the request was successful
@@ -573,4 +582,16 @@ FString UVaRestRequestJSON::GetResponseContentAsString(bool bCacheResponseConten
 
 	// Return previously cached content now
 	return ResponseContent;
+}
+
+const UVaRestSettings* UVaRestRequestJSON::GetSettings() const
+{
+	auto GI = UGameplayStatics::GetGameInstance(this);
+	if (GI)
+	{
+		return GI->GetSubsystem<UVaRestSubsystem>()->GetSettings();
+	}
+
+	UE_LOG(LogVaRest, Warning, TEXT("%s: No World is provided for Outer object, Default settings will be used"), *VA_FUNC_LINE);
+	return GetDefault<UVaRestSettings>();
 }
