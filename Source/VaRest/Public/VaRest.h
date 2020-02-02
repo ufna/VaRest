@@ -4,16 +4,9 @@
 
 #include "Modules/ModuleManager.h"
 
-class UVaRestRequestController;
-class UVaRestSettings;
-
 class FVaRestModule : public IModuleInterface
 {
 public:
-	/** IModuleInterface implementation */
-	virtual void StartupModule() override;
-	virtual void ShutdownModule() override;
-
 	/**
 	 * Singleton-like access to this module's interface.  This is just for convenience!
 	 * Beware of calling this during the shutdown phase, though.  Your module might have been unloaded already.
@@ -34,17 +27,4 @@ public:
 	{
 		return FModuleManager::Get().IsModuleLoaded("VaRest");
 	}
-
-	/** Getter for internal settings object to support runtime configuration changes */
-	UVaRestSettings* GetSettings() const;
-
-	/** Get global request controller */
-	UVaRestRequestController* GetRequestController(UWorld* World) const;
-
-protected:
-	/** Module settings */
-	UVaRestSettings* VaRestSettings;
-
-	/** Request controllers (one for each World we have) */
-	TMap<UWorld*, UVaRestRequestController*> RequestControllers;
 };

@@ -6,8 +6,10 @@
 #include "VaRestJsonObject.h"
 #include "VaRestLibrary.h"
 #include "VaRestSettings.h"
+#include "VaRestSubsystem.h"
 
 #include "Json.h"
+#include "Kismet/GameplayStatics.h"
 #include "Misc/CoreMisc.h"
 #include "Runtime/Launch/Resources/Version.h"
 
@@ -37,7 +39,7 @@ UVaRestRequestJSON::UVaRestRequestJSON(const class FObjectInitializer& PCIP)
 
 UVaRestRequestJSON* UVaRestRequestJSON::ConstructVaRestRequest(UObject* WorldContextObject)
 {
-	return NewObject<UVaRestRequestJSON>();
+	return NewObject<UVaRestRequestJSON>(WorldContextObject);
 }
 
 UVaRestRequestJSON* UVaRestRequestJSON::ConstructVaRestRequestExt(
@@ -293,7 +295,7 @@ void UVaRestRequestJSON::ExecuteProcessRequest()
 void UVaRestRequestJSON::ProcessRequest()
 {
 	// Cache default settings for extended logs
-	const UVaRestSettings* DefaultSettings = GetDefault<UVaRestSettings>();
+	const auto Settings = UGameInstance::GetSubsystem<UVaRestSubsystem>(UGameplayStatics::GetGameInstance(this))->GetSettings();
 
 	// Set verb
 	switch (RequestVerb)
@@ -357,7 +359,7 @@ void UVaRestRequestJSON::ProcessRequest()
 		}
 
 		// Check extended log to avoid security vulnerability (#133)
-		if (DefaultSettings->bExtendedLog)
+		if (Settings->bExtendedLog)
 		{
 			UE_LOG(LogVaRest, Log, TEXT("%s: Request (urlencoded): %s %s %s %s"), *VA_FUNC_LINE, *HttpRequest->GetVerb(), *HttpRequest->GetURL(), *UrlParams, *StringRequestContent);
 		}
@@ -394,7 +396,7 @@ void UVaRestRequestJSON::ProcessRequest()
 		HttpRequest->SetContentAsString(UrlParams);
 
 		// Check extended log to avoid security vulnerability (#133)
-		if (DefaultSettings->bExtendedLog)
+		if (Settings->bExtendedLog)
 		{
 			UE_LOG(LogVaRest, Log, TEXT("%s: Request (url body): %s %s %s"), *VA_FUNC_LINE, *HttpRequest->GetVerb(), *HttpRequest->GetURL(), *UrlParams);
 		}
@@ -491,8 +493,8 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 		}
 	}
 
-	const UVaRestSettings* DefaultSettings = GetDefault<UVaRestSettings>();
-	if (DefaultSettings->bUseChunkedParser)
+	const auto Settings = UGameInstance::GetSubsystem<UVaRestSubsystem>(UGameplayStatics::GetGameInstance(this))->GetSettings();
+	if (Settings->bUseChunkedParser)
 	{
 		// Try to deserialize data to JSON
 		const TArray<uint8>& Bytes = Response->GetContent();
