@@ -10,6 +10,8 @@
 
 #include "VaRestRequestJSON.generated.h"
 
+class UVaRestSettings;
+
 /**
  * @author Original latent action class by https://github.com/unktomi
  */
@@ -84,14 +86,6 @@ class VAREST_API UVaRestRequestJSON : public UObject
 public:
 	//////////////////////////////////////////////////////////////////////////
 	// Construction
-
-	/** Creates new request (totally empty) */
-	UFUNCTION(BlueprintCallable, meta = (DisplayName = "Construct Json Request (Empty)", HidePin = "WorldContextObject", DefaultToSelf = "WorldContextObject"), Category = "VaRest|Request")
-	static UVaRestRequestJSON* ConstructVaRestRequest(UObject* WorldContextObject);
-
-	/** Creates new request with defined verb and content type */
-	UFUNCTION(BlueprintCallable, meta = (DisplayName = "Construct Json Request", HidePin = "WorldContextObject", DefaultToSelf = "WorldContextObject"), Category = "VaRest|Request")
-	static UVaRestRequestJSON* ConstructVaRestRequestExt(UObject* WorldContextObject, ERequestVerb Verb, ERequestContentType ContentType);
 
 	/** Set verb to the request */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
@@ -324,4 +318,7 @@ protected:
 public:
 	/** Returns reference to internal request object */
 	TSharedRef<IHttpRequest> GetHttpRequest() const { return HttpRequest; };
+
+	/** Helper function to get runtime settings */
+	const UVaRestSettings* GetSettings() const;
 };
