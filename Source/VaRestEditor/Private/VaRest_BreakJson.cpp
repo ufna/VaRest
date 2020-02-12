@@ -336,9 +336,12 @@ public:
 		{
 			return;
 		}
+
 		{
+			UClass* SubsystemClass = Cast<UClass>(StaticLoadObject(UClass::StaticClass(), NULL, TEXT("class'VaRest.VaRestSubsystem'")));
+
 			FName FunctionName = TEXT("ConstructVaRestJsonObject");
-			UFunction* FunctionPtr = Class->FindFunctionByName(FunctionName);
+			UFunction* FunctionPtr = SubsystemClass->FindFunctionByName(FunctionName);
 			FBlueprintCompiledStatement& Statement = Context.AppendStatementForNode(Node);
 			Statement.Type = KCST_CallFunction;
 			Statement.FunctionToCall = FunctionPtr;
