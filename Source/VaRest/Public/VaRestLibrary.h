@@ -62,4 +62,10 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility", meta = (DisplayName = "Base64 Decode Data"))
 	static bool Base64DecodeData(const FString& Source, TArray<uint8>& Dest);
+
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility", meta = (DisplayName = "String to MD5"))
+	static FString StringToMd5(const FString& StringToHash);
+
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility", meta = (DisplayName = "String to SHA1"))
+	static FString StringToSha1(const FString& StringToHash);
 };
