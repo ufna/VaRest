@@ -63,9 +63,17 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility", meta = (DisplayName = "Base64 Decode Data"))
 	static bool Base64DecodeData(const FString& Source, TArray<uint8>& Dest);
 
+	/**
+	 * Helper to perform the very common case of hashing an ASCII string into a hex representation.
+	 * 
+	 * @param String	Hex representation of the hash (32 lower-case hex digits)
+	 **/
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility", meta = (DisplayName = "String to MD5"))
 	static FString StringToMd5(const FString& StringToHash);
 
+	/**
+	 * Helper to perform the SHA1 hash operation on string.
+	 **/
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility", meta = (DisplayName = "String to SHA1"))
 	static FString StringToSha1(const FString& StringToHash);
 };
