@@ -100,5 +100,6 @@ public:
 
 private:
 	/** Plugin settings */
+	UPROPERTY()
 	UVaRestSettings* Settings;
 };
