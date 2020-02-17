@@ -121,7 +121,7 @@ class VAREST_API UVaRestJsonObject : public UObject
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	void SetObjectField(const FString& FieldName, UVaRestJsonObject* JsonObject);
 
-	/** Get a map of fields with values. */
+	/** Set a map of fields with String values */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	void SetMapFields(const TMap<FString, FString>& Fields);
 
