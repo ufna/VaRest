@@ -366,6 +366,14 @@ void UVaRestJsonObject::SetObjectField(const FString& FieldName, UVaRestJsonObje
 	JsonObj->SetObjectField(FieldName, JsonObject->GetRootObject());
 }
 
+void UVaRestJsonObject::SetMapFields(const TMap<FString, FString>& Fields)
+{
+	for (auto& field : Fields)
+	{
+		SetStringField(field.Key, field.Value);
+	}
+}
+
 //////////////////////////////////////////////////////////////////////////
 // Array fields helpers (uniform arrays)
 
