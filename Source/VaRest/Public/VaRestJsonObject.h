@@ -3,6 +3,7 @@
 #pragma once
 
 #include "Dom/JsonObject.h"
+#include "Templates/UnrealTypeTraits.h"
 
 #include "VaRestJsonObject.generated.h"
 
@@ -123,8 +124,44 @@ class VAREST_API UVaRestJsonObject : public UObject
 
 	/** Set a map of fields with String values */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
-	void SetMapFields(const TMap<FString, FString>& Fields);
+	void SetMapFields_string(const TMap<FString, FString>& Fields);
 
+	/** Set a map of fields with uint8 values */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	void SetMapFields_uint8(const TMap<FString, uint8>& Fields);
+
+	/** Set a map of fields with int32 values */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	void SetMapFields_int32(const TMap<FString, int32>& Fields);
+
+	/** Set a map of fields with int64 values */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	void SetMapFields_int64(const TMap<FString, int64>& Fields);
+
+	/** Set a map of fields with bool values */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	void SetMapFields_bool(const TMap<FString, bool>& Fields);
+
+private:
+	/** Internal implementation for setting map fields. */
+	template <typename T>
+	void SetMapFields_Impl(const TMap<FString, T>& Fields)
+	{
+		for (auto& field : Fields)
+		{
+			// No need to support all int types as they're not supported by BP
+			if (TIsSame<T, uint8>::Value || TIsSame<T, int32>::Value || TIsSame<T, int64>::Value || TIsSame<T, float>::Value)
+			{
+				SetNumberField(field.Key, field.Value);
+			}
+			else if (TIsSame<T, bool>::Value)
+			{
+				SetBoolField(field.Key, (bool)field.Value);
+			}
+		}
+	}
+
+private:
 	//////////////////////////////////////////////////////////////////////////
 	// Array fields helpers (uniform arrays)
 
