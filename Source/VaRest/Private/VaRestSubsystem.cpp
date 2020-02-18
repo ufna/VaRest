@@ -4,6 +4,7 @@
 
 #include "VaRestDefines.h"
 #include "VaRestJsonObject.h"
+#include "VaRestJsonValue.h"
 #include "VaRestSettings.h"
 
 #include "Developer/Settings/Public/ISettingsModule.h"
@@ -105,6 +106,73 @@ UVaRestRequestJSON* UVaRestSubsystem::ConstructVaRestRequestExt(ERequestVerb Ver
 UVaRestJsonObject* UVaRestSubsystem::ConstructVaRestJsonObject()
 {
 	return NewObject<UVaRestJsonObject>(this);
+}
+
+UVaRestJsonValue* UVaRestSubsystem::ConstructJsonValueNumber(float Number)
+{
+	TSharedPtr<FJsonValue> NewVal = MakeShareable(new FJsonValueNumber(Number));
+
+	UVaRestJsonValue* NewValue = NewObject<UVaRestJsonValue>(this);
+	NewValue->SetRootValue(NewVal);
+
+	return NewValue;
+}
+
+UVaRestJsonValue* UVaRestSubsystem::ConstructJsonValueString(const FString& StringValue)
+{
+	TSharedPtr<FJsonValue> NewVal = MakeShareable(new FJsonValueString(StringValue));
+
+	UVaRestJsonValue* NewValue = NewObject<UVaRestJsonValue>(this);
+	NewValue->SetRootValue(NewVal);
+
+	return NewValue;
+}
+
+UVaRestJsonValue* UVaRestSubsystem::ConstructJsonValueBool(bool InValue)
+{
+	TSharedPtr<FJsonValue> NewVal = MakeShareable(new FJsonValueBoolean(InValue));
+
+	UVaRestJsonValue* NewValue = NewObject<UVaRestJsonValue>(this);
+	NewValue->SetRootValue(NewVal);
+
+	return NewValue;
+}
+
+UVaRestJsonValue* UVaRestSubsystem::ConstructJsonValueArray(const TArray<UVaRestJsonValue*>& InArray)
+{
+	// Prepare data array to create new value
+	TArray<TSharedPtr<FJsonValue>> ValueArray;
+	for (auto InVal : InArray)
+	{
+		ValueArray.Add(InVal->GetRootValue());
+	}
+
+	TSharedPtr<FJsonValue> NewVal = MakeShareable(new FJsonValueArray(ValueArray));
+
+	UVaRestJsonValue* NewValue = NewObject<UVaRestJsonValue>(this);
+	NewValue->SetRootValue(NewVal);
+
+	return NewValue;
+}
+
+UVaRestJsonValue* UVaRestSubsystem::ConstructJsonValueObject(UVaRestJsonObject* JsonObject)
+{
+	TSharedPtr<FJsonValue> NewVal = MakeShareable(new FJsonValueObject(JsonObject->GetRootObject()));
+
+	UVaRestJsonValue* NewValue = NewObject<UVaRestJsonValue>(this);
+	NewValue->SetRootValue(NewVal);
+
+	return NewValue;
+}
+
+UVaRestJsonValue* UVaRestSubsystem::ConstructJsonValue(const TSharedPtr<FJsonValue>& InValue)
+{
+	TSharedPtr<FJsonValue> NewVal = InValue;
+
+	UVaRestJsonValue* NewValue = NewObject<UVaRestJsonValue>(this);
+	NewValue->SetRootValue(NewVal);
+
+	return NewValue;
 }
 
 class UVaRestJsonObject* UVaRestSubsystem::LoadJsonFromFile(const FString& Path, const bool bIsRelativeToContentDir)

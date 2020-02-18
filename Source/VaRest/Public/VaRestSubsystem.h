@@ -12,6 +12,7 @@
 
 class UVaRestRequestJSON;
 class UVaRestSettings;
+class UVaRestJsonValue;
 
 DECLARE_DYNAMIC_DELEGATE_OneParam(FVaRestCallDelegate, UVaRestRequestJSON*, Request);
 
@@ -79,11 +80,35 @@ public:
 	UFUNCTION(BlueprintCallable, meta = (DisplayName = "Construct Json Object"), Category = "VaRest|Subsystem")
 	UVaRestJsonObject* ConstructVaRestJsonObject();
 
+	/** Create new Json Number value
+	 * Attn.!! float used instead of double to make the function blueprintable! */
+	UFUNCTION(BlueprintPure, meta = (DisplayName = "Construct Json Number Value"), Category = "VaRest|Subsystem")
+	UVaRestJsonValue* ConstructJsonValueNumber(float Number);
+
+	/** Create new Json String value */
+	UFUNCTION(BlueprintPure, meta = (DisplayName = "Construct Json String Value"), Category = "VaRest|Subsystem")
+	UVaRestJsonValue* ConstructJsonValueString(const FString& StringValue);
+
+	/** Create new Json Bool value */
+	UFUNCTION(BlueprintPure, meta = (DisplayName = "Construct Json Bool Value"), Category = "VaRest|Subsystem")
+	UVaRestJsonValue* ConstructJsonValueBool(bool InValue);
+
+	/** Create new Json Array value */
+	UFUNCTION(BlueprintPure, meta = (DisplayName = "Construct Json Array Value"), Category = "VaRest|Subsystem")
+	UVaRestJsonValue* ConstructJsonValueArray(const TArray<UVaRestJsonValue*>& InArray);
+
+	/** Create new Json Object value */
+	UFUNCTION(BlueprintPure, meta = (DisplayName = "Construct Json Object Value"), Category = "VaRest|Subsystem")
+	UVaRestJsonValue* ConstructJsonValueObject(UVaRestJsonObject* JsonObject);
+
+	/** Create new Json value from FJsonValue (to be used from VaRestJsonObject) */
+	UVaRestJsonValue* ConstructJsonValue(const TSharedPtr<FJsonValue>& InValue);
+
 	//////////////////////////////////////////////////////////////////////////
 	// File system integration
 
 public:
-	/** 
+	/**
 	 * Load JSON from formatted text file
 	 * @param    bIsRelativeToContentDir    if set to 'false' path is treated as absolute
 	 */
