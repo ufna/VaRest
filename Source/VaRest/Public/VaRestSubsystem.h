@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include "VaRestJsonValue.h"
 #include "VaRestRequestJSON.h"
 
 #include "Delegates/DelegateCombinations.h"
@@ -9,10 +10,6 @@
 #include "Subsystems/SubsystemCollection.h"
 
 #include "VaRestSubsystem.generated.h"
-
-class UVaRestRequestJSON;
-class UVaRestSettings;
-class UVaRestJsonValue;
 
 DECLARE_DYNAMIC_DELEGATE_OneParam(FVaRestCallDelegate, UVaRestRequestJSON*, Request);
 
@@ -114,17 +111,4 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility")
 	class UVaRestJsonObject* LoadJsonFromFile(const FString& Path, const bool bIsRelativeToContentDir = true);
-
-	//////////////////////////////////////////////////////////////////////////
-	// Data getters and helpers
-
-public:
-	/** Getter for internal settings object to support runtime configuration changes */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Subsystem")
-	UVaRestSettings* GetSettings() const;
-
-private:
-	/** Plugin settings */
-	UPROPERTY()
-	UVaRestSettings* Settings;
 };

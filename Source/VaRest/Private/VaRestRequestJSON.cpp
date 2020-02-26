@@ -6,7 +6,6 @@
 #include "VaRestJsonObject.h"
 #include "VaRestLibrary.h"
 #include "VaRestSettings.h"
-#include "VaRestSubsystem.h"
 
 #include "Json.h"
 #include "Kismet/GameplayStatics.h"
@@ -338,7 +337,7 @@ void UVaRestRequestJSON::ProcessRequest()
 		}
 
 		// Check extended log to avoid security vulnerability (#133)
-		if (GetSettings()->bExtendedLog)
+		if (UVaRestLibrary::GetVaRestSettings()->bExtendedLog)
 		{
 			UE_LOG(LogVaRest, Log, TEXT("%s: Request (urlencoded): %s %s %s %s"), *VA_FUNC_LINE, *HttpRequest->GetVerb(), *HttpRequest->GetURL(), *UrlParams, *StringRequestContent);
 		}
@@ -375,7 +374,7 @@ void UVaRestRequestJSON::ProcessRequest()
 		HttpRequest->SetContentAsString(UrlParams);
 
 		// Check extended log to avoid security vulnerability (#133)
-		if (GetSettings()->bExtendedLog)
+		if (UVaRestLibrary::GetVaRestSettings()->bExtendedLog)
 		{
 			UE_LOG(LogVaRest, Log, TEXT("%s: Request (url body): %s %s %s"), *VA_FUNC_LINE, *HttpRequest->GetVerb(), *HttpRequest->GetURL(), *UrlParams);
 		}
@@ -472,7 +471,7 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 		}
 	}
 
-	if (GetSettings()->bUseChunkedParser)
+	if (UVaRestLibrary::GetVaRestSettings()->bUseChunkedParser)
 	{
 		// Try to deserialize data to JSON
 		const TArray<uint8>& Bytes = Response->GetContent();
@@ -582,16 +581,4 @@ FString UVaRestRequestJSON::GetResponseContentAsString(bool bCacheResponseConten
 
 	// Return previously cached content now
 	return ResponseContent;
-}
-
-const UVaRestSettings* UVaRestRequestJSON::GetSettings() const
-{
-	auto GI = UGameplayStatics::GetGameInstance(this);
-	if (GI)
-	{
-		return GI->GetSubsystem<UVaRestSubsystem>()->GetSettings();
-	}
-
-	UE_LOG(LogVaRest, Warning, TEXT("%s: No World is provided for Outer object, Default settings will be used"), *VA_FUNC_LINE);
-	return GetDefault<UVaRestSettings>();
 }

@@ -9,6 +9,8 @@
 
 #include "VaRestLibrary.generated.h"
 
+class UVaRestSettings;
+
 /**
  * Useful tools for REST communications
  */
@@ -16,6 +18,13 @@ UCLASS()
 class VAREST_API UVaRestLibrary : public UBlueprintFunctionLibrary
 {
 	GENERATED_BODY()
+
+	//////////////////////////////////////////////////////////////////////////
+	// Data Accessors
+public:
+	/** Direct access to the plugin settings */
+	UFUNCTION(BlueprintPure, Category = "VaRest|Common")
+	static UVaRestSettings* GetVaRestSettings();
 
 	//////////////////////////////////////////////////////////////////////////
 	// Helpers

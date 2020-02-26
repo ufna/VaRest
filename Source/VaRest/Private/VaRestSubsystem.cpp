@@ -5,13 +5,10 @@
 #include "VaRestDefines.h"
 #include "VaRestJsonObject.h"
 #include "VaRestJsonValue.h"
-#include "VaRestSettings.h"
 
 #include "Developer/Settings/Public/ISettingsModule.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
-
-#define LOCTEXT_NAMESPACE "FVaRest"
 
 UVaRestSubsystem::UVaRestSubsystem()
 	: UGameInstanceSubsystem()
@@ -21,17 +18,6 @@ UVaRestSubsystem::UVaRestSubsystem()
 void UVaRestSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
-
-	Settings = NewObject<UVaRestSettings>(GetTransientPackage(), "VaRestSettings", RF_Standalone);
-
-	// Register settings
-	if (ISettingsModule* SettingsModule = FModuleManager::GetModulePtr<ISettingsModule>("Settings"))
-	{
-		SettingsModule->RegisterSettings("Project", "Plugins", "VaRest",
-			LOCTEXT("RuntimeSettingsName", "VaRest"),
-			LOCTEXT("RuntimeSettingsDescription", "Configure VaRest plugin settings"),
-			Settings);
-	}
 
 	UE_LOG(LogVaRest, Log, TEXT("%s: VaRest subsystem initialized"), *VA_FUNC_LINE);
 }
@@ -198,11 +184,3 @@ class UVaRestJsonObject* UVaRestSubsystem::LoadJsonFromFile(const FString& Path,
 
 	return nullptr;
 }
-
-UVaRestSettings* UVaRestSubsystem::GetSettings() const
-{
-	check(Settings);
-	return Settings;
-}
-
-#undef LOCTEXT_NAMESPACE

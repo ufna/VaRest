@@ -318,7 +318,4 @@ protected:
 public:
 	/** Returns reference to internal request object */
 	TSharedRef<IHttpRequest> GetHttpRequest() const { return HttpRequest; };
-
-	/** Helper function to get runtime settings */
-	const UVaRestSettings* GetSettings() const;
 };

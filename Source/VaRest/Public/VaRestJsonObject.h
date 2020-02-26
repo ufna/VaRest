@@ -17,6 +17,7 @@ class VAREST_API UVaRestJsonObject : public UObject
 {
 	GENERATED_UCLASS_BODY()
 
+public:
 	/** Reset all internal data */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	void Reset();
@@ -161,10 +162,10 @@ private:
 		}
 	}
 
-private:
 	//////////////////////////////////////////////////////////////////////////
 	// Array fields helpers (uniform arrays)
 
+public:
 	/** Get the field named FieldName as a Number Array. Use it only if you're sure that array is uniform!
 	 * Attn.!! float used instead of double to make the function blueprintable! */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
