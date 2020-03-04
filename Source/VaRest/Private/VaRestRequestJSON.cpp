@@ -508,10 +508,8 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 	}
 
 	// Broadcast the result events on next tick
-	AsyncTask(ENamedThreads::GameThread, [this]() {
-		OnRequestComplete.Broadcast(this);
-		OnStaticRequestComplete.Broadcast(this);
-	});
+	OnRequestComplete.Broadcast(this);
+	OnStaticRequestComplete.Broadcast(this);
 
 	// Finish the latent action
 	if (ContinueAction)
