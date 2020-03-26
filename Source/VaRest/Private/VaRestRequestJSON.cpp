@@ -30,13 +30,13 @@ UVaRestRequestJSON::UVaRestRequestJSON(const class FObjectInitializer& PCIP)
 {
 	ContinueAction = nullptr;
 
-	RequestVerb = ERequestVerb::GET;
-	RequestContentType = ERequestContentType::x_www_form_urlencoded_url;
+	RequestVerb = EVaRestRequestVerb::GET;
+	RequestContentType = EVaRestRequestContentType::x_www_form_urlencoded_url;
 
 	ResetData();
 }
 
-void UVaRestRequestJSON::SetVerb(ERequestVerb Verb)
+void UVaRestRequestJSON::SetVerb(EVaRestRequestVerb Verb)
 {
 	RequestVerb = Verb;
 }
@@ -46,7 +46,7 @@ void UVaRestRequestJSON::SetCustomVerb(FString Verb)
 	CustomVerb = Verb;
 }
 
-void UVaRestRequestJSON::SetContentType(ERequestContentType ContentType)
+void UVaRestRequestJSON::SetContentType(EVaRestRequestContentType ContentType)
 {
 	RequestContentType = ContentType;
 }
@@ -171,9 +171,9 @@ FString UVaRestRequestJSON::GetURL() const
 	return HttpRequest->GetURL();
 }
 
-ERequestStatus UVaRestRequestJSON::GetStatus() const
+EVaRestRequestStatus UVaRestRequestJSON::GetStatus() const
 {
-	return ERequestStatus((uint8)HttpRequest->GetStatus());
+	return EVaRestRequestStatus((uint8)HttpRequest->GetStatus());
 }
 
 int32 UVaRestRequestJSON::GetResponseCode() const
@@ -278,23 +278,23 @@ void UVaRestRequestJSON::ProcessRequest()
 	// Set verb
 	switch (RequestVerb)
 	{
-	case ERequestVerb::GET:
+	case EVaRestRequestVerb::GET:
 		HttpRequest->SetVerb(TEXT("GET"));
 		break;
 
-	case ERequestVerb::POST:
+	case EVaRestRequestVerb::POST:
 		HttpRequest->SetVerb(TEXT("POST"));
 		break;
 
-	case ERequestVerb::PUT:
+	case EVaRestRequestVerb::PUT:
 		HttpRequest->SetVerb(TEXT("PUT"));
 		break;
 
-	case ERequestVerb::DEL:
+	case EVaRestRequestVerb::DEL:
 		HttpRequest->SetVerb(TEXT("DELETE"));
 		break;
 
-	case ERequestVerb::CUSTOM:
+	case EVaRestRequestVerb::CUSTOM:
 		HttpRequest->SetVerb(CustomVerb);
 		break;
 
@@ -305,7 +305,7 @@ void UVaRestRequestJSON::ProcessRequest()
 	// Set content-type
 	switch (RequestContentType)
 	{
-	case ERequestContentType::x_www_form_urlencoded_url:
+	case EVaRestRequestContentType::x_www_form_urlencoded_url:
 	{
 		HttpRequest->SetHeader(TEXT("Content-Type"), TEXT("application/x-www-form-urlencoded"));
 
@@ -348,7 +348,7 @@ void UVaRestRequestJSON::ProcessRequest()
 
 		break;
 	}
-	case ERequestContentType::x_www_form_urlencoded_body:
+	case EVaRestRequestContentType::x_www_form_urlencoded_body:
 	{
 		HttpRequest->SetHeader(TEXT("Content-Type"), TEXT("application/x-www-form-urlencoded"));
 
@@ -385,7 +385,7 @@ void UVaRestRequestJSON::ProcessRequest()
 
 		break;
 	}
-	case ERequestContentType::binary:
+	case EVaRestRequestContentType::binary:
 	{
 		HttpRequest->SetHeader(TEXT("Content-Type"), BinaryContentType);
 		HttpRequest->SetContent(RequestBytes);
@@ -394,7 +394,7 @@ void UVaRestRequestJSON::ProcessRequest()
 
 		break;
 	}
-	case ERequestContentType::json:
+	case EVaRestRequestContentType::json:
 	{
 		HttpRequest->SetHeader(TEXT("Content-Type"), TEXT("application/json"));
 
