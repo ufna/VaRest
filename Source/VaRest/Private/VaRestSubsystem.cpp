@@ -28,7 +28,7 @@ void UVaRestSubsystem::Deinitialize()
 	Super::Deinitialize();
 }
 
-void UVaRestSubsystem::CallURL(const FString& URL, ERequestVerb Verb, ERequestContentType ContentType, UVaRestJsonObject* VaRestJson, const FVaRestCallDelegate& Callback)
+void UVaRestSubsystem::CallURL(const FString& URL, EVaRestRequestVerb Verb, EVaRestRequestContentType ContentType, UVaRestJsonObject* VaRestJson, const FVaRestCallDelegate& Callback)
 {
 	UWorld* World = GetWorld();
 	check(World);
@@ -79,7 +79,7 @@ UVaRestRequestJSON* UVaRestSubsystem::ConstructVaRestRequest()
 	return NewObject<UVaRestRequestJSON>(this);
 }
 
-UVaRestRequestJSON* UVaRestSubsystem::ConstructVaRestRequestExt(ERequestVerb Verb, ERequestContentType ContentType)
+UVaRestRequestJSON* UVaRestSubsystem::ConstructVaRestRequestExt(EVaRestRequestVerb Verb, EVaRestRequestContentType ContentType)
 {
 	UVaRestRequestJSON* Request = ConstructVaRestRequest();
 

@@ -90,5 +90,5 @@ public:
 	 * Helper method to convert a status code from HTTP to an enum for easier readability
 	 */
 	UFUNCTION(BlueprintPure, Category = "VaRest|Utility", meta = (DisplayName = "HTTP Status Int To Enum"))
-	static FORCEINLINE EHttpStatusCode::Type HTTPStatusIntToEnum(int32 StatusCode) { return (EHttpStatusCode::Type)StatusCode; }
+	static FORCEINLINE EVaRestHttpStatusCode::Type HTTPStatusIntToEnum(int32 StatusCode) { return (EVaRestHttpStatusCode::Type)StatusCode; }
 };

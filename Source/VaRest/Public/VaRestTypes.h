@@ -4,7 +4,7 @@
 
 /** Verb (GET, PUT, POST) used by the request */
 UENUM(BlueprintType)
-enum class ERequestVerb : uint8
+enum class EVaRestRequestVerb : uint8
 {
 	GET,
 	POST,
@@ -17,7 +17,7 @@ enum class ERequestVerb : uint8
 // clang-format off
 /** Content type (json, urlencoded, etc.) used by the request */
 UENUM(BlueprintType)
-enum class ERequestContentType : uint8
+enum class EVaRestRequestContentType : uint8
 {
 	x_www_form_urlencoded_url	UMETA(DisplayName = "x-www-form-urlencoded (URL)"),
 	x_www_form_urlencoded_body	UMETA(DisplayName = "x-www-form-urlencoded (Request Body)"),
@@ -28,7 +28,7 @@ enum class ERequestContentType : uint8
 
 /** Enumerates the current state of an Http request */
 UENUM(BlueprintType)
-enum class ERequestStatus : uint8
+enum class EVaRestRequestStatus : uint8
 {
 	/** Has not been started via ProcessRequest() */
 	NotStarted,
@@ -44,7 +44,7 @@ enum class ERequestStatus : uint8
 
 // Taken from Interfaces/IHttpResponse.h (had to make BlueprintType :/)
 UENUM(BlueprintType)
-namespace EHttpStatusCode
+namespace EVaRestHttpStatusCode
 {
 /**
  * Response codes that can come back from an Http request
@@ -134,4 +134,4 @@ enum Type
 	// the server does not support, or refuses to support, the http protocol version that was used in the request message.
 	VersionNotSup = 505 UMETA(DisplayName = "VersionNotSup = 505")
 };
-} // namespace EHttpStatusCode
+} // namespace EVaRestHttpStatusCode

@@ -52,7 +52,7 @@ public:
 public:
 	/** Easy way to process http requests */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility")
-	void CallURL(const FString& URL, ERequestVerb Verb, ERequestContentType ContentType, UVaRestJsonObject* VaRestJson, const FVaRestCallDelegate& Callback);
+	void CallURL(const FString& URL, EVaRestRequestVerb Verb, EVaRestRequestContentType ContentType, UVaRestJsonObject* VaRestJson, const FVaRestCallDelegate& Callback);
 
 	/** Called when URL is processed (one for both success/unsuccess events)*/
 	void OnCallComplete(UVaRestRequestJSON* Request);
@@ -71,7 +71,7 @@ public:
 
 	/** Creates new request with defined verb and content type */
 	UFUNCTION(BlueprintCallable, meta = (DisplayName = "Construct Json Request"), Category = "VaRest|Subsystem")
-	UVaRestRequestJSON* ConstructVaRestRequestExt(ERequestVerb Verb, ERequestContentType ContentType);
+	UVaRestRequestJSON* ConstructVaRestRequestExt(EVaRestRequestVerb Verb, EVaRestRequestContentType ContentType);
 
 	/** Create new Json object */
 	UFUNCTION(BlueprintCallable, meta = (DisplayName = "Construct Json Object"), Category = "VaRest|Subsystem")
