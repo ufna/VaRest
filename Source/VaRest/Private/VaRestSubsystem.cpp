@@ -11,7 +11,7 @@
 #include "Misc/Paths.h"
 
 UVaRestSubsystem::UVaRestSubsystem()
-	: UGameInstanceSubsystem()
+	: UEngineSubsystem()
 {
 }
 
