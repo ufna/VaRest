@@ -6,7 +6,6 @@
 #include "VaRestJsonObject.h"
 #include "VaRestLibrary.h"
 #include "VaRestSettings.h"
-#include "VaRestSubsystem.h"
 
 #include "Json.h"
 #include "Kismet/GameplayStatics.h"
@@ -31,13 +30,13 @@ UVaRestRequestJSON::UVaRestRequestJSON(const class FObjectInitializer& PCIP)
 {
 	ContinueAction = nullptr;
 
-	RequestVerb = ERequestVerb::GET;
-	RequestContentType = ERequestContentType::x_www_form_urlencoded_url;
+	RequestVerb = EVaRestRequestVerb::GET;
+	RequestContentType = EVaRestRequestContentType::x_www_form_urlencoded_url;
 
 	ResetData();
 }
 
-void UVaRestRequestJSON::SetVerb(ERequestVerb Verb)
+void UVaRestRequestJSON::SetVerb(EVaRestRequestVerb Verb)
 {
 	RequestVerb = Verb;
 }
@@ -47,7 +46,7 @@ void UVaRestRequestJSON::SetCustomVerb(FString Verb)
 	CustomVerb = Verb;
 }
 
-void UVaRestRequestJSON::SetContentType(ERequestContentType ContentType)
+void UVaRestRequestJSON::SetContentType(EVaRestRequestContentType ContentType)
 {
 	RequestContentType = ContentType;
 }
@@ -172,9 +171,9 @@ FString UVaRestRequestJSON::GetURL() const
 	return HttpRequest->GetURL();
 }
 
-ERequestStatus UVaRestRequestJSON::GetStatus() const
+EVaRestRequestStatus UVaRestRequestJSON::GetStatus() const
 {
-	return ERequestStatus((uint8)HttpRequest->GetStatus());
+	return EVaRestRequestStatus((uint8)HttpRequest->GetStatus());
 }
 
 int32 UVaRestRequestJSON::GetResponseCode() const
@@ -279,23 +278,23 @@ void UVaRestRequestJSON::ProcessRequest()
 	// Set verb
 	switch (RequestVerb)
 	{
-	case ERequestVerb::GET:
+	case EVaRestRequestVerb::GET:
 		HttpRequest->SetVerb(TEXT("GET"));
 		break;
 
-	case ERequestVerb::POST:
+	case EVaRestRequestVerb::POST:
 		HttpRequest->SetVerb(TEXT("POST"));
 		break;
 
-	case ERequestVerb::PUT:
+	case EVaRestRequestVerb::PUT:
 		HttpRequest->SetVerb(TEXT("PUT"));
 		break;
 
-	case ERequestVerb::DEL:
+	case EVaRestRequestVerb::DEL:
 		HttpRequest->SetVerb(TEXT("DELETE"));
 		break;
 
-	case ERequestVerb::CUSTOM:
+	case EVaRestRequestVerb::CUSTOM:
 		HttpRequest->SetVerb(CustomVerb);
 		break;
 
@@ -306,7 +305,7 @@ void UVaRestRequestJSON::ProcessRequest()
 	// Set content-type
 	switch (RequestContentType)
 	{
-	case ERequestContentType::x_www_form_urlencoded_url:
+	case EVaRestRequestContentType::x_www_form_urlencoded_url:
 	{
 		HttpRequest->SetHeader(TEXT("Content-Type"), TEXT("application/x-www-form-urlencoded"));
 
@@ -338,7 +337,7 @@ void UVaRestRequestJSON::ProcessRequest()
 		}
 
 		// Check extended log to avoid security vulnerability (#133)
-		if (GetSettings()->bExtendedLog)
+		if (UVaRestLibrary::GetVaRestSettings()->bExtendedLog)
 		{
 			UE_LOG(LogVaRest, Log, TEXT("%s: Request (urlencoded): %s %s %s %s"), *VA_FUNC_LINE, *HttpRequest->GetVerb(), *HttpRequest->GetURL(), *UrlParams, *StringRequestContent);
 		}
@@ -349,33 +348,41 @@ void UVaRestRequestJSON::ProcessRequest()
 
 		break;
 	}
-	case ERequestContentType::x_www_form_urlencoded_body:
+	case EVaRestRequestContentType::x_www_form_urlencoded_body:
 	{
 		HttpRequest->SetHeader(TEXT("Content-Type"), TEXT("application/x-www-form-urlencoded"));
 
 		FString UrlParams = "";
 		uint16 ParamIdx = 0;
 
-		// Loop through all the values and prepare additional url part
-		for (auto RequestIt = RequestJsonObj->GetRootObject()->Values.CreateIterator(); RequestIt; ++RequestIt)
+		// Add optional string content
+		if (!StringRequestContent.IsEmpty())
 		{
-			FString Key = RequestIt.Key();
-			FString Value = RequestIt.Value().Get()->AsString();
-
-			if (!Key.IsEmpty() && !Value.IsEmpty())
+			UrlParams = StringRequestContent;
+		}
+		else
+		{
+			// Loop through all the values and prepare additional url part
+			for (auto RequestIt = RequestJsonObj->GetRootObject()->Values.CreateIterator(); RequestIt; ++RequestIt)
 			{
-				UrlParams += ParamIdx == 0 ? "" : "&";
-				UrlParams += UVaRestLibrary::PercentEncode(Key) + "=" + UVaRestLibrary::PercentEncode(Value);
-			}
+				FString Key = RequestIt.Key();
+				FString Value = RequestIt.Value().Get()->AsString();
 
-			ParamIdx++;
+				if (!Key.IsEmpty() && !Value.IsEmpty())
+				{
+					UrlParams += ParamIdx == 0 ? "" : "&";
+					UrlParams += UVaRestLibrary::PercentEncode(Key) + "=" + UVaRestLibrary::PercentEncode(Value);
+				}
+
+				ParamIdx++;
+			}
 		}
 
 		// Apply params
 		HttpRequest->SetContentAsString(UrlParams);
 
 		// Check extended log to avoid security vulnerability (#133)
-		if (GetSettings()->bExtendedLog)
+		if (UVaRestLibrary::GetVaRestSettings()->bExtendedLog)
 		{
 			UE_LOG(LogVaRest, Log, TEXT("%s: Request (url body): %s %s %s"), *VA_FUNC_LINE, *HttpRequest->GetVerb(), *HttpRequest->GetURL(), *UrlParams);
 		}
@@ -386,7 +393,7 @@ void UVaRestRequestJSON::ProcessRequest()
 
 		break;
 	}
-	case ERequestContentType::binary:
+	case EVaRestRequestContentType::binary:
 	{
 		HttpRequest->SetHeader(TEXT("Content-Type"), BinaryContentType);
 		HttpRequest->SetContent(RequestBytes);
@@ -395,7 +402,7 @@ void UVaRestRequestJSON::ProcessRequest()
 
 		break;
 	}
-	case ERequestContentType::json:
+	case EVaRestRequestContentType::json:
 	{
 		HttpRequest->SetHeader(TEXT("Content-Type"), TEXT("application/json"));
 
@@ -472,7 +479,7 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 		}
 	}
 
-	if (GetSettings()->bUseChunkedParser)
+	if (UVaRestLibrary::GetVaRestSettings()->bUseChunkedParser)
 	{
 		// Try to deserialize data to JSON
 		const TArray<uint8>& Bytes = Response->GetContent();
@@ -509,10 +516,8 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 	}
 
 	// Broadcast the result events on next tick
-	AsyncTask(ENamedThreads::GameThread, [this]() {
-		OnRequestComplete.Broadcast(this);
-		OnStaticRequestComplete.Broadcast(this);
-	});
+	OnRequestComplete.Broadcast(this);
+	OnStaticRequestComplete.Broadcast(this);
 
 	// Finish the latent action
 	if (ContinueAction)
@@ -582,16 +587,4 @@ FString UVaRestRequestJSON::GetResponseContentAsString(bool bCacheResponseConten
 
 	// Return previously cached content now
 	return ResponseContent;
-}
-
-const UVaRestSettings* UVaRestRequestJSON::GetSettings() const
-{
-	auto GI = UGameplayStatics::GetGameInstance(this);
-	if (GI)
-	{
-		return GI->GetSubsystem<UVaRestSubsystem>()->GetSettings();
-	}
-
-	UE_LOG(LogVaRest, Warning, TEXT("%s: No World is provided for Outer object, Default settings will be used"), *VA_FUNC_LINE);
-	return GetDefault<UVaRestSettings>();
 }

@@ -89,7 +89,7 @@ public:
 
 	/** Set verb to the request */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
-	void SetVerb(ERequestVerb Verb);
+	void SetVerb(EVaRestRequestVerb Verb);
 
 	/** Set custom verb to the request */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
@@ -98,7 +98,7 @@ public:
 	/** Set content type to the request. If you're using the x-www-form-urlencoded, 
 	 * params/constaints should be defined as key=ValueString pairs from Json data */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
-	void SetContentType(ERequestContentType ContentType);
+	void SetContentType(EVaRestRequestContentType ContentType);
 
 	/** Set content type of the request for binary post data */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
@@ -163,7 +163,7 @@ public:
 
 	/** Get status of http request */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
-	ERequestStatus GetStatus() const;
+	EVaRestRequestStatus GetStatus() const;
 
 	/** Get the response code of the last query */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
@@ -295,10 +295,10 @@ protected:
 	UVaRestJsonObject* ResponseJsonObj;
 
 	/** Verb for making request (GET,POST,etc) */
-	ERequestVerb RequestVerb;
+	EVaRestRequestVerb RequestVerb;
 
 	/** Content type to be applied for request */
-	ERequestContentType RequestContentType;
+	EVaRestRequestContentType RequestContentType;
 
 	/** Mapping of header section to values. Used to generate final header string for request */
 	TMap<FString, FString> RequestHeaders;
@@ -318,7 +318,4 @@ protected:
 public:
 	/** Returns reference to internal request object */
 	TSharedRef<IHttpRequest> GetHttpRequest() const { return HttpRequest; };
-
-	/** Helper function to get runtime settings */
-	const UVaRestSettings* GetSettings() const;
 };

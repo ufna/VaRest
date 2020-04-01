@@ -2,16 +2,14 @@
 
 #pragma once
 
+#include "VaRestJsonValue.h"
 #include "VaRestRequestJSON.h"
 
 #include "Delegates/DelegateCombinations.h"
-#include "Subsystems/GameInstanceSubsystem.h"
+#include "Subsystems/EngineSubsystem.h"
 #include "Subsystems/SubsystemCollection.h"
 
 #include "VaRestSubsystem.generated.h"
-
-class UVaRestRequestJSON;
-class UVaRestSettings;
 
 DECLARE_DYNAMIC_DELEGATE_OneParam(FVaRestCallDelegate, UVaRestRequestJSON*, Request);
 
@@ -36,7 +34,7 @@ struct FVaRestCallResponse
 };
 
 UCLASS()
-class VAREST_API UVaRestSubsystem : public UGameInstanceSubsystem
+class VAREST_API UVaRestSubsystem : public UEngineSubsystem
 {
 	GENERATED_BODY()
 
@@ -54,7 +52,7 @@ public:
 public:
 	/** Easy way to process http requests */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility")
-	void CallURL(const FString& URL, ERequestVerb Verb, ERequestContentType ContentType, UVaRestJsonObject* VaRestJson, const FVaRestCallDelegate& Callback);
+	void CallURL(const FString& URL, EVaRestRequestVerb Verb, EVaRestRequestContentType ContentType, UVaRestJsonObject* VaRestJson, const FVaRestCallDelegate& Callback);
 
 	/** Called when URL is processed (one for both success/unsuccess events)*/
 	void OnCallComplete(UVaRestRequestJSON* Request);
@@ -73,32 +71,44 @@ public:
 
 	/** Creates new request with defined verb and content type */
 	UFUNCTION(BlueprintCallable, meta = (DisplayName = "Construct Json Request"), Category = "VaRest|Subsystem")
-	UVaRestRequestJSON* ConstructVaRestRequestExt(ERequestVerb Verb, ERequestContentType ContentType);
+	UVaRestRequestJSON* ConstructVaRestRequestExt(EVaRestRequestVerb Verb, EVaRestRequestContentType ContentType);
 
 	/** Create new Json object */
 	UFUNCTION(BlueprintCallable, meta = (DisplayName = "Construct Json Object"), Category = "VaRest|Subsystem")
 	UVaRestJsonObject* ConstructVaRestJsonObject();
 
+	/** Create new Json Number value
+	 * Attn.!! float used instead of double to make the function blueprintable! */
+	UFUNCTION(BlueprintPure, meta = (DisplayName = "Construct Json Number Value"), Category = "VaRest|Subsystem")
+	UVaRestJsonValue* ConstructJsonValueNumber(float Number);
+
+	/** Create new Json String value */
+	UFUNCTION(BlueprintPure, meta = (DisplayName = "Construct Json String Value"), Category = "VaRest|Subsystem")
+	UVaRestJsonValue* ConstructJsonValueString(const FString& StringValue);
+
+	/** Create new Json Bool value */
+	UFUNCTION(BlueprintPure, meta = (DisplayName = "Construct Json Bool Value"), Category = "VaRest|Subsystem")
+	UVaRestJsonValue* ConstructJsonValueBool(bool InValue);
+
+	/** Create new Json Array value */
+	UFUNCTION(BlueprintPure, meta = (DisplayName = "Construct Json Array Value"), Category = "VaRest|Subsystem")
+	UVaRestJsonValue* ConstructJsonValueArray(const TArray<UVaRestJsonValue*>& InArray);
+
+	/** Create new Json Object value */
+	UFUNCTION(BlueprintPure, meta = (DisplayName = "Construct Json Object Value"), Category = "VaRest|Subsystem")
+	UVaRestJsonValue* ConstructJsonValueObject(UVaRestJsonObject* JsonObject);
+
+	/** Create new Json value from FJsonValue (to be used from VaRestJsonObject) */
+	UVaRestJsonValue* ConstructJsonValue(const TSharedPtr<FJsonValue>& InValue);
+
 	//////////////////////////////////////////////////////////////////////////
 	// File system integration
 
 public:
-	/** 
+	/**
 	 * Load JSON from formatted text file
 	 * @param    bIsRelativeToContentDir    if set to 'false' path is treated as absolute
 	 */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility")
 	class UVaRestJsonObject* LoadJsonFromFile(const FString& Path, const bool bIsRelativeToContentDir = true);
-
-	//////////////////////////////////////////////////////////////////////////
-	// Data getters and helpers
-
-public:
-	/** Getter for internal settings object to support runtime configuration changes */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Subsystem")
-	UVaRestSettings* GetSettings() const;
-
-private:
-	/** Plugin settings */
-	UVaRestSettings* Settings;
 };

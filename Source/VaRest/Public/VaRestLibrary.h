@@ -9,6 +9,8 @@
 
 #include "VaRestLibrary.generated.h"
 
+class UVaRestSettings;
+
 /**
  * Useful tools for REST communications
  */
@@ -16,6 +18,13 @@ UCLASS()
 class VAREST_API UVaRestLibrary : public UBlueprintFunctionLibrary
 {
 	GENERATED_BODY()
+
+	//////////////////////////////////////////////////////////////////////////
+	// Data Accessors
+public:
+	/** Direct access to the plugin settings */
+	UFUNCTION(BlueprintPure, Category = "VaRest|Common")
+	static UVaRestSettings* GetVaRestSettings();
 
 	//////////////////////////////////////////////////////////////////////////
 	// Helpers
@@ -62,4 +71,24 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility", meta = (DisplayName = "Base64 Decode Data"))
 	static bool Base64DecodeData(const FString& Source, TArray<uint8>& Dest);
+
+	/**
+	 * Helper to perform the very common case of hashing an ASCII string into a hex representation.
+	 * 
+	 * @param String	Hex representation of the hash (32 lower-case hex digits)
+	 */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility", meta = (DisplayName = "String to MD5"))
+	static FString StringToMd5(const FString& StringToHash);
+
+	/**
+	 * Helper to perform the SHA1 hash operation on string.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility", meta = (DisplayName = "String to SHA1"))
+	static FString StringToSha1(const FString& StringToHash);
+
+	/**
+	 * Helper method to convert a status code from HTTP to an enum for easier readability
+	 */
+	UFUNCTION(BlueprintPure, Category = "VaRest|Utility", meta = (DisplayName = "HTTP Status Int To Enum"))
+	static FORCEINLINE EVaRestHttpStatusCode::Type HTTPStatusIntToEnum(int32 StatusCode) { return (EVaRestHttpStatusCode::Type)StatusCode; }
 };
