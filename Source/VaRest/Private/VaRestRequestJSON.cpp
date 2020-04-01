@@ -355,19 +355,27 @@ void UVaRestRequestJSON::ProcessRequest()
 		FString UrlParams = "";
 		uint16 ParamIdx = 0;
 
-		// Loop through all the values and prepare additional url part
-		for (auto RequestIt = RequestJsonObj->GetRootObject()->Values.CreateIterator(); RequestIt; ++RequestIt)
+		// Add optional string content
+		if (!StringRequestContent.IsEmpty())
 		{
-			FString Key = RequestIt.Key();
-			FString Value = RequestIt.Value().Get()->AsString();
-
-			if (!Key.IsEmpty() && !Value.IsEmpty())
+			UrlParams = StringRequestContent;
+		}
+		else
+		{
+			// Loop through all the values and prepare additional url part
+			for (auto RequestIt = RequestJsonObj->GetRootObject()->Values.CreateIterator(); RequestIt; ++RequestIt)
 			{
-				UrlParams += ParamIdx == 0 ? "" : "&";
-				UrlParams += UVaRestLibrary::PercentEncode(Key) + "=" + UVaRestLibrary::PercentEncode(Value);
-			}
+				FString Key = RequestIt.Key();
+				FString Value = RequestIt.Value().Get()->AsString();
 
-			ParamIdx++;
+				if (!Key.IsEmpty() && !Value.IsEmpty())
+				{
+					UrlParams += ParamIdx == 0 ? "" : "&";
+					UrlParams += UVaRestLibrary::PercentEncode(Key) + "=" + UVaRestLibrary::PercentEncode(Value);
+				}
+
+				ParamIdx++;
+			}
 		}
 
 		// Apply params

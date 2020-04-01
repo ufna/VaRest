@@ -6,7 +6,7 @@
 #include "VaRestRequestJSON.h"
 
 #include "Delegates/DelegateCombinations.h"
-#include "Subsystems/GameInstanceSubsystem.h"
+#include "Subsystems/EngineSubsystem.h"
 #include "Subsystems/SubsystemCollection.h"
 
 #include "VaRestSubsystem.generated.h"
@@ -34,7 +34,7 @@ struct FVaRestCallResponse
 };
 
 UCLASS()
-class VAREST_API UVaRestSubsystem : public UGameInstanceSubsystem
+class VAREST_API UVaRestSubsystem : public UEngineSubsystem
 {
 	GENERATED_BODY()
 
