@@ -254,7 +254,7 @@ FText UVaRest_BreakJson::GetMenuCategory() const
 	if (CachedCategory.IsOutOfDate(this))
 	{
 		// FText::Format() is slow, so we cache this to save on performance
-		CachedCategory.SetCachedText(FEditorCategoryUtils::BuildCategoryString(FCommonEditorCategory::Utilities, LOCTEXT("ActionMenuCategory", "Va Rest")), this);
+		CachedCategory.SetCachedText(FEditorCategoryUtils::BuildCategoryString(FCommonEditorCategory::Utilities, LOCTEXT("ActionMenuCategory", "VaRest")), this);
 	}
 	return CachedCategory;
 }
@@ -273,7 +273,6 @@ void UVaRest_BreakJson::CreateProjectionPins(UEdGraphPin* Source)
 #endif
 
 		UObject* Subtype = nullptr;
-		FString FieldName = (*it).Name.ToString();
 
 		switch ((*it).Type)
 		{
@@ -297,7 +296,7 @@ void UVaRest_BreakJson::CreateProjectionPins(UEdGraphPin* Source)
 
 		UEdGraphNode::FCreatePinParams OutputPinParams;
 		OutputPinParams.ContainerType = (*it).bIsArray ? EPinContainerType::Array : EPinContainerType::None;
-		UEdGraphPin* OutputPin = CreatePin(EGPD_Output, Type, TEXT(""), Subtype, FName((*(*it).Name.ToString())), OutputPinParams);
+		UEdGraphPin* OutputPin = CreatePin(EGPD_Output, Type, TEXT(""), Subtype, (*it).Name, OutputPinParams);
 	}
 }
 
@@ -340,7 +339,7 @@ public:
 		{
 			UClass* SubsystemClass = Cast<UClass>(StaticLoadObject(UClass::StaticClass(), NULL, TEXT("class'VaRest.VaRestSubsystem'")));
 
-			FName FunctionName = TEXT("ConstructVaRestJsonObject");
+			FName FunctionName = TEXT("StaticConstructVaRestJsonObject");
 			UFunction* FunctionPtr = SubsystemClass->FindFunctionByName(FunctionName);
 			FBlueprintCompiledStatement& Statement = Context.AppendStatementForNode(Node);
 			Statement.Type = KCST_CallFunction;
@@ -360,7 +359,6 @@ public:
 			UEdGraphPin* Pin = Node->Pins[PinIndex];
 			if (Pin && (EGPD_Input == Pin->Direction))
 			{
-
 				FBPTerminal** Source = Context.NetMap.Find(FEdGraphUtilities::GetNetFromPin(Pin));
 
 #if ENGINE_MINOR_VERSION >= 19
@@ -548,7 +546,7 @@ FText UVaRest_MakeJson::GetMenuCategory() const
 	if (CachedCategory.IsOutOfDate(this))
 	{
 		// FText::Format() is slow, so we cache this to save on performance
-		CachedCategory.SetCachedText(FEditorCategoryUtils::BuildCategoryString(FCommonEditorCategory::Utilities, LOCTEXT("ActionMenuCategory", "Va Rest")), this);
+		CachedCategory.SetCachedText(FEditorCategoryUtils::BuildCategoryString(FCommonEditorCategory::Utilities, LOCTEXT("ActionMenuCategory", "VaRest")), this);
 	}
 	return CachedCategory;
 }
@@ -562,7 +560,6 @@ void UVaRest_MakeJson::CreateProjectionPins(UEdGraphPin* Source)
 	{
 		FName Type;
 		UObject* Subtype = nullptr;
-		FString FieldName = (*it).Name.ToString();
 
 		switch ((*it).Type)
 		{
@@ -586,7 +583,7 @@ void UVaRest_MakeJson::CreateProjectionPins(UEdGraphPin* Source)
 
 		UEdGraphNode::FCreatePinParams InputPinParams;
 		InputPinParams.ContainerType = (*it).bIsArray ? EPinContainerType::Array : EPinContainerType::None;
-		UEdGraphPin* InputPin = CreatePin(EGPD_Input, Type, TEXT(""), Subtype, FName((*(*it).Name.ToString())), InputPinParams);
+		UEdGraphPin* InputPin = CreatePin(EGPD_Input, Type, TEXT(""), Subtype, (*it).Name, InputPinParams);
 
 #if ENGINE_MINOR_VERSION >= 20
 		InputPin->SetSavePinIfOrphaned(false);

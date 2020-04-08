@@ -27,10 +27,10 @@ enum class EVaRest_JsonType : uint8
 USTRUCT(BlueprintType)
 struct FVaRest_NamedType
 {
-	GENERATED_USTRUCT_BODY();
+	GENERATED_USTRUCT_BODY()
 
 	UPROPERTY(EditAnywhere, Category = NamedType)
-	FText Name;
+	FName Name;
 
 	UPROPERTY(EditAnywhere, Category = NamedType)
 	EVaRest_JsonType Type;

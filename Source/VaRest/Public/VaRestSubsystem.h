@@ -77,6 +77,10 @@ public:
 	UFUNCTION(BlueprintCallable, meta = (DisplayName = "Construct Json Object"), Category = "VaRest|Subsystem")
 	UVaRestJsonObject* ConstructVaRestJsonObject();
 
+	/** Create new Json object (static one for MakeJson node, hack for #293) */
+	UFUNCTION()
+	static UVaRestJsonObject* StaticConstructVaRestJsonObject();
+
 	/** Create new Json Number value
 	 * Attn.!! float used instead of double to make the function blueprintable! */
 	UFUNCTION(BlueprintPure, meta = (DisplayName = "Construct Json Number Value"), Category = "VaRest|Subsystem")
