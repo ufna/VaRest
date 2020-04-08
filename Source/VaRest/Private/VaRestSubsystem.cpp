@@ -30,9 +30,6 @@ void UVaRestSubsystem::Deinitialize()
 
 void UVaRestSubsystem::CallURL(const FString& URL, EVaRestRequestVerb Verb, EVaRestRequestContentType ContentType, UVaRestJsonObject* VaRestJson, const FVaRestCallDelegate& Callback)
 {
-	UWorld* World = GetWorld();
-	check(World);
-
 	// Check we have valid data json
 	if (VaRestJson == nullptr)
 	{
