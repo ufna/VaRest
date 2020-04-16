@@ -9,6 +9,7 @@
 #include "Developer/Settings/Public/ISettingsModule.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "Subsystems/SubsystemBlueprintLibrary.h"
 
 UVaRestSubsystem::UVaRestSubsystem()
 	: UEngineSubsystem()
@@ -30,9 +31,6 @@ void UVaRestSubsystem::Deinitialize()
 
 void UVaRestSubsystem::CallURL(const FString& URL, EVaRestRequestVerb Verb, EVaRestRequestContentType ContentType, UVaRestJsonObject* VaRestJson, const FVaRestCallDelegate& Callback)
 {
-	UWorld* World = GetWorld();
-	check(World);
-
 	// Check we have valid data json
 	if (VaRestJson == nullptr)
 	{
@@ -92,6 +90,12 @@ UVaRestRequestJSON* UVaRestSubsystem::ConstructVaRestRequestExt(EVaRestRequestVe
 UVaRestJsonObject* UVaRestSubsystem::ConstructVaRestJsonObject()
 {
 	return NewObject<UVaRestJsonObject>(this);
+}
+
+UVaRestJsonObject* UVaRestSubsystem::StaticConstructVaRestJsonObject()
+{
+	auto SelfSystem = CastChecked<UVaRestSubsystem>(USubsystemBlueprintLibrary::GetEngineSubsystem(UVaRestSubsystem::StaticClass()), ECastCheckedType::NullChecked);
+	return SelfSystem->ConstructVaRestJsonObject();
 }
 
 UVaRestJsonValue* UVaRestSubsystem::ConstructJsonValueNumber(float Number)
