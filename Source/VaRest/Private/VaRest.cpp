@@ -7,6 +7,8 @@
 
 #include "Developer/Settings/Public/ISettingsModule.h"
 
+#include "Interfaces/IPluginManager.h"
+
 #define LOCTEXT_NAMESPACE "FVaRestModule"
 
 void FVaRestModule::StartupModule()
@@ -23,7 +25,7 @@ void FVaRestModule::StartupModule()
 			ModuleSettings);
 	}
 
-	UE_LOG(LogVaRest, Log, TEXT("%s: VaRest module started"), *VA_FUNC_LINE);
+	UE_LOG(LogVaRest, Log, TEXT("%s: VaRest (%s) module started"), *VA_FUNC_LINE, *GetPluginVersion());
 }
 
 void FVaRestModule::ShutdownModule()
@@ -47,6 +49,14 @@ UVaRestSettings* FVaRestModule::GetSettings() const
 {
 	check(ModuleSettings);
 	return ModuleSettings;
+}
+
+FString FVaRestModule::GetPluginVersion() const
+{
+	IPluginManager& manager = IPluginManager::Get();
+	TSharedPtr<IPlugin> const plugin = manager.FindPlugin("VaRest");
+
+	return !plugin.IsValid() ? FString() : plugin->GetDescriptor().VersionName;
 }
 
 IMPLEMENT_MODULE(FVaRestModule, VaRest)
