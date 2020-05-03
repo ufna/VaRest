@@ -53,10 +53,9 @@ UVaRestSettings* FVaRestModule::GetSettings() const
 
 FString FVaRestModule::GetPluginVersion() const
 {
-	IPluginManager& manager = IPluginManager::Get();
-	TSharedPtr<IPlugin> const plugin = manager.FindPlugin("VaRest");
+	TSharedPtr<IPlugin> const plugin = IPluginManager::Get().FindPlugin("VaRest");
 
-	return !plugin.IsValid() ? FString() : plugin->GetDescriptor().VersionName;
+	return !plugin.IsValid() ? FString("Unable to get version number") : plugin->GetDescriptor().VersionName;
 }
 
 IMPLEMENT_MODULE(FVaRestModule, VaRest)
