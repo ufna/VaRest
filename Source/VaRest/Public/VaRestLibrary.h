@@ -91,4 +91,20 @@ public:
 	 */
 	UFUNCTION(BlueprintPure, Category = "VaRest|Utility", meta = (DisplayName = "HTTP Status Int To Enum"))
 	static FORCEINLINE EVaRestHttpStatusCode::Type HTTPStatusIntToEnum(int32 StatusCode) { return (EVaRestHttpStatusCode::Type)StatusCode; }
+
+	/**
+	 * Format a Json string correctly
+	 *
+	 * @param const FString & InputString The string that you want to format
+	 */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility", meta = (DisplayName = "Pretty Print Json String"))
+	static FString PrettyPrintJsonString(const FString& InputString);
+
+	/**
+	 * Format a Json string with no white spaces
+	 *
+	 * @param const FString & InputString The string that you want to format
+	 */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility", meta = (DisplayName = "Condense Json String"))
+	static FString CondenseJsonString(const FString& InputString);
 };

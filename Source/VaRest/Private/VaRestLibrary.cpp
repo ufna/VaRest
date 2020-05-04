@@ -8,6 +8,10 @@
 #include "VaRestRequestJSON.h"
 #include "VaRestSettings.h"
 
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
+#include "Serialization/JsonWriter.h"
+
 #include "Misc/Base64.h"
 
 UVaRestSettings* UVaRestLibrary::GetVaRestSettings()
@@ -77,4 +81,39 @@ FString UVaRestLibrary::StringToSha1(const FString& StringToHash)
 	}
 
 	return Sha1String;
+}
+
+
+FString UVaRestLibrary::PrettyPrintJsonString(const FString& InputString)
+{
+	TSharedPtr<FJsonObject> JsonObject = MakeShareable(new FJsonObject());
+	TSharedRef<TJsonReader<>> JsonReader = TJsonReaderFactory<>::Create(InputString);
+
+	if (FJsonSerializer::Deserialize(JsonReader, JsonObject))
+	{
+		FString JsonString;
+		TSharedRef<TJsonWriter<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>> Writer = TJsonWriterFactory<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>::Create(&JsonString);
+		FJsonSerializer::Serialize(JsonObject.ToSharedRef(), Writer);
+
+		return JsonString;
+	}
+
+	return "";
+}
+
+FString UVaRestLibrary::CondenseJsonString(const FString& InputString)
+{
+	TSharedPtr<FJsonObject> JsonObject = MakeShareable(new FJsonObject());
+	TSharedRef<TJsonReader<>> JsonReader = TJsonReaderFactory<>::Create(InputString);
+
+	if (FJsonSerializer::Deserialize(JsonReader, JsonObject))
+	{
+		FString JsonString;
+		TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer = TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&JsonString);
+		FJsonSerializer::Serialize(JsonObject.ToSharedRef(), Writer);
+
+		return JsonString;
+	}
+
+	return "";
 }
