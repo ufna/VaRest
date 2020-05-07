@@ -35,7 +35,8 @@ bool UVaRestLibrary::Base64Decode(const FString& Source, FString& Dest)
 	bool Success = FBase64::Decode(Source, ByteArray);
 
 	FUTF8ToTCHAR StringSrc = FUTF8ToTCHAR((const ANSICHAR*)ByteArray.GetData(), ByteArray.Num());
-	Dest.AppendChars(StringSrc.Get(), StringSrc.Length() + 1);
+	Dest = FString();
+	Dest.AppendChars(StringSrc.Get(), StringSrc.Length());
 
 	return Success;
 }
@@ -48,6 +49,7 @@ bool UVaRestLibrary::Base64EncodeData(const TArray<uint8>& Data, FString& Dest)
 		return true;
 	}
 
+	Dest = FString();
 	return false;
 }
 

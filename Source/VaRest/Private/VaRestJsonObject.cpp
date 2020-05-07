@@ -46,7 +46,7 @@ void UVaRestJsonObject::SetRootObject(const TSharedPtr<FJsonObject>& JsonObject)
 FString UVaRestJsonObject::EncodeJson() const
 {
 	FString OutputString;
-	TSharedRef<FCondensedJsonStringWriter> Writer = FCondensedJsonStringWriterFactory::Create(&OutputString);
+	auto Writer = TJsonWriterFactory<>::Create(&OutputString);
 	FJsonSerializer::Serialize(JsonObj, Writer);
 
 	return OutputString;
@@ -54,13 +54,9 @@ FString UVaRestJsonObject::EncodeJson() const
 
 FString UVaRestJsonObject::EncodeJsonToSingleString() const
 {
-	FString OutputString = EncodeJson();
-
-	// Remove line terminators
-	OutputString.Replace(LINE_TERMINATOR, TEXT(""));
-
-	// Remove tabs
-	OutputString.Replace(LINE_TERMINATOR, TEXT("\t"));
+	FString OutputString;
+	auto Writer = FCondensedJsonStringWriterFactory::Create(&OutputString);
+	FJsonSerializer::Serialize(JsonObj, Writer);
 
 	return OutputString;
 }
