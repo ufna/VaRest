@@ -92,7 +92,9 @@ public:
 	UFUNCTION(BlueprintPure, Category = "VaRest|Utility", meta = (DisplayName = "HTTP Status Int To Enum"))
 	static FORCEINLINE EVaRestHttpStatusCode::Type HTTPStatusIntToEnum(int32 StatusCode) { return (EVaRestHttpStatusCode::Type)StatusCode; }
 
-	/** Get the plugin's version. */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility", meta = (DisplayName = "Get VaRest Version"))
-	static FString GetPluginVersion();
+	/**
+	 * Get the plugin's version
+	 */
+	UFUNCTION(BlueprintPure, Category = "VaRest|Utility", meta = (DisplayName = "Get VaRest Version"))
+	static FString GetVaRestVersion();
 };

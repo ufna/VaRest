@@ -24,7 +24,7 @@ void FVaRestModule::StartupModule()
 			ModuleSettings);
 	}
 
-	UE_LOG(LogVaRest, Log, TEXT("%s: VaRest (%s) module started"), *VA_FUNC_LINE, *UVaRestLibrary::GetPluginVersion());
+	UE_LOG(LogVaRest, Log, TEXT("%s: VaRest (%s) module started"), *VA_FUNC_LINE, *UVaRestLibrary::GetVaRestVersion());
 }
 
 void FVaRestModule::ShutdownModule()

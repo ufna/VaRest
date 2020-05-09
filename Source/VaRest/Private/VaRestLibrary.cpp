@@ -80,9 +80,9 @@ FString UVaRestLibrary::StringToSha1(const FString& StringToHash)
 	return Sha1String;
 }
 
-FString UVaRestLibrary::GetPluginVersion()
+FString UVaRestLibrary::GetVaRestVersion()
 {
-	TSharedPtr<IPlugin> const Plugin = IPluginManager::Get().FindPlugin("VaRest");
+	const auto PluginRef = IPluginManager::Get().FindPlugin("VaRest");
 
-	return !Plugin.IsValid() ? FString("Unable to get version number") : Plugin->GetDescriptor().VersionName;
+	return !PluginRef.IsValid() ? FString("invalid") : PluginRef->GetDescriptor().VersionName;
 }
