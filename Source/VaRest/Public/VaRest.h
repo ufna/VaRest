@@ -37,9 +37,6 @@ public:
 	/** Getter for internal settings object to support runtime configuration changes */
 	UVaRestSettings* GetSettings() const;
 
-	/** Get the plugin version. */
-	FString GetPluginVersion() const;
-
 protected:
 	/** Module settings */
 	UVaRestSettings* ModuleSettings;

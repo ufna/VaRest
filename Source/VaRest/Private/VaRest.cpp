@@ -3,11 +3,10 @@
 #include "VaRest.h"
 
 #include "VaRestDefines.h"
+#include "VaRestLibrary.h"
 #include "VaRestSettings.h"
 
 #include "Developer/Settings/Public/ISettingsModule.h"
-
-#include "Interfaces/IPluginManager.h"
 
 #define LOCTEXT_NAMESPACE "FVaRestModule"
 
@@ -25,7 +24,7 @@ void FVaRestModule::StartupModule()
 			ModuleSettings);
 	}
 
-	UE_LOG(LogVaRest, Log, TEXT("%s: VaRest (%s) module started"), *VA_FUNC_LINE, *GetPluginVersion());
+	UE_LOG(LogVaRest, Log, TEXT("%s: VaRest (%s) module started"), *VA_FUNC_LINE, *UVaRestLibrary::GetPluginVersion());
 }
 
 void FVaRestModule::ShutdownModule()
@@ -49,13 +48,6 @@ UVaRestSettings* FVaRestModule::GetSettings() const
 {
 	check(ModuleSettings);
 	return ModuleSettings;
-}
-
-FString FVaRestModule::GetPluginVersion() const
-{
-	TSharedPtr<IPlugin> const plugin = IPluginManager::Get().FindPlugin("VaRest");
-
-	return !plugin.IsValid() ? FString("Unable to get version number") : plugin->GetDescriptor().VersionName;
 }
 
 IMPLEMENT_MODULE(FVaRestModule, VaRest)

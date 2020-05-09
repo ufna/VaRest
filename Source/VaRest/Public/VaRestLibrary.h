@@ -74,7 +74,7 @@ public:
 
 	/**
 	 * Helper to perform the very common case of hashing an ASCII string into a hex representation.
-	 * 
+	 *
 	 * @param String	Hex representation of the hash (32 lower-case hex digits)
 	 */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility", meta = (DisplayName = "String to MD5"))
@@ -91,4 +91,8 @@ public:
 	 */
 	UFUNCTION(BlueprintPure, Category = "VaRest|Utility", meta = (DisplayName = "HTTP Status Int To Enum"))
 	static FORCEINLINE EVaRestHttpStatusCode::Type HTTPStatusIntToEnum(int32 StatusCode) { return (EVaRestHttpStatusCode::Type)StatusCode; }
+
+	/** Get the plugin's version. */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility", meta = (DisplayName = "Get VaRest Version"))
+	static FString GetPluginVersion();
 };
