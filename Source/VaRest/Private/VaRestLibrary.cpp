@@ -8,6 +8,7 @@
 #include "VaRestRequestJSON.h"
 #include "VaRestSettings.h"
 
+#include "Interfaces/IPluginManager.h"
 #include "Misc/Base64.h"
 
 UVaRestSettings* UVaRestLibrary::GetVaRestSettings()
@@ -77,4 +78,11 @@ FString UVaRestLibrary::StringToSha1(const FString& StringToHash)
 	}
 
 	return Sha1String;
+}
+
+FString UVaRestLibrary::GetPluginVersion()
+{
+	TSharedPtr<IPlugin> const Plugin = IPluginManager::Get().FindPlugin("VaRest");
+
+	return !Plugin.IsValid() ? FString("Unable to get version number") : Plugin->GetDescriptor().VersionName;
 }

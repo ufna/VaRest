@@ -3,6 +3,7 @@
 #include "VaRest.h"
 
 #include "VaRestDefines.h"
+#include "VaRestLibrary.h"
 #include "VaRestSettings.h"
 
 #include "Developer/Settings/Public/ISettingsModule.h"
@@ -23,7 +24,7 @@ void FVaRestModule::StartupModule()
 			ModuleSettings);
 	}
 
-	UE_LOG(LogVaRest, Log, TEXT("%s: VaRest module started"), *VA_FUNC_LINE);
+	UE_LOG(LogVaRest, Log, TEXT("%s: VaRest (%s) module started"), *VA_FUNC_LINE, *UVaRestLibrary::GetPluginVersion());
 }
 
 void FVaRestModule::ShutdownModule()
