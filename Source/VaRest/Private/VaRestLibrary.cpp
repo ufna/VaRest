@@ -86,3 +86,16 @@ FString UVaRestLibrary::GetVaRestVersion()
 
 	return !PluginRef.IsValid() ? FString("invalid") : PluginRef->GetDescriptor().VersionName;
 }
+
+FVaRestURL UVaRestLibrary::GetWorldURL(UObject* WorldContextObject)
+{
+	if (WorldContextObject)
+	{
+		if (UWorld* World = WorldContextObject->GetWorld())
+		{
+			return FVaRestURL(World->URL);
+		}
+	}
+
+	return FVaRestURL();
+}

@@ -97,4 +97,14 @@ public:
 	 */
 	UFUNCTION(BlueprintPure, Category = "VaRest|Utility", meta = (DisplayName = "Get VaRest Version"))
 	static FString GetVaRestVersion();
+
+	//////////////////////////////////////////////////////////////////////////
+	// Common Network Helpers
+
+public:
+	/**
+	 * Get the URL that was used when loading this World
+	 */
+	UFUNCTION(BlueprintPure, meta = (WorldContext = "WorldContextObject"))
+	static FVaRestURL GetWorldURL(UObject* WorldContextObject);
 };

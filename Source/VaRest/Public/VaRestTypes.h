@@ -2,6 +2,10 @@
 
 #pragma once
 
+#include "Engine/EngineBaseTypes.h"
+
+#include "VaRestTypes.generated.h"
+
 /** Verb (GET, PUT, POST) used by the request */
 UENUM(BlueprintType)
 enum class EVaRestRequestVerb : uint8
@@ -135,3 +139,61 @@ enum Type
 	VersionNotSup = 505 UMETA(DisplayName = "VersionNotSup = 505")
 };
 } // namespace EVaRestHttpStatusCode
+
+/**
+ * FURL structure wrapper for BP access
+ */
+USTRUCT(BlueprintType)
+struct VAREST_API FVaRestURL
+{
+	GENERATED_BODY()
+
+	/** Protocol, i.e. "unreal" or "http" */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
+	FString Protocol;
+
+	/** Optional hostname, i.e. "204.157.115.40" or "unreal.epicgames.com", blank if local. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
+	FString Host;
+
+	/** Optional host port */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
+	int32 Port;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
+	int32 Valid;
+
+	/** Map name, i.e. "SkyCity", default is "Entry" */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
+	FString Map;
+
+	/** Optional place to download Map if client does not possess it */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
+	FString RedirectURL;
+
+	/** Options */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
+	TArray<FString> Op;
+
+	/** Portal to enter through, default is "" */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
+	FString Portal;
+
+	FVaRestURL()
+		: Port(0)
+		, Valid(0)
+	{
+	}
+
+	FVaRestURL(FURL& InUrl)
+		: Protocol(InUrl.Protocol)
+		, Host(InUrl.Host)
+		, Port(InUrl.Port)
+		, Valid(InUrl.Valid)
+		, Map(InUrl.Map)
+		, RedirectURL(InUrl.RedirectURL)
+		, Op(InUrl.Op)
+		, Portal(InUrl.Portal)
+	{
+	}
+};
