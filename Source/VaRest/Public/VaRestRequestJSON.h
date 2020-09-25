@@ -313,9 +313,9 @@ protected:
 	FString CustomVerb;
 
 	/** Request we're currently processing */
-	TSharedRef<IHttpRequest> HttpRequest = FHttpModule::Get().CreateRequest();
+	TSharedRef<IHttpRequest, ESPMode::ThreadSafe> HttpRequest = FHttpModule::Get().CreateRequest();
 
 public:
 	/** Returns reference to internal request object */
-	TSharedRef<IHttpRequest> GetHttpRequest() const { return HttpRequest; };
+	TSharedRef<IHttpRequest, ESPMode::ThreadSafe> GetHttpRequest() const { return HttpRequest; };
 };
