@@ -105,6 +105,6 @@ public:
 	/**
 	 * Get the URL that was used when loading this World
 	 */
-	UFUNCTION(BlueprintPure, meta = (WorldContext = "WorldContextObject"))
+	UFUNCTION(BlueprintPure, Category = "VaRest|Utility", meta = (WorldContext = "WorldContextObject"))
 	static FVaRestURL GetWorldURL(UObject* WorldContextObject);
 };
