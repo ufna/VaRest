@@ -149,34 +149,34 @@ struct VAREST_API FVaRestURL
 	GENERATED_BODY()
 
 	/** Protocol, i.e. "unreal" or "http" */
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "URL")
 	FString Protocol;
 
 	/** Optional hostname, i.e. "204.157.115.40" or "unreal.epicgames.com", blank if local. */
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "URL")
 	FString Host;
 
 	/** Optional host port */
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "URL")
 	int32 Port;
 
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "URL")
 	int32 Valid;
 
 	/** Map name, i.e. "SkyCity", default is "Entry" */
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "URL")
 	FString Map;
 
 	/** Optional place to download Map if client does not possess it */
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "URL")
 	FString RedirectURL;
 
 	/** Options */
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "URL")
 	TArray<FString> Op;
 
 	/** Portal to enter through, default is "" */
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "URL")
 	FString Portal;
 
 	FVaRestURL()
