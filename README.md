@@ -1,6 +1,8 @@
-# VaRest
-
 [![statusIcon](https://teamcity.ufna.dev/app/rest/builds/buildType:(id:UfnaDev_VaRest_ClangFormatCheck)/statusIcon.svg)](https://teamcity.ufna.dev/viewType.html?buildTypeId=UfnaDev_VaRest_ClangFormatCheck&guest=1)
+![GitHub](https://img.shields.io/github/license/ufna/VaRest)
+![GitHub release (latest by date including pre-releases)](https://img.shields.io/github/v/release/ufna/VaRest?include_prereleases)
+
+# VaRest
 
 VaRest is the plugin for [Unreal Engine 4](https://www.unrealengine.com/) that makes REST server communications easier to use.
 
@@ -14,7 +16,7 @@ Key features:
 
 Check the [Wiki](http://bit.ly/VaRest-Docs) for plugin usage examples and installation notes.
 
-Current version: **1.1 R 26** (UE 4.19-4.23)
+Current version: **1.1 R 30** (UE 4.25)
 
 ![SCREENSHOT](SCREENSHOT.jpg)
 

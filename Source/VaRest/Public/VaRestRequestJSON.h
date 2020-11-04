@@ -10,6 +10,8 @@
 
 #include "VaRestRequestJSON.generated.h"
 
+class UVaRestSettings;
+
 /**
  * @author Original latent action class by https://github.com/unktomi
  */
@@ -85,17 +87,9 @@ public:
 	//////////////////////////////////////////////////////////////////////////
 	// Construction
 
-	/** Creates new request (totally empty) */
-	UFUNCTION(BlueprintCallable, meta = (DisplayName = "Construct Json Request (Empty)", HidePin = "WorldContextObject", DefaultToSelf = "WorldContextObject"), Category = "VaRest|Request")
-	static UVaRestRequestJSON* ConstructRequest(UObject* WorldContextObject);
-
-	/** Creates new request with defined verb and content type */
-	UFUNCTION(BlueprintCallable, meta = (DisplayName = "Construct Json Request", HidePin = "WorldContextObject", DefaultToSelf = "WorldContextObject"), Category = "VaRest|Request")
-	static UVaRestRequestJSON* ConstructRequestExt(UObject* WorldContextObject, ERequestVerb Verb, ERequestContentType ContentType);
-
 	/** Set verb to the request */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
-	void SetVerb(ERequestVerb Verb);
+	void SetVerb(EVaRestRequestVerb Verb);
 
 	/** Set custom verb to the request */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
@@ -104,7 +98,7 @@ public:
 	/** Set content type to the request. If you're using the x-www-form-urlencoded, 
 	 * params/constaints should be defined as key=ValueString pairs from Json data */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
-	void SetContentType(ERequestContentType ContentType);
+	void SetContentType(EVaRestRequestContentType ContentType);
 
 	/** Set content type of the request for binary post data */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
@@ -146,7 +140,7 @@ public:
 
 	/** Get the Request Json object */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
-	UVaRestJsonObject* GetRequestObject();
+	UVaRestJsonObject* GetRequestObject() const;
 
 	/** Set the Request Json object */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
@@ -154,7 +148,7 @@ public:
 
 	/** Get the Response Json object */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
-	UVaRestJsonObject* GetResponseObject();
+	UVaRestJsonObject* GetResponseObject() const;
 
 	/** Set the Response Json object */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
@@ -165,23 +159,23 @@ public:
 
 	/** Get url of http request */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
-	FString GetURL();
+	FString GetURL() const;
 
 	/** Get status of http request */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
-	ERequestStatus GetStatus();
+	EVaRestRequestStatus GetStatus() const;
 
 	/** Get the response code of the last query */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
-	int32 GetResponseCode();
+	int32 GetResponseCode() const;
 
 	/** Get value of desired response header */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
-	FString GetResponseHeader(const FString HeaderName);
+	UFUNCTION(BlueprintPure, Category = "VaRest|Response")
+	FString GetResponseHeader(const FString& HeaderName);
 
 	/** Get list of all response headers */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
-	TArray<FString> GetAllResponseHeaders();
+	TArray<FString> GetAllResponseHeaders() const;
 
 	//////////////////////////////////////////////////////////////////////////
 	// URL processing
@@ -301,10 +295,10 @@ protected:
 	UVaRestJsonObject* ResponseJsonObj;
 
 	/** Verb for making request (GET,POST,etc) */
-	ERequestVerb RequestVerb;
+	EVaRestRequestVerb RequestVerb;
 
 	/** Content type to be applied for request */
-	ERequestContentType RequestContentType;
+	EVaRestRequestContentType RequestContentType;
 
 	/** Mapping of header section to values. Used to generate final header string for request */
 	TMap<FString, FString> RequestHeaders;

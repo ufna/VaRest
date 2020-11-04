@@ -17,11 +17,6 @@ UVaRestJsonObject::UVaRestJsonObject(const FObjectInitializer& ObjectInitializer
 {
 }
 
-UVaRestJsonObject* UVaRestJsonObject::ConstructJsonObject(UObject* WorldContextObject)
-{
-	return NewObject<UVaRestJsonObject>();
-}
-
 void UVaRestJsonObject::Reset()
 {
 	JsonObj = MakeShared<FJsonObject>();
@@ -51,7 +46,7 @@ void UVaRestJsonObject::SetRootObject(const TSharedPtr<FJsonObject>& JsonObject)
 FString UVaRestJsonObject::EncodeJson() const
 {
 	FString OutputString;
-	TSharedRef<FCondensedJsonStringWriter> Writer = FCondensedJsonStringWriterFactory::Create(&OutputString);
+	auto Writer = TJsonWriterFactory<>::Create(&OutputString);
 	FJsonSerializer::Serialize(JsonObj, Writer);
 
 	return OutputString;
@@ -59,13 +54,9 @@ FString UVaRestJsonObject::EncodeJson() const
 
 FString UVaRestJsonObject::EncodeJsonToSingleString() const
 {
-	FString OutputString = EncodeJson();
-
-	// Remove line terminators
-	OutputString.Replace(LINE_TERMINATOR, TEXT(""));
-
-	// Remove tabs
-	OutputString.Replace(LINE_TERMINATOR, TEXT("\t"));
+	FString OutputString;
+	auto Writer = FCondensedJsonStringWriterFactory::Create(&OutputString);
+	FJsonSerializer::Serialize(JsonObj, Writer);
 
 	return OutputString;
 }
@@ -369,6 +360,34 @@ void UVaRestJsonObject::SetObjectField(const FString& FieldName, UVaRestJsonObje
 	}
 
 	JsonObj->SetObjectField(FieldName, JsonObject->GetRootObject());
+}
+
+void UVaRestJsonObject::SetMapFields_string(const TMap<FString, FString>& Fields)
+{
+	for (auto& field : Fields)
+	{
+		SetStringField(field.Key, field.Value);
+	}
+}
+
+void UVaRestJsonObject::SetMapFields_uint8(const TMap<FString, uint8>& Fields)
+{
+	SetMapFields_Impl(Fields);
+}
+
+void UVaRestJsonObject::SetMapFields_int32(const TMap<FString, int32>& Fields)
+{
+	SetMapFields_Impl(Fields);
+}
+
+void UVaRestJsonObject::SetMapFields_int64(const TMap<FString, int64>& Fields)
+{
+	SetMapFields_Impl(Fields);
+}
+
+void UVaRestJsonObject::SetMapFields_bool(const TMap<FString, bool>& Fields)
+{
+	SetMapFields_Impl(Fields);
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -675,11 +694,7 @@ bool UVaRestJsonObject::WriteToFile(const FString& Path)
 		for (int i = 0; i < JsonObjectValuePair.Key.Len(); ++i)
 		{
 			Str = FString(1, &BufferPtr[i]);
-#if PLATFORM_WINDOWS
-			WriteStringToArchive(Ar, *Str, Str.Len() - 1);
-#else
 			WriteStringToArchive(Ar, *Str, Str.Len());
-#endif
 		}
 
 		Str = FString(TEXT("\""));

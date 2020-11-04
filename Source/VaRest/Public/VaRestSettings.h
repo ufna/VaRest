@@ -13,4 +13,8 @@ public:
 	/** You can disable request content logging to avoid security vulnerability */
 	UPROPERTY(Config, EditAnywhere, Category = "VaRest")
 	bool bExtendedLog;
+
+	/** Use custom chunked parses (best for memory, but has issues with hex-encoded utf-8) */
+	UPROPERTY(Config, EditAnywhere, Category = "VaRest")
+	bool bUseChunkedParser;
 };
