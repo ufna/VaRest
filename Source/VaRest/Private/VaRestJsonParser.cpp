@@ -6,7 +6,6 @@
 
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
-#include "Logging/LogMacros.h"
 
 uint32 FUtf8Helper::CodepointFromUtf8(const ANSICHAR*& SourceString, const uint32 SourceLengthRemaining)
 {

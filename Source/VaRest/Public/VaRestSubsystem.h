@@ -5,9 +5,7 @@
 #include "VaRestJsonValue.h"
 #include "VaRestRequestJSON.h"
 
-#include "Delegates/DelegateCombinations.h"
 #include "Subsystems/EngineSubsystem.h"
-#include "Subsystems/SubsystemCollection.h"
 
 #include "VaRestSubsystem.generated.h"
 

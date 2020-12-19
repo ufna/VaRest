@@ -2,8 +2,6 @@
 
 #pragma once
 
-#include "VaRestDefines.h"
-
 #include "VaRestJsonValue.generated.h"
 
 class UVaRestJsonObject;

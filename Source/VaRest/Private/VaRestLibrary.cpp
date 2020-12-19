@@ -4,10 +4,10 @@
 
 #include "VaRest.h"
 #include "VaRestDefines.h"
-#include "VaRestJsonObject.h"
 #include "VaRestRequestJSON.h"
-#include "VaRestSettings.h"
 
+#include "Engine/World.h"
+#include "GenericPlatform/GenericPlatformHttp.h"
 #include "Interfaces/IPluginManager.h"
 #include "Misc/Base64.h"
 

@@ -6,7 +6,6 @@
 #include "VaRestJsonObject.h"
 #include "VaRestJsonValue.h"
 
-#include "Developer/Settings/Public/ISettingsModule.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Subsystems/SubsystemBlueprintLibrary.h"

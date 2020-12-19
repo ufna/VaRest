@@ -4,7 +4,6 @@
 
 #include "Kismet/BlueprintFunctionLibrary.h"
 
-#include "VaRestDefines.h"
 #include "VaRestTypes.h"
 
 #include "VaRestLibrary.generated.h"

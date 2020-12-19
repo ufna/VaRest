@@ -7,9 +7,11 @@
 #include "VaRestLibrary.h"
 #include "VaRestSettings.h"
 
+#include "Engine/Engine.h"
+#include "Engine/EngineTypes.h"
+#include "Engine/LatentActionManager.h"
+#include "Engine/World.h"
 #include "Json.h"
-#include "Kismet/GameplayStatics.h"
-#include "Misc/CoreMisc.h"
 #include "Runtime/Launch/Resources/Version.h"
 
 FString UVaRestRequestJSON::DeprecatedResponseString(TEXT("DEPRECATED: Please use GetResponseContentAsString() instead"));
