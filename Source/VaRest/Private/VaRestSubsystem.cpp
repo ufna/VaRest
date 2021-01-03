@@ -62,7 +62,7 @@ void UVaRestSubsystem::OnCallComplete(UVaRestRequestJSON* Request)
 		return;
 	}
 
-	auto Response = RequestMap.Find(Request);
+	const auto Response = RequestMap.Find(Request);
 	Request->OnStaticRequestComplete.Remove(Response->CompleteDelegateHandle);
 	Request->OnStaticRequestFail.Remove(Response->FailDelegateHandle);
 

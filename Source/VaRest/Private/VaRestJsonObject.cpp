@@ -524,7 +524,7 @@ TArray<UVaRestJsonObject*> UVaRestJsonObject::GetObjectArrayField(const FString&
 	}
 
 	TArray<TSharedPtr<FJsonValue>> ValArray = JsonObj->GetArrayField(FieldName);
-	for (const auto Value : ValArray)
+	for (const auto& Value : ValArray)
 	{
 		if (Value->Type != EJson::Object)
 		{

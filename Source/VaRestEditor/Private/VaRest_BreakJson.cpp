@@ -86,7 +86,7 @@ public:
 				FBlueprintCompiledStatement& Statement = Context.AppendStatementForNode(Node);
 				FName FunctionName;
 
-				bool bIsArray = Pin->PinType.ContainerType == EPinContainerType::Array;
+				const bool bIsArray = Pin->PinType.ContainerType == EPinContainerType::Array;
 				if (FieldType == CompilerContext.GetSchema()->PC_Boolean)
 				{
 					FunctionName = bIsArray ? TEXT("GetBoolArrayField") : TEXT("GetBoolField");
@@ -213,7 +213,7 @@ FLinearColor UVaRest_BreakJson::GetNodeTitleColor() const
 
 void UVaRest_BreakJson::PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent)
 {
-	FName PropertyName = (PropertyChangedEvent.Property != NULL) ? PropertyChangedEvent.Property->GetFName() : NAME_None;
+	const FName PropertyName = (PropertyChangedEvent.Property != NULL) ? PropertyChangedEvent.Property->GetFName() : NAME_None;
 	if (PropertyName == GET_MEMBER_NAME_STRING_CHECKED(UVaRest_BreakJson, Outputs) ||
 		PropertyName == GET_MEMBER_NAME_STRING_CHECKED(FVaRest_NamedType, Name) ||
 		PropertyName == GET_MEMBER_NAME_STRING_CHECKED(FVaRest_NamedType, Type) ||
@@ -339,7 +339,7 @@ public:
 		{
 			UClass* SubsystemClass = Cast<UClass>(StaticLoadObject(UClass::StaticClass(), NULL, TEXT("class'VaRest.VaRestSubsystem'")));
 
-			FName FunctionName = TEXT("StaticConstructVaRestJsonObject");
+			const FName FunctionName = TEXT("StaticConstructVaRestJsonObject");
 			UFunction* FunctionPtr = SubsystemClass->FindFunctionByName(FunctionName);
 			FBlueprintCompiledStatement& Statement = Context.AppendStatementForNode(Node);
 			Statement.Type = KCST_CallFunction;
@@ -388,7 +388,7 @@ public:
 				FBlueprintCompiledStatement& Statement = Context.AppendStatementForNode(Node);
 				FName FunctionName;
 
-				bool bIsArray = Pin->PinType.ContainerType == EPinContainerType::Array;
+				const bool bIsArray = Pin->PinType.ContainerType == EPinContainerType::Array;
 				if (FieldType == CompilerContext.GetSchema()->PC_Boolean)
 				{
 					FunctionName = bIsArray ? TEXT("SetBoolArrayField") : TEXT("SetBoolField");
@@ -505,7 +505,7 @@ FLinearColor UVaRest_MakeJson::GetNodeTitleColor() const
 
 void UVaRest_MakeJson::PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent)
 {
-	FName PropertyName = (PropertyChangedEvent.Property != NULL) ? PropertyChangedEvent.Property->GetFName() : NAME_None;
+	const FName PropertyName = (PropertyChangedEvent.Property != NULL) ? PropertyChangedEvent.Property->GetFName() : NAME_None;
 	if (PropertyName == GET_MEMBER_NAME_STRING_CHECKED(UVaRest_MakeJson, Inputs) ||
 		PropertyName == GET_MEMBER_NAME_STRING_CHECKED(FVaRest_NamedType, Name) ||
 		PropertyName == GET_MEMBER_NAME_STRING_CHECKED(FVaRest_NamedType, Type) ||

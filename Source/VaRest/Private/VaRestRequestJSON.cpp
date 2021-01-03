@@ -499,7 +499,7 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 	else
 	{
 		// Use default unreal one
-		TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(*Response->GetContentAsString());
+		const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(*Response->GetContentAsString());
 		TSharedPtr<FJsonObject> OutJsonObj;
 		if (FJsonSerializer::Deserialize(Reader, OutJsonObj))
 		{

@@ -166,7 +166,7 @@ UVaRestJsonObject* UVaRestJsonValue::AsObject()
 		return nullptr;
 	}
 
-	TSharedPtr<FJsonObject> NewObj = JsonVal->AsObject();
+	const TSharedPtr<FJsonObject> NewObj = JsonVal->AsObject();
 
 	UVaRestJsonObject* JsonObj = NewObject<UVaRestJsonObject>();
 	JsonObj->SetRootObject(NewObj);
