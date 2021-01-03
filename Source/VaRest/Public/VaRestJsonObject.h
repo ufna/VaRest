@@ -218,7 +218,7 @@ public:
 
 public:
 	/** Save json to file */
-	bool WriteToFile(const FString& Path);
+	bool WriteToFile(const FString& Path) const;
 
 	/**
 	 * Blueprint Save json to filepath 

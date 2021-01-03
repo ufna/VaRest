@@ -4,12 +4,15 @@
 
 #include "Engine/LatentActionManager.h"
 #include "Http.h"
+#include "HttpModule.h"
+#include "Interfaces/IHttpRequest.h"
 #include "LatentActions.h"
 
 #include "VaRestTypes.h"
 
 #include "VaRestRequestJSON.generated.h"
 
+class UVaRestJsonObject;
 class UVaRestSettings;
 
 /**

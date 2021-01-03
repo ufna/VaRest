@@ -11,6 +11,7 @@
 #include "Engine/EngineTypes.h"
 #include "Engine/LatentActionManager.h"
 #include "Engine/World.h"
+#include "Interfaces/IHttpResponse.h"
 #include "Json.h"
 #include "Runtime/Launch/Resources/Version.h"
 
