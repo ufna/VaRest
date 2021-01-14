@@ -56,7 +56,15 @@ class VAREST_API UVaRestJsonValue : public UObject
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	float AsNumber() const;
 
-	/** Returns this value as a number, throwing an error if this is not an Json String */
+	/** Returns this value as a int32, throwing an error if this is not an Json Number */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	int32 AsInt32() const;
+
+	/** Returns this value as a int64, throwing an error if this is not an Json Number */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	int32 AsInt64() const;
+
+	/** Returns this value as a string, throwing an error if this is not an Json String */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	FString AsString() const;
 
