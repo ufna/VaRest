@@ -111,7 +111,29 @@ float UVaRestJsonValue::AsNumber() const
 		return 0.f;
 	}
 
-	return JsonVal->AsNumber();
+	return static_cast<float>(JsonVal->AsNumber());
+}
+
+int32 UVaRestJsonValue::AsInt32() const
+{
+	if (!JsonVal.IsValid())
+	{
+		ErrorMessage(TEXT("Number"));
+		return 0.f;
+	}
+
+	return static_cast<int32>(JsonVal->AsNumber());
+}
+
+int32 UVaRestJsonValue::AsInt64() const
+{
+	if (!JsonVal.IsValid())
+	{
+		ErrorMessage(TEXT("Number"));
+		return 0.f;
+	}
+
+	return static_cast<int64>(JsonVal->AsNumber());
 }
 
 FString UVaRestJsonValue::AsString() const
