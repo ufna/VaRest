@@ -30,6 +30,11 @@ class VAREST_API UVaRestJsonValue : public UObject
 {
 	GENERATED_UCLASS_BODY()
 
+public:
+	/** Reset all internal data */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	void Reset();
+
 	/** Get the root Json value */
 	TSharedPtr<FJsonValue>& GetRootValue();
 

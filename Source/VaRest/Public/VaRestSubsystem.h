@@ -104,6 +104,14 @@ public:
 	UVaRestJsonValue* ConstructJsonValue(const TSharedPtr<FJsonValue>& InValue);
 
 	//////////////////////////////////////////////////////////////////////////
+	// Serialization
+
+public:
+	/** Construct Json value from string */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Subsystem")
+	UVaRestJsonValue* DecodeJson(const FString& JsonString);
+
+	//////////////////////////////////////////////////////////////////////////
 	// File system integration
 
 public:

@@ -4,6 +4,7 @@
 
 #include "VaRestDefines.h"
 #include "VaRestJsonObject.h"
+#include "VaRestJsonValue.h"
 #include "VaRestLibrary.h"
 #include "VaRestSettings.h"
 
@@ -112,6 +113,15 @@ void UVaRestRequestJSON::ResetResponseData()
 		ResponseJsonObj = NewObject<UVaRestJsonObject>();
 	}
 
+	if (ResponseJsonValue != nullptr)
+	{
+		ResponseJsonValue->Reset();
+	}
+	else
+	{
+		ResponseJsonValue = NewObject<UVaRestJsonValue>();
+	}
+
 	ResponseHeaders.Empty();
 	ResponseCode = -1;
 	ResponseSize = 0;
@@ -164,6 +174,12 @@ void UVaRestRequestJSON::SetResponseObject(UVaRestJsonObject* JsonObject)
 	}
 
 	ResponseJsonObj = JsonObject;
+}
+
+UVaRestJsonValue* UVaRestRequestJSON::GetResponseValue() const
+{
+	check(ResponseJsonValue);
+	return ResponseJsonValue;
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -500,11 +516,16 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 	{
 		// Use default unreal one
 		const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(*Response->GetContentAsString());
-		TSharedPtr<FJsonObject> OutJsonObj;
-		if (FJsonSerializer::Deserialize(Reader, OutJsonObj))
+		TSharedPtr<FJsonValue> OutJsonValue;
+		if (FJsonSerializer::Deserialize(Reader, OutJsonValue))
 		{
-			ResponseJsonObj->SetRootObject(OutJsonObj.ToSharedRef());
+			ResponseJsonValue->SetRootValue(OutJsonValue);
 			ResponseSize = Response->GetContentLength();
+
+			if (ResponseJsonValue->GetType() == EVaJson::Object)
+			{
+				ResponseJsonObj->SetRootObject(ResponseJsonValue->GetRootValue()->AsObject());
+			}
 		}
 	}
 

@@ -10,6 +10,11 @@ UVaRestJsonValue::UVaRestJsonValue(const FObjectInitializer& ObjectInitializer)
 {
 }
 
+void UVaRestJsonValue::Reset()
+{
+	JsonVal = nullptr;
+}
+
 TSharedPtr<FJsonValue>& UVaRestJsonValue::GetRootValue()
 {
 	return JsonVal;

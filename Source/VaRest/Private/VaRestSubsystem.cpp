@@ -8,6 +8,8 @@
 
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
 #include "Subsystems/SubsystemBlueprintLibrary.h"
 
 UVaRestSubsystem::UVaRestSubsystem()
@@ -162,6 +164,18 @@ UVaRestJsonValue* UVaRestSubsystem::ConstructJsonValue(const TSharedPtr<FJsonVal
 	NewValue->SetRootValue(NewVal);
 
 	return NewValue;
+}
+
+UVaRestJsonValue* UVaRestSubsystem::DecodeJson(const FString& JsonString)
+{
+	const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(*JsonString);
+	TSharedPtr<FJsonValue> OutJsonValue;
+	if (FJsonSerializer::Deserialize(Reader, OutJsonValue))
+	{
+		return ConstructJsonValue(OutJsonValue);
+	}
+
+	return nullptr;
 }
 
 class UVaRestJsonObject* UVaRestSubsystem::LoadJsonFromFile(const FString& Path, const bool bIsRelativeToContentDir)
