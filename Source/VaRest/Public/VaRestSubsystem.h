@@ -109,7 +109,11 @@ public:
 public:
 	/** Construct Json value from string */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Subsystem")
-	UVaRestJsonValue* DecodeJson(const FString& JsonString);
+	UVaRestJsonValue* DecodeJsonValue(const FString& JsonString);
+
+	/** Construct Json object from string */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Subsystem")
+	UVaRestJsonObject* DecodeJsonObject(const FString& JsonString);
 
 	//////////////////////////////////////////////////////////////////////////
 	// File system integration

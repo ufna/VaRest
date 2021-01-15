@@ -166,13 +166,27 @@ UVaRestJsonValue* UVaRestSubsystem::ConstructJsonValue(const TSharedPtr<FJsonVal
 	return NewValue;
 }
 
-UVaRestJsonValue* UVaRestSubsystem::DecodeJson(const FString& JsonString)
+UVaRestJsonValue* UVaRestSubsystem::DecodeJsonValue(const FString& JsonString)
 {
 	const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(*JsonString);
 	TSharedPtr<FJsonValue> OutJsonValue;
 	if (FJsonSerializer::Deserialize(Reader, OutJsonValue))
 	{
 		return ConstructJsonValue(OutJsonValue);
+	}
+
+	return nullptr;
+}
+
+UVaRestJsonObject* UVaRestSubsystem::DecodeJsonObject(const FString& JsonString)
+{
+	const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(*JsonString);
+	TSharedPtr<FJsonObject> OutJsonObj;
+	if (FJsonSerializer::Deserialize(Reader, OutJsonObj))
+	{
+		auto NewJsonObj = NewObject<UVaRestJsonObject>(this);
+		NewJsonObj->SetRootObject(OutJsonObj);
+		return NewJsonObj;
 	}
 
 	return nullptr;
