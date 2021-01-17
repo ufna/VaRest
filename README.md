@@ -16,7 +16,7 @@ Key features:
 
 Check the [Wiki](http://bit.ly/VaRest-Docs) for plugin usage examples and installation notes.
 
-Current version: **1.1 R 31** (UE 4.26)
+Current version: **1.1 R 32** (UE 4.26)
 
 ![SCREENSHOT](SCREENSHOT.jpg)
 
@@ -26,5 +26,5 @@ Legal info
 
 Unreal® is a trademark or registered trademark of Epic Games, Inc. in the United States of America and elsewhere.
 
-Unreal® Engine, Copyright 1998 – 2018, Epic Games, Inc. All rights reserved.
+Unreal® Engine, Copyright 1998 – 2021, Epic Games, Inc. All rights reserved.
 
