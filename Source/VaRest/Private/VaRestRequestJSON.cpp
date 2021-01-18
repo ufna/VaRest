@@ -4,12 +4,16 @@
 
 #include "VaRestDefines.h"
 #include "VaRestJsonObject.h"
+#include "VaRestJsonValue.h"
 #include "VaRestLibrary.h"
 #include "VaRestSettings.h"
 
+#include "Engine/Engine.h"
+#include "Engine/EngineTypes.h"
+#include "Engine/LatentActionManager.h"
+#include "Engine/World.h"
+#include "Interfaces/IHttpResponse.h"
 #include "Json.h"
-#include "Kismet/GameplayStatics.h"
-#include "Misc/CoreMisc.h"
 #include "Runtime/Launch/Resources/Version.h"
 
 FString UVaRestRequestJSON::DeprecatedResponseString(TEXT("DEPRECATED: Please use GetResponseContentAsString() instead"));
@@ -109,6 +113,15 @@ void UVaRestRequestJSON::ResetResponseData()
 		ResponseJsonObj = NewObject<UVaRestJsonObject>();
 	}
 
+	if (ResponseJsonValue != nullptr)
+	{
+		ResponseJsonValue->Reset();
+	}
+	else
+	{
+		ResponseJsonValue = NewObject<UVaRestJsonValue>();
+	}
+
 	ResponseHeaders.Empty();
 	ResponseCode = -1;
 	ResponseSize = 0;
@@ -161,6 +174,12 @@ void UVaRestRequestJSON::SetResponseObject(UVaRestJsonObject* JsonObject)
 	}
 
 	ResponseJsonObj = JsonObject;
+}
+
+UVaRestJsonValue* UVaRestRequestJSON::GetResponseValue() const
+{
+	check(ResponseJsonValue);
+	return ResponseJsonValue;
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -496,12 +515,17 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 	else
 	{
 		// Use default unreal one
-		TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(*Response->GetContentAsString());
-		TSharedPtr<FJsonObject> OutJsonObj;
-		if (FJsonSerializer::Deserialize(Reader, OutJsonObj))
+		const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(*Response->GetContentAsString());
+		TSharedPtr<FJsonValue> OutJsonValue;
+		if (FJsonSerializer::Deserialize(Reader, OutJsonValue))
 		{
-			ResponseJsonObj->SetRootObject(OutJsonObj.ToSharedRef());
+			ResponseJsonValue->SetRootValue(OutJsonValue);
 			ResponseSize = Response->GetContentLength();
+
+			if (ResponseJsonValue->GetType() == EVaJson::Object)
+			{
+				ResponseJsonObj->SetRootObject(ResponseJsonValue->GetRootValue()->AsObject());
+			}
 		}
 	}
 

@@ -6,7 +6,6 @@
 
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
-#include "Logging/LogMacros.h"
 
 uint32 FUtf8Helper::CodepointFromUtf8(const ANSICHAR*& SourceString, const uint32 SourceLengthRemaining)
 {
@@ -294,7 +293,7 @@ void FJSONState::PopObject()
 {
 	if (Objects.Num() > 0)
 	{
-		auto Object = Objects.Pop(false);
+		const auto Object = Objects.Pop(false);
 		if (Object->Type == EJson::Object)
 		{
 			return;
@@ -308,7 +307,7 @@ void FJSONState::PopArray()
 {
 	if (Objects.Num() > 0)
 	{
-		auto Object = Objects.Pop(false);
+		const auto Object = Objects.Pop(false);
 		if (Object->Type == EJson::Array)
 		{
 			return;
@@ -322,7 +321,7 @@ void FJSONState::PopValue(bool bCheckType)
 {
 	if (Objects.Num() > 0)
 	{
-		auto Value = Objects.Last(0);
+		const auto Value = Objects.Last(0);
 		if (Value->Type == EJson::Object || Value->Type == EJson::Array)
 		{
 			if (bCheckType)
@@ -339,7 +338,7 @@ void FJSONState::PopValue(bool bCheckType)
 				{
 				case EJson::Null:
 				{
-					auto LowerCase = Data.ToLower();
+					const auto LowerCase = Data.ToLower();
 					if (LowerCase != TEXT("null"))
 					{
 						bError = true;
@@ -356,7 +355,7 @@ void FJSONState::PopValue(bool bCheckType)
 				}
 				case EJson::Number:
 				{
-					FString LowerCase = Data.ToLower();
+					const FString LowerCase = Data.ToLower();
 					int32 ePosition = INDEX_NONE;
 					LowerCase.FindChar('e', ePosition);
 					if (ePosition == INDEX_NONE)
@@ -372,8 +371,8 @@ void FJSONState::PopValue(bool bCheckType)
 					}
 					else if (LowerCase.Len() > ePosition + 2)
 					{
-						FString Left = LowerCase.Left(ePosition);
-						FString Rigth = LowerCase.Right(LowerCase.Len() - ePosition - 1);
+						const FString Left = LowerCase.Left(ePosition);
+						const FString Rigth = LowerCase.Right(LowerCase.Len() - ePosition - 1);
 						if (Left.IsNumeric() && Rigth.IsNumeric())
 						{
 							((FJsonValueNonConstNumber*)Value.Get())->AsNonConstNumber() = FCString::Atod(*Left) * FMath::Pow(10.f, FCString::Atoi(*Rigth));
@@ -391,7 +390,7 @@ void FJSONState::PopValue(bool bCheckType)
 				}
 				case EJson::Boolean:
 				{
-					auto LowerCase = Data.ToLower();
+					const auto LowerCase = Data.ToLower();
 					if (LowerCase == TEXT("true"))
 					{
 						((FJsonValueNonConstBoolean*)Value.Get())->AsNonConstBool() = true;
@@ -415,7 +414,7 @@ void FJSONState::PopValue(bool bCheckType)
 
 				ClearData();
 
-				auto Container = Objects.Last(0);
+				const auto Container = Objects.Last(0);
 				if (Container->Type == EJson::Object)
 				{
 					if (Key.Len() > 0)
@@ -502,7 +501,7 @@ TSharedPtr<FJsonValueObject> FJSONState::PushObject(TSharedPtr<FJsonObject> Obje
 
 TSharedPtr<FJsonValueNonConstArray> FJSONState::PushArray()
 {
-	TArray<TSharedPtr<FJsonValue>> Empty;
+	const TArray<TSharedPtr<FJsonValue>> Empty;
 	TSharedPtr<FJsonValueNonConstArray> Result(new FJsonValueNonConstArray(Empty));
 	Objects.Add(Result);
 	Size += sizeof(TSharedPtr<FJsonValueNonConstArray>) + sizeof(FJsonValueNonConstArray);
@@ -627,7 +626,7 @@ void FJSONReader::UpdateNotation()
 			if (State.Key.Len() > 0)
 			{
 				State.Notation = EJSONNotation::OBJECT;
-				auto Value = State.GetObject();
+				const auto Value = State.GetObject();
 				if (Value != nullptr)
 				{
 					Value->AsObject()->SetField(State.Key, State.PushObject());
@@ -709,7 +708,7 @@ void FJSONReader::UpdateNotation()
 			State.Notation = EJSONNotation::ARRAY;
 			if (State.Key.Len() > 0)
 			{
-				auto Value = State.GetObject();
+				const auto Value = State.GetObject();
 				if (Value != nullptr)
 				{
 					Value->AsObject()->SetField(State.Key, State.PushArray());
@@ -1100,7 +1099,7 @@ void FJSONWriter::Write(TSharedPtr<FJsonValue> JsonValue, FArchive* Writer, bool
 	}
 	default:
 	{
-		FString Value = JsonValue->AsString();
+		const FString Value = JsonValue->AsString();
 
 		const TCHAR* BufferPtr = *Value;
 		for (int i = 0; i < Value.Len(); ++i)

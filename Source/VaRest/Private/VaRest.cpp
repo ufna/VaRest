@@ -3,9 +3,11 @@
 #include "VaRest.h"
 
 #include "VaRestDefines.h"
+#include "VaRestLibrary.h"
 #include "VaRestSettings.h"
 
 #include "Developer/Settings/Public/ISettingsModule.h"
+#include "UObject/Package.h"
 
 #define LOCTEXT_NAMESPACE "FVaRestModule"
 
@@ -23,7 +25,7 @@ void FVaRestModule::StartupModule()
 			ModuleSettings);
 	}
 
-	UE_LOG(LogVaRest, Log, TEXT("%s: VaRest module started"), *VA_FUNC_LINE);
+	UE_LOG(LogVaRest, Log, TEXT("%s: VaRest (%s) module started"), *VA_FUNC_LINE, *UVaRestLibrary::GetVaRestVersion());
 }
 
 void FVaRestModule::ShutdownModule()

@@ -10,6 +10,11 @@ UVaRestJsonValue::UVaRestJsonValue(const FObjectInitializer& ObjectInitializer)
 {
 }
 
+void UVaRestJsonValue::Reset()
+{
+	JsonVal = nullptr;
+}
+
 TSharedPtr<FJsonValue>& UVaRestJsonValue::GetRootValue()
 {
 	return JsonVal;
@@ -111,7 +116,29 @@ float UVaRestJsonValue::AsNumber() const
 		return 0.f;
 	}
 
-	return JsonVal->AsNumber();
+	return static_cast<float>(JsonVal->AsNumber());
+}
+
+int32 UVaRestJsonValue::AsInt32() const
+{
+	if (!JsonVal.IsValid())
+	{
+		ErrorMessage(TEXT("Number"));
+		return 0.f;
+	}
+
+	return static_cast<int32>(JsonVal->AsNumber());
+}
+
+int32 UVaRestJsonValue::AsInt64() const
+{
+	if (!JsonVal.IsValid())
+	{
+		ErrorMessage(TEXT("Number"));
+		return 0.f;
+	}
+
+	return static_cast<int64>(JsonVal->AsNumber());
 }
 
 FString UVaRestJsonValue::AsString() const
@@ -166,7 +193,7 @@ UVaRestJsonObject* UVaRestJsonValue::AsObject()
 		return nullptr;
 	}
 
-	TSharedPtr<FJsonObject> NewObj = JsonVal->AsObject();
+	const TSharedPtr<FJsonObject> NewObj = JsonVal->AsObject();
 
 	UVaRestJsonObject* JsonObj = NewObject<UVaRestJsonObject>();
 	JsonObj->SetRootObject(NewObj);

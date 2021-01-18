@@ -99,6 +99,14 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	void SetIntegerField(const FString& FieldName, int32 Number);
 
+	/** Get the field named FieldName as an Int64. Ensures that the field is present and is of type Json number. */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	int64 GetInt64Field(const FString& FieldName) const;
+
+	/** Add a field named FieldName with Int64 as value. */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	void SetInt64Field(const FString& FieldName, int64 Number);
+
 	/** Get the field named FieldName as a string. */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	FString GetStringField(const FString& FieldName) const;
@@ -218,7 +226,7 @@ public:
 
 public:
 	/** Save json to file */
-	bool WriteToFile(const FString& Path);
+	bool WriteToFile(const FString& Path) const;
 
 	/**
 	 * Blueprint Save json to filepath 

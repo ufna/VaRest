@@ -2,7 +2,7 @@
 
 #pragma once
 
-#include "Modules/ModuleManager.h"
+#include "Modules/ModuleInterface.h"
 
 class FVaRestEditorModule : public IModuleInterface
 {

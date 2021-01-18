@@ -26,7 +26,7 @@ public:
 
 	virtual void Compile(FKismetFunctionContext& Context, UEdGraphNode* Node) override
 	{
-		UEdGraphPin* InputPin = NULL;
+		UEdGraphPin* InputPin = nullptr;
 
 		for (int32 PinIndex = 0; PinIndex < Node->Pins.Num(); ++PinIndex)
 		{
@@ -39,7 +39,7 @@ public:
 		}
 
 		UEdGraphPin* InNet = FEdGraphUtilities::GetNetFromPin(InputPin);
-		UClass* Class = Cast<UClass>(StaticLoadObject(UClass::StaticClass(), NULL, TEXT("class'VaRest.VaRestJsonObject'")));
+		UClass* Class = Cast<UClass>(StaticLoadObject(UClass::StaticClass(), nullptr, TEXT("class'VaRest.VaRestJsonObject'")));
 
 		FBPTerminal** SourceTerm = Context.NetMap.Find(InNet);
 		if (SourceTerm == nullptr)
@@ -86,7 +86,7 @@ public:
 				FBlueprintCompiledStatement& Statement = Context.AppendStatementForNode(Node);
 				FName FunctionName;
 
-				bool bIsArray = Pin->PinType.ContainerType == EPinContainerType::Array;
+				const bool bIsArray = Pin->PinType.ContainerType == EPinContainerType::Array;
 				if (FieldType == CompilerContext.GetSchema()->PC_Boolean)
 				{
 					FunctionName = bIsArray ? TEXT("GetBoolArrayField") : TEXT("GetBoolField");
@@ -122,7 +122,7 @@ public:
 	FBPTerminal* RegisterInputTerm(FKismetFunctionContext& Context, UVaRest_BreakJson* Node)
 	{
 		// Find input pin
-		UEdGraphPin* InputPin = NULL;
+		UEdGraphPin* InputPin = nullptr;
 		for (int32 PinIndex = 0; PinIndex < Node->Pins.Num(); ++PinIndex)
 		{
 			UEdGraphPin* Pin = Node->Pins[PinIndex];
@@ -168,7 +168,7 @@ public:
 			for (int32 PinIndex = 0; PinIndex < Node->Pins.Num(); ++PinIndex)
 			{
 				UEdGraphPin* Pin = Node->Pins[PinIndex];
-				if (NULL != Pin && EGPD_Output == Pin->Direction)
+				if (nullptr != Pin && EGPD_Output == Pin->Direction)
 				{
 					RegisterOutputTerm(Context, Pin, StructContextTerm);
 				}
@@ -194,7 +194,7 @@ void UVaRest_BreakJson::AllocateDefaultPins()
 {
 	const UEdGraphSchema_K2* K2Schema = GetDefault<UEdGraphSchema_K2>();
 
-	UClass* Class = Cast<UClass>(StaticLoadObject(UClass::StaticClass(), NULL, TEXT("class'VaRest.VaRestJsonObject'")));
+	UClass* Class = Cast<UClass>(StaticLoadObject(UClass::StaticClass(), nullptr, TEXT("class'VaRest.VaRestJsonObject'")));
 	UEdGraphPin* Pin = CreatePin(EGPD_Input, K2Schema->PC_Object, TEXT(""), Class, TEXT("Target"));
 
 #if ENGINE_MINOR_VERSION >= 17
@@ -213,7 +213,7 @@ FLinearColor UVaRest_BreakJson::GetNodeTitleColor() const
 
 void UVaRest_BreakJson::PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent)
 {
-	FName PropertyName = (PropertyChangedEvent.Property != NULL) ? PropertyChangedEvent.Property->GetFName() : NAME_None;
+	const FName PropertyName = (PropertyChangedEvent.Property != nullptr) ? PropertyChangedEvent.Property->GetFName() : NAME_None;
 	if (PropertyName == GET_MEMBER_NAME_STRING_CHECKED(UVaRest_BreakJson, Outputs) ||
 		PropertyName == GET_MEMBER_NAME_STRING_CHECKED(FVaRest_NamedType, Name) ||
 		PropertyName == GET_MEMBER_NAME_STRING_CHECKED(FVaRest_NamedType, Type) ||
@@ -262,7 +262,7 @@ FText UVaRest_BreakJson::GetMenuCategory() const
 void UVaRest_BreakJson::CreateProjectionPins(UEdGraphPin* Source)
 {
 	const UEdGraphSchema_K2* K2Schema = GetDefault<UEdGraphSchema_K2>();
-	UClass* Class = Cast<UClass>(StaticLoadObject(UClass::StaticClass(), NULL, TEXT("class'VaRest.VaRestJsonObject'")));
+	UClass* Class = Cast<UClass>(StaticLoadObject(UClass::StaticClass(), nullptr, TEXT("class'VaRest.VaRestJsonObject'")));
 
 	for (TArray<FVaRest_NamedType>::TIterator it(Outputs); it; ++it)
 	{
@@ -316,7 +316,7 @@ public:
 
 	virtual void Compile(FKismetFunctionContext& Context, UEdGraphNode* Node) override
 	{
-		UEdGraphPin* OutputPin = NULL;
+		UEdGraphPin* OutputPin = nullptr;
 
 		for (int32 PinIndex = 0; PinIndex < Node->Pins.Num(); ++PinIndex)
 		{
@@ -328,7 +328,7 @@ public:
 			}
 		}
 
-		UClass* Class = Cast<UClass>(StaticLoadObject(UClass::StaticClass(), NULL, TEXT("class'VaRest.VaRestJsonObject'")));
+		UClass* Class = Cast<UClass>(StaticLoadObject(UClass::StaticClass(), nullptr, TEXT("class'VaRest.VaRestJsonObject'")));
 
 		FBPTerminal** TargetTerm = Context.NetMap.Find(OutputPin);
 		if (TargetTerm == nullptr)
@@ -337,9 +337,9 @@ public:
 		}
 
 		{
-			UClass* SubsystemClass = Cast<UClass>(StaticLoadObject(UClass::StaticClass(), NULL, TEXT("class'VaRest.VaRestSubsystem'")));
+			UClass* SubsystemClass = Cast<UClass>(StaticLoadObject(UClass::StaticClass(), nullptr, TEXT("class'VaRest.VaRestSubsystem'")));
 
-			FName FunctionName = TEXT("StaticConstructVaRestJsonObject");
+			const FName FunctionName = TEXT("StaticConstructVaRestJsonObject");
 			UFunction* FunctionPtr = SubsystemClass->FindFunctionByName(FunctionName);
 			FBlueprintCompiledStatement& Statement = Context.AppendStatementForNode(Node);
 			Statement.Type = KCST_CallFunction;
@@ -388,7 +388,7 @@ public:
 				FBlueprintCompiledStatement& Statement = Context.AppendStatementForNode(Node);
 				FName FunctionName;
 
-				bool bIsArray = Pin->PinType.ContainerType == EPinContainerType::Array;
+				const bool bIsArray = Pin->PinType.ContainerType == EPinContainerType::Array;
 				if (FieldType == CompilerContext.GetSchema()->PC_Boolean)
 				{
 					FunctionName = bIsArray ? TEXT("SetBoolArrayField") : TEXT("SetBoolField");
@@ -486,7 +486,7 @@ void UVaRest_MakeJson::AllocateDefaultPins()
 {
 	const UEdGraphSchema_K2* K2Schema = GetDefault<UEdGraphSchema_K2>();
 
-	UClass* Class = Cast<UClass>(StaticLoadObject(UClass::StaticClass(), NULL, TEXT("class'VaRest.VaRestJsonObject'")));
+	UClass* Class = Cast<UClass>(StaticLoadObject(UClass::StaticClass(), nullptr, TEXT("class'VaRest.VaRestJsonObject'")));
 	UEdGraphPin* Pin = CreatePin(EGPD_Output, K2Schema->PC_Object, TEXT(""), Class, TEXT("Target"));
 
 #if ENGINE_MINOR_VERSION >= 17
@@ -505,7 +505,7 @@ FLinearColor UVaRest_MakeJson::GetNodeTitleColor() const
 
 void UVaRest_MakeJson::PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent)
 {
-	FName PropertyName = (PropertyChangedEvent.Property != NULL) ? PropertyChangedEvent.Property->GetFName() : NAME_None;
+	const FName PropertyName = (PropertyChangedEvent.Property != nullptr) ? PropertyChangedEvent.Property->GetFName() : NAME_None;
 	if (PropertyName == GET_MEMBER_NAME_STRING_CHECKED(UVaRest_MakeJson, Inputs) ||
 		PropertyName == GET_MEMBER_NAME_STRING_CHECKED(FVaRest_NamedType, Name) ||
 		PropertyName == GET_MEMBER_NAME_STRING_CHECKED(FVaRest_NamedType, Type) ||
@@ -554,7 +554,7 @@ FText UVaRest_MakeJson::GetMenuCategory() const
 void UVaRest_MakeJson::CreateProjectionPins(UEdGraphPin* Source)
 {
 	const UEdGraphSchema_K2* K2Schema = GetDefault<UEdGraphSchema_K2>();
-	UClass* Class = Cast<UClass>(StaticLoadObject(UClass::StaticClass(), NULL, TEXT("class'VaRest.VaRestJsonObject'")));
+	UClass* Class = Cast<UClass>(StaticLoadObject(UClass::StaticClass(), nullptr, TEXT("class'VaRest.VaRestJsonObject'")));
 
 	for (TArray<FVaRest_NamedType>::TIterator it(Inputs); it; ++it)
 	{

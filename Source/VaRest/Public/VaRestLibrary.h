@@ -4,7 +4,6 @@
 
 #include "Kismet/BlueprintFunctionLibrary.h"
 
-#include "VaRestDefines.h"
 #include "VaRestTypes.h"
 
 #include "VaRestLibrary.generated.h"
@@ -74,7 +73,7 @@ public:
 
 	/**
 	 * Helper to perform the very common case of hashing an ASCII string into a hex representation.
-	 * 
+	 *
 	 * @param String	Hex representation of the hash (32 lower-case hex digits)
 	 */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility", meta = (DisplayName = "String to MD5"))
@@ -91,4 +90,20 @@ public:
 	 */
 	UFUNCTION(BlueprintPure, Category = "VaRest|Utility", meta = (DisplayName = "HTTP Status Int To Enum"))
 	static FORCEINLINE EVaRestHttpStatusCode::Type HTTPStatusIntToEnum(int32 StatusCode) { return (EVaRestHttpStatusCode::Type)StatusCode; }
+
+	/**
+	 * Get the plugin's version
+	 */
+	UFUNCTION(BlueprintPure, Category = "VaRest|Utility", meta = (DisplayName = "Get VaRest Version"))
+	static FString GetVaRestVersion();
+
+	//////////////////////////////////////////////////////////////////////////
+	// Common Network Helpers
+
+public:
+	/**
+	 * Get the URL that was used when loading this World
+	 */
+	UFUNCTION(BlueprintPure, Category = "VaRest|Utility", meta = (WorldContext = "WorldContextObject"))
+	static FVaRestURL GetWorldURL(UObject* WorldContextObject);
 };

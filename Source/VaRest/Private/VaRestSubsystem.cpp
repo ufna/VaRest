@@ -6,9 +6,10 @@
 #include "VaRestJsonObject.h"
 #include "VaRestJsonValue.h"
 
-#include "Developer/Settings/Public/ISettingsModule.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
 #include "Subsystems/SubsystemBlueprintLibrary.h"
 
 UVaRestSubsystem::UVaRestSubsystem()
@@ -63,7 +64,7 @@ void UVaRestSubsystem::OnCallComplete(UVaRestRequestJSON* Request)
 		return;
 	}
 
-	auto Response = RequestMap.Find(Request);
+	const auto Response = RequestMap.Find(Request);
 	Request->OnStaticRequestComplete.Remove(Response->CompleteDelegateHandle);
 	Request->OnStaticRequestFail.Remove(Response->FailDelegateHandle);
 
@@ -163,6 +164,32 @@ UVaRestJsonValue* UVaRestSubsystem::ConstructJsonValue(const TSharedPtr<FJsonVal
 	NewValue->SetRootValue(NewVal);
 
 	return NewValue;
+}
+
+UVaRestJsonValue* UVaRestSubsystem::DecodeJsonValue(const FString& JsonString)
+{
+	const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(*JsonString);
+	TSharedPtr<FJsonValue> OutJsonValue;
+	if (FJsonSerializer::Deserialize(Reader, OutJsonValue))
+	{
+		return ConstructJsonValue(OutJsonValue);
+	}
+
+	return nullptr;
+}
+
+UVaRestJsonObject* UVaRestSubsystem::DecodeJsonObject(const FString& JsonString)
+{
+	const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(*JsonString);
+	TSharedPtr<FJsonObject> OutJsonObj;
+	if (FJsonSerializer::Deserialize(Reader, OutJsonObj))
+	{
+		auto NewJsonObj = NewObject<UVaRestJsonObject>(this);
+		NewJsonObj->SetRootObject(OutJsonObj);
+		return NewJsonObj;
+	}
+
+	return nullptr;
 }
 
 class UVaRestJsonObject* UVaRestSubsystem::LoadJsonFromFile(const FString& Path, const bool bIsRelativeToContentDir)

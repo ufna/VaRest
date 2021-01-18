@@ -5,9 +5,7 @@
 #include "VaRestJsonValue.h"
 #include "VaRestRequestJSON.h"
 
-#include "Delegates/DelegateCombinations.h"
 #include "Subsystems/EngineSubsystem.h"
-#include "Subsystems/SubsystemCollection.h"
 
 #include "VaRestSubsystem.generated.h"
 
@@ -104,6 +102,18 @@ public:
 
 	/** Create new Json value from FJsonValue (to be used from VaRestJsonObject) */
 	UVaRestJsonValue* ConstructJsonValue(const TSharedPtr<FJsonValue>& InValue);
+
+	//////////////////////////////////////////////////////////////////////////
+	// Serialization
+
+public:
+	/** Construct Json value from string */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Subsystem")
+	UVaRestJsonValue* DecodeJsonValue(const FString& JsonString);
+
+	/** Construct Json object from string */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Subsystem")
+	UVaRestJsonObject* DecodeJsonObject(const FString& JsonString);
 
 	//////////////////////////////////////////////////////////////////////////
 	// File system integration

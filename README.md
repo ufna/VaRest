@@ -1,4 +1,4 @@
-[![statusIcon](https://teamcity.ufna.dev/app/rest/builds/buildType:(id:UfnaDev_VaRest_ClangFormatCheck)/statusIcon.svg)](https://teamcity.ufna.dev/viewType.html?buildTypeId=UfnaDev_VaRest_ClangFormatCheck&guest=1)
+[![statusIcon](https://teamcity.ufna.dev/app/rest/builds/buildType:(id:UfnaDev_VaRest_BuildPlugin)/statusIcon.svg)](https://teamcity.ufna.dev/viewType.html?buildTypeId=UfnaDev_VaRest_BuildPlugin&guest=1)
 ![GitHub](https://img.shields.io/github/license/ufna/VaRest)
 ![GitHub release (latest by date including pre-releases)](https://img.shields.io/github/v/release/ufna/VaRest?include_prereleases)
 
@@ -16,7 +16,7 @@ Key features:
 
 Check the [Wiki](http://bit.ly/VaRest-Docs) for plugin usage examples and installation notes.
 
-Current version: **1.1 R 30** (UE 4.25)
+Current version: **1.1 R 32** (UE 4.26)
 
 ![SCREENSHOT](SCREENSHOT.jpg)
 
@@ -26,5 +26,5 @@ Legal info
 
 Unreal® is a trademark or registered trademark of Epic Games, Inc. in the United States of America and elsewhere.
 
-Unreal® Engine, Copyright 1998 – 2018, Epic Games, Inc. All rights reserved.
+Unreal® Engine, Copyright 1998 – 2021, Epic Games, Inc. All rights reserved.
 
