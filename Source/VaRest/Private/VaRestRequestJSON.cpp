@@ -520,11 +520,11 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 		if (FJsonSerializer::Deserialize(Reader, OutJsonValue))
 		{
 			ResponseJsonValue->SetRootValue(OutJsonValue);
-			ResponseSize = Response->GetContentLength();
 
 			if (ResponseJsonValue->GetType() == EVaJson::Object)
 			{
 				ResponseJsonObj->SetRootObject(ResponseJsonValue->GetRootValue()->AsObject());
+				ResponseSize = Response->GetContentLength();
 			}
 		}
 	}
