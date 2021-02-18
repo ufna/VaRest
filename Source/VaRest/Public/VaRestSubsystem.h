@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include "VaRestJsonObject.h"
 #include "VaRestJsonValue.h"
 #include "VaRestRequestJSON.h"
 
