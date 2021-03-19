@@ -166,15 +166,19 @@ public:
 	// Request/response data access
 
 	/** Get url of http request */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
+	UFUNCTION(BlueprintPure, Category = "VaRest|Request")
 	FString GetURL() const;
 
+	/** Get verb to the request */
+	UFUNCTION(BlueprintPure, Category = "VaRest|Request")
+	EVaRestRequestVerb GetVerb() const;
+
 	/** Get status of http request */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
+	UFUNCTION(BlueprintPure, Category = "VaRest|Request")
 	EVaRestRequestStatus GetStatus() const;
 
 	/** Get the response code of the last query */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
+	UFUNCTION(BlueprintPure, Category = "VaRest|Response")
 	int32 GetResponseCode() const;
 
 	/** Get value of desired response header */
@@ -182,7 +186,7 @@ public:
 	FString GetResponseHeader(const FString& HeaderName);
 
 	/** Get list of all response headers */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
+	UFUNCTION(BlueprintPure, Category = "VaRest|Response")
 	TArray<FString> GetAllResponseHeaders() const;
 
 	//////////////////////////////////////////////////////////////////////////
