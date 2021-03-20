@@ -9,6 +9,7 @@ namespace UnrealBuildTool.Rules
 		public VaRest(ReadOnlyTargetRules Target) : base(Target)
 		{
 			PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
+			PrecompileForTargets = PrecompileTargetsType.Any;
 
 			PrivateIncludePaths.AddRange(
 				new string[] {
