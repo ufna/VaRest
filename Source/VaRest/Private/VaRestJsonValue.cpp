@@ -130,7 +130,7 @@ int32 UVaRestJsonValue::AsInt32() const
 	return static_cast<int32>(JsonVal->AsNumber());
 }
 
-int32 UVaRestJsonValue::AsInt64() const
+int64 UVaRestJsonValue::AsInt64() const
 {
 	if (!JsonVal.IsValid())
 	{
