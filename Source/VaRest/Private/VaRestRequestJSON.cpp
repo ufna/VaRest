@@ -190,6 +190,11 @@ FString UVaRestRequestJSON::GetURL() const
 	return HttpRequest->GetURL();
 }
 
+EVaRestRequestVerb UVaRestRequestJSON::GetVerb() const
+{
+	return RequestVerb;
+}
+
 EVaRestRequestStatus UVaRestRequestJSON::GetStatus() const
 {
 	return EVaRestRequestStatus((uint8)HttpRequest->GetStatus());

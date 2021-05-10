@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include "VaRestJsonObject.h"
 #include "VaRestJsonValue.h"
 #include "VaRestRequestJSON.h"
 
@@ -124,5 +125,5 @@ public:
 	 * @param    bIsRelativeToContentDir    if set to 'false' path is treated as absolute
 	 */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility")
-	class UVaRestJsonObject* LoadJsonFromFile(const FString& Path, const bool bIsRelativeToContentDir = true);
+	UVaRestJsonObject* LoadJsonFromFile(const FString& Path, const bool bIsRelativeToContentDir = true);
 };

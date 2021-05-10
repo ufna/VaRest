@@ -67,7 +67,7 @@ public:
 
 	/** Returns this value as a int64, throwing an error if this is not an Json Number */
 	UFUNCTION(BlueprintPure, Category = "VaRest|Json")
-	int32 AsInt64() const;
+	int64 AsInt64() const;
 
 	/** Returns this value as a string, throwing an error if this is not an Json String */
 	UFUNCTION(BlueprintPure, Category = "VaRest|Json")
