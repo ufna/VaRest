@@ -589,11 +589,7 @@ int32 UVaRestJsonObject::DeserializeFromUTF8Bytes(const ANSICHAR* Bytes, int32 S
 	const ANSICHAR* EndByte = Bytes + Size;
 	while (Bytes < EndByte)
 	{
-#if ENGINE_MINOR_VERSION >= 19
 		TCHAR Char = FUtf8Helper::CodepointFromUtf8(Bytes, EndByte - Bytes);
-#else
-		TCHAR Char = FUTF8ToTCHAR_Convert::utf8codepoint(&Bytes);
-#endif
 		if (Char > 0xFFFF)
 		{
 			Char = UNICODE_BOGUS_CHAR_CODEPOINT;

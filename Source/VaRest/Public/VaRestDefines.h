@@ -4,12 +4,7 @@
 
 #include "Runtime/Launch/Resources/Version.h"
 
-#if ENGINE_MINOR_VERSION >= 15
 #include "CoreMinimal.h"
-#else
-#include "CoreUObject.h"
-#include "Engine.h"
-#endif
 
 #include "Logging/LogCategory.h"
 #include "Logging/LogMacros.h"
