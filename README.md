@@ -16,7 +16,7 @@ Key features:
 
 Check the [Wiki](http://bit.ly/VaRest-Docs) for plugin usage examples and installation notes.
 
-Current version: **1.1 R 32** (UE 4.26)
+Current version: **1.1 R 33** (UE 5.0)
 
 ![SCREENSHOT](SCREENSHOT.jpg)
 
