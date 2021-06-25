@@ -428,7 +428,14 @@ void UVaRestRequestJSON::ProcessRequest()
 		// Set Json content
 		HttpRequest->SetContentAsString(OutputString);
 
-		UE_LOG(LogVaRest, Log, TEXT("Request (json): %s %s %sJSON(%s%s%s)JSON"), *HttpRequest->GetVerb(), *HttpRequest->GetURL(), LINE_TERMINATOR, LINE_TERMINATOR, *OutputString, LINE_TERMINATOR);
+		if (UVaRestLibrary::GetVaRestSettings()->bExtendedLog)
+		{
+			UE_LOG(LogVaRest, Log, TEXT("Request (json): %s %s %sJSON(%s%s%s)JSON"), *HttpRequest->GetVerb(), *HttpRequest->GetURL(), LINE_TERMINATOR, LINE_TERMINATOR, *OutputString, LINE_TERMINATOR);
+		}
+		else
+		{
+			UE_LOG(LogVaRest, Log, TEXT("Request (json): %s %s (check bExtendedLog for additional data)"), *HttpRequest->GetVerb(), *HttpRequest->GetURL());
+		}
 
 		break;
 	}
