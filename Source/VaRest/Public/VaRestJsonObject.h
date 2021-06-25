@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "VaRestDefines.h"
+
 #include "Dom/JsonObject.h"
 #include "Templates/UnrealTypeTraits.h"
 
@@ -170,6 +172,32 @@ private:
 		}
 	}
 
+	/** Internal implementation to get number arrays of different types */
+	template <typename T>
+	TArray<T> GetTypeArrayField(const FString& FieldName) const
+	{
+		TArray<T> NumberArray;
+		if (!JsonObj->HasTypedField<EJson::Array>(FieldName) || FieldName.IsEmpty())
+		{
+			UE_LOG(LogVaRest, Warning, TEXT("%s: No field with name %s of type Array"), *VA_FUNC_LINE, *FieldName);
+			return NumberArray;
+		}
+
+		const TArray<TSharedPtr<FJsonValue>> JsonArrayValues = JsonObj->GetArrayField(FieldName);
+		for (TArray<TSharedPtr<FJsonValue>>::TConstIterator It(JsonArrayValues); It; ++It)
+		{
+			const auto Value = (*It).Get();
+			if (Value->Type != EJson::Number)
+			{
+				UE_LOG(LogVaRest, Error, TEXT("Not Number element in array with field name %s"), *FieldName);
+			}
+
+			NumberArray.Add((*It)->AsNumber());
+		}
+
+		return NumberArray;
+	}
+
 	//////////////////////////////////////////////////////////////////////////
 	// Array fields helpers (uniform arrays)
 
@@ -178,6 +206,10 @@ public:
 	 * Attn.!! float used instead of double to make the function blueprintable! */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	TArray<float> GetNumberArrayField(const FString& FieldName) const;
+
+	/** Get the field named FieldName as a Number Array. Use it only if you're sure that array is uniform! */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	TArray<int32> GetIntegerArrayField(const FString& FieldName) const;
 
 	/** Set an ObjectField named FieldName and value of Number Array
 	 * Attn.!! float used instead of double to make the function blueprintable! */
