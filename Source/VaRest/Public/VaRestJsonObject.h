@@ -3,6 +3,7 @@
 #pragma once
 
 #include "VaRestDefines.h"
+
 #include "Dom/JsonObject.h"
 #include "Templates/UnrealTypeTraits.h"
 
@@ -171,6 +172,7 @@ private:
 		}
 	}
 
+	/** Internal implementation to get number arrays of different types */
 	template <typename T>
 	TArray<T> GetTypeArrayField(const FString& FieldName) const
 	{
@@ -204,8 +206,10 @@ public:
 	 * Attn.!! float used instead of double to make the function blueprintable! */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	TArray<float> GetNumberArrayField(const FString& FieldName) const;
+
+	/** Get the field named FieldName as a Number Array. Use it only if you're sure that array is uniform! */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
-	TArray<int> GetIntegerArrayField(const FString& FieldName) const;
+	TArray<int32> GetIntegerArrayField(const FString& FieldName) const;
 
 	/** Set an ObjectField named FieldName and value of Number Array
 	 * Attn.!! float used instead of double to make the function blueprintable! */
