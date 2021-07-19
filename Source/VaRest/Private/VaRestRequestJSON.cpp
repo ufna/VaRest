@@ -248,7 +248,7 @@ void UVaRestRequestJSON::ProcessURL(const FString& Url)
 	ProcessRequest();
 }
 
-void UVaRestRequestJSON::ApplyURL(const FString& Url, UVaRestJsonObject*& Result, UObject* WorldContextObject, FLatentActionInfo LatentInfo)
+void UVaRestRequestJSON::ApplyURL(const FString& Url, UVaRestRequestJSON*& Result, UObject* WorldContextObject, FLatentActionInfo LatentInfo)
 {
 	// Be sure to trim URL because it can break links on iOS
 	FString TrimmedUrl = Url;
@@ -262,7 +262,7 @@ void UVaRestRequestJSON::ApplyURL(const FString& Url, UVaRestJsonObject*& Result
 	if (UWorld* World = GEngine->GetWorldFromContextObjectChecked(WorldContextObject))
 	{
 		FLatentActionManager& LatentActionManager = World->GetLatentActionManager();
-		FVaRestLatentAction<UVaRestJsonObject*>* Kont = LatentActionManager.FindExistingAction<FVaRestLatentAction<UVaRestJsonObject*>>(LatentInfo.CallbackTarget, LatentInfo.UUID);
+		FVaRestLatentAction<UVaRestRequestJSON*>* Kont = LatentActionManager.FindExistingAction<FVaRestLatentAction<UVaRestRequestJSON*>>(LatentInfo.CallbackTarget, LatentInfo.UUID);
 
 		if (Kont != nullptr)
 		{
@@ -270,7 +270,7 @@ void UVaRestRequestJSON::ApplyURL(const FString& Url, UVaRestJsonObject*& Result
 			LatentActionManager.RemoveActionsForObject(LatentInfo.CallbackTarget);
 		}
 
-		LatentActionManager.AddNewAction(LatentInfo.CallbackTarget, LatentInfo.UUID, ContinueAction = new FVaRestLatentAction<UVaRestJsonObject*>(this, Result, LatentInfo));
+		LatentActionManager.AddNewAction(LatentInfo.CallbackTarget, LatentInfo.UUID, ContinueAction = new FVaRestLatentAction<UVaRestRequestJSON*>(this, Result, LatentInfo));
 	}
 
 	ProcessRequest();
@@ -548,10 +548,10 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 	// Finish the latent action
 	if (ContinueAction)
 	{
-		FVaRestLatentAction<UVaRestJsonObject*>* K = ContinueAction;
+		FVaRestLatentAction<UVaRestRequestJSON*>* K = ContinueAction;
 		ContinueAction = nullptr;
 
-		K->Call(ResponseJsonObj);
+		K->Call(this);
 	}
 }
 
