@@ -421,7 +421,7 @@ void UVaRestRequestJSON::ProcessRequest()
 		HttpRequest->SetHeader(TEXT("Content-Type"), TEXT("application/json"));
 
 		// Body is ignored for get requests, so we shouldn't place json into it even if it's empty
-		if(RequestVerb == EVaRestRequestVerb::GET)
+		if (RequestVerb == EVaRestRequestVerb::GET)
 		{
 			break;
 		}
