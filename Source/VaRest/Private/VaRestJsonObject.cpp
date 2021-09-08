@@ -46,7 +46,7 @@ void UVaRestJsonObject::SetRootObject(const TSharedPtr<FJsonObject>& JsonObject)
 FString UVaRestJsonObject::EncodeJson() const
 {
 	FString OutputString;
-	TSharedRef<FCondensedJsonStringWriter> Writer = FCondensedJsonStringWriterFactory::Create(&OutputString);
+	const auto Writer = TJsonWriterFactory<>::Create(&OutputString);
 	FJsonSerializer::Serialize(JsonObj, Writer);
 
 	return OutputString;
@@ -54,13 +54,9 @@ FString UVaRestJsonObject::EncodeJson() const
 
 FString UVaRestJsonObject::EncodeJsonToSingleString() const
 {
-	FString OutputString = EncodeJson();
-
-	// Remove line terminators
-	OutputString.Replace(LINE_TERMINATOR, TEXT(""));
-
-	// Remove tabs
-	OutputString.Replace(LINE_TERMINATOR, TEXT("\t"));
+	FString OutputString;
+	const auto Writer = FCondensedJsonStringWriterFactory::Create(&OutputString);
+	FJsonSerializer::Serialize(JsonObj, Writer);
 
 	return OutputString;
 }
@@ -69,7 +65,7 @@ bool UVaRestJsonObject::DecodeJson(const FString& JsonString, bool bUseIncrement
 {
 	if (bUseIncrementalParser)
 	{
-		int32 BytesRead = DeserializeFromTCHARBytes(JsonString.GetCharArray().GetData(), JsonString.Len());
+		const int32 BytesRead = DeserializeFromTCHARBytes(JsonString.GetCharArray().GetData(), JsonString.Len());
 
 		// JsonObj is always valid, but read bytes is zero when something went wrong
 		if (BytesRead > 0)
@@ -79,7 +75,7 @@ bool UVaRestJsonObject::DecodeJson(const FString& JsonString, bool bUseIncrement
 	}
 	else
 	{
-		TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(*JsonString);
+		const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(*JsonString);
 		TSharedPtr<FJsonObject> OutJsonObj;
 		if (FJsonSerializer::Deserialize(Reader, OutJsonObj))
 		{
@@ -201,6 +197,27 @@ void UVaRestJsonObject::SetIntegerField(const FString& FieldName, int32 Number)
 	JsonObj->SetNumberField(FieldName, Number);
 }
 
+int64 UVaRestJsonObject::GetInt64Field(const FString& FieldName) const
+{
+	if (!JsonObj->HasTypedField<EJson::Number>(FieldName))
+	{
+		UE_LOG(LogVaRest, Warning, TEXT("No field with name %s of type Number"), *FieldName);
+		return 0;
+	}
+
+	return static_cast<int64>(JsonObj->GetNumberField(FieldName));
+}
+
+void UVaRestJsonObject::SetInt64Field(const FString& FieldName, int64 Number)
+{
+	if (FieldName.IsEmpty())
+	{
+		return;
+	}
+
+	JsonObj->SetNumberField(FieldName, Number);
+}
+
 FString UVaRestJsonObject::GetStringField(const FString& FieldName) const
 {
 	if (!JsonObj->HasTypedField<EJson::String>(FieldName))
@@ -281,7 +298,7 @@ void UVaRestJsonObject::SetArrayField(const FString& FieldName, const TArray<UVa
 	// Process input array and COPY original values
 	for (auto InVal : InArray)
 	{
-		TSharedPtr<FJsonValue> JsonVal = InVal->GetRootValue();
+		const TSharedPtr<FJsonValue> JsonVal = InVal->GetRootValue();
 
 		switch (InVal->GetType())
 		{
@@ -348,7 +365,7 @@ UVaRestJsonObject* UVaRestJsonObject::GetObjectField(const FString& FieldName) c
 		return nullptr;
 	}
 
-	TSharedPtr<FJsonObject> JsonObjField = JsonObj->GetObjectField(FieldName);
+	const TSharedPtr<FJsonObject> JsonObjField = JsonObj->GetObjectField(FieldName);
 
 	UVaRestJsonObject* OutRestJsonObj = NewObject<UVaRestJsonObject>();
 	OutRestJsonObj->SetRootObject(JsonObjField);
@@ -366,31 +383,45 @@ void UVaRestJsonObject::SetObjectField(const FString& FieldName, UVaRestJsonObje
 	JsonObj->SetObjectField(FieldName, JsonObject->GetRootObject());
 }
 
+void UVaRestJsonObject::SetMapFields_string(const TMap<FString, FString>& Fields)
+{
+	for (auto& field : Fields)
+	{
+		SetStringField(field.Key, field.Value);
+	}
+}
+
+void UVaRestJsonObject::SetMapFields_uint8(const TMap<FString, uint8>& Fields)
+{
+	SetMapFields_Impl(Fields);
+}
+
+void UVaRestJsonObject::SetMapFields_int32(const TMap<FString, int32>& Fields)
+{
+	SetMapFields_Impl(Fields);
+}
+
+void UVaRestJsonObject::SetMapFields_int64(const TMap<FString, int64>& Fields)
+{
+	SetMapFields_Impl(Fields);
+}
+
+void UVaRestJsonObject::SetMapFields_bool(const TMap<FString, bool>& Fields)
+{
+	SetMapFields_Impl(Fields);
+}
+
 //////////////////////////////////////////////////////////////////////////
 // Array fields helpers (uniform arrays)
 
 TArray<float> UVaRestJsonObject::GetNumberArrayField(const FString& FieldName) const
 {
-	TArray<float> NumberArray;
-	if (!JsonObj->HasTypedField<EJson::Array>(FieldName) || FieldName.IsEmpty())
-	{
-		UE_LOG(LogVaRest, Warning, TEXT("%s: No field with name %s of type Array"), *VA_FUNC_LINE, *FieldName);
-		return NumberArray;
-	}
+	return GetTypeArrayField<float>(FieldName);
+}
 
-	TArray<TSharedPtr<FJsonValue>> JsonArrayValues = JsonObj->GetArrayField(FieldName);
-	for (TArray<TSharedPtr<FJsonValue>>::TConstIterator It(JsonArrayValues); It; ++It)
-	{
-		auto Value = (*It).Get();
-		if (Value->Type != EJson::Number)
-		{
-			UE_LOG(LogVaRest, Error, TEXT("Not Number element in array with field name %s"), *FieldName);
-		}
-
-		NumberArray.Add((*It)->AsNumber());
-	}
-
-	return NumberArray;
+TArray<int32> UVaRestJsonObject::GetIntegerArrayField(const FString& FieldName) const
+{
+	return GetTypeArrayField<int32>(FieldName);
 }
 
 void UVaRestJsonObject::SetNumberArrayField(const FString& FieldName, const TArray<float>& NumberArray)
@@ -419,10 +450,10 @@ TArray<FString> UVaRestJsonObject::GetStringArrayField(const FString& FieldName)
 		return StringArray;
 	}
 
-	TArray<TSharedPtr<FJsonValue>> JsonArrayValues = JsonObj->GetArrayField(FieldName);
+	const TArray<TSharedPtr<FJsonValue>> JsonArrayValues = JsonObj->GetArrayField(FieldName);
 	for (TArray<TSharedPtr<FJsonValue>>::TConstIterator It(JsonArrayValues); It; ++It)
 	{
-		auto Value = (*It).Get();
+		const auto Value = (*It).Get();
 		if (Value->Type != EJson::String)
 		{
 			UE_LOG(LogVaRest, Error, TEXT("Not String element in array with field name %s"), *FieldName);
@@ -459,10 +490,10 @@ TArray<bool> UVaRestJsonObject::GetBoolArrayField(const FString& FieldName) cons
 		return BoolArray;
 	}
 
-	TArray<TSharedPtr<FJsonValue>> JsonArrayValues = JsonObj->GetArrayField(FieldName);
+	const TArray<TSharedPtr<FJsonValue>> JsonArrayValues = JsonObj->GetArrayField(FieldName);
 	for (TArray<TSharedPtr<FJsonValue>>::TConstIterator It(JsonArrayValues); It; ++It)
 	{
-		auto Value = (*It).Get();
+		const auto Value = (*It).Get();
 		if (Value->Type != EJson::Boolean)
 		{
 			UE_LOG(LogVaRest, Error, TEXT("Not Boolean element in array with field name %s"), *FieldName);
@@ -500,7 +531,7 @@ TArray<UVaRestJsonObject*> UVaRestJsonObject::GetObjectArrayField(const FString&
 	}
 
 	TArray<TSharedPtr<FJsonValue>> ValArray = JsonObj->GetArrayField(FieldName);
-	for (auto Value : ValArray)
+	for (const auto& Value : ValArray)
 	{
 		if (Value->Type != EJson::Object)
 		{
@@ -544,11 +575,7 @@ int32 UVaRestJsonObject::DeserializeFromUTF8Bytes(const ANSICHAR* Bytes, int32 S
 	const ANSICHAR* EndByte = Bytes + Size;
 	while (Bytes < EndByte)
 	{
-#if ENGINE_MINOR_VERSION >= 19
 		TCHAR Char = FUtf8Helper::CodepointFromUtf8(Bytes, EndByte - Bytes);
-#else
-		TCHAR Char = FUTF8ToTCHAR_Convert::utf8codepoint(&Bytes);
-#endif
 		if (Char > 0xFFFF)
 		{
 			Char = UNICODE_BOGUS_CHAR_CODEPOINT;
@@ -619,11 +646,11 @@ void UVaRestJsonObject::DecodeFromArchive(TUniquePtr<FArchive>& Reader)
 
 		if (bIsIntelByteOrder)
 		{
-			Char = CharCast<TCHAR>((UCS2CHAR)((uint16)SymbolBytes[0] + (uint16)SymbolBytes[1] * 256));
+			Char = CharCast<TCHAR>(static_cast<UCS2CHAR>(static_cast<uint16>(SymbolBytes[0]) + static_cast<uint16>(SymbolBytes[1]) * 256));
 		}
 		else
 		{
-			Char = CharCast<TCHAR>((UCS2CHAR)((uint16)SymbolBytes[1] + (uint16)SymbolBytes[0] * 256));
+			Char = CharCast<TCHAR>(static_cast<UCS2CHAR>(static_cast<uint16>(SymbolBytes[1]) + static_cast<uint16>(SymbolBytes[0]) * 256));
 		}
 
 		if (!JsonReader.Read(Char))
@@ -643,7 +670,7 @@ void UVaRestJsonObject::DecodeFromArchive(TUniquePtr<FArchive>& Reader)
 //////////////////////////////////////////////////////////////////////////
 // Serialize
 
-bool UVaRestJsonObject::WriteToFile(const FString& Path)
+bool UVaRestJsonObject::WriteToFile(const FString& Path) const
 {
 	TUniquePtr<FArchive> FileWriter(IFileManager::Get().CreateFileWriter(*Path));
 	if (!FileWriter)
@@ -699,8 +726,8 @@ bool UVaRestJsonObject::WriteToFilePath(const FString& Path, const bool bIsRelat
 
 bool UVaRestJsonObject::WriteStringToArchive(FArchive& Ar, const TCHAR* StrPtr, int64 Len)
 {
-	auto Src = StringCast<UCS2CHAR>(StrPtr, Len);
-	Ar.Serialize((UCS2CHAR*)Src.Get(), Src.Length() * sizeof(UCS2CHAR));
+	const auto Src = StringCast<UCS2CHAR>(StrPtr, Len);
+	Ar.Serialize(const_cast<UCS2CHAR*>(Src.Get()), Src.Length() * sizeof(UCS2CHAR));
 
 	return true;
 }

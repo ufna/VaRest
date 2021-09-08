@@ -9,6 +9,7 @@ namespace UnrealBuildTool.Rules
 		public VaRest(ReadOnlyTargetRules Target) : base(Target)
 		{
 			PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
+			PrecompileForTargets = PrecompileTargetsType.Any;
 
 			PrivateIncludePaths.AddRange(
 				new string[] {
@@ -23,7 +24,8 @@ namespace UnrealBuildTool.Rules
 					"CoreUObject",
 					"Engine",
 					"HTTP",
-					"Json"
+					"Json",
+					"Projects" // Required by IPluginManager etc (used to get plugin information)
 					// ... add other public dependencies that you statically link with here ...
 				});
 		}

@@ -4,33 +4,22 @@
 
 #include "VaRestDefines.h"
 #include "VaRestJsonObject.h"
-#include "VaRestSettings.h"
+#include "VaRestJsonValue.h"
 
-#include "Developer/Settings/Public/ISettingsModule.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
-
-#define LOCTEXT_NAMESPACE "FVaRest"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
+#include "Subsystems/SubsystemBlueprintLibrary.h"
 
 UVaRestSubsystem::UVaRestSubsystem()
-	: UGameInstanceSubsystem()
+	: UEngineSubsystem()
 {
 }
 
 void UVaRestSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
-
-	Settings = NewObject<UVaRestSettings>(GetTransientPackage(), "VaRestSettings", RF_Standalone);
-
-	// Register settings
-	if (ISettingsModule* SettingsModule = FModuleManager::GetModulePtr<ISettingsModule>("Settings"))
-	{
-		SettingsModule->RegisterSettings("Project", "Plugins", "VaRest",
-			LOCTEXT("RuntimeSettingsName", "VaRest"),
-			LOCTEXT("RuntimeSettingsDescription", "Configure VaRest plugin settings"),
-			Settings);
-	}
 
 	UE_LOG(LogVaRest, Log, TEXT("%s: VaRest subsystem initialized"), *VA_FUNC_LINE);
 }
@@ -41,11 +30,8 @@ void UVaRestSubsystem::Deinitialize()
 	Super::Deinitialize();
 }
 
-void UVaRestSubsystem::CallURL(const FString& URL, ERequestVerb Verb, ERequestContentType ContentType, UVaRestJsonObject* VaRestJson, const FVaRestCallDelegate& Callback)
+void UVaRestSubsystem::CallURL(const FString& URL, EVaRestRequestVerb Verb, EVaRestRequestContentType ContentType, UVaRestJsonObject* VaRestJson, const FVaRestCallDelegate& Callback)
 {
-	UWorld* World = GetWorld();
-	check(World);
-
 	// Check we have valid data json
 	if (VaRestJson == nullptr)
 	{
@@ -78,7 +64,7 @@ void UVaRestSubsystem::OnCallComplete(UVaRestRequestJSON* Request)
 		return;
 	}
 
-	auto Response = RequestMap.Find(Request);
+	const auto Response = RequestMap.Find(Request);
 	Request->OnStaticRequestComplete.Remove(Response->CompleteDelegateHandle);
 	Request->OnStaticRequestFail.Remove(Response->FailDelegateHandle);
 
@@ -92,7 +78,7 @@ UVaRestRequestJSON* UVaRestSubsystem::ConstructVaRestRequest()
 	return NewObject<UVaRestRequestJSON>(this);
 }
 
-UVaRestRequestJSON* UVaRestSubsystem::ConstructVaRestRequestExt(ERequestVerb Verb, ERequestContentType ContentType)
+UVaRestRequestJSON* UVaRestSubsystem::ConstructVaRestRequestExt(EVaRestRequestVerb Verb, EVaRestRequestContentType ContentType)
 {
 	UVaRestRequestJSON* Request = ConstructVaRestRequest();
 
@@ -105,6 +91,105 @@ UVaRestRequestJSON* UVaRestSubsystem::ConstructVaRestRequestExt(ERequestVerb Ver
 UVaRestJsonObject* UVaRestSubsystem::ConstructVaRestJsonObject()
 {
 	return NewObject<UVaRestJsonObject>(this);
+}
+
+UVaRestJsonObject* UVaRestSubsystem::StaticConstructVaRestJsonObject()
+{
+	auto SelfSystem = CastChecked<UVaRestSubsystem>(USubsystemBlueprintLibrary::GetEngineSubsystem(UVaRestSubsystem::StaticClass()), ECastCheckedType::NullChecked);
+	return SelfSystem->ConstructVaRestJsonObject();
+}
+
+UVaRestJsonValue* UVaRestSubsystem::ConstructJsonValueNumber(float Number)
+{
+	TSharedPtr<FJsonValue> NewVal = MakeShareable(new FJsonValueNumber(Number));
+
+	UVaRestJsonValue* NewValue = NewObject<UVaRestJsonValue>(this);
+	NewValue->SetRootValue(NewVal);
+
+	return NewValue;
+}
+
+UVaRestJsonValue* UVaRestSubsystem::ConstructJsonValueString(const FString& StringValue)
+{
+	TSharedPtr<FJsonValue> NewVal = MakeShareable(new FJsonValueString(StringValue));
+
+	UVaRestJsonValue* NewValue = NewObject<UVaRestJsonValue>(this);
+	NewValue->SetRootValue(NewVal);
+
+	return NewValue;
+}
+
+UVaRestJsonValue* UVaRestSubsystem::ConstructJsonValueBool(bool InValue)
+{
+	TSharedPtr<FJsonValue> NewVal = MakeShareable(new FJsonValueBoolean(InValue));
+
+	UVaRestJsonValue* NewValue = NewObject<UVaRestJsonValue>(this);
+	NewValue->SetRootValue(NewVal);
+
+	return NewValue;
+}
+
+UVaRestJsonValue* UVaRestSubsystem::ConstructJsonValueArray(const TArray<UVaRestJsonValue*>& InArray)
+{
+	// Prepare data array to create new value
+	TArray<TSharedPtr<FJsonValue>> ValueArray;
+	for (auto InVal : InArray)
+	{
+		ValueArray.Add(InVal->GetRootValue());
+	}
+
+	TSharedPtr<FJsonValue> NewVal = MakeShareable(new FJsonValueArray(ValueArray));
+
+	UVaRestJsonValue* NewValue = NewObject<UVaRestJsonValue>(this);
+	NewValue->SetRootValue(NewVal);
+
+	return NewValue;
+}
+
+UVaRestJsonValue* UVaRestSubsystem::ConstructJsonValueObject(UVaRestJsonObject* JsonObject)
+{
+	TSharedPtr<FJsonValue> NewVal = MakeShareable(new FJsonValueObject(JsonObject->GetRootObject()));
+
+	UVaRestJsonValue* NewValue = NewObject<UVaRestJsonValue>(this);
+	NewValue->SetRootValue(NewVal);
+
+	return NewValue;
+}
+
+UVaRestJsonValue* UVaRestSubsystem::ConstructJsonValue(const TSharedPtr<FJsonValue>& InValue)
+{
+	TSharedPtr<FJsonValue> NewVal = InValue;
+
+	UVaRestJsonValue* NewValue = NewObject<UVaRestJsonValue>(this);
+	NewValue->SetRootValue(NewVal);
+
+	return NewValue;
+}
+
+UVaRestJsonValue* UVaRestSubsystem::DecodeJsonValue(const FString& JsonString)
+{
+	const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(*JsonString);
+	TSharedPtr<FJsonValue> OutJsonValue;
+	if (FJsonSerializer::Deserialize(Reader, OutJsonValue))
+	{
+		return ConstructJsonValue(OutJsonValue);
+	}
+
+	return nullptr;
+}
+
+UVaRestJsonObject* UVaRestSubsystem::DecodeJsonObject(const FString& JsonString)
+{
+	const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(*JsonString);
+	TSharedPtr<FJsonObject> OutJsonObj;
+	if (FJsonSerializer::Deserialize(Reader, OutJsonObj))
+	{
+		auto NewJsonObj = NewObject<UVaRestJsonObject>(this);
+		NewJsonObj->SetRootObject(OutJsonObj);
+		return NewJsonObj;
+	}
+
+	return nullptr;
 }
 
 class UVaRestJsonObject* UVaRestSubsystem::LoadJsonFromFile(const FString& Path, const bool bIsRelativeToContentDir)
@@ -130,11 +215,3 @@ class UVaRestJsonObject* UVaRestSubsystem::LoadJsonFromFile(const FString& Path,
 
 	return nullptr;
 }
-
-UVaRestSettings* UVaRestSubsystem::GetSettings() const
-{
-	check(Settings);
-	return Settings;
-}
-
-#undef LOCTEXT_NAMESPACE

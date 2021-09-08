@@ -10,71 +10,9 @@ UVaRestJsonValue::UVaRestJsonValue(const FObjectInitializer& ObjectInitializer)
 {
 }
 
-UVaRestJsonValue* UVaRestJsonValue::ConstructJsonValueNumber(UObject* WorldContextObject, float Number)
+void UVaRestJsonValue::Reset()
 {
-	TSharedPtr<FJsonValue> NewVal = MakeShareable(new FJsonValueNumber(Number));
-
-	UVaRestJsonValue* NewValue = NewObject<UVaRestJsonValue>();
-	NewValue->SetRootValue(NewVal);
-
-	return NewValue;
-}
-
-UVaRestJsonValue* UVaRestJsonValue::ConstructJsonValueString(UObject* WorldContextObject, const FString& StringValue)
-{
-	TSharedPtr<FJsonValue> NewVal = MakeShareable(new FJsonValueString(StringValue));
-
-	UVaRestJsonValue* NewValue = NewObject<UVaRestJsonValue>();
-	NewValue->SetRootValue(NewVal);
-
-	return NewValue;
-}
-
-UVaRestJsonValue* UVaRestJsonValue::ConstructJsonValueBool(UObject* WorldContextObject, bool InValue)
-{
-	TSharedPtr<FJsonValue> NewVal = MakeShareable(new FJsonValueBoolean(InValue));
-
-	UVaRestJsonValue* NewValue = NewObject<UVaRestJsonValue>();
-	NewValue->SetRootValue(NewVal);
-
-	return NewValue;
-}
-
-UVaRestJsonValue* UVaRestJsonValue::ConstructJsonValueArray(UObject* WorldContextObject, const TArray<UVaRestJsonValue*>& InArray)
-{
-	// Prepare data array to create new value
-	TArray<TSharedPtr<FJsonValue>> ValueArray;
-	for (auto InVal : InArray)
-	{
-		ValueArray.Add(InVal->GetRootValue());
-	}
-
-	TSharedPtr<FJsonValue> NewVal = MakeShareable(new FJsonValueArray(ValueArray));
-
-	UVaRestJsonValue* NewValue = NewObject<UVaRestJsonValue>();
-	NewValue->SetRootValue(NewVal);
-
-	return NewValue;
-}
-
-UVaRestJsonValue* UVaRestJsonValue::ConstructJsonValueObject(UObject* WorldContextObject, UVaRestJsonObject* JsonObject)
-{
-	TSharedPtr<FJsonValue> NewVal = MakeShareable(new FJsonValueObject(JsonObject->GetRootObject()));
-
-	UVaRestJsonValue* NewValue = NewObject<UVaRestJsonValue>();
-	NewValue->SetRootValue(NewVal);
-
-	return NewValue;
-}
-
-UVaRestJsonValue* ConstructJsonValue(UObject* WorldContextObject, const TSharedPtr<FJsonValue>& InValue)
-{
-	TSharedPtr<FJsonValue> NewVal = InValue;
-
-	UVaRestJsonValue* NewValue = NewObject<UVaRestJsonValue>();
-	NewValue->SetRootValue(NewVal);
-
-	return NewValue;
+	JsonVal = nullptr;
 }
 
 TSharedPtr<FJsonValue>& UVaRestJsonValue::GetRootValue()
@@ -178,7 +116,29 @@ float UVaRestJsonValue::AsNumber() const
 		return 0.f;
 	}
 
-	return JsonVal->AsNumber();
+	return static_cast<float>(JsonVal->AsNumber());
+}
+
+int32 UVaRestJsonValue::AsInt32() const
+{
+	if (!JsonVal.IsValid())
+	{
+		ErrorMessage(TEXT("Number"));
+		return 0.f;
+	}
+
+	return static_cast<int32>(JsonVal->AsNumber());
+}
+
+int64 UVaRestJsonValue::AsInt64() const
+{
+	if (!JsonVal.IsValid())
+	{
+		ErrorMessage(TEXT("Number"));
+		return 0.f;
+	}
+
+	return static_cast<int64>(JsonVal->AsNumber());
 }
 
 FString UVaRestJsonValue::AsString() const
@@ -233,7 +193,7 @@ UVaRestJsonObject* UVaRestJsonValue::AsObject()
 		return nullptr;
 	}
 
-	TSharedPtr<FJsonObject> NewObj = JsonVal->AsObject();
+	const TSharedPtr<FJsonObject> NewObj = JsonVal->AsObject();
 
 	UVaRestJsonObject* JsonObj = NewObject<UVaRestJsonObject>();
 	JsonObj->SetRootObject(NewObj);

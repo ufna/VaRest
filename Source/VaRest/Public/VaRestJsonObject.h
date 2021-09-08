@@ -2,7 +2,10 @@
 
 #pragma once
 
+#include "VaRestDefines.h"
+
 #include "Dom/JsonObject.h"
+#include "Templates/UnrealTypeTraits.h"
 
 #include "VaRestJsonObject.generated.h"
 
@@ -16,6 +19,7 @@ class VAREST_API UVaRestJsonObject : public UObject
 {
 	GENERATED_UCLASS_BODY()
 
+public:
 	/** Reset all internal data */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	void Reset();
@@ -97,6 +101,14 @@ class VAREST_API UVaRestJsonObject : public UObject
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	void SetIntegerField(const FString& FieldName, int32 Number);
 
+	/** Get the field named FieldName as an Int64. Ensures that the field is present and is of type Json number. */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	int64 GetInt64Field(const FString& FieldName) const;
+
+	/** Add a field named FieldName with Int64 as value. */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	void SetInt64Field(const FString& FieldName, int64 Number);
+
 	/** Get the field named FieldName as a string. */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	FString GetStringField(const FString& FieldName) const;
@@ -121,13 +133,83 @@ class VAREST_API UVaRestJsonObject : public UObject
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	void SetObjectField(const FString& FieldName, UVaRestJsonObject* JsonObject);
 
+	/** Set a map of fields with String values */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	void SetMapFields_string(const TMap<FString, FString>& Fields);
+
+	/** Set a map of fields with uint8 values */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	void SetMapFields_uint8(const TMap<FString, uint8>& Fields);
+
+	/** Set a map of fields with int32 values */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	void SetMapFields_int32(const TMap<FString, int32>& Fields);
+
+	/** Set a map of fields with int64 values */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	void SetMapFields_int64(const TMap<FString, int64>& Fields);
+
+	/** Set a map of fields with bool values */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	void SetMapFields_bool(const TMap<FString, bool>& Fields);
+
+private:
+	/** Internal implementation for setting map fields. */
+	template <typename T>
+	void SetMapFields_Impl(const TMap<FString, T>& Fields)
+	{
+		for (auto& field : Fields)
+		{
+			// No need to support all int types as they're not supported by BP
+			if (TIsSame<T, uint8>::Value || TIsSame<T, int32>::Value || TIsSame<T, int64>::Value || TIsSame<T, float>::Value)
+			{
+				SetNumberField(field.Key, field.Value);
+			}
+			else if (TIsSame<T, bool>::Value)
+			{
+				SetBoolField(field.Key, (bool)field.Value);
+			}
+		}
+	}
+
+	/** Internal implementation to get number arrays of different types */
+	template <typename T>
+	TArray<T> GetTypeArrayField(const FString& FieldName) const
+	{
+		TArray<T> NumberArray;
+		if (!JsonObj->HasTypedField<EJson::Array>(FieldName) || FieldName.IsEmpty())
+		{
+			UE_LOG(LogVaRest, Warning, TEXT("%s: No field with name %s of type Array"), *VA_FUNC_LINE, *FieldName);
+			return NumberArray;
+		}
+
+		const TArray<TSharedPtr<FJsonValue>> JsonArrayValues = JsonObj->GetArrayField(FieldName);
+		for (TArray<TSharedPtr<FJsonValue>>::TConstIterator It(JsonArrayValues); It; ++It)
+		{
+			const auto Value = (*It).Get();
+			if (Value->Type != EJson::Number)
+			{
+				UE_LOG(LogVaRest, Error, TEXT("Not Number element in array with field name %s"), *FieldName);
+			}
+
+			NumberArray.Add((*It)->AsNumber());
+		}
+
+		return NumberArray;
+	}
+
 	//////////////////////////////////////////////////////////////////////////
 	// Array fields helpers (uniform arrays)
 
+public:
 	/** Get the field named FieldName as a Number Array. Use it only if you're sure that array is uniform!
 	 * Attn.!! float used instead of double to make the function blueprintable! */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	TArray<float> GetNumberArrayField(const FString& FieldName) const;
+
+	/** Get the field named FieldName as a Number Array. Use it only if you're sure that array is uniform! */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	TArray<int32> GetIntegerArrayField(const FString& FieldName) const;
 
 	/** Set an ObjectField named FieldName and value of Number Array
 	 * Attn.!! float used instead of double to make the function blueprintable! */
@@ -176,7 +258,7 @@ public:
 
 public:
 	/** Save json to file */
-	bool WriteToFile(const FString& Path);
+	bool WriteToFile(const FString& Path) const;
 
 	/**
 	 * Blueprint Save json to filepath 

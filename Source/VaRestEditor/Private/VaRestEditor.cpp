@@ -2,6 +2,8 @@
 
 #include "VaRestEditor.h"
 
+#include "Modules/ModuleManager.h"
+
 #define LOCTEXT_NAMESPACE "FVaRestEditorModule"
 
 void FVaRestEditorModule::StartupModule()

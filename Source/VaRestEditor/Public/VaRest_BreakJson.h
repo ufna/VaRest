@@ -5,11 +5,7 @@
 
 #include "Runtime/Launch/Resources/Version.h"
 
-#if ENGINE_MINOR_VERSION >= 15
 #include "CoreMinimal.h"
-#else
-#include "Engine.h"
-#endif
 #include "K2Node.h"
 
 #include "VaRest_BreakJson.generated.h"
@@ -27,10 +23,10 @@ enum class EVaRest_JsonType : uint8
 USTRUCT(BlueprintType)
 struct FVaRest_NamedType
 {
-	GENERATED_USTRUCT_BODY();
+	GENERATED_USTRUCT_BODY()
 
 	UPROPERTY(EditAnywhere, Category = NamedType)
-	FText Name;
+	FName Name;
 
 	UPROPERTY(EditAnywhere, Category = NamedType)
 	EVaRest_JsonType Type;

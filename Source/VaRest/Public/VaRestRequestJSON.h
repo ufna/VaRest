@@ -4,12 +4,16 @@
 
 #include "Engine/LatentActionManager.h"
 #include "Http.h"
+#include "HttpModule.h"
+#include "Interfaces/IHttpRequest.h"
 #include "LatentActions.h"
 
 #include "VaRestTypes.h"
 
 #include "VaRestRequestJSON.generated.h"
 
+class UVaRestJsonValue;
+class UVaRestJsonObject;
 class UVaRestSettings;
 
 /**
@@ -89,7 +93,7 @@ public:
 
 	/** Set verb to the request */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
-	void SetVerb(ERequestVerb Verb);
+	void SetVerb(EVaRestRequestVerb Verb);
 
 	/** Set custom verb to the request */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
@@ -98,7 +102,7 @@ public:
 	/** Set content type to the request. If you're using the x-www-form-urlencoded, 
 	 * params/constaints should be defined as key=ValueString pairs from Json data */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
-	void SetContentType(ERequestContentType ContentType);
+	void SetContentType(EVaRestRequestContentType ContentType);
 
 	/** Set content type of the request for binary post data */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
@@ -154,19 +158,27 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
 	void SetResponseObject(UVaRestJsonObject* JsonObject);
 
+	/** Get the Response Json value */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
+	UVaRestJsonValue* GetResponseValue() const;
+
 	///////////////////////////////////////////////////////////////////////////
 	// Request/response data access
 
 	/** Get url of http request */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
+	UFUNCTION(BlueprintPure, Category = "VaRest|Request")
 	FString GetURL() const;
 
+	/** Get verb to the request */
+	UFUNCTION(BlueprintPure, Category = "VaRest|Request")
+	EVaRestRequestVerb GetVerb() const;
+
 	/** Get status of http request */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
-	ERequestStatus GetStatus() const;
+	UFUNCTION(BlueprintPure, Category = "VaRest|Request")
+	EVaRestRequestStatus GetStatus() const;
 
 	/** Get the response code of the last query */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
+	UFUNCTION(BlueprintPure, Category = "VaRest|Response")
 	int32 GetResponseCode() const;
 
 	/** Get value of desired response header */
@@ -174,7 +186,7 @@ public:
 	FString GetResponseHeader(const FString& HeaderName);
 
 	/** Get list of all response headers */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
+	UFUNCTION(BlueprintPure, Category = "VaRest|Response")
 	TArray<FString> GetAllResponseHeaders() const;
 
 	//////////////////////////////////////////////////////////////////////////
@@ -294,11 +306,15 @@ protected:
 	UPROPERTY()
 	UVaRestJsonObject* ResponseJsonObj;
 
+	/** Response data stored as JSON value */
+	UPROPERTY()
+	UVaRestJsonValue* ResponseJsonValue;
+
 	/** Verb for making request (GET,POST,etc) */
-	ERequestVerb RequestVerb;
+	EVaRestRequestVerb RequestVerb;
 
 	/** Content type to be applied for request */
-	ERequestContentType RequestContentType;
+	EVaRestRequestContentType RequestContentType;
 
 	/** Mapping of header section to values. Used to generate final header string for request */
 	TMap<FString, FString> RequestHeaders;
@@ -313,12 +329,9 @@ protected:
 	FString CustomVerb;
 
 	/** Request we're currently processing */
-	TSharedRef<IHttpRequest> HttpRequest = FHttpModule::Get().CreateRequest();
+	TSharedRef<IHttpRequest, ESPMode::ThreadSafe> HttpRequest = FHttpModule::Get().CreateRequest();
 
 public:
 	/** Returns reference to internal request object */
-	TSharedRef<IHttpRequest> GetHttpRequest() const { return HttpRequest; };
-
-	/** Helper function to get runtime settings */
-	const UVaRestSettings* GetSettings() const;
+	TSharedRef<IHttpRequest, ESPMode::ThreadSafe> GetHttpRequest() const { return HttpRequest; };
 };
