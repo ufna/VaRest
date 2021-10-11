@@ -485,7 +485,7 @@ FJsonValueNonConstArray* FJSONState::GetArray()
 
 TSharedPtr<FJsonValueObject> FJSONState::PushObject()
 {
-	TSharedPtr<FJsonValueObject> Result(new FJsonValueObject(TSharedPtr<FJsonObject>(new FJsonObject())));
+	TSharedPtr<FJsonValueObject> Result(new FJsonValueObject(MakeShared<FJsonObject>()));
 	Objects.Add(Result);
 	Size += sizeof(TSharedPtr<FJsonValueObject>) + sizeof(FJsonValueObject);
 	return Result;
@@ -650,7 +650,7 @@ void FJSONReader::UpdateNotation()
 			}
 			else
 			{
-				State.Root = TSharedPtr<FJsonObject>(new FJsonObject());
+				State.Root = MakeShared<FJsonObject>();
 				State.PushObject(State.Root); // add root object
 				State.Notation = EJSONNotation::OBJECT;
 			}
