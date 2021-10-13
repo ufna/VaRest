@@ -420,6 +420,12 @@ void UVaRestRequestJSON::ProcessRequest()
 	{
 		HttpRequest->SetHeader(TEXT("Content-Type"), TEXT("application/json"));
 
+		// Body is ignored for get requests, so we shouldn't place json into it even if it's empty
+		if (RequestVerb == EVaRestRequestVerb::GET)
+		{
+			break;
+		}
+
 		// Serialize data to json string
 		FString OutputString;
 		TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&OutputString);
@@ -428,7 +434,14 @@ void UVaRestRequestJSON::ProcessRequest()
 		// Set Json content
 		HttpRequest->SetContentAsString(OutputString);
 
-		UE_LOG(LogVaRest, Log, TEXT("Request (json): %s %s %sJSON(%s%s%s)JSON"), *HttpRequest->GetVerb(), *HttpRequest->GetURL(), LINE_TERMINATOR, LINE_TERMINATOR, *OutputString, LINE_TERMINATOR);
+		if (UVaRestLibrary::GetVaRestSettings()->bExtendedLog)
+		{
+			UE_LOG(LogVaRest, Log, TEXT("Request (json): %s %s %sJSON(%s%s%s)JSON"), *HttpRequest->GetVerb(), *HttpRequest->GetURL(), LINE_TERMINATOR, LINE_TERMINATOR, *OutputString, LINE_TERMINATOR);
+		}
+		else
+		{
+			UE_LOG(LogVaRest, Log, TEXT("Request (json): %s %s (check bExtendedLog for additional data)"), *HttpRequest->GetVerb(), *HttpRequest->GetURL());
+		}
 
 		break;
 	}
