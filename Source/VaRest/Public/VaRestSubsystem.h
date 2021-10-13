@@ -15,7 +15,7 @@ DECLARE_DYNAMIC_DELEGATE_OneParam(FVaRestCallDelegate, UVaRestRequestJSON*, Requ
 USTRUCT()
 struct FVaRestCallResponse
 {
-	GENERATED_USTRUCT_BODY()
+	GENERATED_BODY()
 
 	UPROPERTY()
 	UVaRestRequestJSON* Request;
