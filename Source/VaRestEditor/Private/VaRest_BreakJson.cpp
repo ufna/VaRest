@@ -434,8 +434,8 @@ public:
 };
 
 /**
-* Main node class
-*/
+ * Main node class
+ */
 UVaRest_MakeJson::UVaRest_MakeJson(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {

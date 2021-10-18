@@ -99,7 +99,7 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
 	void SetCustomVerb(FString Verb);
 
-	/** Set content type to the request. If you're using the x-www-form-urlencoded, 
+	/** Set content type to the request. If you're using the x-www-form-urlencoded,
 	 * params/constaints should be defined as key=ValueString pairs from Json data */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
 	void SetContentType(EVaRestRequestContentType ContentType);
@@ -243,10 +243,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility")
 	void AddTag(FName Tag);
 
-	/** 
-	 * Remove tag from this request 
+	/**
+	 * Remove tag from this request
 	 *
-	 * @return Number of removed elements 
+	 * @return Number of removed elements
 	 */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility")
 	int32 RemoveTag(FName Tag);
@@ -264,7 +264,7 @@ protected:
 
 public:
 	/**
-	 * Get request response stored as a string 
+	 * Get request response stored as a string
 	 * @param bCacheResponseContent - Set true if you plan to use it few times to prevent deserialization each time
 	 */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
@@ -298,7 +298,7 @@ protected:
 	TArray<uint8> RequestBytes;
 	FString BinaryContentType;
 
-	/** Used for special cases when used wants to have plain string data in request. 
+	/** Used for special cases when used wants to have plain string data in request.
 	 * Attn.! Content-type x-www-form-urlencoded only. */
 	FString StringRequestContent;
 
