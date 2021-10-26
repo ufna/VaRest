@@ -13,7 +13,7 @@
 UENUM(BlueprintType)
 enum class EVaRest_JsonType : uint8
 {
-	//JSON_Null UMETA(DisplayName = "Null"),
+	// JSON_Null UMETA(DisplayName = "Null"),
 	JSON_Bool UMETA(DisplayName = "Boolean"),
 	JSON_Number UMETA(DisplayName = "Number"),
 	JSON_String UMETA(DisplayName = "String"),

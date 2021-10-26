@@ -11,11 +11,30 @@ AlignEscapedNewlines:                           Right
 AlignTrailingComments:                          true
 AllowShortCaseLabelsOnASingleLine:              true
 AllowShortFunctionsOnASingleLine:               InlineOnly
-BreakBeforeBraces:                              Allman
+AllowShortLambdasOnASingleLine:                 All
+BraceWrapping:
+  AfterCaseLabel: true
+  AfterClass: true
+  AfterControlStatement: true
+  AfterEnum: true
+  AfterFunction: true
+  AfterNamespace: true
+  AfterStruct: true
+  AfterUnion: true
+  AfterExternBlock: false
+  BeforeCatch: true
+  BeforeElse: true
+  BeforeLambdaBody: false
+  BeforeWhile: true
+  SplitEmptyFunction: true
+  SplitEmptyRecord: true
+  SplitEmptyNamespace: true
+BreakBeforeBraces: Custom
 BreakConstructorInitializersBeforeComma:        true
 ColumnLimit:                                    0
 PointerAlignment:                               Left
 SpacesInAngles:                                 false
+CommentPragmas:                                 '^[^ ]'
 ---
 Language: ObjC
 DisableFormat: true

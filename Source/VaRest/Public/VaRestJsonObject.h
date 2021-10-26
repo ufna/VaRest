@@ -261,7 +261,7 @@ public:
 	bool WriteToFile(const FString& Path) const;
 
 	/**
-	 * Blueprint Save json to filepath 
+	 * Blueprint Save json to filepath
 	 *
 	 * @param bIsRelativeToProjectDir If set to 'false' path is treated as absolute
 	 */
