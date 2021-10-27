@@ -6,7 +6,11 @@
 #include "VaRestJsonParser.h"
 #include "VaRestJsonValue.h"
 
-#include "Runtime/Launch/Resources/Version.h"
+#include "HAL/FileManager.h"
+#include "Misc/Paths.h"
+#include "Policies/CondensedJsonPrintPolicy.h"
+#include "Serialization/JsonSerializer.h"
+#include "Serialization/JsonWriter.h"
 
 typedef TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>> FCondensedJsonStringWriterFactory;
 typedef TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>> FCondensedJsonStringWriter;
