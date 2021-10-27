@@ -9,12 +9,11 @@
 #include "VaRestSettings.h"
 
 #include "Engine/Engine.h"
-#include "Engine/EngineTypes.h"
 #include "Engine/LatentActionManager.h"
 #include "Engine/World.h"
 #include "Interfaces/IHttpResponse.h"
-#include "Json.h"
-#include "Runtime/Launch/Resources/Version.h"
+#include "Serialization/JsonSerializer.h"
+#include "Serialization/JsonWriter.h"
 
 FString UVaRestRequestJSON::DeprecatedResponseString(TEXT("DEPRECATED: Please use GetResponseContentAsString() instead"));
 
