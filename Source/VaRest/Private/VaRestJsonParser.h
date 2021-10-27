@@ -2,7 +2,8 @@
 
 #pragma once
 
-#include "Json.h"
+#include "CoreMinimal.h"
+#include "Dom/JsonValue.h"
 
 struct FUtf8Helper
 {
