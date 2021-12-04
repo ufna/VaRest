@@ -16,15 +16,18 @@ UVaRestRequestAsync* UVaRestRequestAsync::VaRestRequestAsync(FString URL, EVaRes
 
 void UVaRestRequestAsync::Activate()
 {
-	VaRestSubsystem = GEngine->GetEngineSubsystem<UVaRestSubsystem>();
-	JSONRequest = VaRestSubsystem->ConstructVaRestRequestExt(Verb, ContentType);
-	JsonObject = JSONRequest->GetRequestObject();
+	// Create request
+	UVaRestSubsystem* VaRestSubsystem = GEngine->GetEngineSubsystem<UVaRestSubsystem>();
+	UVaRestRequestJSON* RequestJSON = VaRestSubsystem->ConstructVaRestRequestExt(Verb, ContentType);
+	UVaRestJsonObject* JsonObject = RequestJSON->GetRequestObject();
 	JsonObject->DecodeJson(RequestMessage);
-	
-	JSONRequest->OnRequestComplete.AddDynamic(this, &UVaRestRequestAsync::OnSuccessResend);
-	JSONRequest->OnRequestFail.AddDynamic(this, &UVaRestRequestAsync::OnFailureResend);
-	
-	JSONRequest->ProcessURL(URL);
+
+	// Bind to delegates
+	RequestJSON->OnRequestComplete.AddDynamic(this, &UVaRestRequestAsync::OnSuccessResend);
+	RequestJSON->OnRequestFail.AddDynamic(this, &UVaRestRequestAsync::OnFailureResend);
+
+	// Start request
+	RequestJSON->ProcessURL(URL);
 }
 
 void UVaRestRequestAsync::OnSuccessResend(class UVaRestRequestJSON* RequestJSON)

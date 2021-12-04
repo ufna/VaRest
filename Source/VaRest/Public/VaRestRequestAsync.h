@@ -9,8 +9,6 @@
 #include "VaRestTypes.h"
 #include "VaRestRequestAsync.generated.h"
 
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FResponseDelegate, FString, ResposeMessage);
-
 /**
 * This is async function that encapsulate callback delegates and make your code more clear.
 * 
@@ -21,41 +19,34 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FResponseDelegate, FString, ResposeM
 * https://www.unrealengine.com/marketplace/en-US/product/dbjson
 */
 
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FResponseDelegate, FString, ResposeMessage);
+
 UCLASS()
 class VAREST_API UVaRestRequestAsync : public UBlueprintAsyncActionBase
 {
 	GENERATED_BODY()
-
-	UPROPERTY()
-	UVaRestSubsystem* VaRestSubsystem;
 	
-	UPROPERTY()
-	UVaRestRequestJSON* JSONRequest;
-
-	UPROPERTY()
-	UVaRestJsonObject* JsonObject;
-
-
 	FString URL;
 	EVaRestRequestVerb Verb;
 	EVaRestRequestContentType ContentType;
 	FString RequestMessage;
 	
-public:
 	UPROPERTY(BlueprintAssignable)
 	FResponseDelegate OnSuccess;
 
 	UPROPERTY(BlueprintAssignable)
 	FResponseDelegate OnFail;
 
-	UFUNCTION(BlueprintCallable, meta = (BlueprintUnternalUseOnly = "true", DisplayName = "VaRest Simple Request Async"))
-	static UVaRestRequestAsync* VaRestRequestAsync(FString URL, EVaRestRequestVerb Verb, EVaRestRequestContentType ContentType, FString RequestMessage);
-
-	virtual void Activate() override;
-
 	UFUNCTION()
 	void OnSuccessResend(class UVaRestRequestJSON* RequestJSON);
 
 	UFUNCTION()
 	void OnFailureResend(class UVaRestRequestJSON* RequestJSON);
+
+	virtual void Activate() override;
+	
+public:
+	UFUNCTION(BlueprintCallable, meta = (BlueprintUnternalUseOnly = "true", DisplayName = "VaRest Simple Request Async"))
+	static UVaRestRequestAsync* VaRestRequestAsync(FString URL, EVaRestRequestVerb Verb, EVaRestRequestContentType ContentType, FString RequestMessage);
 };
