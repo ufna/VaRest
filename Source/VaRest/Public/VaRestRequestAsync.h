@@ -20,7 +20,7 @@
 */
 
 
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FResponseDelegate, FString, ResposeMessage);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FResponseDelegate, int32, ResponseCode, FString, ResposeMessage);
 
 UCLASS()
 class VAREST_API UVaRestRequestAsync : public UBlueprintAsyncActionBase

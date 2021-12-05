@@ -32,12 +32,12 @@ void UVaRestRequestAsync::Activate()
 
 void UVaRestRequestAsync::OnSuccessResend(class UVaRestRequestJSON* RequestJSON)
 {
-	OnSuccess.Broadcast(RequestJSON->GetResponseContentAsString());
+	OnSuccess.Broadcast(RequestJSON->GetResponseCode(), RequestJSON->GetResponseContentAsString(false));
 	RemoveFromRoot();
 }
 
 void UVaRestRequestAsync::OnFailureResend(class UVaRestRequestJSON* RequestJSON)
 {
-	OnFail.Broadcast(RequestJSON->GetResponseContentAsString());
+	OnFail.Broadcast(RequestJSON->GetResponseCode(), RequestJSON->GetResponseContentAsString(false));
 	RemoveFromRoot();
 }
