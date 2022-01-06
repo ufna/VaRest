@@ -129,6 +129,9 @@ void UVaRestRequestJSON::ResetResponseData()
 
 	// #127 Reset string to deprecated state
 	ResponseContent = DeprecatedResponseString;
+
+	ResponseBytes.Empty();
+	ResponseContentLength = 0;
 }
 
 void UVaRestRequestJSON::Cancel()
@@ -225,6 +228,16 @@ TArray<FString> UVaRestRequestJSON::GetAllResponseHeaders() const
 		Result.Add(It.Key() + TEXT(": ") + It.Value());
 	}
 	return Result;
+}
+
+int32 UVaRestRequestJSON::GetResponseContentLength() const
+{
+	return ResponseContentLength;
+}
+
+const TArray<uint8>& UVaRestRequestJSON::GetResponseContent() const
+{
+	return ResponseBytes;
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -544,6 +557,9 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 		// Save response data as a string
 		ResponseContent = Response->GetContentAsString();
 		ResponseSize = ResponseContent.GetAllocatedSize();
+
+		ResponseBytes = Response->GetContent();
+		ResponseContentLength = Response->GetContentLength();
 	}
 
 	// Broadcast the result events on next tick
