@@ -302,7 +302,7 @@ void UVaRestJsonObject::SetArrayField(const FString& FieldName, const TArray<UVa
 	// Process input array and COPY original values
 	for (auto InVal : InArray)
 	{
-		if(InVal == nullptr)
+		if (InVal == nullptr)
 			continue;
 
 		const TSharedPtr<FJsonValue> JsonVal = InVal->GetRootValue();
@@ -566,7 +566,7 @@ void UVaRestJsonObject::SetObjectArrayField(const FString& FieldName, const TArr
 	TArray<TSharedPtr<FJsonValue>> EntriesArray;
 	for (auto Value : ObjectArray)
 	{
-		if(Value == nullptr)
+		if (Value == nullptr)
 			continue;
 
 		EntriesArray.Add(MakeShareable(new FJsonValueObject(Value->GetRootObject())));
