@@ -48,6 +48,10 @@ public:
 	//////////////////////////////////////////////////////////////////////////
 	// FJsonObject API
 
+	/** Gets the type of value as string for a given field */
+	UFUNCTION(BlueprintPure, Category = "VaRest|Json")
+	FString GetFieldTypeString(const FString& FieldName) const;
+
 	/** Returns a list of field names that exist in the object */
 	UFUNCTION(BlueprintPure, Category = "VaRest|Json")
 	TArray<FString> GetFieldNames() const;
