@@ -99,6 +99,38 @@ bool UVaRestJsonObject::DecodeJson(const FString& JsonString, bool bUseIncrement
 //////////////////////////////////////////////////////////////////////////
 // FJsonObject API
 
+FString UVaRestJsonObject::GetFieldTypeString(const FString& FieldName) const
+{
+	if (!JsonObj->HasTypedField<EJson::Null>(FieldName))
+	{
+		return TEXT("Null");
+	}
+	else if (!JsonObj->HasTypedField<EJson::String>(FieldName))
+	{
+		return TEXT("String");
+	}
+	else if (!JsonObj->HasTypedField<EJson::Number>(FieldName))
+	{
+		return TEXT("Number");
+	}
+	else if (!JsonObj->HasTypedField<EJson::Boolean>(FieldName))
+	{
+		return TEXT("Boolean");
+	}
+	else if (!JsonObj->HasTypedField<EJson::Object>(FieldName))
+	{
+		return TEXT("Object");
+	}
+	else if (!JsonObj->HasTypedField<EJson::Array>(FieldName))
+	{
+		return TEXT("Array");
+	}
+
+	UE_LOG(LogVaRest, Warning, TEXT("Field with name %s type unkonwn."), *FieldName);
+	return "";
+
+}
+
 TArray<FString> UVaRestJsonObject::GetFieldNames() const
 {
 	TArray<FString> Result;
