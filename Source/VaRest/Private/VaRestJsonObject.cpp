@@ -126,7 +126,7 @@ FString UVaRestJsonObject::GetFieldTypeString(const FString& FieldName) const
 		return TEXT("Array");
 	}
 
-	UE_LOG(LogVaRest, Warning, TEXT("Field with name %s type unkonwn."), *FieldName);
+	UE_LOG(LogVaRest, Warning, TEXT("Field with name %s type unknown"), *FieldName);
 	return "";
 }
 
