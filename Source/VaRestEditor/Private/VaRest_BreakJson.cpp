@@ -77,7 +77,7 @@ public:
 				{
 					FunctionName = bIsArray ? TEXT("GetBoolArrayField") : TEXT("GetBoolField");
 				}
-				else if (FieldType == CompilerContext.GetSchema()->PC_Float)
+				else if (FieldType == CompilerContext.GetSchema()->PC_Real)
 				{
 					FunctionName = bIsArray ? TEXT("GetNumberArrayField") : TEXT("GetNumberField");
 				}
@@ -259,7 +259,7 @@ void UVaRest_BreakJson::CreateProjectionPins(UEdGraphPin* Source)
 			break;
 
 		case EVaRest_JsonType::JSON_Number:
-			Type = K2Schema->PC_Float;
+			Type = K2Schema->PC_Real;
 			break;
 
 		case EVaRest_JsonType::JSON_String:
@@ -357,7 +357,7 @@ public:
 				{
 					FunctionName = bIsArray ? TEXT("SetBoolArrayField") : TEXT("SetBoolField");
 				}
-				else if (FieldType == CompilerContext.GetSchema()->PC_Float)
+				else if (FieldType == CompilerContext.GetSchema()->PC_Real)
 				{
 					FunctionName = bIsArray ? TEXT("SetNumberArrayField") : TEXT("SetNumberField");
 				}
@@ -528,7 +528,7 @@ void UVaRest_MakeJson::CreateProjectionPins(UEdGraphPin* Source)
 			break;
 
 		case EVaRest_JsonType::JSON_Number:
-			Type = K2Schema->PC_Float;
+			Type = K2Schema->PC_Real;
 			break;
 
 		case EVaRest_JsonType::JSON_String:
