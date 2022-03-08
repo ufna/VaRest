@@ -1,4 +1,3 @@
-[![statusIcon](https://teamcity.ufna.dev/app/rest/builds/buildType:(id:UfnaDev_VaRest_BuildPlugin)/statusIcon.svg)](https://teamcity.ufna.dev/viewType.html?buildTypeId=UfnaDev_VaRest_BuildPlugin&guest=1)
 ![GitHub](https://img.shields.io/github/license/ufna/VaRest)
 ![GitHub release (latest by date including pre-releases)](https://img.shields.io/github/v/release/ufna/VaRest?include_prereleases)
 
