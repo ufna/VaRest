@@ -30,7 +30,7 @@ void UVaRestSubsystem::Deinitialize()
 	Super::Deinitialize();
 }
 
-void UVaRestSubsystem::CallURL(const FString& URL, EVaRestRequestVerb Verb, TMap<FString, FString> headers, EVaRestRequestContentType ContentType, UVaRestJsonObject* VaRestJson, const FVaRestCallDelegate& Callback)
+void UVaRestSubsystem::CallURL(const FString& URL, EVaRestRequestVerb Verb, const TMap<FString, FString> headers, EVaRestRequestContentType ContentType, UVaRestJsonObject* VaRestJson, const FVaRestCallDelegate& Callback)
 {
 	// Check we have valid data json
 	if (VaRestJson == nullptr)
@@ -45,9 +45,9 @@ void UVaRestSubsystem::CallURL(const FString& URL, EVaRestRequestVerb Verb, TMap
 	Request->SetRequestObject(VaRestJson);
 	
 	for (const TPair<FString, FString>& pair : headers)
+	{
 		Request->SetHeader(pair.Key, pair.Value);
-	
-	
+	}
 
 	FVaRestCallResponse Response;
 	Response.Request = Request;

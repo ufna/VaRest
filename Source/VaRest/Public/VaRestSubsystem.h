@@ -15,7 +15,7 @@ DECLARE_DYNAMIC_DELEGATE_OneParam(FVaRestCallDelegate, UVaRestRequestJSON*, Requ
 USTRUCT()
 struct FVaRestCallResponse
 {
-	GENERATED_USTRUCT_BODY()
+	GENERATED_BODY()
 
 	UPROPERTY()
 	UVaRestRequestJSON* Request;
@@ -52,7 +52,7 @@ public:
 public:
 	/** Easy way to process http requests */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility")
-	void CallURL(const FString& URL, EVaRestRequestVerb Verb, TMap<FString, FString> headers, EVaRestRequestContentType ContentType, UVaRestJsonObject* VaRestJson, const FVaRestCallDelegate& Callback);
+	void CallURL(const FString& URL, EVaRestRequestVerb Verb, const TMap<FString, FString> headers, EVaRestRequestContentType ContentType, UVaRestJsonObject* VaRestJson, const FVaRestCallDelegate& Callback);
 
 	/** Called when URL is processed (one for both success/unsuccess events)*/
 	void OnCallComplete(UVaRestRequestJSON* Request);
