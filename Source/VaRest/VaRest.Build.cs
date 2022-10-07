@@ -10,6 +10,7 @@ namespace UnrealBuildTool.Rules
 		{
 			PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 			PrecompileForTargets = PrecompileTargetsType.Any;
+			IncludeOrderVersion = EngineIncludeOrderVersion.Latest;
 
 			PrivateIncludePaths.AddRange(
 				new string[] {
