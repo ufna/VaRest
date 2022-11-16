@@ -542,12 +542,12 @@ TSharedPtr<FJsonValueNonConstString> FJSONState::PushString()
 
 void FJSONState::ClearData()
 {
-	Data.Empty(Data.GetCharArray().Max());
+	Data.Reset();
 }
 
 void FJSONState::ClearKey()
 {
-	Key.Empty(Key.GetCharArray().Max());
+	Key.Reset();
 }
 
 void FJSONState::DataToKey()
