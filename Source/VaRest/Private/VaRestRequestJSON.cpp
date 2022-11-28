@@ -301,6 +301,9 @@ void UVaRestRequestJSON::ExecuteProcessRequest()
 
 void UVaRestRequestJSON::ProcessRequest()
 {
+	// Force add to root once request is launched
+	AddToRoot();
+
 	// Set verb
 	switch (RequestVerb)
 	{
@@ -480,6 +483,9 @@ void UVaRestRequestJSON::ProcessRequest()
 
 void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bWasSuccessful)
 {
+	// Remove from root on completion
+	RemoveFromRoot();
+
 	// Be sure that we have no data from previous response
 	ResetResponseData();
 
