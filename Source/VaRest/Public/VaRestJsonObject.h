@@ -92,10 +92,13 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	float GetNumberField(const FString& FieldName) const;
 
-	/** Add a field named FieldName with Number as value
-	 * Attn.!! float used instead of double to make the function blueprintable! */
+	/** DEPRECATED Attn.!! float used instead of double to make the function blueprintable! */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	void SetNumberField(const FString& FieldName, float Number);
+
+	/** Add a field named FieldName with Number as value */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	void SetNumberFieldDouble(const FString& FieldName, double Number);
 
 	/** Get the field named FieldName as an Integer. Ensures that the field is present and is of type Json number. */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
@@ -215,10 +218,13 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	TArray<int32> GetIntegerArrayField(const FString& FieldName) const;
 
-	/** Set an ObjectField named FieldName and value of Number Array
-	 * Attn.!! float used instead of double to make the function blueprintable! */
+	/** DEPRECATED Attn.!! float used instead of double to make the function blueprintable! */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
 	void SetNumberArrayField(const FString& FieldName, const TArray<float>& NumberArray);
+
+	/** Set an ObjectField named FieldName and value of Number Array */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")
+	void SetNumberArrayFieldDouble(const FString& FieldName, const TArray<double>& NumberArray);
 
 	/** Get the field named FieldName as a String Array. Use it only if you're sure that array is uniform! */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json")

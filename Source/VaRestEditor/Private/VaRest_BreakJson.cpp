@@ -361,7 +361,7 @@ public:
 				}
 				else if (FieldType == CompilerContext.GetSchema()->PC_Real)
 				{
-					FunctionName = bIsArray ? TEXT("SetNumberArrayField") : TEXT("SetNumberField");
+					FunctionName = bIsArray ? TEXT("SetNumberArrayFieldDouble") : TEXT("SetNumberFieldDouble");
 				}
 				else if (FieldType == CompilerContext.GetSchema()->PC_String)
 				{
