@@ -168,11 +168,11 @@ private:
 		for (auto& field : Fields)
 		{
 			// No need to support all int types as they're not supported by BP
-			if (TIsSame<T, uint8>::Value || TIsSame<T, int32>::Value || TIsSame<T, int64>::Value || TIsSame<T, float>::Value)
+			if (std::is_same_v<T, uint8> || std::is_same_v<T, int32> || std::is_same_v<T, int64> || std::is_same_v<T, float>)
 			{
 				SetNumberField(field.Key, field.Value);
 			}
-			else if (TIsSame<T, bool>::Value)
+			else if (std::is_same_v<T, bool>)
 			{
 				SetBoolField(field.Key, (bool)field.Value);
 			}
