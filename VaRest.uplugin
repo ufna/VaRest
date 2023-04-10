@@ -6,7 +6,7 @@
 	"VersionName" : "1.1-r32",
 	"CreatedBy" : "Vladimir Alyamkin",
 	"CreatedByURL" : "https://ufna.dev",
-	"EngineVersion" : "5.0.0",
+	"EngineVersion" : "5.2.0",
 	"Description" : "Plugin that makes REST (JSON) server communication easy to use",
 	"Category" : "Network",
 	"DocsURL": "https://bit.ly/VaRest-Docs",

@@ -211,6 +211,16 @@ void UVaRestJsonObject::SetNumberField(const FString& FieldName, float Number)
 	JsonObj->SetNumberField(FieldName, Number);
 }
 
+void UVaRestJsonObject::SetNumberFieldDouble(const FString& FieldName, double Number)
+{
+	if (FieldName.IsEmpty())
+	{
+		return;
+	}
+
+	JsonObj->SetNumberField(FieldName, Number);
+}
+
 int32 UVaRestJsonObject::GetIntegerField(const FString& FieldName) const
 {
 	if (!JsonObj->HasTypedField<EJson::Number>(FieldName))
@@ -463,6 +473,23 @@ TArray<int32> UVaRestJsonObject::GetIntegerArrayField(const FString& FieldName) 
 }
 
 void UVaRestJsonObject::SetNumberArrayField(const FString& FieldName, const TArray<float>& NumberArray)
+{
+	if (FieldName.IsEmpty())
+	{
+		return;
+	}
+
+	TArray<TSharedPtr<FJsonValue>> EntriesArray;
+
+	for (auto Number : NumberArray)
+	{
+		EntriesArray.Add(MakeShareable(new FJsonValueNumber(Number)));
+	}
+
+	JsonObj->SetArrayField(FieldName, EntriesArray);
+}
+
+void UVaRestJsonObject::SetNumberArrayFieldDouble(const FString& FieldName, const TArray<double>& NumberArray)
 {
 	if (FieldName.IsEmpty())
 	{

@@ -249,6 +249,7 @@ void UVaRest_BreakJson::CreateProjectionPins(UEdGraphPin* Source)
 	for (TArray<FVaRest_NamedType>::TIterator it(Outputs); it; ++it)
 	{
 		FName Type;
+		FName SubCategory;
 
 		UObject* Subtype = nullptr;
 
@@ -260,6 +261,7 @@ void UVaRest_BreakJson::CreateProjectionPins(UEdGraphPin* Source)
 
 		case EVaRest_JsonType::JSON_Number:
 			Type = K2Schema->PC_Real;
+			SubCategory = K2Schema->PC_Double;
 			break;
 
 		case EVaRest_JsonType::JSON_String:
@@ -274,7 +276,7 @@ void UVaRest_BreakJson::CreateProjectionPins(UEdGraphPin* Source)
 
 		UEdGraphNode::FCreatePinParams OutputPinParams;
 		OutputPinParams.ContainerType = (*it).bIsArray ? EPinContainerType::Array : EPinContainerType::None;
-		UEdGraphPin* OutputPin = CreatePin(EGPD_Output, Type, TEXT(""), Subtype, (*it).Name, OutputPinParams);
+		UEdGraphPin* OutputPin = CreatePin(EGPD_Output, Type, SubCategory, Subtype, (*it).Name, OutputPinParams);
 	}
 }
 
@@ -359,7 +361,7 @@ public:
 				}
 				else if (FieldType == CompilerContext.GetSchema()->PC_Real)
 				{
-					FunctionName = bIsArray ? TEXT("SetNumberArrayField") : TEXT("SetNumberField");
+					FunctionName = bIsArray ? TEXT("SetNumberArrayFieldDouble") : TEXT("SetNumberFieldDouble");
 				}
 				else if (FieldType == CompilerContext.GetSchema()->PC_String)
 				{
@@ -519,6 +521,7 @@ void UVaRest_MakeJson::CreateProjectionPins(UEdGraphPin* Source)
 	for (TArray<FVaRest_NamedType>::TIterator it(Inputs); it; ++it)
 	{
 		FName Type;
+		FName SubCategory;
 		UObject* Subtype = nullptr;
 
 		switch ((*it).Type)
@@ -529,6 +532,7 @@ void UVaRest_MakeJson::CreateProjectionPins(UEdGraphPin* Source)
 
 		case EVaRest_JsonType::JSON_Number:
 			Type = K2Schema->PC_Real;
+			SubCategory = K2Schema->PC_Double;
 			break;
 
 		case EVaRest_JsonType::JSON_String:
@@ -543,7 +547,7 @@ void UVaRest_MakeJson::CreateProjectionPins(UEdGraphPin* Source)
 
 		UEdGraphNode::FCreatePinParams InputPinParams;
 		InputPinParams.ContainerType = (*it).bIsArray ? EPinContainerType::Array : EPinContainerType::None;
-		UEdGraphPin* InputPin = CreatePin(EGPD_Input, Type, TEXT(""), Subtype, (*it).Name, InputPinParams);
+		UEdGraphPin* InputPin = CreatePin(EGPD_Input, Type, SubCategory, Subtype, (*it).Name, InputPinParams);
 
 		InputPin->SetSavePinIfOrphaned(false);
 	}
