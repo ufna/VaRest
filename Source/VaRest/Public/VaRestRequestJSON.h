@@ -189,6 +189,23 @@ public:
 	UFUNCTION(BlueprintPure, Category = "VaRest|Response")
 	TArray<FString> GetAllResponseHeaders() const;
 
+	/**
+	 * Shortcut to get the Content-Length header value. Will not always return non-zero.
+	 * If you want the real length of the payload, get the payload and check it's length.
+	 *
+	 * @return the content length (if available)
+	 */
+	UFUNCTION(BlueprintPure, Category = "VaRest|Response")
+	int32 GetResponseContentLength() const;
+
+	/**
+	 * Get the content payload of the request or response.
+	 *
+	 * @param Content - array that will be filled with the content.
+	 */
+	UFUNCTION(BlueprintPure, Category = "VaRest|Response")
+	const TArray<uint8>& GetResponseContent() const;
+
 	//////////////////////////////////////////////////////////////////////////
 	// URL processing
 
@@ -297,6 +314,10 @@ protected:
 
 	TArray<uint8> RequestBytes;
 	FString BinaryContentType;
+
+	/** Raw response storage */
+	TArray<uint8> ResponseBytes;
+	int32 ResponseContentLength;
 
 	/** Used for special cases when used wants to have plain string data in request.
 	 * Attn.! Content-type x-www-form-urlencoded only. */

@@ -1,4 +1,3 @@
-[![statusIcon](https://teamcity.ufna.dev/app/rest/builds/buildType:(id:UfnaDev_VaRest_BuildPlugin)/statusIcon.svg)](https://teamcity.ufna.dev/viewType.html?buildTypeId=UfnaDev_VaRest_BuildPlugin&guest=1)
 ![GitHub](https://img.shields.io/github/license/ufna/VaRest)
 ![GitHub release (latest by date including pre-releases)](https://img.shields.io/github/v/release/ufna/VaRest?include_prereleases)
 
@@ -16,7 +15,7 @@ Key features:
 
 Check the [Wiki](http://bit.ly/VaRest-Docs) for plugin usage examples and installation notes.
 
-Current version: **1.1.33** (UE 4.27; please check the [5.0](https://github.com/ufna/VaRest/tree/5.0) branch for UE5 EA support).
+Current version: **1.1 R 33** (UE 5.2)
 
 ![SCREENSHOT](SCREENSHOT.jpg)
 

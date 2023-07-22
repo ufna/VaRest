@@ -99,6 +99,37 @@ bool UVaRestJsonObject::DecodeJson(const FString& JsonString, bool bUseIncrement
 //////////////////////////////////////////////////////////////////////////
 // FJsonObject API
 
+FString UVaRestJsonObject::GetFieldTypeString(const FString& FieldName) const
+{
+	if (!JsonObj->HasTypedField<EJson::Null>(FieldName))
+	{
+		return TEXT("Null");
+	}
+	else if (!JsonObj->HasTypedField<EJson::String>(FieldName))
+	{
+		return TEXT("String");
+	}
+	else if (!JsonObj->HasTypedField<EJson::Number>(FieldName))
+	{
+		return TEXT("Number");
+	}
+	else if (!JsonObj->HasTypedField<EJson::Boolean>(FieldName))
+	{
+		return TEXT("Boolean");
+	}
+	else if (!JsonObj->HasTypedField<EJson::Object>(FieldName))
+	{
+		return TEXT("Object");
+	}
+	else if (!JsonObj->HasTypedField<EJson::Array>(FieldName))
+	{
+		return TEXT("Array");
+	}
+
+	UE_LOG(LogVaRest, Warning, TEXT("Field with name %s type unknown"), *FieldName);
+	return "";
+}
+
 TArray<FString> UVaRestJsonObject::GetFieldNames() const
 {
 	TArray<FString> Result;
@@ -171,6 +202,16 @@ float UVaRestJsonObject::GetNumberField(const FString& FieldName) const
 }
 
 void UVaRestJsonObject::SetNumberField(const FString& FieldName, float Number)
+{
+	if (FieldName.IsEmpty())
+	{
+		return;
+	}
+
+	JsonObj->SetNumberField(FieldName, Number);
+}
+
+void UVaRestJsonObject::SetNumberFieldDouble(const FString& FieldName, double Number)
 {
 	if (FieldName.IsEmpty())
 	{
@@ -302,6 +343,9 @@ void UVaRestJsonObject::SetArrayField(const FString& FieldName, const TArray<UVa
 	// Process input array and COPY original values
 	for (auto InVal : InArray)
 	{
+		if (InVal == nullptr)
+			continue;
+
 		const TSharedPtr<FJsonValue> JsonVal = InVal->GetRootValue();
 
 		switch (InVal->GetType())
@@ -445,6 +489,23 @@ void UVaRestJsonObject::SetNumberArrayField(const FString& FieldName, const TArr
 	JsonObj->SetArrayField(FieldName, EntriesArray);
 }
 
+void UVaRestJsonObject::SetNumberArrayFieldDouble(const FString& FieldName, const TArray<double>& NumberArray)
+{
+	if (FieldName.IsEmpty())
+	{
+		return;
+	}
+
+	TArray<TSharedPtr<FJsonValue>> EntriesArray;
+
+	for (auto Number : NumberArray)
+	{
+		EntriesArray.Add(MakeShareable(new FJsonValueNumber(Number)));
+	}
+
+	JsonObj->SetArrayField(FieldName, EntriesArray);
+}
+
 TArray<FString> UVaRestJsonObject::GetStringArrayField(const FString& FieldName) const
 {
 	TArray<FString> StringArray;
@@ -563,6 +624,9 @@ void UVaRestJsonObject::SetObjectArrayField(const FString& FieldName, const TArr
 	TArray<TSharedPtr<FJsonValue>> EntriesArray;
 	for (auto Value : ObjectArray)
 	{
+		if (Value == nullptr)
+			continue;
+
 		EntriesArray.Add(MakeShareable(new FJsonValueObject(Value->GetRootObject())));
 	}
 

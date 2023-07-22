@@ -129,6 +129,9 @@ void UVaRestRequestJSON::ResetResponseData()
 
 	// #127 Reset string to deprecated state
 	ResponseContent = DeprecatedResponseString;
+
+	ResponseBytes.Empty();
+	ResponseContentLength = 0;
 }
 
 void UVaRestRequestJSON::Cancel()
@@ -227,6 +230,16 @@ TArray<FString> UVaRestRequestJSON::GetAllResponseHeaders() const
 	return Result;
 }
 
+int32 UVaRestRequestJSON::GetResponseContentLength() const
+{
+	return ResponseContentLength;
+}
+
+const TArray<uint8>& UVaRestRequestJSON::GetResponseContent() const
+{
+	return ResponseBytes;
+}
+
 //////////////////////////////////////////////////////////////////////////
 // URL processing
 
@@ -288,6 +301,9 @@ void UVaRestRequestJSON::ExecuteProcessRequest()
 
 void UVaRestRequestJSON::ProcessRequest()
 {
+	// Force add to root once request is launched
+	AddToRoot();
+
 	// Set verb
 	switch (RequestVerb)
 	{
@@ -467,6 +483,9 @@ void UVaRestRequestJSON::ProcessRequest()
 
 void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bWasSuccessful)
 {
+	// Remove from root on completion
+	RemoveFromRoot();
+
 	// Be sure that we have no data from previous response
 	ResetResponseData();
 
@@ -544,6 +563,9 @@ void UVaRestRequestJSON::OnProcessRequestComplete(FHttpRequestPtr Request, FHttp
 		// Save response data as a string
 		ResponseContent = Response->GetContentAsString();
 		ResponseSize = ResponseContent.GetAllocatedSize();
+
+		ResponseBytes = Response->GetContent();
+		ResponseContentLength = Response->GetContentLength();
 	}
 
 	// Broadcast the result events on next tick
