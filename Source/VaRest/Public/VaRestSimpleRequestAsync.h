@@ -47,5 +47,5 @@ class UVaRestSimpleRequestAsync : public UBlueprintAsyncActionBase
 
 public:
 	UFUNCTION(BlueprintCallable, meta = (BlueprintUnternalUseOnly = "true", DisplayName = "VaRest Simple Request Async"))
-	static UVaRestSimpleRequestAsync* VaRestSimpleRequestAsync(FString URL, EVaRestRequestVerb Verb, EVaRestRequestContentType ContentType, FString RequestMessage);
+	static UVaRestSimpleRequestAsync* VaRestSimpleRequestAsync(const FString URL, EVaRestRequestVerb Verb, EVaRestRequestContentType ContentType, const FString RequestMessage);
 };

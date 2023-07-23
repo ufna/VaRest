@@ -2,7 +2,7 @@
 
 #include "VaRestSimpleRequestAsync.h"
 
-UVaRestSimpleRequestAsync* UVaRestSimpleRequestAsync::VaRestSimpleRequestAsync(FString URL, EVaRestRequestVerb Verb, EVaRestRequestContentType ContentType, FString RequestMessage)
+UVaRestSimpleRequestAsync* UVaRestSimpleRequestAsync::VaRestSimpleRequestAsync(const FString URL, EVaRestRequestVerb Verb, EVaRestRequestContentType ContentType, const FString RequestMessage)
 {
 	UVaRestSimpleRequestAsync* object = NewObject<UVaRestSimpleRequestAsync>();
 
