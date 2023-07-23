@@ -1,4 +1,4 @@
-// Alan Verbilo 2021 for VaRest plugin.
+// Alan Verbilo 2021-2023 for VaRest plugin.
 
 #pragma once
 
@@ -7,7 +7,7 @@
 #include "VaRestRequestJSON.h"
 #include "VaRestSubsystem.h"
 #include "VaRestTypes.h"
-#include "VaRestRequestAsync.generated.h"
+#include "VaRestSimpleRequestAsync.generated.h"
 
 /**
 * This is async function that encapsulate callback delegates and make your code more clear.
@@ -19,19 +19,18 @@
 * https://www.unrealengine.com/marketplace/en-US/product/dbjson
 */
 
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FResponseDelegate, int32, ResponseCode, FString, ResposeMessage);
 
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FResponseDelegate, FString, ResposeMessage);
-
-UCLASS()
-class VAREST_API UVaRestRequestAsync : public UBlueprintAsyncActionBase
+UCLASS(MinimalAPI)
+class UVaRestSimpleRequestAsync : public UBlueprintAsyncActionBase
 {
 	GENERATED_BODY()
-	
+
 	FString URL;
 	EVaRestRequestVerb Verb;
 	EVaRestRequestContentType ContentType;
 	FString RequestMessage;
-	
+
 	UPROPERTY(BlueprintAssignable)
 	FResponseDelegate OnSuccess;
 
@@ -45,8 +44,8 @@ class VAREST_API UVaRestRequestAsync : public UBlueprintAsyncActionBase
 	void OnFailureResend(class UVaRestRequestJSON* RequestJSON);
 
 	virtual void Activate() override;
-	
+
 public:
 	UFUNCTION(BlueprintCallable, meta = (BlueprintUnternalUseOnly = "true", DisplayName = "VaRest Simple Request Async"))
-	static UVaRestRequestAsync* VaRestRequestAsync(FString URL, EVaRestRequestVerb Verb, EVaRestRequestContentType ContentType, FString RequestMessage);
+	static UVaRestSimpleRequestAsync* VaRestSimpleRequestAsync(FString URL, EVaRestRequestVerb Verb, EVaRestRequestContentType ContentType, FString RequestMessage);
 };
