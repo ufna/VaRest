@@ -101,27 +101,27 @@ bool UVaRestJsonObject::DecodeJson(const FString& JsonString, bool bUseIncrement
 
 FString UVaRestJsonObject::GetFieldTypeString(const FString& FieldName) const
 {
-	if (!JsonObj->HasTypedField<EJson::Null>(FieldName))
+	if (JsonObj->HasTypedField<EJson::Null>(FieldName))
 	{
 		return TEXT("Null");
 	}
-	else if (!JsonObj->HasTypedField<EJson::String>(FieldName))
+	else if (JsonObj->HasTypedField<EJson::String>(FieldName))
 	{
 		return TEXT("String");
 	}
-	else if (!JsonObj->HasTypedField<EJson::Number>(FieldName))
+	else if (JsonObj->HasTypedField<EJson::Number>(FieldName))
 	{
 		return TEXT("Number");
 	}
-	else if (!JsonObj->HasTypedField<EJson::Boolean>(FieldName))
+	else if (JsonObj->HasTypedField<EJson::Boolean>(FieldName))
 	{
 		return TEXT("Boolean");
 	}
-	else if (!JsonObj->HasTypedField<EJson::Object>(FieldName))
+	else if (JsonObj->HasTypedField<EJson::Object>(FieldName))
 	{
 		return TEXT("Object");
 	}
-	else if (!JsonObj->HasTypedField<EJson::Array>(FieldName))
+	else if (JsonObj->HasTypedField<EJson::Array>(FieldName))
 	{
 		return TEXT("Array");
 	}
