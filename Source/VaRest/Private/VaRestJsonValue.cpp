@@ -5,6 +5,31 @@
 #include "VaRestDefines.h"
 #include "VaRestJsonObject.h"
 
+
+namespace JsonValueUtils
+{
+	static const TMap<EJson, EVaJson> JsonToVaJsonMap = {
+		{EJson::None, EVaJson::None},
+		{EJson::Null, EVaJson::Null},
+		{EJson::String, EVaJson::String},
+		{EJson::Number, EVaJson::Number},
+		{EJson::Boolean, EVaJson::Boolean},
+		{EJson::Array, EVaJson::Array},
+		{EJson::Object, EVaJson::Object}
+	};
+
+	static const TMap<EJson, FString> JsonToStringMap = {
+		{EJson::None, TEXT("None")},
+		{EJson::Null, TEXT("Null")},
+		{EJson::String, TEXT("String")},
+		{EJson::Number, TEXT("Number")},
+		{EJson::Boolean, TEXT("Boolean")},
+		{EJson::Array, TEXT("Array")},
+		{EJson::Object, TEXT("Object")}
+	};
+}
+
+
 UVaRestJsonValue::UVaRestJsonValue(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
@@ -35,67 +60,27 @@ EVaJson UVaRestJsonValue::GetType() const
 		return EVaJson::None;
 	}
 
-	switch (JsonVal->Type)
+	if (JsonValueUtils::JsonToVaJsonMap.Contains(JsonVal->Type))
 	{
-	case EJson::None:
-		return EVaJson::None;
-
-	case EJson::Null:
-		return EVaJson::Null;
-
-	case EJson::String:
-		return EVaJson::String;
-
-	case EJson::Number:
-		return EVaJson::Number;
-
-	case EJson::Boolean:
-		return EVaJson::Boolean;
-
-	case EJson::Array:
-		return EVaJson::Array;
-
-	case EJson::Object:
-		return EVaJson::Object;
-
-	default:
-		return EVaJson::None;
+		return JsonValueUtils::JsonToVaJsonMap[JsonVal->Type];
 	}
+
+	return EVaJson::None;
 }
 
 FString UVaRestJsonValue::GetTypeString() const
 {
 	if (!JsonVal.IsValid())
 	{
-		return "None";
+		return TEXT("None");
 	}
 
-	switch (JsonVal->Type)
+	if (JsonValueUtils::JsonToStringMap.Contains(JsonVal->Type))
 	{
-	case EJson::None:
-		return TEXT("None");
-
-	case EJson::Null:
-		return TEXT("Null");
-
-	case EJson::String:
-		return TEXT("String");
-
-	case EJson::Number:
-		return TEXT("Number");
-
-	case EJson::Boolean:
-		return TEXT("Boolean");
-
-	case EJson::Array:
-		return TEXT("Array");
-
-	case EJson::Object:
-		return TEXT("Object");
-
-	default:
-		return TEXT("None");
+		return JsonValueUtils::JsonToStringMap[JsonVal->Type];
 	}
+
+	return TEXT("None");
 }
 
 bool UVaRestJsonValue::IsNull() const

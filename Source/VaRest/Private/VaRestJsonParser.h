@@ -125,6 +125,12 @@ struct FJSONState
 
 	FORCEINLINE bool CheckTokens(EJSONToken T1, EJSONToken T2, EJSONToken T3);
 
+	FORCEINLINE bool IsObjectOrArray(TSharedPtr<FJsonValue> Value);
+
+	FORCEINLINE bool IsValidObject(FJsonValue* Value);
+
+	FORCEINLINE bool IsValidArray(FJsonValue* Value);
+
 	FORCEINLINE void PopToken(int32 Num);
 
 	FORCEINLINE void PopObject();
@@ -174,6 +180,18 @@ private:
 	FORCEINLINE bool IsNewLine(const TCHAR& Char);
 
 	FORCEINLINE bool IsSpace(const TCHAR& Char);
+
+	FORCEINLINE bool IsSpaceWithData(const TCHAR& Char);
+
+	FORCEINLINE bool IsQuotationChar(const TCHAR& Char);
+
+	FORCEINLINE bool IsQuoteNotEscaped(const TCHAR& Char);
+
+	FORCEINLINE bool IsBackslashNotEscaped(const TCHAR& Char);
+
+	FORCEINLINE bool IsNumericOrNegativeSign(const TCHAR& Char);
+
+	FORCEINLINE bool IsValidNumberCharacter(const TCHAR& Char);
 
 	FORCEINLINE bool FindToken(const TCHAR& Char);
 
