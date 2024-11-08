@@ -7,6 +7,36 @@
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 
+
+namespace JsonReaderUtils
+{
+	static const TSet<char> BoolChars = {'T', 't', 'F', 'f'};
+	static const TSet<char> NullChars = {'N', 'n'};
+	static const TSet<char> StringChars = {'\'', '"'};
+	static const TMap<char, EJSONToken> JSONTokenSymbols = {
+		{'{', EJSONToken::CURLY_BEGIN},
+		{'}', EJSONToken::CURLY_END},
+		{'[', EJSONToken::SQUARE_BEGIN},
+		{']', EJSONToken::SQUARE_END},
+		{',', EJSONToken::COMMA},
+		{':', EJSONToken::COLON}
+	};
+}
+
+namespace JsonWriterUtils
+{
+	static const TMap<EJson, FString> JsonBeginningSymbols = {
+		{EJson::Object, FString(TEXT("{"))},
+		{EJson::Array, FString(TEXT("["))},
+		{EJson::String, FString(TEXT("\""))}
+	};
+	static const TMap<EJson, FString> JsonClosingSymbols = {
+		{EJson::Object, FString(TEXT("}"))},
+		{EJson::Array, FString(TEXT("]"))},
+		{EJson::String, FString(TEXT("\""))}
+	};
+}
+
 uint32 FUtf8Helper::CodepointFromUtf8(const ANSICHAR*& SourceString, const uint32 SourceLengthRemaining)
 {
 	checkSlow(SourceLengthRemaining > 0);
@@ -272,6 +302,21 @@ bool FJSONState::CheckTokens(EJSONToken T1, EJSONToken T2, EJSONToken T3)
 	return T1 == GetToken(2) && T2 == GetToken(1) && T3 == GetToken(0);
 }
 
+bool FJSONState::IsObjectOrArray(TSharedPtr<FJsonValue> Value)
+{
+	return Value->Type == EJson::Object || Value->Type == EJson::Array;
+}
+
+bool FJSONState::IsValidObject(FJsonValue* Value)
+{
+	return Value != nullptr && Value->Type == EJson::Object;
+}
+
+bool FJSONState::IsValidArray(FJsonValue* Value)
+{
+	return Value != nullptr && Value->Type == EJson::Array;
+}
+
 void FJSONState::PopToken(int32 Num)
 {
 	if (Num > 0)
@@ -322,7 +367,7 @@ void FJSONState::PopValue(bool bCheckType)
 	if (Objects.Num() > 0)
 	{
 		const auto Value = Objects.Last(0);
-		if (Value->Type == EJson::Object || Value->Type == EJson::Array)
+		if (IsObjectOrArray(Value))
 		{
 			if (bCheckType)
 			{
@@ -464,7 +509,7 @@ FJsonValue* FJSONState::GetLast()
 FJsonValueObject* FJSONState::GetObject()
 {
 	FJsonValue* Value = GetLast();
-	if (Value != nullptr && Value->Type == EJson::Object)
+	if (IsValidObject(Value))
 	{
 		return (FJsonValueObject*)Value;
 	}
@@ -475,7 +520,7 @@ FJsonValueObject* FJSONState::GetObject()
 FJsonValueNonConstArray* FJSONState::GetArray()
 {
 	FJsonValue* Value = GetLast();
-	if (Value != nullptr && Value->Type == EJson::Array)
+	if (IsValidArray(Value))
 	{
 		return (FJsonValueNonConstArray*)Value;
 	}
@@ -576,6 +621,35 @@ bool FJSONReader::IsSpace(const TCHAR& Char)
 	return IsNewLine(Char) || Char == ' ' || Char == '\t' || Char == '\r';
 }
 
+bool FJSONReader::IsSpaceWithData(const TCHAR& Char)
+{
+	return IsSpace(Char) && State.Data.Len() > 0;
+}
+
+bool FJSONReader::IsQuotationChar(const TCHAR& Char)
+{
+	return Char == '\'' || Char == '"';
+}
+
+bool FJSONReader::IsQuoteNotEscaped(const TCHAR& Char)
+{
+	return !State.bEscape && State.Quote == Char;
+}
+
+bool FJSONReader::IsBackslashNotEscaped(const TCHAR& Char)
+{
+	return Char == '\\' && !State.bEscape;
+}
+
+bool FJSONReader::IsNumericOrNegativeSign(const TCHAR& Char)
+{
+	return (Char >= '0' && Char <= '9') || Char == '-';
+}
+
+bool FJSONReader::IsValidNumberCharacter(const TCHAR& Char) {
+	return (IsNumericOrNegativeSign(Char) || Char == '.' || Char == '+' || Char == 'e' || Char == 'E');
+}
+
 bool FJSONReader::FindToken(const TCHAR& Char)
 {
 	if (State.bEscape)
@@ -585,14 +659,10 @@ bool FJSONReader::FindToken(const TCHAR& Char)
 
 	if (State.Notation != EJSONNotation::STRING)
 	{
-		switch (Char)
+		if (JsonReaderUtils::JSONTokenSymbols.Contains(Char))
 		{
-		case '{': State.Tokens.Add(EJSONToken::CURLY_BEGIN); return true;
-		case '}': State.Tokens.Add(EJSONToken::CURLY_END); return true;
-		case '[': State.Tokens.Add(EJSONToken::SQUARE_BEGIN); return true;
-		case ']': State.Tokens.Add(EJSONToken::SQUARE_END); return true;
-		case ',': State.Tokens.Add(EJSONToken::COMMA); return true;
-		case ':': State.Tokens.Add(EJSONToken::COLON); return true;
+			State.Tokens.Add(JsonReaderUtils::JSONTokenSymbols[Char]);
+			return true;
 		}
 	}
 	return false;
@@ -822,7 +892,7 @@ void FJSONReader::ReadAsString(const TCHAR& Char)
 		return;
 	}
 
-	if (!State.bEscape && State.Quote == Char)
+	if (IsQuoteNotEscaped(Char))
 	{
 		State.Quote = UNICODE_BOGUS_CHAR_CODEPOINT;
 		State.Notation = EJSONNotation::SKIP;
@@ -847,7 +917,7 @@ void FJSONReader::ReadAsString(const TCHAR& Char)
 
 void FJSONReader::ReadAsStringSpecial(const TCHAR& Char)
 {
-	if (IsSpace(Char) && State.Data.Len() > 0)
+	if (IsSpaceWithData(Char))
 	{
 		State.Notation = EJSONNotation::SKIP;
 		return;
@@ -858,13 +928,13 @@ void FJSONReader::ReadAsStringSpecial(const TCHAR& Char)
 
 void FJSONReader::ReadAsNumber(const TCHAR& Char)
 {
-	if (IsSpace(Char) && State.Data.Len() > 0)
+	if (IsSpaceWithData(Char))
 	{
 		State.Notation = EJSONNotation::SKIP;
 		return;
 	}
 
-	if ((Char >= '0' && Char <= '9') || Char == '-' || Char == '.' || Char == '+' || Char == 'e' || Char == 'E')
+	if (IsValidNumberCharacter(Char))
 	{
 		State.Data.AppendChar(Char);
 	}
@@ -876,37 +946,32 @@ void FJSONReader::ReadAsNumber(const TCHAR& Char)
 
 void FJSONReader::ReadBasicValue(const TCHAR& Char)
 {
-	switch (Char)
-	{
-	case 'T':
-	case 't':
-	case 'F':
-	case 'f':
+
+	if (JsonReaderUtils::BoolChars.Contains(Char))
 	{
 		State.PushBoolean();
 		State.Notation = EJSONNotation::STRING_SPECIAL;
 		ReadAsStringSpecial(Char);
 		return;
 	}
-	case 'N':
-	case 'n':
+
+	if (JsonReaderUtils::NullChars.Contains(Char))
 	{
 		State.PushNull();
 		State.Notation = EJSONNotation::STRING_SPECIAL;
 		ReadAsStringSpecial(Char);
 		return;
 	}
-	case '\'':
-	case '"':
+
+	if (JsonReaderUtils::StringChars.Contains(Char))
 	{
 		State.PushString();
 		State.Notation = EJSONNotation::STRING;
 		State.Quote = Char;
 		return;
 	}
-	}
 
-	if ((Char >= '0' && Char <= '9') || Char == '-')
+	if (IsNumericOrNegativeSign(Char))
 	{
 		State.PushNumber();
 		State.Notation = EJSONNotation::NUMBER;
@@ -933,7 +998,7 @@ void FJSONReader::ReadAsObject(const TCHAR& Char)
 
 	if (State.CheckTokens(EJSONToken::CURLY_BEGIN)) // read key "{"
 	{
-		if (Char == '\'' || Char == '"')
+		if (IsQuotationChar(Char))
 		{
 			State.Notation = EJSONNotation::STRING;
 			State.Quote = Char;
@@ -960,7 +1025,7 @@ void FJSONReader::Skip(const TCHAR& Char)
 
 bool FJSONReader::Read(const TCHAR Char)
 {
-	if (Char == '\\' && !State.bEscape)
+	if (IsBackslashNotEscaped(Char))
 	{
 		State.bEscape = true;
 		return true;
@@ -1004,44 +1069,22 @@ FJSONWriter::FJSONWriter()
 
 bool FJSONWriter::GetStartChar(const TSharedPtr<FJsonValue>& JsonValue, FString& Str)
 {
-	switch (JsonValue->Type)
+	if (JsonWriterUtils::JsonBeginningSymbols.Contains(JsonValue->Type))
 	{
-	case EJson::Object:
-		Str = FString(TEXT("{"));
-		break;
-	case EJson::Array:
-		Str = FString(TEXT("["));
-		break;
-	case EJson::String:
-		Str = FString(TEXT("\""));
-		break;
-	default:
-		return false;
-		break;
+		Str = JsonWriterUtils::JsonBeginningSymbols[JsonValue->Type];
+		return true;
 	}
-
-	return true;
+	return false;
 }
 
 bool FJSONWriter::GetEndChar(const TSharedPtr<FJsonValue>& JsonValue, FString& Str)
 {
-	switch (JsonValue->Type)
+	if (JsonWriterUtils::JsonClosingSymbols.Contains(JsonValue->Type))
 	{
-	case EJson::Object:
-		Str = FString(TEXT("}"));
-		break;
-	case EJson::Array:
-		Str = FString(TEXT("]"));
-		break;
-	case EJson::String:
-		Str = FString(TEXT("\""));
-		break;
-	default:
-		return false;
-		break;
+		Str = JsonWriterUtils::JsonClosingSymbols[JsonValue->Type];
+		return true;
 	}
-
-	return true;
+	return false;
 }
 
 void FJSONWriter::Write(TSharedPtr<FJsonValue> JsonValue, FArchive* Writer, bool IsLastElement)
