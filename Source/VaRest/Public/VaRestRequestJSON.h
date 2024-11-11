@@ -220,7 +220,7 @@ public:
 
 	/** Open URL in latent mode */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request", meta = (Latent, LatentInfo = "LatentInfo", HidePin = "WorldContextObject", DefaultToSelf = "WorldContextObject"))
-	virtual void ApplyURL(const FString& Url, UVaRestJsonObject*& Result, UObject* WorldContextObject, struct FLatentActionInfo LatentInfo);
+	virtual void ApplyURL(const FString& Url, UVaRestRequestJSON*& Result, UObject* WorldContextObject, struct FLatentActionInfo LatentInfo);
 
 	/** Check URL and execute process request */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
@@ -306,7 +306,7 @@ protected:
 
 protected:
 	/** Latent action helper */
-	FVaRestLatentAction<UVaRestJsonObject*>* ContinueAction;
+	FVaRestLatentAction<UVaRestRequestJSON*>* ContinueAction;
 
 	/** Internal request data stored as JSON */
 	UPROPERTY()
