@@ -2,7 +2,6 @@
 
 #include "VaRestJson.h"
 
-#include "VaRestJsonDocument.h"
 #include "VaRestJsonWriter.h"
 
 using namespace VaRest::Json;

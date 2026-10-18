@@ -65,4 +65,43 @@ bool FVaRestJsonWriteValuesTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonWriteCapacityTest, "VaRest.Json.Write.Capacity",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestJsonWriteCapacityTest::RunTest(const FString& Parameters)
+{
+	// 1 MiB of ASCII string: the output buffer must grow geometrically, not reserve 6x the input up front
+	FString Big;
+	Big.Reserve(1 << 20);
+	for (int32 i = 0; i < (1 << 20); ++i)
+	{
+		Big.AppendChar(TEXT('a'));
+	}
+	TArray<uint8> Bytes;
+	FVaRestJson::From(Big).ToUtf8(Bytes);
+	TestEqual(TEXT("1 MiB string length"), Bytes.Num(), (1 << 20) + 2);
+	TestTrue(TEXT("no 6x over-reserve"), Bytes.Max() < 2 * Bytes.Num());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonWriteEdgeTest, "VaRest.Json.Write.Edge",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestJsonWriteEdgeTest::RunTest(const FString& Parameters)
+{
+	// Embedded NUL in an object key
+	const UTF8CHAR Key[] = { 'a', 0, 'b' };
+	const FVaRestJson K = FVaRestJson::Object().Set(FUtf8StringView(Key, 3), 1);
+	TestEqual(TEXT("embedded NUL in key"), K.ToString(), FString(TEXT("{\"a\\u0000b\":1}")));
+
+	// Lookup miss: node-less handle prints nothing
+	TestEqual(TEXT("miss handle -> empty"), FVaRestJson::Object()[TEXT("nope")].ToString(), FString());
+
+	// ToUtf8 appends after existing bytes
+	TArray<uint8> Bytes = { 'x' };
+	FVaRestJson::From(2).ToUtf8(Bytes);
+	TestTrue(TEXT("ToUtf8 appends x2"), Bytes.Num() == 2 && Bytes[0] == 'x' && Bytes[1] == '2');
+	return true;
+}
+
 #endif

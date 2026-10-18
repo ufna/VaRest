@@ -20,9 +20,16 @@ namespace VaRest::Json
 			void Flush() {}
 		};
 
+		/**
+		 * No-op on purpose. RapidJSON's escape path reserves 2 + length * 6 bytes per string
+		 * (writer.h:398), which over-reserves up to 6x and whose int32 cast can overflow. The reserve
+		 * is only a hint, so TArray's geometric growth in Put/PutUnsafe is used instead. This overload
+		 * exists so ADL picks it over rapidjson's generic template, which would call Put per character.
+		 */
 		inline void PutReserve(FUtf8Sink& Sink, size_t Count)
 		{
-			Sink.Out.Reserve(Sink.Out.Num() + static_cast<int32>(Count));
+			(void)Sink;
+			(void)Count;
 		}
 
 		inline void PutUnsafe(FUtf8Sink& Sink, char C)
