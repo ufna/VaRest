@@ -16,14 +16,34 @@
 ## Memory instrument calibration
 
 LLM was enabled (`-llm`). The test allocates a known 8 MiB array under a scratch tag and asserts LLM sees it within 5%.
-Result: LLM reported 8.0 MiB in all 15 invocations (check passed). The memory column is valid.
+Result: LLM reported 8.0 MiB in all invocations (check passed). The memory column is valid.
+Second calibration (many small blocks, what the DOM does): 100000 allocations of 64 B under their own tag, expect 6,400,000 B, LLM reported 6,400,000 B (exact; passes the 10% check). A first attempt reported 7,217,920 B because the pointer array's growth was inside the tagged scope; it is now reserved outside.
 (LLM tag names must be alphanumeric: a dotted tag name aborts in `ValidateUniqueName`, so tags are `VaRestBenchCalibration` etc.)
 
 "Retained memory" is what LLM attributes to the scoped parse while the result is alive. For VaRest, `Parse(view)` copies the
 input into the document (about 9.0 MiB for the 10 MiB fixture), so that copy is included. For the engine path it includes the
 temporary FString only if still alive, which it is not (freed before the measurement ends).
 
-## Results (median of 3 invocations; raw values in brackets)
+## Results
+
+All VaRest rows below were measured with arena-hint factor 1 (the committed `ArenaHintFor`). Two measurement sessions exist and
+they differ by up to ~17% in absolute time (machine state drifts between sessions; ratios stay stable). The decision table is
+Session B, re-run on HEAD with the committed code. Session A is kept for the no-validation experiment, which was only run then.
+
+### Session B (decision table, HEAD, factor 1): median of 3 invocations, raw values in brackets
+
+| fixture | path | parse ms | retained memory | write ms |
+|---|---|---|---|---|
+| bench_1mb.json | engine (FString, v1 path) | 118.09 [117.40, 118.09, 119.46] | 7.9 MiB | 48.45 [48.45, 48.78, 48.08] |
+| bench_1mb.json | engine (UTF-8 reader) | 123.14 [123.47, 122.33, 123.14] | | |
+| bench_1mb.json | VaRest Parse (copy + in situ) | 3.78 [3.79, 3.78, 3.76] | 4.7 MiB | 2.14 [2.14, 2.15, 2.12] |
+| bench_1mb.json | VaRest ParseOwned (minus the test's copy) | 3.75 [3.75, 3.81, 3.74] | | |
+| bench_10mb.json | engine (FString, v1 path) | 1090.20 [1090.20, 1059.01, 1112.34] | 78.4 MiB | 497.78 [507.13, 472.38, 497.78] |
+| bench_10mb.json | engine (UTF-8 reader) | 1158.55 [1158.55, 1112.27, 1164.87] | | |
+| bench_10mb.json | VaRest Parse (copy + in situ) | 45.44 [45.85, 44.85, 45.44] | 47.1 MiB | 34.67 [23.42, 34.79, 34.67] |
+| bench_10mb.json | VaRest ParseOwned (minus the test's copy) | 41.15 [42.55, 41.15, 37.26] | | |
+
+### Session A (earlier, also factor 1): median of 3 invocations, raw values in brackets
 
 | fixture | path | parse ms | retained memory | write ms |
 |---|---|---|---|---|
@@ -52,7 +72,7 @@ Retained memory is identical across the no-validation build, as expected.
 
 ## Arena-hint tuning (`ArenaHintFor` = InputBytes * factor, clamped 4 KiB..256 MiB)
 
-Two invocations each, bench_10mb.json VaRest Parse (the 1 MiB figures are in the last column).
+Measured in Session A, factor edited and rebuilt between sets, two invocations each (not the committed factor for rows 2 and 4).
 
 | factor | parse ms 10 MiB (per invocation, mean) | retained 10 MiB | parse ms 1 MiB (per invocation) | retained 1 MiB |
 |---|---|---|---|---|
@@ -60,17 +80,41 @@ Two invocations each, bench_10mb.json VaRest Parse (the 1 MiB figures are in the
 | 2 (previous) | 48.03, 47.81 (47.92) | 47.1 MiB | 3.76, 3.72 | 4.8 MiB |
 | 4 | 54.90, 46.78 (50.84) | 47.1 MiB | 3.56, 3.50 | 4.8 MiB |
 
-Rule: lowest retained memory among settings whose parse time is within 5% of the best. Only the first chunk is sized from the hint
-(later chunks are a fixed 64 KiB), so retained memory is flat at the 0.1 MiB resolution of the column, apart from 0.1 MiB on the
-1 MiB fixture where factor 1 is lower. Factor 1 is lowest in memory and fastest (factor 2 is 8.5% slower, factor 4 15% slower
-by mean, though the timing noise between invocations is several percent). Chosen: **factor 1**; `ArenaHintFor` changed from `* 2` to `* 1`.
+Conclusion: **inconclusive within noise.** Retained memory is identical at 0.1 MiB resolution for all three factors (see the arena
+accounting below for why), and the timing gaps between factors (8-15% on 10 MiB, with factor 4 fastest on 1 MiB) are the same
+order as the ~17% cross-session variation and rest on only two invocations per factor. Factor 1 was chosen because it is the
+smallest first chunk, not because it is faster.
+
+## Arena accounting (factor 1, 10 MiB fixture, Session B)
+
+| fixture | input B | arena used B | arena reserved B | used / input | reserved / input |
+|---|---|---|---|---|---|
+| bench_1mb.json | 944204 | 4015872 | 4024780 | 4.253 | 4.263 |
+| bench_10mb.json | 9448081 | 39886464 | 39944481 | 4.222 | 4.228 |
+
+The DOM is about 4.2x the input size. Reserved exceeds used by only 0.15% (58 KB of 39.9 MB), i.e. chunks are filled almost
+completely. The controller's hypothesis holds: the first chunk (input size, ~9 MiB at factor 1; 2x or 4x at the other factors)
+is not larger than the ~40 MB DOM, so it is filled and the arena simply continues with 64 KiB chunks; the factor only moves where
+the chunk boundary falls, and retained is DOM bytes rounded up to the last chunk. Cross-check: 39,944,481 B arena + 9,448,081 B
+input copy = 49,392,562 B = 47.1 MiB, exactly the LLM figure for VaRest. (A hint above the DOM size would reserve unused memory;
+factor 4 on 10 MiB is 36 MiB, still under the 40 MB DOM, which is why no difference showed.)
+
+## Retained versus peak memory (spec 7.3 says "peak")
+
+The benchmark measures **retained** memory (LLM bytes still allocated under the tag while the result is alive). Peak was not
+measured separately. For the engine path, peak is strictly larger than the retained figure: during parse it also holds the
+transient UTF-16 FString of the input (about 2x the input bytes, ~18 MiB for 10 MiB), which is freed before the retained figure is
+taken. VaRest's retained figure includes its 9 MiB input copy, and its peak is about equal to its retained figure. So "not worse
+on memory" holds a fortiori on a peak basis. The spec's other comparands (`FJsonObjectConverter`, typed decode, the v1 request
+path) are deferred to M2 and M3, where those pieces exist.
 
 ## Decision
 
 Gate (spec 7.3): on bench_10mb.json, VaRest parse is at least 2x faster than "engine (FString, v1 path)" OR retains at least 2x less
 memory, and is not worse on the other.
 
-- Parse: 38.94 ms vs 1026.18 ms = **26.4x faster** (ParseOwned 37.86 ms = 27.1x). Threshold 2x met.
-- Memory: 47.1 MiB vs 78.4 MiB = 1.66x less (not 2x, but not worse). The memory arm alone would not pass; the speed arm does.
+- Parse (Session B, HEAD): 45.44 ms vs 1090.20 ms = **24.0x faster** (ParseOwned 41.15 ms = 26.5x). Threshold 2x met.
+  (Session A gave 38.94 vs 1026.18 = 26.4x; the verdict does not depend on the session.)
+- Memory (retained, not peak): 47.1 MiB vs 78.4 MiB = 1.66x less (not 2x, but not worse; peak favours VaRest more). The memory arm alone would not pass; the speed arm does.
 
 **Decision:** PASS — VaRest arena DOM stays.

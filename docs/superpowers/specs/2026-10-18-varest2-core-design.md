@@ -548,7 +548,7 @@ N), peak memory, typed decode, serialize. Compared against `FJsonSerializer` + `
 the 10 MiB fixture, and not worse on the other), fall back to an `FJsonValue`-backed
 `FVaRestJson`. API and BP stay the same, and the decision is recorded.
 
-**Gate result (2026-10-19):** PASS — see docs/passport/2026-10-19-json-bench.md.
+**Gate result (2026-10-19):** PASS — see docs/passport/2026-10-19-json-bench.md. Measured: parse time and *retained* memory (peak was not measured; the engine path's peak is larger than its retained figure, so the memory comparison holds a fortiori). `FJsonObjectConverter`, typed decode and the v1 request path are deferred to M2/M3.
 
 ---
 

@@ -8,6 +8,7 @@
 #include "Misc/AutomationTest.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "VaRestJsonDocument.h"
 #include "Policies/CondensedJsonPrintPolicy.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
@@ -79,7 +80,28 @@ bool FVaRestJsonBenchTest::RunTest(const FString& Parameters)
 		TestTrue(TEXT("LLM sees 8 MiB within 5%"), FMath::Abs(Calibrated - (8 << 20)) < (8 << 20) / 20);
 	}
 
+	// Second calibration: many small allocations (what the DOM does), allocator overhead may count
+	TArray<void*> Small;
+	Small.Reserve(100000); // reserved outside the tagged scope so only the 64 B blocks are counted
+	const int64 SmallBytes = RetainedBytes(TEXT("VaRestBenchSmall"), [&Small] {
+		for (int32 i = 0; i < 100000; ++i)
+		{
+			Small.Add(FMemory::Malloc(64));
+		}
+	});
+	if (SmallBytes >= 0)
+	{
+		TestTrue(TEXT("LLM sees 100k x 64 B within 10%"), FMath::Abs(SmallBytes - 6400000) < 640000);
+	}
+	const FString SmallLine = FString::Printf(TEXT("LLM calibration (100000 x 64 B, expect 6400000 B): %lld B\n\n"), SmallBytes);
+	for (void* P : Small)
+	{
+		FMemory::Free(P);
+	}
+
+	FString ArenaReport;
 	FString Report = FString::Printf(TEXT("LLM calibration (8 MiB alloc): %s\n\n"), *Mb(Calibrated));
+	Report += SmallLine;
 	Report += TEXT("| fixture | path | parse ms (median) | retained memory | write ms |\n|---|---|---|---|---|\n");
 	for (const TCHAR* Name : { TEXT("bench_1mb.json"), TEXT("bench_10mb.json") })
 	{
@@ -113,20 +135,25 @@ bool FVaRestJsonBenchTest::RunTest(const FString& Parameters)
 
 		// VaRest: copy + in situ, and stolen buffer
 		const double OursViewMs = MedianMs(Runs, [&] { auto R = FVaRestJson::Parse(Utf8); (void)R; });
+		// The input copy reserves the NUL slack byte, as the HTTP layer will; its cost is measured next and subtracted.
 		const double OursOwnedMs = MedianMs(Runs, [&] {
-			TArray<uint8> Copy; // the copy is outside what an HTTP response would pay (it reserves the NUL slack byte); subtract below
-				Copy.Reserve(Bytes.Num() + 1);
-				Copy.Append(Bytes);
+			TArray<uint8> Copy;
+			Copy.Reserve(Bytes.Num() + 1);
+			Copy.Append(Bytes);
 			auto R = FVaRestJson::ParseOwned(MoveTemp(Copy));
 			(void)R;
 		});
 		const double CopyMs = MedianMs(Runs, [&] {
-				TArray<uint8> Copy;
-				Copy.Reserve(Bytes.Num() + 1);
-				Copy.Append(Bytes);
-			});
+			TArray<uint8> Copy;
+			Copy.Reserve(Bytes.Num() + 1);
+			Copy.Append(Bytes);
+		});
 		FVaRestJson Ours;
 		const int64 OursMem = RetainedBytes(TEXT("VaRestBenchVaRest"), [&] { Ours = FVaRestJson::Parse(Utf8).StealValue(); });
+
+		ArenaReport += FString::Printf(TEXT("arena %s: input %lld B, used %llu B, reserved %llu B, used/input %.3f, reserved/input %.3f\n\n"), Name,
+			(int64)Bytes.Num(), (uint64)Ours.GetDocumentInternal()->Arena.GetUsedBytes(), (uint64)Ours.GetDocumentInternal()->Arena.GetReservedBytes(),
+			(double)Ours.GetDocumentInternal()->Arena.GetUsedBytes() / Bytes.Num(), (double)Ours.GetDocumentInternal()->Arena.GetReservedBytes() / Bytes.Num());
 
 		// Writing
 		const double EngineWriteMs = MedianMs(Runs, [&] {
@@ -145,6 +172,7 @@ bool FVaRestJsonBenchTest::RunTest(const FString& Parameters)
 		Report += FString::Printf(TEXT("| %s | VaRest ParseOwned (minus the test's copy) | %.2f | | |\n"), Name, OursOwnedMs - CopyMs);
 	}
 
+	Report += TEXT("\n") + ArenaReport;
 	AddInfo(Report);
 	FFileHelper::SaveStringToFile(Report, *(FPaths::ProjectSavedDir() / TEXT("VaRestBench") / TEXT("results.md")));
 	return true;
