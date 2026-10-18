@@ -1595,8 +1595,9 @@ bool FVaRestJsonApiIterationTest::RunTest(const FString& Parameters)
 		++Visited;
 		J.Remove(M.GetKey());
 	}
-	TestTrue(TEXT("visited at least one"), Visited >= 1);
-	TestTrue(TEXT("no out-of-range member"), J.Num() <= 3);
+	// Deterministic: visit b (removed -> [a,c]), index 1 is c (removed -> [a]), index 2 >= Num stops.
+	TestEqual(TEXT("visits"), Visited, 2);
+	TestEqual(TEXT("survivor"), FString::Join(J.GetKeys(), TEXT(",")), FString(TEXT("a")));
 	return true;
 }
 
