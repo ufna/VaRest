@@ -337,6 +337,13 @@ struct VARESTJSON_API FVaRestJson
 	static FVaRestJson FromJsonValue(const TSharedPtr<FJsonValue>& Value);
 	static FVaRestJson FromJsonObject(const TSharedPtr<FJsonObject>& InObject);
 
+	// ---- struct ops (TStructOpsTypeTraits below): pin defaults, copy/paste, SaveGame, CDO diffs
+
+	bool ExportTextItem(FString& ValueStr, const FVaRestJson& DefaultValue, UObject* Parent, int32 PortFlags, UObject* ExportRootScope) const;
+	bool ImportTextItem(const TCHAR*& Buffer, int32 PortFlags, UObject* Parent, FOutputDevice* ErrorText);
+	bool Identical(const FVaRestJson* Other, uint32 PortFlags) const;
+	bool Serialize(FArchive& Ar);
+
 	// ---- for sibling VaRest modules and tests; not a stable API
 
 	const FDocumentRef& GetDocumentInternal() const { return Doc; }
@@ -430,6 +437,18 @@ private:
 
 	FDocumentRef Doc;
 	VaRest::Json::FNode* Node = nullptr;
+};
+
+template <>
+struct TStructOpsTypeTraits<FVaRestJson> : public TStructOpsTypeTraitsBase2<FVaRestJson>
+{
+	enum
+	{
+		WithExportTextItem = true,
+		WithImportTextItem = true,
+		WithIdentical = true,
+		WithSerializer = true,
+	};
 };
 
 struct FVaRestJsonMember
