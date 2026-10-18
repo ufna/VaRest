@@ -129,11 +129,14 @@ its parent grows. Our DOM gives handle stability by construction:
   child nodes stay where they are. Removed nodes stay in the arena until the document dies.
   `Clone()` rebuilds into a fresh document when that matters (an in-place compaction would move
   nodes and invalidate other handles, so there is none).
-* **Parsing is in situ on a buffer the document owns.** RapidJSON's SIMD whitespace and string
-  scanners are specialised only for null-terminated string streams, so every parse runs
-  `kParseInsituFlag` over an owned, NUL-terminated UTF-8 buffer. `ParseOwned(TArray<uint8>&&)`
-  steals the HTTP response body (zero copies); the view overloads copy the input once. Parsed
-  strings point into that buffer; strings created by mutation live in the arena.
+* **Parsing is in situ on a buffer the document owns**, so parsed strings and keys point into
+  that buffer with **zero per-string copies** (`kParseInsituFlag` over an owned, NUL-terminated
+  UTF-8 buffer). `ParseOwned(TArray<uint8>&&)` steals the HTTP response body — zero-copy when the
+  array has one byte of slack for the terminator, which the HTTP layer reserves; the view overloads
+  copy the input once. Strings created by mutation live in the arena. (Not for SIMD:
+  `kParseValidateEncodingFlag`, which untrusted input needs, disables RapidJSON's SIMD string
+  scanner, and a SIMD whitespace skipper also exists for bounded `MemoryStream`s — reader.h:514,
+  :1006, verified in Task 6's review.) A raw NUL inside the input is an error, not an early end.
 * Objects with more than 8 members get a hash index (open addressing, in the arena) built **at parse
   time or on mutation**, never on read, so concurrent readers never write.
 * Duplicate keys in input are preserved; lookup returns the **last** occurrence (`JSON.parse`
