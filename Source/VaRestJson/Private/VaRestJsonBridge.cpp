@@ -69,40 +69,47 @@ namespace
 	}
 
 	/**
-	 * Exact decimal integer parse with overflow detection. LexTryParseString is not used: it is not
-	 * documented to reject out-of-range input, and an overflowed id would come back silently wrong.
+	 * Exact decimal integer: sign and magnitude. False for anything that is not an integer within the
+	 * int64 (negative) or uint64 (positive) range. Allocates nothing, so a rejected candidate leaves no node behind.
 	 */
-	FNode* TryIntegerNode(FDocument& Doc, const FString& S)
+	bool ParseIntegerDigits(const FString& S, bool& bNegative, uint64& Magnitude)
 	{
-		const bool bNegative = S.StartsWith(TEXT("-"));
+		bNegative = S.StartsWith(TEXT("-"));
 		int32 i = bNegative ? 1 : 0;
 		if (i >= S.Len())
 		{
-			return nullptr;
+			return false;
 		}
-		uint64 Magnitude = 0;
+		Magnitude = 0;
 		for (; i < S.Len(); ++i)
 		{
 			if (!FChar::IsDigit(S[i]))
 			{
-				return nullptr;
+				return false;
 			}
 			const uint64 Digit = static_cast<uint64>(S[i] - TEXT('0'));
 			if (Magnitude > (MAX_uint64 - Digit) / 10)
 			{
-				return nullptr; // overflow: not representable as an integer, let it be a double
+				return false; // overflow
 			}
 			Magnitude = Magnitude * 10 + Digit;
 		}
-		if (bNegative)
+		return !bNegative || Magnitude <= 9223372036854775808ull;
+	}
+
+	double ToDouble(bool bNegative, uint64 Magnitude)
+	{
+		const double Result = static_cast<double>(Magnitude); // round to nearest, as strtod does
+		return bNegative ? -Result : Result;
+	}
+
+	FNode* MakeIntegerNode(FDocument& Doc, bool bNegative, uint64 Magnitude)
+	{
+		if (!bNegative)
 		{
-			if (Magnitude > 9223372036854775808ull)
-			{
-				return nullptr;
-			}
-			return Doc.NewInt(Magnitude == 9223372036854775808ull ? MIN_int64 : -static_cast<int64>(Magnitude));
+			return Doc.NewUInt(Magnitude); // stored as Int when it fits int64
 		}
-		return Doc.NewUInt(Magnitude); // stored as Int when it fits int64
+		return Doc.NewInt(Magnitude == 9223372036854775808ull ? MIN_int64 : -static_cast<int64>(Magnitude));
 	}
 
 	FNode* FromEngine(FDocument& Doc, const FJsonValue& Value)
@@ -122,17 +129,23 @@ namespace
 		}
 		case EJson::Number:
 		{
-			// FJsonValueNumberString carries exact digits; prefer them when they are an integer
-			FString Digits;
-			if (Value.TryGetString(Digits))
+			double D = 0.0;
+			if (!Value.TryGetNumber(D))
 			{
-				if (FNode* Integer = TryIntegerNode(Doc, Digits))
-				{
-					return Integer;
-				}
+				return Doc.NewNull(); // malformed number string; no engine log
 			}
-			const double D = Value.AsNumber();
-			// The engine writes integral doubles without a fraction; keep them integers so text matches
+			// Exact digits first. FJsonValueNumber::TryGetString is SanitizeFloat with 6 fractional digits and
+			// trailing zeros trimmed (JsonValue.cpp:446-450), so for a plain double its text is not authoritative:
+			// 0.9999999 would read as "1". Take the digits only when they round to the same double, which every
+			// genuine number string does, so 64-bit values above 2^53 still come back exact.
+			FString Digits;
+			bool bNegative = false;
+			uint64 Magnitude = 0;
+			if (Value.TryGetString(Digits) && ParseIntegerDigits(Digits, bNegative, Magnitude) && ToDouble(bNegative, Magnitude) == D)
+			{
+				return MakeIntegerNode(Doc, bNegative, Magnitude);
+			}
+			// The engine writes integral doubles without a fraction, so 5.0 becomes 5 and -0.0 becomes 0 by design
 			if (FMath::TruncToDouble(D) == D && D >= -9007199254740992.0 && D <= 9007199254740992.0)
 			{
 				return Doc.NewInt(static_cast<int64>(D));
