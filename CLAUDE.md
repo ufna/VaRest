@@ -60,18 +60,64 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 
 ## Build & Test
 
-_Add your build and test commands here_
+**The plugin builds inside a separate host project**, `/w/Unreal/VaRestHost` (not in this repo).
+Its `Plugins/VaRest` is a **symlink** to this checkout, so there is one working tree. That only
+works because this workstation builds without UBA detours (`bAllowUBAExecutor=false` in the user
+`BuildConfiguration.xml`); with detours on, UBA aborts on symlinked plugins
+(`cross-process rename-while-open`). Details: `docs/dev/host-project.md`.
 
 ```bash
-# Example:
-# npm install
-# npm test
+# Build + run the whole VaRest automation suite (reads results from the run's log, not stdout)
+Tools/run_tests.sh                    # filter "VaRest"
+Tools/run_tests.sh VaRest.Json        # narrower filter
+Tools/run_tests.sh --no-build VaRest  # skip the build
+
+# Build only (editor target)
+/w/Unreal/UnrealEngine/Engine/Build/BatchFiles/Linux/Build.sh \
+  VaRestHostEditor Linux Development -project=/w/Unreal/VaRestHost/VaRestHost.uproject
+
+# Monolithic game target -- a different code path; check it before a milestone lands
+/w/Unreal/UnrealEngine/Engine/Build/BatchFiles/Linux/Build.sh \
+  VaRestHost Linux Development -project=/w/Unreal/VaRestHost/VaRestHost.uproject
 ```
+
+**Dev-loop hazards** (inherited from VaCuus, each one cost real time there):
+
+- **No editor may be running while you build** -- it holds the module `.so` files. Kill **by PID**,
+  never `pkill -f <pattern>` (the pattern matches your own shell and kills it).
+- **`-ExecCmds` splits on commas.** For automation use `Automation RunTests X; Quit` (Automation
+  splits its own argument on `;` and its own Quit exits with the result code). `…, Quit` never
+  fires and the editor idles forever.
+- **Read results from the log file**, not stdout (`Tools/run_tests.sh` does).
+- **`ShutdownModule` never runs** in an `Automation RunTests …; Quit` run.
+- **`exit 127` with no callstack is a stale engine module**; the message is on stderr.
 
 ## Architecture Overview
 
-_Add a brief overview of your project architecture_
+VaRest 2 is being built on branch `v2`. The design is
+`docs/superpowers/specs/2026-10-18-varest2-core-design.md`, and implementation plans live in
+`docs/superpowers/plans/`.
+
+| Module | Type | Role |
+| --- | --- | --- |
+| `VaRestJson` | Runtime | `FVaRestJson`: own arena DOM, RapidJSON (engine copy) as SAX reader + writer; struct <-> JSON; BP JSON library |
+| `VaRestHttp` | Runtime | `FVaRestClient`, request pipeline + stages, `UVaRestApi` asset, `UVaRestHub`, async BP actions |
+| `VaRest` | Runtime | the **v1 API at unchanged paths**, reimplemented as deprecated shims (removed in v3) |
+| `VaRestEditor` | UncookedOnly | K2 nodes, v1 and v2 |
+| `VaRestEditorTools` | Editor | asset definition, validation, menus |
+
+Tag `v1-on-5.8` is v1 with the minimal UE 5.8 port and no behaviour change. The v1 compat
+fixture is authored from it.
 
 ## Conventions & Patterns
 
-_Add your project-specific conventions here_
+- **Comments explain *why*, and cite engine source as `file:line`. Open every line you cite.**
+- **Restore-the-bug is the proof standard.** For a correctness claim: break it deliberately, watch
+  the specific test fail, restore, and report both outcomes.
+- **Prefer enforcement by shape over enforcement by comment.** Make the wrong call fail to compile
+  (`[[nodiscard]]` builders, private members reachable only through the correct path).
+- **Threading rule:** control plane on the game thread, data plane off it. Stage logic, callbacks
+  and BP events run on the game thread; parse/decode/disk IO run on `UE::Tasks`.
+- **v1 paths are frozen.** Never rename, move or change the signature of anything under
+  `Source/VaRest` or `Source/VaRestEditor` that v1 shipped; v1 projects load it by path.
+- **Push back with sources** when a premise is wrong.
