@@ -133,7 +133,12 @@ FString UVaRestJsonObject::GetFieldTypeString(const FString& FieldName) const
 TArray<FString> UVaRestJsonObject::GetFieldNames() const
 {
 	TArray<FString> Result;
-	JsonObj->Values.GetKeys(Result);
+	Result.Reserve(JsonObj->Values.Num());
+	for (const auto& Pair : JsonObj->Values)
+	{
+		// UE 5.8: FJsonObject keys are UE::TSharedString, not FString
+		Result.Emplace(*Pair.Key);
+	}
 
 	return Result;
 }

@@ -278,7 +278,7 @@ void FJSONState::PopToken(int32 Num)
 	{
 		if (Tokens.Num() >= Num)
 		{
-			Tokens.RemoveAt(Tokens.Num() - Num, Num, false);
+			Tokens.RemoveAt(Tokens.Num() - Num, Num, EAllowShrinking::No);
 		}
 		else
 		{
@@ -293,7 +293,7 @@ void FJSONState::PopObject()
 {
 	if (Objects.Num() > 0)
 	{
-		const auto Object = Objects.Pop(false);
+		const auto Object = Objects.Pop(EAllowShrinking::No);
 		if (Object->Type == EJson::Object)
 		{
 			return;
@@ -307,7 +307,7 @@ void FJSONState::PopArray()
 {
 	if (Objects.Num() > 0)
 	{
-		const auto Object = Objects.Pop(false);
+		const auto Object = Objects.Pop(EAllowShrinking::No);
 		if (Object->Type == EJson::Array)
 		{
 			return;
@@ -331,7 +331,7 @@ void FJSONState::PopValue(bool bCheckType)
 		}
 		else
 		{
-			Objects.Pop(false);
+			Objects.Pop(EAllowShrinking::No);
 			if (Objects.Num() > 0)
 			{
 				switch (Value->Type)
@@ -1069,7 +1069,7 @@ void FJSONWriter::Write(TSharedPtr<FJsonValue> JsonValue, FArchive* Writer, bool
 			const TCHAR* BufferPtr = *ChildJsonPair.Key;
 			for (int i = 0; i < ChildJsonPair.Key.Len(); ++i)
 			{
-				Str = FString(1, &ChildJsonPair.Key[i]);
+				Str = FString(1, &BufferPtr[i]);
 				UVaRestJsonObject::WriteStringToArchive(Ar, *Str, Str.Len());
 			}
 
