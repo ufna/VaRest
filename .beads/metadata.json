@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "VaRest",
+  "project_id": "1cfff5a7-c53e-4ddf-9ff3-283d51d8f8d0"
+}
