@@ -85,6 +85,11 @@ struct FVaRestJsonParseOptions
  * visible through all of them (like VaRest 1 objects and FJsonObjectWrapper). Set/Add COPY their
  * value into this document. Clone() makes an independent tree.
  *
+ * A lookup that misses (Get, operator[], At) returns a handle that keeps the document but has no node:
+ * IsValid() is false and GetType() is None. Writing through it (Set/Add) logs an error and does nothing,
+ * so a missed lookup never silently writes into a detached temporary. A default-constructed handle
+ * (no document) auto-vivifies on its first Set/Add. Two node-less handles compare Equal.
+ *
  * Threading: any number of threads may read a document nobody mutates; mutation needs exclusive
  * access; handles are safe to copy across threads.
  */
@@ -179,7 +184,18 @@ struct VARESTJSON_API FVaRestJson
 		else if constexpr (std::is_floating_point_v<U>)
 		{
 			const TOptional<double> V = TryGetDouble();
-			return V ? TOptional<U>(static_cast<U>(*V)) : TOptional<U>();
+			if (!V)
+			{
+				return {};
+			}
+			if constexpr (std::is_same_v<U, float>)
+			{
+				if (FMath::IsFinite(*V) && FMath::Abs(*V) > static_cast<double>(TNumericLimits<float>::Max()))
+				{
+					return {};
+				}
+			}
+			return TOptional<U>(static_cast<U>(*V));
 		}
 		else if constexpr (std::is_same_v<U, FString>)
 		{
@@ -247,6 +263,9 @@ struct VARESTJSON_API FVaRestJson
 	FVaRestJson& Set(const UTF8CHAR* Key, ValueType&& Value) { return Set(FUtf8StringView(Key), Forward<ValueType>(Value)); }
 
 	bool Remove(FStringView Key);
+	bool Remove(FUtf8StringView Key);
+	bool Remove(const TCHAR* Key) { return Remove(FStringView(Key)); }
+	bool Remove(const UTF8CHAR* Key) { return Remove(FUtf8StringView(Key)); }
 	TArray<FString> GetKeys() const;
 	FVaRestJsonMemberRange Members() const;
 	FVaRestJsonMember MemberAt(int32 Index) const;
@@ -270,9 +289,9 @@ struct VARESTJSON_API FVaRestJson
 	template <typename ValueType>
 	FVaRestJson& SetAt(int32 Index, ValueType&& Value)
 	{
-		if (IsArray())
+		if (VaRest::Json::FDocument* TargetDoc = PrepareSetAt(Index))
 		{
-			SetAtNode(Index, MakeNodeFor(*Doc, Forward<ValueType>(Value)));
+			SetAtNode(Index, MakeNodeFor(*TargetDoc, Forward<ValueType>(Value)));
 		}
 		return *this;
 	}
@@ -309,7 +328,7 @@ struct VARESTJSON_API FVaRestJson
 	/** Null when this is not an object */
 	TSharedPtr<FJsonObject> ToJsonObject() const;
 	static FVaRestJson FromJsonValue(const TSharedPtr<FJsonValue>& Value);
-	static FVaRestJson FromJsonObject(const TSharedPtr<FJsonObject>& Object);
+	static FVaRestJson FromJsonObject(const TSharedPtr<FJsonObject>& InObject);
 
 	// ---- for sibling VaRest modules and tests; not a stable API
 
@@ -330,6 +349,8 @@ private:
 	void SetNode(FStringView Key, VaRest::Json::FNode* Value);
 	void SetNodeUtf8(FUtf8StringView Key, VaRest::Json::FNode* Value);
 	void AddNode(VaRest::Json::FNode* Value);
+	VaRest::Json::FDocument* PrepareSetAt(int32 Index);
+	FVaRestJson Miss() const { return FVaRestJson(Doc, nullptr); }
 	void SetAtNode(int32 Index, VaRest::Json::FNode* Value);
 
 	TOptional<bool> TryGetBool() const;
@@ -359,6 +380,11 @@ private:
 		else if constexpr (std::is_same_v<U, bool>)
 		{
 			return MakeBool(InDoc, Value);
+		}
+		else if constexpr (std::is_same_v<U, char> || std::is_same_v<U, wchar_t> || std::is_same_v<U, char8_t> || std::is_same_v<U, char16_t> || std::is_same_v<U, char32_t>)
+		{
+			static_assert(sizeof(U) == 0, "FVaRestJson: a single character is not a JSON value; pass a string");
+			return nullptr;
 		}
 		else if constexpr (std::is_integral_v<U> && std::is_signed_v<U>)
 		{
@@ -390,7 +416,7 @@ private:
 		}
 		else
 		{
-			static_assert(sizeof(U) == 0, "FVaRestJson: unsupported value type (narrow char literals need TEXT(); structs arrive in M2)");
+			static_assert(sizeof(U) == 0, "FVaRestJson: unsupported value type (structs arrive with FVaRestJsonConvert in M2)");
 			return nullptr;
 		}
 	}

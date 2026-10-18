@@ -182,17 +182,17 @@ FVaRestJson FVaRestJson::Get(FUtf8StringView Key) const
 {
 	if (!IsObject())
 	{
-		return {};
+		return Miss();
 	}
 	FNode* Found = FDocument::Find(*Node, Key);
-	return Found ? FVaRestJson(Doc, Found) : FVaRestJson();
+	return Found ? FVaRestJson(Doc, Found) : Miss();
 }
 
 FVaRestJson FVaRestJson::Get(FStringView Key) const
 {
 	if (!IsObject())
 	{
-		return {};
+		return Miss();
 	}
 	const auto Utf8 = StringCast<UTF8CHAR>(Key.GetData(), Key.Len());
 	return Get(FUtf8StringView(Utf8.Get(), Utf8.Length()));
@@ -202,6 +202,11 @@ FDocument* FVaRestJson::PrepareContainer(EVaRestJsonType Kind, const TCHAR* Oper
 {
 	if (!Node)
 	{
+		if (Doc)
+		{
+			UE_LOG(LogVaRestJson, Error, TEXT("FVaRestJson: cannot %s on a missing value (a lookup missed); set the field on its parent first, e.g. Parent.Set(Key, FVaRestJson::Object())"), Operation);
+			return nullptr;
+		}
 		*this = Kind == EVaRestJsonType::Object ? Object() : Array();
 		return Doc.Get();
 	}
@@ -237,6 +242,11 @@ void FVaRestJson::SetAtNode(int32 Index, FNode* Value)
 	}
 }
 
+bool FVaRestJson::Remove(FUtf8StringView Key)
+{
+	return IsObject() && Doc->Remove(*Node, Key) > 0;
+}
+
 bool FVaRestJson::Remove(FStringView Key)
 {
 	if (!IsObject())
@@ -244,7 +254,17 @@ bool FVaRestJson::Remove(FStringView Key)
 		return false;
 	}
 	const auto Utf8 = StringCast<UTF8CHAR>(Key.GetData(), Key.Len());
-	return Doc->Remove(*Node, FUtf8StringView(Utf8.Get(), Utf8.Length())) > 0;
+	return Remove(FUtf8StringView(Utf8.Get(), Utf8.Length()));
+}
+
+FDocument* FVaRestJson::PrepareSetAt(int32 Index)
+{
+	if (!IsArray() || Index < 0 || Index >= static_cast<int32>(Node->Arr.Num))
+	{
+		UE_LOG(LogVaRestJson, Error, TEXT("FVaRestJson: cannot SetAt index %d on a %s of %d elements"), Index, TypeName(GetType()), Num());
+		return nullptr;
+	}
+	return Doc.Get();
 }
 
 TArray<FString> FVaRestJson::GetKeys() const
@@ -281,7 +301,7 @@ FVaRestJson FVaRestJson::At(int32 Index) const
 {
 	if (!IsArray() || Index < 0 || Index >= static_cast<int32>(Node->Arr.Num))
 	{
-		return {};
+		return Miss();
 	}
 	return FVaRestJson(Doc, Node->Arr.Items[Index]);
 }
@@ -302,7 +322,7 @@ FVaRestJson FVaRestJson::Clone() const
 	{
 		return {};
 	}
-	FDocumentRef NewDoc = NewDocument(FMath::Max<SIZE_T>(4096, Doc->Arena.GetUsedBytes()));
+	FDocumentRef NewDoc = NewDocument(Node == Doc->Root ? FMath::Max<SIZE_T>(4096, Doc->Arena.GetUsedBytes()) : SIZE_T(4096));
 	FNode* Root = NewDoc->DeepCopy(*Node);
 	NewDoc->Root = Root;
 	return FVaRestJson(MoveTemp(NewDoc), Root);

@@ -5,6 +5,7 @@
 #include "Async/ParallelFor.h"
 #include "Misc/AutomationTest.h"
 #include "VaRestJson.h"
+#include "VaRestJsonDocument.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonApiBuildReadTest, "VaRest.Json.Api.BuildAndRead",
 	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
@@ -172,7 +173,7 @@ bool FVaRestJsonApiIterationTest::RunTest(const FString& Parameters)
 	for (const FVaRestJsonMember& M : J.Members())
 	{
 		++Visited;
-		J.Remove(M.GetKey());
+		J.Remove(M.Key);
 	}
 	// Deterministic: visit b (removed -> [a,c]), index 1 is c (removed -> [a]), index 2 >= Num stops.
 	TestEqual(TEXT("visits"), Visited, 2);
@@ -203,6 +204,61 @@ bool FVaRestJsonApiConcurrentReadTest::RunTest(const FString& Parameters)
 		}
 	});
 	TestEqual(TEXT("concurrent lookups"), Wrong.load(), 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonApiEdgeCasesTest, "VaRest.Json.Api.EdgeCases",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestJsonApiEdgeCasesTest::RunTest(const FString& Parameters)
+{
+	// Subtree Clone must not inherit the whole document's arena size
+	FVaRestJson Big = FVaRestJson::Object();
+	for (int32 i = 0; i < 2000; ++i)
+	{
+		Big.Set(*FString::Printf(TEXT("key%d"), i), FString::Printf(TEXT("value number %d"), i));
+	}
+	FVaRestJson Sub = Big[TEXT("key5")].Clone();
+	TestTrue(TEXT("subtree clone arena is small"), Sub.GetDocumentInternal()->Arena.GetReservedBytes() < 64 * 1024);
+	TestEqual(TEXT("subtree clone value"), Sub.AsString(), FString(TEXT("value number 5")));
+	TestTrue(TEXT("root clone equals"), Big.Clone().Equals(Big));
+
+	// UTF-8 Remove
+	FVaRestJson R = FVaRestJson::Object().Set(TEXT("a"), 1).Set(TEXT("b"), 2);
+	TestTrue(TEXT("Remove utf8"), R.Remove(FUtf8StringView(UTF8TEXT("a"))));
+	TestFalse(TEXT("removed"), R.Has(TEXT("a")));
+	TestFalse(TEXT("Remove utf8 missing"), R.Remove(UTF8TEXT("zzz")));
+
+	// A missed lookup does not swallow writes
+	FVaRestJson Parent = FVaRestJson::Object();
+	AddExpectedError(TEXT("cannot Set a field on a missing value"), EAutomationExpectedErrorFlags::Contains, 1);
+	Parent[TEXT("profile")].Set(TEXT("x"), 1);
+	TestEqual(TEXT("parent unchanged"), Parent.Num(), 0);
+	TestFalse(TEXT("miss stays invalid"), Parent[TEXT("profile")].IsValid());
+	FVaRestJson Def;
+	Def.Set(TEXT("x"), 1);
+	TestTrue(TEXT("default handle still auto-vivifies"), Def.IsObject());
+	TestTrue(TEXT("node-less handles equal"), Parent[TEXT("a")].Equals(Parent[TEXT("b")]));
+
+	// TryGet<float> range
+	FVaRestJson F = FVaRestJson::Object().Set(TEXT("huge"), 1e300).Set(TEXT("ok"), 1.5);
+	TestFalse(TEXT("1e300 is not a float"), F[TEXT("huge")].TryGet<float>().IsSet());
+	TestEqual(TEXT("1.5 float"), F[TEXT("ok")].AsFloat(), 1.5f);
+
+	// SetAt out of range
+	FVaRestJson A = FVaRestJson::Array(1, 2);
+	AddExpectedError(TEXT("cannot SetAt index 5"), EAutomationExpectedErrorFlags::Contains, 1);
+	A.SetAt(5, 9);
+	TestEqual(TEXT("SetAt oob leaves Num"), A.Num(), 2);
+
+	// Replacing a key keeps Num
+	FVaRestJson S = FVaRestJson::Object().Set(TEXT("k"), 1).Set(TEXT("k"), 2);
+	TestEqual(TEXT("replace keeps Num"), S.Num(), 1);
+	TestEqual(TEXT("replaced"), S[TEXT("k")].AsInt(), 2);
+
+	// Small unsigned reads with AsInt
+	FVaRestJson U = FVaRestJson::Object().Set(TEXT("u"), 5u);
+	TestEqual(TEXT("5u AsInt"), U[TEXT("u")].AsInt(), 5);
 	return true;
 }
 
