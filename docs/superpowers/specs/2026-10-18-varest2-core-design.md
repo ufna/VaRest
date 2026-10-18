@@ -126,8 +126,14 @@ its parent grows. Our DOM gives handle stability by construction:
   array as an arena vector of `Node*`; object as an arena vector of `{key UTF-8, Node*}` in
   **insertion order**.
 * Growing a member/element vector allocates a new vector in the arena (geometric growth), and the
-  child nodes stay where they are. Removed nodes stay in the arena until the document dies. `Compact()`
-  rebuilds when that matters.
+  child nodes stay where they are. Removed nodes stay in the arena until the document dies.
+  `Clone()` rebuilds into a fresh document when that matters (an in-place compaction would move
+  nodes and invalidate other handles, so there is none).
+* **Parsing is in situ on a buffer the document owns.** RapidJSON's SIMD whitespace and string
+  scanners are specialised only for null-terminated string streams, so every parse runs
+  `kParseInsituFlag` over an owned, NUL-terminated UTF-8 buffer. `ParseOwned(TArray<uint8>&&)`
+  steals the HTTP response body (zero copies); the view overloads copy the input once. Parsed
+  strings point into that buffer; strings created by mutation live in the arena.
 * Objects with more than 8 members get a hash index (open addressing, in the arena) built **at parse
   time or on mutation**, never on read, so concurrent readers never write.
 * Duplicate keys in input are preserved; lookup returns the **last** occurrence (`JSON.parse`
@@ -164,7 +170,7 @@ TOptional<FProfile> P = Json[TEXT("profile")].TryGet<FProfile>();
 FVaRestJson Name = Json.Path(TEXT("user.items[3].name"));    // also JSON Pointer: "/user/items/3/name"
 for (const auto& [Key, Value] : Json.Members()) { ... }
 for (const FVaRestJson& Item : Json.Elements()) { ... }
-FString Text = Json.ToString(EVaRestJsonFormat::Pretty);    // also ToUtf8(TArray<uint8>&)
+FString Text = Json.ToString(EVaRestJsonFormat::Pretty);    // 2-space indent; also ToUtf8(TArray<uint8>&)
 ```
 
 * `FVaRestJsonError`: message, byte offset, line, column, JSON path (for decode errors).
@@ -545,13 +551,13 @@ the 10 MiB fixture, and not worse on the other), fall back to an `FJsonValue`-ba
 
 | M | Content | Exit |
 | --- | --- | --- |
-| M0 | Branch, host project, CLAUDE.md/AGENTS.md, beads, v1 builds on 5.8, v1 compat fixture authored | host builds; fixture BPs saved |
+| M0 | Branch, host project, CLAUDE.md/AGENTS.md, beads, v1 builds on 5.8 (tag `v1-on-5.8`) | host builds; v1 loads on 5.8 |
 | M1 | JSON arena DOM, parse/serialise, C++ API, bridges, **benchmark gate** | Json tests green; gate decided and recorded |
 | M2 | Struct ↔ JSON, BP JSON library, wildcard nodes, Make Json K2 | Convert tests green; BP smoke |
 | M3 | HTTP client, builder, transport, threading, bodies, errors, progress, file up/down, logging/redaction, limiter, fake transport, test server | Http tests green |
 | M4 | Retry, auth/session, envelope, cache, offline queue + connectivity, trace tap, stats | stage tests green, restore-the-bug done |
 | M5 | API asset, Hub, UVaRestApiClient, Call Endpoint / Send Request / simple nodes, settings, asset tooling | BP end-to-end against test server |
-| M6 | v1 shims on the new core, compat fixture verification, MIGRATION.md | fixture loads/compiles/runs |
+| M6 | v1 compat fixture authored from tag `v1-on-5.8`, v1 shims on the new core, fixture verification, MIGRATION.md | fixture loads/compiles/runs |
 | M7 | SAX→struct decoder (per §2.4 rule), benchmark passport, monolithic/Shipping/cooked runs, README | passport published; builds green |
 
 Each milestone gets its own implementation plan in `docs/superpowers/plans/`, written when the
@@ -566,7 +572,7 @@ API asset).
   hop to a background decode task.
 * **K2 node complexity** (`Call Endpoint` reconstruction on asset edits). Mitigation: pins are a
   pure function of `(asset, endpoint)`; orphan pins kept; a dedicated reconstruction test.
-* **Arena growth under heavy mutation.** Mitigation: `Compact()`; the docs recommend building bodies
+* **Arena growth under heavy mutation.** Mitigation: `Clone()`; the docs recommend building bodies
   from structs.
 * **Legacy fixture authoring** needs v1 to build on 5.8. Mitigation: the minimal port is part of M0.
   If v1 cannot be made to build, author the fixture on 5.4 and resave on 5.8.
