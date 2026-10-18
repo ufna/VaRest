@@ -3,6 +3,9 @@
 #
 #   Tools/run_tests.sh [--no-build] [--] [Filter]      (default filter: VaRest)
 #
+# The filter is a test-path PREFIX (StartsWith:), so benchmarks named Bench.VaRest.* never
+# run in the default suite; run them with `Tools/run_tests.sh Bench.VaRest`.
+#
 # Results are read from the run's own log file, never from stdout: an interleaved
 # UnrealTraceServer fork clobbers the tail of stdout on Linux (VaCuus dev-loop note).
 # Exit code: 0 when every matched test passed, 1 on any failure, 2 on setup errors,
@@ -25,6 +28,13 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -f "$PROJECT" ]] || { echo "run_tests: host project not found: $PROJECT" >&2; exit 2; }
+
+# A bare RunTests argument is a SUBSTRING match (AutomationCommandline.cpp:211-227), so
+# "VaRest.Json" would also run "Bench.VaRest.Json.*". StartsWith: matches from the start of
+# the test path and appends the trailing dot itself (AutomationCommandline.cpp:153-170).
+if [[ "$FILTER" != StartsWith:* && "$FILTER" != Group:* ]]; then
+	FILTER="StartsWith:$FILTER"
+fi
 
 # An editor holds the module .so files open; building under it fails or, worse, half-links.
 # Match the exact process names, never `pgrep -f <pattern>`: a pattern also matches this
