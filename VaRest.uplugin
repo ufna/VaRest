@@ -1,8 +1,8 @@
 {
 	"FileVersion" : 3,
 	"FriendlyName" : "VaRest",
-	"Version" : 32,
-	"VersionName" : "1.1-r34",
+	"Version" : 200,
+	"VersionName" : "2.0.0-dev",
 	"CreatedBy" : "Vladimir Alyamkin",
 	"CreatedByURL" : "https://ufna.dev",
 	"EngineVersion" : "5.8.0",
@@ -12,6 +12,12 @@
 	"MarketplaceURL" : "com.epicgames.launcher://ue/marketplace/content/e47be161e7a24e928560290abd5dcc4f",
 	"Modules" :
 	[
+		{
+			"Name" : "VaRestJson",
+			"Type" : "Runtime",
+			"LoadingPhase" : "PreDefault",
+			"PlatformAllowList" : [ "Win64", "Mac", "Linux", "Android", "IOS" ]
+		},
 		{
 			"Name" : "VaRest",
 			"Type" : "Runtime",
