@@ -86,6 +86,104 @@ bool FVaRestJsonStructOpsIdentitySerializeTest::RunTest(const FString& Parameter
 	TestTrue(TEXT("serialize round trip"), Loaded.Equals(ToSave));
 	TestFalse(TEXT("invalid stays invalid"), LoadedInvalid.IsValid());
 	TestFalse(TEXT("reader consumed exactly"), Reader.IsError());
+	TestTrue(TEXT("reader at end"), Reader.AtEnd());
+	TestEqual(TEXT("Tell == Num"), Reader.Tell(), static_cast<int64>(Bytes.Num()));
+	return true;
+}
+
+namespace
+{
+	TArray<uint8> GoldenBytes()
+	{
+		TArray<uint8> Bytes;
+		FMemoryWriter Writer(Bytes);
+		FVaRestJson::Object().Set(TEXT("a"), 1).Serialize(Writer);
+		return Bytes;
+	}
+
+	FVaRestJson LoadFrom(const TArray<uint8>& Bytes, bool& bOutError)
+	{
+		FMemoryReader Reader(Bytes);
+		FVaRestJson Loaded = FVaRestJson::Object();
+		Loaded.Serialize(Reader);
+		bOutError = Reader.IsError();
+		return Loaded;
+	}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonStructOpsHostileArchiveTest, "VaRest.Json.StructOps.HostileArchive",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestJsonStructOpsHostileArchiveTest::RunTest(const FString& Parameters)
+{
+	const TArray<uint8> Golden = GoldenBytes();
+	const uint8 Expected[] = {1, 1, 7, 0, 0, 0, 0, 0, 0, 0, '{', '"', 'a', '"', ':', '1', '}'};
+	TestEqual(TEXT("golden size"), Golden.Num(), static_cast<int32>(sizeof(Expected)));
+	TestTrue(TEXT("golden bytes"), Golden.Num() == sizeof(Expected) && FMemory::Memcmp(Golden.GetData(), Expected, sizeof(Expected)) == 0);
+
+	bool bError = false;
+	FVaRestJson Good = LoadFrom(Golden, bError);
+	TestTrue(TEXT("golden loads"), Good.IsValid() && !bError);
+
+	// (b) truncated mid-payload
+	{
+		TArray<uint8> Cut(Golden.GetData(), 13);
+		AddExpectedError(TEXT("implausible payload length"), EAutomationExpectedErrorFlags::Contains, 0);
+		const FVaRestJson Loaded = LoadFrom(Cut, bError);
+		TestFalse(TEXT("truncated invalid"), Loaded.IsValid());
+		TestTrue(TEXT("truncated errors"), bError);
+	}
+	// (c) oversized length, patched to 2^40
+	{
+		TArray<uint8> Huge = Golden;
+		FMemory::Memzero(Huge.GetData() + 2, 8);
+		Huge[2 + 5] = 1;
+		AddExpectedError(TEXT("implausible payload length"), EAutomationExpectedErrorFlags::Contains, 1);
+		const FVaRestJson Loaded = LoadFrom(Huge, bError);
+		TestFalse(TEXT("huge invalid"), Loaded.IsValid());
+		TestTrue(TEXT("huge errors"), bError);
+	}
+	// (d) wrong version
+	{
+		TArray<uint8> Bad = Golden;
+		Bad[0] = 2;
+		AddExpectedError(TEXT("unsupported serialized version 2"), EAutomationExpectedErrorFlags::Contains, 1);
+		const FVaRestJson Loaded = LoadFrom(Bad, bError);
+		TestFalse(TEXT("version invalid"), Loaded.IsValid());
+		TestTrue(TEXT("version errors"), bError);
+	}
+	// (e) consistent archive, payload is not JSON
+	{
+		TArray<uint8> Bad = Golden;
+		Bad.SetNum(10);
+		Bad[2] = 4;
+		Bad.Append(reinterpret_cast<const uint8*>("{bad"), 4);
+		AddExpectedError(TEXT("stored JSON does not parse"), EAutomationExpectedErrorFlags::Contains, 1);
+		const FVaRestJson Loaded = LoadFrom(Bad, bError);
+		TestFalse(TEXT("bad json invalid"), Loaded.IsValid());
+		TestFalse(TEXT("bad json is not an archive error"), bError);
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonStructOpsUnicodeTextTest, "VaRest.Json.StructOps.UnicodeText",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestJsonStructOpsUnicodeTextTest::RunTest(const FString& Parameters)
+{
+	UScriptStruct* HolderStruct = FVaRestJsonTestHolder::StaticStruct();
+	FVaRestJsonTestHolder Source;
+	Source.Before = 1;
+	Source.Json = FVaRestJson::Object().Set(TEXT("s"), TEXT("\u0436\U0001F600\u0436"));
+	Source.After = 7;
+
+	FString Text;
+	HolderStruct->ExportText(Text, &Source, nullptr, nullptr, PPF_None, nullptr);
+	FVaRestJsonTestHolder Imported;
+	HolderStruct->ImportText(*Text, &Imported, nullptr, PPF_None, GLog, HolderStruct->GetName());
+	TestTrue(TEXT("astral and Cyrillic survive"), Imported.Json.Equals(Source.Json));
+	TestEqual(TEXT("After not swallowed"), Imported.After, 7);
+	TestEqual(TEXT("Before"), Imported.Before, 1);
 	return true;
 }
 
