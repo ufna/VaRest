@@ -28,10 +28,10 @@ FString FVaRestJson::ToString(EVaRestJsonFormat Format) const
 
 namespace
 {
-	/** First arena chunk sized from the input; the benchmark (Task 10) tunes this factor. */
+	/** First arena chunk sized from the input (factor 1, tuned by the Task 10 benchmark, docs/passport/2026-10-19-json-bench.md); later chunks are fixed 64 KiB, so the factor barely moves retained memory. */
 	SIZE_T ArenaHintFor(int64 InputBytes)
 	{
-		return static_cast<SIZE_T>(FMath::Clamp<int64>(InputBytes * 2, 4096, 256ll * 1024 * 1024));
+		return static_cast<SIZE_T>(FMath::Clamp<int64>(InputBytes, 4096, 256ll * 1024 * 1024));
 	}
 
 	/** Rejects oversize input before anything is allocated */

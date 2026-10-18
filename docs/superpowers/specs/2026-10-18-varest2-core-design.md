@@ -548,6 +548,8 @@ N), peak memory, typed decode, serialize. Compared against `FJsonSerializer` + `
 the 10 MiB fixture, and not worse on the other), fall back to an `FJsonValue`-backed
 `FVaRestJson`. API and BP stay the same, and the decision is recorded.
 
+**Gate result (2026-10-19):** PASS — see docs/passport/2026-10-19-json-bench.md.
+
 ---
 
 ## 8. Milestones

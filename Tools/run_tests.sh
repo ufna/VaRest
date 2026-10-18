@@ -6,6 +6,7 @@
 # A bare filter is anchored at the start of the test path (it is passed as ^Filter), so
 # benchmarks named Bench.VaRest.* never run in the default suite; run them with
 # `Tools/run_tests.sh Bench.VaRest`. Explicit StartsWith:/Group: filters pass through as given.
+# VAREST_EXTRA_ARGS is appended to the editor command line (e.g. -llm for the benchmarks).
 #
 # Results are read from the run's own log file, never from stdout: an interleaved
 # UnrealTraceServer fork clobbers the tail of stdout on Linux (VaCuus dev-loop note).
@@ -60,7 +61,7 @@ rm -f "$LOG"
 # `, Quit` is a separate console command that never fires and the editor idles forever.
 "$ENGINE/Engine/Binaries/Linux/UnrealEditor-Cmd" "$PROJECT" \
 	-ExecCmds="Automation RunTests $FILTER; Quit" \
-	-unattended -nullrhi -nosplash -nopause -abslog="$LOG" >/dev/null 2>&1 || true
+	-unattended -nullrhi -nosplash -nopause -abslog="$LOG" ${VAREST_EXTRA_ARGS:-} >/dev/null 2>&1 || true
 
 [[ -f "$LOG" ]] || { echo "run_tests: no log written: $LOG" >&2; exit 2; }
 
