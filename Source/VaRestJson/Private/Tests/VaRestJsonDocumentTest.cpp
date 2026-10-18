@@ -10,8 +10,21 @@ using namespace VaRest::Json;
 namespace VaRestJsonDocumentTest
 {
 	FUtf8StringView K(const char* S) { return FUtf8StringView(reinterpret_cast<const UTF8CHAR*>(S)); }
+
+	/** A missing member fails the test and yields an inert Null node instead of a null dereference. */
+	const FNode& Need(FAutomationTestBase& Test, const FNode* Node, const TCHAR* What)
+	{
+		static FNode Missing;
+		if (!Node)
+		{
+			Test.AddError(FString::Printf(TEXT("Missing node: %s"), What));
+			return Missing;
+		}
+		return *Node;
+	}
 }
 using VaRestJsonDocumentTest::K;
+using VaRestJsonDocumentTest::Need;
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonDocNumbersTest, "VaRest.Json.Document.Numbers",
 	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
@@ -41,7 +54,7 @@ bool FVaRestJsonDocObjectTest::RunTest(const FString& Parameters)
 	Doc.Set(*Obj, K("a"), Doc.NewInt(3)); // replaces in place
 	TestEqual(TEXT("replace keeps member count"), (int32)Obj->Obj.Num, 2);
 	TestTrue(TEXT("replace keeps order"), KeyEquals(Obj->Obj.Members[0].Key, K("a")));
-	TestEqual(TEXT("a replaced"), FDocument::Find(*Obj, K("a"))->Int, (int64)3);
+	TestEqual(TEXT("a replaced"), Need(*this, FDocument::Find(*Obj, K("a")), TEXT("a")).Int, (int64)3);
 
 	// Keys are case-sensitive
 	TestNull(TEXT("'A' is not 'a'"), FDocument::Find(*Obj, K("A")));
@@ -49,7 +62,7 @@ bool FVaRestJsonDocObjectTest::RunTest(const FString& Parameters)
 	// Duplicates (the parser keeps them): lookup returns the LAST occurrence
 	Doc.Append(*Obj, Doc.CopyStr(K("b"), true), Doc.NewInt(20));
 	TestEqual(TEXT("duplicate kept"), (int32)Obj->Obj.Num, 3);
-	TestEqual(TEXT("last occurrence wins"), FDocument::Find(*Obj, K("b"))->Int, (int64)20);
+	TestEqual(TEXT("last occurrence wins"), Need(*this, FDocument::Find(*Obj, K("b")), TEXT("b")).Int, (int64)20);
 
 	// Remove drops every occurrence and keeps the order of the rest
 	Doc.Set(*Obj, K("c"), Doc.NewInt(4));
@@ -88,11 +101,11 @@ bool FVaRestJsonDocIndexTest::RunTest(const FString& Parameters)
 
 	// Duplicate through the index: last wins
 	Doc.Append(*Obj, Doc.CopyStr(K("k5"), true), Doc.NewInt(5000));
-	TestEqual(TEXT("indexed last occurrence wins"), FDocument::Find(*Obj, K("k5"))->Int, (int64)5000);
+	TestEqual(TEXT("indexed last occurrence wins"), Need(*this, FDocument::Find(*Obj, K("k5")), TEXT("k5")).Int, (int64)5000);
 
 	// Remove shifts members; the index must be rebuilt, not left pointing at old slots
 	TestEqual(TEXT("remove k0"), Doc.Remove(*Obj, K("k0")), 1);
-	TestEqual(TEXT("k999 after shift"), FDocument::Find(*Obj, K("k999"))->Int, (int64)999);
+	TestEqual(TEXT("k999 after shift"), Need(*this, FDocument::Find(*Obj, K("k999")), TEXT("k999")).Int, (int64)999);
 	TestNull(TEXT("k0 gone"), FDocument::Find(*Obj, K("k0")));
 	return true;
 }
@@ -119,8 +132,8 @@ bool FVaRestJsonDocStabilityTest::RunTest(const FString& Parameters)
 	}
 
 	TestTrue(TEXT("child pointer still resolves"), FDocument::Find(*Root, K("child")) == Child);
-	TestTrue(TEXT("child content intact"), KeyEquals(FDocument::Find(*Child, K("x"))->Str, K("kept")));
-	TestTrue(TEXT("first element pointer intact"), Arr->Arr.Items[0] == First && First->Int == 7);
+	TestTrue(TEXT("child content intact"), KeyEquals(Need(*this, FDocument::Find(*Child, K("x")), TEXT("x")).Str, K("kept")));
+	TestTrue(TEXT("first element pointer intact"), Arr->Arr.Num > 0 && Arr->Arr.Items[0] == First && First->Int == 7);
 	return true;
 }
 
@@ -145,10 +158,13 @@ bool FVaRestJsonDocCopyTest::RunTest(const FString& Parameters)
 		Copy = Target.DeepCopy(*Obj);
 	} // Source and its arena are gone
 
-	TestTrue(TEXT("string copied"), KeyEquals(FDocument::Find(*Copy, K("s"))->Str, K("text")));
-	TestEqual(TEXT("array copied"), FDocument::Find(*Copy, K("a"))->Arr.Items[0]->Double, 2.5);
+	TestTrue(TEXT("string copied"), KeyEquals(Need(*this, FDocument::Find(*Copy, K("s")), TEXT("s")).Str, K("text")));
+	const FNode& CopiedArr = Need(*this, FDocument::Find(*Copy, K("a")), TEXT("a"));
+	const bool bArrOk = CopiedArr.Type == EVaRestJsonType::Array && CopiedArr.Arr.Num == 1;
+	TestTrue(TEXT("array copied has one element"), bArrOk);
+	TestEqual(TEXT("array copied"), bArrOk ? Need(*this, CopiedArr.Arr.Items[0], TEXT("a[0]")).Double : 0.0, 2.5);
 	TestNotNull(TEXT("copied big object is indexed"), Copy->Obj.Index);
-	TestEqual(TEXT("indexed lookup in copy"), FDocument::Find(*Copy, K("n19"))->Int, (int64)19);
+	TestEqual(TEXT("indexed lookup in copy"), Need(*this, FDocument::Find(*Copy, K("n19")), TEXT("n19")).Int, (int64)19);
 
 	// Copying an ancestor under one of its own descendants terminates and does not alias
 	FNode* Root = Target.NewObject();
@@ -157,7 +173,12 @@ bool FVaRestJsonDocCopyTest::RunTest(const FString& Parameters)
 	Target.Set(*Sub, K("loop"), Target.DeepCopy(*Root));
 	const FNode* Loop = FDocument::Find(*Sub, K("loop"));
 	TestTrue(TEXT("loop is a copy, not the root"), Loop != Root);
-	TestNull(TEXT("copy was taken before the attach"), FDocument::Find(*FDocument::Find(*Loop, K("sub")), K("loop")));
+	const FNode* LoopSub = Loop && Loop->Type == EVaRestJsonType::Object ? FDocument::Find(*Loop, K("sub")) : nullptr;
+	TestNotNull(TEXT("copy contains sub"), LoopSub);
+	if (LoopSub && LoopSub->Type == EVaRestJsonType::Object)
+	{
+		TestNull(TEXT("copy was taken before the attach"), FDocument::Find(*LoopSub, K("loop")));
+	}
 	return true;
 }
 
