@@ -274,9 +274,21 @@ namespace VaRest::Json
 		O.Num = Write;
 		if (Removed > 0)
 		{
-			// Members shifted, so every index slot after the first removal is stale.
-			O.Index = nullptr;
-			if (O.Num > IndexThreshold)
+			// Members shifted, so every index slot after the first removal is stale. The arena never
+			// frees, so reuse the existing slot array (clear and reinsert) instead of allocating a new one.
+			if (O.Num <= IndexThreshold)
+			{
+				O.Index = nullptr;
+			}
+			else if (O.Index && O.Index->Capacity >= O.Num * 2)
+			{
+				FMemory::Memzero(O.Index->Slots, sizeof(uint32) * O.Index->Capacity);
+				for (uint32 i = 0; i < O.Num; ++i)
+				{
+					IndexInsert(Object, i);
+				}
+			}
+			else
 			{
 				BuildIndex(Object);
 			}

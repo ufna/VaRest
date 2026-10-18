@@ -210,4 +210,51 @@ bool FVaRestJsonDocEqualsTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonDocRemoveArenaTest, "VaRest.Json.Document.RemoveDoesNotGrowArena",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestJsonDocRemoveArenaTest::RunTest(const FString& Parameters)
+{
+	FDocument Doc;
+	FNode* Obj = Doc.NewObject();
+	auto Key = [](int32 i) { return FString::Printf(TEXT("r%d"), i); };
+	for (int32 i = 0; i < 200; ++i)
+	{
+		Doc.Set(*Obj, StringCast<UTF8CHAR>(*Key(i)).Get(), Doc.NewInt(i));
+	}
+	const SIZE_T Before = Doc.Arena.GetUsedBytes();
+
+	int32 BadRemoves = 0;
+	for (int32 i = 0; i < 150; ++i)
+	{
+		BadRemoves += Doc.Remove(*Obj, StringCast<UTF8CHAR>(*Key(i)).Get()) != 1;
+	}
+	TestEqual(TEXT("every remove removed one member"), BadRemoves, 0);
+	TestTrue(TEXT("removes do not grow the arena"), Doc.Arena.GetUsedBytes() < Before + 256);
+
+	int32 Wrong = 0;
+	for (int32 i = 0; i < 200; ++i)
+	{
+		const FNode* N = FDocument::Find(*Obj, StringCast<UTF8CHAR>(*Key(i)).Get());
+		Wrong += (i < 150) ? (N != nullptr) : (!N || N->Int != i);
+	}
+	TestEqual(TEXT("remaining keys resolve, removed keys do not"), Wrong, 0);
+
+	// Down to exactly the threshold: the index is dropped and linear lookups still work
+	for (int32 i = 150; i < 200 - (int32)IndexThreshold; ++i)
+	{
+		Doc.Remove(*Obj, StringCast<UTF8CHAR>(*Key(i)).Get());
+	}
+	TestEqual(TEXT("threshold member count"), (int32)Obj->Obj.Num, (int32)IndexThreshold);
+	TestNull(TEXT("no index at the threshold"), Obj->Obj.Index);
+	Wrong = 0;
+	for (int32 i = 200 - (int32)IndexThreshold; i < 200; ++i)
+	{
+		const FNode* N = FDocument::Find(*Obj, StringCast<UTF8CHAR>(*Key(i)).Get());
+		Wrong += !N || N->Int != i;
+	}
+	TestEqual(TEXT("lookups after dropping the index"), Wrong, 0);
+	return true;
+}
+
 #endif
