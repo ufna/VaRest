@@ -3,13 +3,15 @@
 #
 #   Tools/run_tests.sh [--no-build] [--] [Filter]      (default filter: VaRest)
 #
-# The filter is a test-path PREFIX (StartsWith:), so benchmarks named Bench.VaRest.* never
-# run in the default suite; run them with `Tools/run_tests.sh Bench.VaRest`.
+# A bare filter is anchored at the start of the test path (it is passed as ^Filter), so
+# benchmarks named Bench.VaRest.* never run in the default suite; run them with
+# `Tools/run_tests.sh Bench.VaRest`. Explicit StartsWith:/Group: filters pass through as given.
 #
 # Results are read from the run's own log file, never from stdout: an interleaved
 # UnrealTraceServer fork clobbers the tail of stdout on Linux (VaCuus dev-loop note).
-# Exit code: 0 when every matched test passed, 1 on any failure, 2 on setup errors,
-# 3 when the filter matched no tests.
+# Exit code: 0 when every matched test passed and the run completed, 1 on any failure or when
+# the run did not complete (crash: no "TEST COMPLETE. EXIT CODE" log line) or ended with a
+# non-zero exit code, 2 on setup errors, 3 when the filter matched no tests.
 set -euo pipefail
 
 ENGINE="${VAREST_ENGINE:-/w/Unreal/UnrealEngine}"
@@ -29,11 +31,12 @@ done
 
 [[ -f "$PROJECT" ]] || { echo "run_tests: host project not found: $PROJECT" >&2; exit 2; }
 
-# A bare RunTests argument is a SUBSTRING match (AutomationCommandline.cpp:211-227), so
-# "VaRest.Json" would also run "Bench.VaRest.Json.*". StartsWith: matches from the start of
-# the test path and appends the trailing dot itself (AutomationCommandline.cpp:153-170).
-if [[ "$FILTER" != StartsWith:* && "$FILTER" != Group:* ]]; then
-	FILTER="StartsWith:$FILTER"
+# A bare RunTests argument is a SUBSTRING match unless it starts with '^' (bMatchFromStart,
+# AutomationCommandline.cpp:211-227), so "VaRest.Json" would also run "Bench.VaRest.Json.*".
+# StartsWith: is not usable for a full test name: it appends a trailing '.' to the filter
+# (AutomationCommandline.cpp:153-170), so "StartsWith:VaRest.Json.Document.Index" matches nothing.
+if [[ "$FILTER" != StartsWith:* && "$FILTER" != Group:* && "$FILTER" != ^* ]]; then
+	FILTER="^$FILTER"
 fi
 
 # An editor holds the module .so files open; building under it fails or, worse, half-links.
@@ -61,6 +64,14 @@ rm -f "$LOG"
 
 [[ -f "$LOG" ]] || { echo "run_tests: no log written: $LOG" >&2; exit 2; }
 
+COMPLETE=$(grep -oE 'TEST COMPLETE\. EXIT CODE: -?[0-9]+' "$LOG" | tail -1 || true)
+if [[ -z "$COMPLETE" ]]; then
+	echo "run_tests: run did not complete (crash?) -- see $LOG" >&2
+	tail -n 20 "$LOG" >&2
+	exit 1
+fi
+EXITCODE="${COMPLETE##* }"
+
 PASSED=$(grep -c 'Test Completed. Result={Success}' "$LOG" || true)
 FAILED=$(grep -c 'Test Completed. Result={Fail}' "$LOG" || true)
 
@@ -74,4 +85,8 @@ if [[ $FAILED -gt 0 ]]; then
 	grep -E 'Test Completed. Result=\{Fail\}|LogAutomationController: Error' "$LOG" || true
 fi
 echo "run_tests: $PASSED passed, $FAILED failed (filter '$FILTER', log $LOG)"
+if [[ "$EXITCODE" != "0" ]]; then
+	echo "run_tests: run finished with exit code $EXITCODE" >&2
+	exit 1
+fi
 [[ $FAILED -eq 0 ]]
