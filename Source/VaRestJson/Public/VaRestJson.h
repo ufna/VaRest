@@ -76,6 +76,9 @@ struct FVaRestJsonParseOptions
 
 	/** Accept comments and trailing commas (config files, not wire data) */
 	bool bAllowCommentsAndTrailingCommas = false;
+
+	/** Larger inputs are rejected up front, before anything is allocated. 0 = unlimited */
+	int64 MaxInputBytes = 0;
 };
 
 /**
@@ -314,7 +317,11 @@ struct VARESTJSON_API FVaRestJson
 	static TValueOrError<FVaRestJson, FVaRestJsonError> Parse(FUtf8StringView Text, const FVaRestJsonParseOptions& Options = FVaRestJsonParseOptions());
 	static TValueOrError<FVaRestJson, FVaRestJsonError> Parse(FStringView Text, const FVaRestJsonParseOptions& Options = FVaRestJsonParseOptions());
 	static TValueOrError<FVaRestJson, FVaRestJsonError> Parse(TConstArrayView<uint8> Utf8Bytes, const FVaRestJsonParseOptions& Options = FVaRestJsonParseOptions());
-	/** Steals the buffer (an HTTP response body): zero copies; parsed strings point into it */
+	/**
+	 * Steals the buffer (an HTTP response body); parsed strings point into it.
+	 * Zero-copy when Utf8Bytes has at least one byte of slack (Max() > Num()), because the parser needs a
+	 * NUL terminator; otherwise one reallocation.
+	 */
 	static TValueOrError<FVaRestJson, FVaRestJsonError> ParseOwned(TArray<uint8>&& Utf8Bytes, const FVaRestJsonParseOptions& Options = FVaRestJsonParseOptions());
 
 	/** "" for an invalid handle, "null" for a null value */

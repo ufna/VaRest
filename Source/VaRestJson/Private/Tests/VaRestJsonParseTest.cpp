@@ -60,16 +60,16 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonParseStringsTest, "VaRest.Json.Parse
 
 bool FVaRestJsonParseStringsTest::RunTest(const FString& Parameters)
 {
-	TestEqual(TEXT("escapes"), P(*this, TEXT("\"\\\"\\\\\\/\\b\\f\\n\\r\\t\"")).AsString(), FString(TEXT("\"\\/\b\f\n\r\t")));
-	TestEqual(TEXT("\\u00e9"), P(*this, TEXT("\"\\u00e9\"")).AsString(), FString(TEXT("é")));
+	TestEqualSensitive(TEXT("escapes"), P(*this, TEXT("\"\\\"\\\\\\/\\b\\f\\n\\r\\t\"")).AsString(), FString(TEXT("\"\\/\b\f\n\r\t")));
+	TestEqualSensitive(TEXT("\\u00e9"), P(*this, TEXT("\"\\u00e9\"")).AsString(), FString(TEXT("é")));
 	TestEqual(TEXT("surrogate pair -> 4-byte UTF-8"), P(*this, TEXT("\"\\ud83d\\ude00\"")).AsUtf8View().Len(), 4);
-	TestEqual(TEXT("raw UTF-8"), P(*this, TEXT("\"привет\"")).AsString(), FString(TEXT("привет")));
+	TestEqualSensitive(TEXT("raw UTF-8"), P(*this, TEXT("\"привет\"")).AsString(), FString(TEXT("привет")));
 
 	// Embedded NUL in a key and in a value
 	const FVaRestJson J = P(*this, TEXT("{\"a\\u0000b\":\"x\\u0000y\"}"));
 	const UTF8CHAR Key[] = { 'a', 0, 'b' };
 	TestEqual(TEXT("key with NUL is found"), J[FUtf8StringView(Key, 3)].AsUtf8View().Len(), 3);
-	TestEqual(TEXT("NUL round-trips"), J.ToString(), FString(TEXT("{\"a\\u0000b\":\"x\\u0000y\"}")));
+	TestEqualSensitive(TEXT("NUL round-trips"), J.ToString(), FString(TEXT("{\"a\\u0000b\":\"x\\u0000y\"}")));
 
 	const uint8 BadUtf8[] = { '"', 0xC3, 0x28, '"' };
 	TestTrue(TEXT("invalid UTF-8 is rejected"), !FVaRestJson::Parse(TConstArrayView<uint8>(BadUtf8, 4)).HasValue());
@@ -85,7 +85,7 @@ bool FVaRestJsonParseStructureTest::RunTest(const FString& Parameters)
 	const FVaRestJson J = P(*this, TEXT(" { \"a\" : [ 1 , { \"b\" : null } , [ ] ] , \"c\" : {} } "));
 	TestEqual(TEXT("nested"), J[TEXT("a")].Num(), 3);
 	TestTrue(TEXT("deep null"), J[TEXT("a")][1][TEXT("b")].IsNull());
-	TestEqual(TEXT("round trip"), J.ToString(), FString(TEXT("{\"a\":[1,{\"b\":null},[]],\"c\":{}}")));
+	TestEqualSensitive(TEXT("round trip"), J.ToString(), FString(TEXT("{\"a\":[1,{\"b\":null},[]],\"c\":{}}")));
 
 	const FVaRestJson D = P(*this, TEXT("{\"a\":1,\"a\":2}"));
 	TestEqual(TEXT("duplicates: last wins"), D[TEXT("a")].AsInt(), 2);
@@ -109,7 +109,7 @@ bool FVaRestJsonParseStructureTest::RunTest(const FString& Parameters)
 	TArray<uint8> Owned;
 	Owned.Append(reinterpret_cast<const uint8*>("[\"s\"]"), 5);
 	TValueOrError<FVaRestJson, FVaRestJsonError> O = FVaRestJson::ParseOwned(MoveTemp(Owned));
-	TestTrue(TEXT("owned parse"), O.HasValue() && O.GetValue()[0].AsString() == TEXT("s"));
+	TestTrue(TEXT("owned parse"), O.HasValue() && O.GetValue()[0].AsString().Equals(TEXT("s"), ESearchCase::CaseSensitive));
 	TestEqual(TEXT("buffer was moved"), Owned.Num(), 0);
 	return true;
 }
@@ -180,6 +180,56 @@ bool FVaRestJsonParseConcurrentReadTest::RunTest(const FString& Parameters)
 		}
 	});
 	TestEqual(TEXT("concurrent lookups on a parsed object"), Wrong.load(), 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonParseHardeningTest, "VaRest.Json.Parse.Hardening",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestJsonParseHardeningTest::RunTest(const FString& Parameters)
+{
+	// A raw NUL must not end the document silently (RapidJSON stops at NUL, reader.h:2199)
+	const uint8 NulThenGarbage[] = { '{', '}', 0, 'x' };
+	TValueOrError<FVaRestJson, FVaRestJsonError> A = FVaRestJson::Parse(TConstArrayView<uint8>(NulThenGarbage, 4));
+	TestTrue(TEXT("{}\\0x fails"), !A.HasValue());
+	if (!A.HasValue())
+	{
+		TestEqualSensitive(TEXT("NUL message"), A.GetError().Message, FString(TEXT("Unexpected NUL byte in input")));
+		TestEqual(TEXT("NUL offset"), A.GetError().Offset, (int64)2);
+	}
+	const uint8 NulThenBracket[] = { '[', '1', ']', 0, ']' };
+	TestFalse(TEXT("[1]\\0] fails"), FVaRestJson::Parse(TConstArrayView<uint8>(NulThenBracket, 5)).HasValue());
+	const uint8 TrailingNul[] = { '[', '1', ']', 0 };
+	TestFalse(TEXT("a trailing NUL is also a NUL"), FVaRestJson::Parse(TConstArrayView<uint8>(TrailingNul, 4)).HasValue());
+
+	// MaxInputBytes
+	FVaRestJsonParseOptions Small;
+	Small.MaxInputBytes = 4;
+	TestTrue(TEXT("within the limit"), FVaRestJson::Parse(FUtf8StringView(UTF8TEXT("[12]")), Small).HasValue());
+	const FVaRestJsonError Big = E(*this, UTF8TEXT("[1,2,3]"), Small);
+	TestEqualSensitive(TEXT("size message"), Big.Message, FString(TEXT("Input of 7 bytes exceeds MaxInputBytes (4)")));
+	TestEqual(TEXT("size offset"), Big.Offset, (int64)-1);
+	TestFalse(TEXT("FStringView overload honours the limit"), FVaRestJson::Parse(FStringView(TEXT("[1,2,3]")), Small).HasValue());
+
+	// Effective depth limit is reported
+	FVaRestJsonParseOptions Zero;
+	Zero.MaxDepth = 0;
+	TestTrue(TEXT("clamped limit in message"), E(*this, UTF8TEXT("[[1]]"), Zero).Message.Contains(TEXT("deeper than 1")));
+
+	// FStringView overload keeps line/column
+	TValueOrError<FVaRestJson, FVaRestJsonError> L = FVaRestJson::Parse(FStringView(TEXT("{\n  \"a\": 1,\n  \"b\": x\n}")));
+	TestTrue(TEXT("string overload line/column"), !L.HasValue() && L.GetError().Line == 3 && L.GetError().Column == 8);
+
+	// Duplicate keys on the indexed (> 8 members) path
+	FString Dup = TEXT("{");
+	for (int32 i = 0; i < 12; ++i)
+	{
+		Dup += FString::Printf(TEXT("\"k%d\":%d,"), i, i);
+	}
+	Dup += TEXT("\"k3\":99}");
+	const FVaRestJson D = P(*this, *Dup);
+	TestEqual(TEXT("indexed duplicates: last wins"), D[TEXT("k3")].AsInt(), 99);
+	TestEqual(TEXT("indexed duplicates: both counted"), D.Num(), 13);
 	return true;
 }
 

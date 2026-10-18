@@ -34,15 +34,32 @@ namespace
 		return static_cast<SIZE_T>(FMath::Clamp<int64>(InputBytes * 2, 4096, 256ll * 1024 * 1024));
 	}
 
+	/** Rejects oversize input before anything is allocated */
+	bool ExceedsLimit(int64 InputBytes, const FVaRestJsonParseOptions& Options, FVaRestJsonError& OutError)
+	{
+		if (Options.MaxInputBytes > 0 && InputBytes > Options.MaxInputBytes)
+		{
+			OutError = FVaRestJsonError();
+			OutError.Offset = -1;
+			OutError.Message = FString::Printf(TEXT("Input of %lld bytes exceeds MaxInputBytes (%lld)"), InputBytes, Options.MaxInputBytes);
+			return true;
+		}
+		return false;
+	}
+
 	TValueOrError<FVaRestJson, FVaRestJsonError> ParseIntoDocument(TArray<uint8>&& Bytes, const FVaRestJsonParseOptions& Options, FUtf8StringView Original)
 	{
+		FVaRestJsonError Error;
+		if (ExceedsLimit(Bytes.Num(), Options, Error))
+		{
+			return MakeError(MoveTemp(Error));
+		}
 		const int64 Bom = BomLength(Bytes.GetData(), Bytes.Num());
 		const int64 InputBytes = Bytes.Num();
 		TSharedPtr<FDocument, ESPMode::ThreadSafe> Doc = MakeShared<FDocument, ESPMode::ThreadSafe>(ArenaHintFor(InputBytes));
 		Doc->Input = MoveTemp(Bytes);
-		Doc->Input.Add(0);
+		Doc->Input.Add(0); // no reallocation when the caller left a byte of slack
 
-		FVaRestJsonError Error;
 		if (!ParseInSitu(*Doc, Bom, Options, Original, Error))
 		{
 			return MakeError(MoveTemp(Error));
@@ -59,6 +76,11 @@ TValueOrError<FVaRestJson, FVaRestJsonError> FVaRestJson::ParseOwned(TArray<uint
 
 TValueOrError<FVaRestJson, FVaRestJsonError> FVaRestJson::Parse(TConstArrayView<uint8> Utf8Bytes, const FVaRestJsonParseOptions& Options)
 {
+	FVaRestJsonError Error;
+	if (ExceedsLimit(Utf8Bytes.Num(), Options, Error))
+	{
+		return MakeError(MoveTemp(Error));
+	}
 	TArray<uint8> Copy;
 	Copy.Reserve(Utf8Bytes.Num() + 1);
 	Copy.Append(Utf8Bytes.GetData(), Utf8Bytes.Num());
@@ -72,6 +94,26 @@ TValueOrError<FVaRestJson, FVaRestJsonError> FVaRestJson::Parse(FUtf8StringView 
 
 TValueOrError<FVaRestJson, FVaRestJsonError> FVaRestJson::Parse(FStringView Text, const FVaRestJsonParseOptions& Options)
 {
-	const auto Utf8 = StringCast<UTF8CHAR>(Text.GetData(), Text.Len());
-	return Parse(FUtf8StringView(Utf8.Get(), Utf8.Length()), Options);
+	// One copy: convert straight into the owned buffer (with a byte of slack for the terminator). The in-situ
+	// parse rewrites that buffer, so line/column are computed on the error path only, by converting again.
+	const int32 Utf8Len = FPlatformString::ConvertedLength<UTF8CHAR>(Text.GetData(), Text.Len());
+	FVaRestJsonError Error;
+	if (ExceedsLimit(Utf8Len, Options, Error))
+	{
+		return MakeError(MoveTemp(Error));
+	}
+	TArray<uint8> Bytes;
+	Bytes.Reserve(Utf8Len + 1);
+	Bytes.AddUninitialized(Utf8Len);
+	FPlatformString::Convert(reinterpret_cast<UTF8CHAR*>(Bytes.GetData()), Utf8Len, Text.GetData(), Text.Len());
+
+	TValueOrError<FVaRestJson, FVaRestJsonError> Result = ParseIntoDocument(MoveTemp(Bytes), Options, FUtf8StringView());
+	if (!Result.HasValue() && Result.GetError().Offset >= 0)
+	{
+		FVaRestJsonError Diagnosed = Result.GetError();
+		const auto Original = StringCast<UTF8CHAR>(Text.GetData(), Text.Len());
+		FillLineColumn(Diagnosed, FUtf8StringView(Original.Get(), Original.Length()));
+		return MakeError(MoveTemp(Diagnosed));
+	}
+	return Result;
 }
