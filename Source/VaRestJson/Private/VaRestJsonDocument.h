@@ -1,0 +1,76 @@
+// Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
+
+#pragma once
+
+#include "VaRestJsonArena.h"
+#include "VaRestJsonNode.h"
+
+namespace VaRest::Json
+{
+	/**
+	 * Owns every node of one JSON tree. FVaRestJson handles share it through a thread-safe
+	 * TSharedPtr; nodes live in the arena and never move, so a handle's raw FNode* stays valid
+	 * for as long as any handle keeps the document alive.
+	 */
+	class FDocument
+	{
+	public:
+		explicit FDocument(SIZE_T ArenaFirstChunk = 4096)
+			: Arena(ArenaFirstChunk)
+		{
+		}
+
+		FArena Arena;
+
+		/** In-situ parse buffer, NUL-terminated; parsed strings and keys point into it */
+		TArray<uint8> Input;
+
+		FNode* Root = nullptr;
+
+		FNode* NewNull();
+		FNode* NewBool(bool bValue);
+		FNode* NewInt(int64 Value);
+		/** Stored as Int when it fits int64 */
+		FNode* NewUInt(uint64 Value);
+		FNode* NewDouble(double Value);
+		/** Copies Value into the arena */
+		FNode* NewString(FUtf8StringView Value);
+		/** No copy: Data must live in Input or the arena, NUL-terminated */
+		FNode* NewStringRef(const UTF8CHAR* Data, uint32 Len);
+		FNode* NewArray(uint32 Reserve = 0);
+		FNode* NewObject(uint32 Reserve = 0);
+
+		FStr CopyStr(FUtf8StringView Value, bool bHash);
+		static FStr RefStr(const UTF8CHAR* Data, uint32 Len, bool bHash);
+
+		/** Index of the LAST member with this key, or INDEX_NONE */
+		static int32 FindMember(const FNode& Object, FUtf8StringView Key, uint32 Hash);
+		static FNode* Find(const FNode& Object, FUtf8StringView Key);
+
+		/** Replace the last occurrence's value, or append */
+		void Set(FNode& Object, FUtf8StringView Key, FNode* Value);
+		/** Append without looking for duplicates (the parser keeps them) */
+		void Append(FNode& Object, const FStr& Key, FNode* Value);
+		/** Remove every occurrence; returns how many were removed */
+		int32 Remove(FNode& Object, FUtf8StringView Key);
+		void BuildIndex(FNode& Object);
+
+		void Append(FNode& Array, FNode* Value);
+		bool SetAt(FNode& Array, uint32 Index, FNode* Value);
+		bool RemoveAt(FNode& Array, uint32 Index);
+
+		/** Exact-size fill used by the parser */
+		void AssignArray(FNode& Array, TConstArrayView<FNode*> Items);
+		void AssignObject(FNode& Object, TConstArrayView<FMember> Members);
+
+		/** Deep copy of Src, from any document, into this one. Reads Src completely before returning. */
+		FNode* DeepCopy(const FNode& Src);
+
+		/** JSON equality: 1 == 1.0, objects ignore member order and compare duplicates by their last occurrence */
+		static bool Equals(const FNode& A, const FNode& B);
+
+	private:
+		FNode* NewNode(EVaRestJsonType Type);
+		void IndexInsert(FNode& Object, uint32 MemberIndex);
+	};
+}

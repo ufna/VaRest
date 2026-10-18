@@ -1,0 +1,459 @@
+// Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
+
+#include "VaRestJsonDocument.h"
+
+namespace VaRest::Json
+{
+	namespace
+	{
+		template <typename T>
+		T* GrowVector(FArena& Arena, T* Old, uint32 Num, uint32& InOutMax)
+		{
+			// The old vector is abandoned in the arena; the nodes it pointed at do not move.
+			const uint32 NewMax = FMath::Max<uint32>(4, InOutMax * 2);
+			T* New = Arena.NewArray<T>(NewMax);
+			if (Num)
+			{
+				FMemory::Memcpy(New, Old, sizeof(T) * Num);
+			}
+			InOutMax = NewMax;
+			return New;
+		}
+
+		bool NumbersEqual(const FNode& A, const FNode& B)
+		{
+			if (A.NumKind == B.NumKind)
+			{
+				switch (A.NumKind)
+				{
+				case ENumKind::Int:    return A.Int == B.Int;
+				case ENumKind::UInt:   return A.UInt == B.UInt;
+				case ENumKind::Double: return A.Double == B.Double;
+				}
+			}
+			if (A.NumKind != ENumKind::Double && B.NumKind != ENumKind::Double)
+			{
+				return false; // Int and UInt never overlap: UInt holds only values above INT64_MAX
+			}
+			const FNode& D = A.NumKind == ENumKind::Double ? A : B;
+			const FNode& I = A.NumKind == ENumKind::Double ? B : A;
+			const double V = D.Double;
+			if (!FMath::IsFinite(V) || FMath::TruncToDouble(V) != V)
+			{
+				return false;
+			}
+			if (I.NumKind == ENumKind::Int)
+			{
+				return V >= -9223372036854775808.0 && V < 9223372036854775808.0 && static_cast<int64>(V) == I.Int;
+			}
+			return V >= 9223372036854775808.0 && V < 18446744073709551616.0 && static_cast<uint64>(V) == I.UInt;
+		}
+	}
+
+	FNode* FDocument::NewNode(EVaRestJsonType Type)
+	{
+		FNode* Node = Arena.New<FNode>();
+		Node->Type = Type;
+		return Node;
+	}
+
+	FNode* FDocument::NewNull()
+	{
+		return NewNode(EVaRestJsonType::Null);
+	}
+
+	FNode* FDocument::NewBool(bool bValue)
+	{
+		FNode* Node = NewNode(EVaRestJsonType::Bool);
+		Node->Bool = bValue;
+		return Node;
+	}
+
+	FNode* FDocument::NewInt(int64 Value)
+	{
+		FNode* Node = NewNode(EVaRestJsonType::Number);
+		Node->NumKind = ENumKind::Int;
+		Node->Int = Value;
+		return Node;
+	}
+
+	FNode* FDocument::NewUInt(uint64 Value)
+	{
+		if (Value <= static_cast<uint64>(MAX_int64))
+		{
+			return NewInt(static_cast<int64>(Value));
+		}
+		FNode* Node = NewNode(EVaRestJsonType::Number);
+		Node->NumKind = ENumKind::UInt;
+		Node->UInt = Value;
+		return Node;
+	}
+
+	FNode* FDocument::NewDouble(double Value)
+	{
+		FNode* Node = NewNode(EVaRestJsonType::Number);
+		Node->NumKind = ENumKind::Double;
+		Node->Double = Value;
+		return Node;
+	}
+
+	FStr FDocument::CopyStr(FUtf8StringView Value, bool bHash)
+	{
+		const uint32 Len = static_cast<uint32>(Value.Len());
+		UTF8CHAR* Data = Arena.NewArray<UTF8CHAR>(Len + 1);
+		if (Len)
+		{
+			FMemory::Memcpy(Data, Value.GetData(), Len);
+		}
+		Data[Len] = UTF8CHAR(0);
+		return FStr{ Data, Len, bHash ? HashKey(Value) : 0u };
+	}
+
+	FStr FDocument::RefStr(const UTF8CHAR* Data, uint32 Len, bool bHash)
+	{
+		return FStr{ Data, Len, bHash ? HashKey(FUtf8StringView(Data, Len)) : 0u };
+	}
+
+	FNode* FDocument::NewString(FUtf8StringView Value)
+	{
+		FNode* Node = NewNode(EVaRestJsonType::String);
+		Node->Str = CopyStr(Value, false);
+		return Node;
+	}
+
+	FNode* FDocument::NewStringRef(const UTF8CHAR* Data, uint32 Len)
+	{
+		FNode* Node = NewNode(EVaRestJsonType::String);
+		Node->Str = RefStr(Data, Len, false);
+		return Node;
+	}
+
+	FNode* FDocument::NewArray(uint32 Reserve)
+	{
+		FNode* Node = NewNode(EVaRestJsonType::Array);
+		Node->Arr = FNode::FArr{ Arena.NewArray<FNode*>(Reserve), 0, Reserve };
+		return Node;
+	}
+
+	FNode* FDocument::NewObject(uint32 Reserve)
+	{
+		FNode* Node = NewNode(EVaRestJsonType::Object);
+		Node->Obj = FNode::FObj{ Arena.NewArray<FMember>(Reserve), 0, Reserve, nullptr };
+		return Node;
+	}
+
+	int32 FDocument::FindMember(const FNode& Object, FUtf8StringView Key, uint32 Hash)
+	{
+		check(Object.Type == EVaRestJsonType::Object);
+		const FNode::FObj& O = Object.Obj;
+		if (const FIndex* Index = O.Index)
+		{
+			const uint32 Mask = Index->Capacity - 1;
+			for (uint32 Slot = Hash & Mask;; Slot = (Slot + 1) & Mask)
+			{
+				const uint32 Entry = Index->Slots[Slot];
+				if (Entry == 0)
+				{
+					return INDEX_NONE;
+				}
+				const FMember& M = O.Members[Entry - 1];
+				if (M.Key.Hash == Hash && KeyEquals(M.Key, Key))
+				{
+					return static_cast<int32>(Entry - 1);
+				}
+			}
+		}
+		for (int32 i = static_cast<int32>(O.Num) - 1; i >= 0; --i)
+		{
+			const FMember& M = O.Members[i];
+			if (M.Key.Hash == Hash && KeyEquals(M.Key, Key))
+			{
+				return i; // scanning from the end: the last occurrence wins
+			}
+		}
+		return INDEX_NONE;
+	}
+
+	FNode* FDocument::Find(const FNode& Object, FUtf8StringView Key)
+	{
+		const int32 i = FindMember(Object, Key, HashKey(Key));
+		return i == INDEX_NONE ? nullptr : Object.Obj.Members[i].Value;
+	}
+
+	void FDocument::Set(FNode& Object, FUtf8StringView Key, FNode* Value)
+	{
+		const int32 i = FindMember(Object, Key, HashKey(Key));
+		if (i != INDEX_NONE)
+		{
+			Object.Obj.Members[i].Value = Value;
+			return;
+		}
+		Append(Object, CopyStr(Key, true), Value);
+	}
+
+	void FDocument::Append(FNode& Object, const FStr& Key, FNode* Value)
+	{
+		check(Object.Type == EVaRestJsonType::Object);
+		FNode::FObj& O = Object.Obj;
+		if (O.Num == O.Max)
+		{
+			O.Members = GrowVector(Arena, O.Members, O.Num, O.Max);
+		}
+		O.Members[O.Num] = FMember{ Key, Value };
+		++O.Num;
+
+		if (O.Index)
+		{
+			if (O.Num * 2 > O.Index->Capacity)
+			{
+				BuildIndex(Object);
+			}
+			else
+			{
+				IndexInsert(Object, O.Num - 1);
+			}
+		}
+		else if (O.Num > IndexThreshold)
+		{
+			BuildIndex(Object);
+		}
+	}
+
+	void FDocument::IndexInsert(FNode& Object, uint32 MemberIndex)
+	{
+		FIndex& Index = *Object.Obj.Index;
+		const FMember& M = Object.Obj.Members[MemberIndex];
+		const uint32 Mask = Index.Capacity - 1;
+		for (uint32 Slot = M.Key.Hash & Mask;; Slot = (Slot + 1) & Mask)
+		{
+			uint32& Entry = Index.Slots[Slot];
+			if (Entry == 0)
+			{
+				Entry = MemberIndex + 1;
+				return;
+			}
+			const FMember& Other = Object.Obj.Members[Entry - 1];
+			if (Other.Key.Hash == M.Key.Hash && KeyEquals(Other.Key, M.Key.View()))
+			{
+				Entry = MemberIndex + 1; // a later duplicate takes the slot: last occurrence wins
+				return;
+			}
+		}
+	}
+
+	void FDocument::BuildIndex(FNode& Object)
+	{
+		FNode::FObj& O = Object.Obj;
+		const uint32 Capacity = FMath::RoundUpToPowerOfTwo(FMath::Max<uint32>(16, O.Num * 2));
+		FIndex* Index = Arena.New<FIndex>();
+		Index->Capacity = Capacity;
+		Index->Slots = Arena.NewArray<uint32>(Capacity);
+		FMemory::Memzero(Index->Slots, sizeof(uint32) * Capacity);
+		O.Index = Index;
+		for (uint32 i = 0; i < O.Num; ++i)
+		{
+			IndexInsert(Object, i);
+		}
+	}
+
+	int32 FDocument::Remove(FNode& Object, FUtf8StringView Key)
+	{
+		check(Object.Type == EVaRestJsonType::Object);
+		FNode::FObj& O = Object.Obj;
+		const uint32 Hash = HashKey(Key);
+		uint32 Write = 0;
+		for (uint32 Read = 0; Read < O.Num; ++Read)
+		{
+			const FMember& M = O.Members[Read];
+			if (!(M.Key.Hash == Hash && KeyEquals(M.Key, Key)))
+			{
+				O.Members[Write++] = M;
+			}
+		}
+		const int32 Removed = static_cast<int32>(O.Num - Write);
+		O.Num = Write;
+		if (Removed > 0)
+		{
+			// Members shifted, so every index slot after the first removal is stale.
+			O.Index = nullptr;
+			if (O.Num > IndexThreshold)
+			{
+				BuildIndex(Object);
+			}
+		}
+		return Removed;
+	}
+
+	void FDocument::Append(FNode& Array, FNode* Value)
+	{
+		check(Array.Type == EVaRestJsonType::Array);
+		FNode::FArr& A = Array.Arr;
+		if (A.Num == A.Max)
+		{
+			A.Items = GrowVector(Arena, A.Items, A.Num, A.Max);
+		}
+		A.Items[A.Num++] = Value;
+	}
+
+	bool FDocument::SetAt(FNode& Array, uint32 Index, FNode* Value)
+	{
+		check(Array.Type == EVaRestJsonType::Array);
+		if (Index >= Array.Arr.Num)
+		{
+			return false;
+		}
+		Array.Arr.Items[Index] = Value;
+		return true;
+	}
+
+	bool FDocument::RemoveAt(FNode& Array, uint32 Index)
+	{
+		check(Array.Type == EVaRestJsonType::Array);
+		FNode::FArr& A = Array.Arr;
+		if (Index >= A.Num)
+		{
+			return false;
+		}
+		FMemory::Memmove(A.Items + Index, A.Items + Index + 1, sizeof(FNode*) * (A.Num - Index - 1));
+		--A.Num;
+		return true;
+	}
+
+	void FDocument::AssignArray(FNode& Array, TConstArrayView<FNode*> Items)
+	{
+		const uint32 Num = static_cast<uint32>(Items.Num());
+		FNode** Data = Arena.NewArray<FNode*>(Num);
+		if (Num)
+		{
+			FMemory::Memcpy(Data, Items.GetData(), sizeof(FNode*) * Num);
+		}
+		Array.Arr = FNode::FArr{ Data, Num, Num };
+	}
+
+	void FDocument::AssignObject(FNode& Object, TConstArrayView<FMember> Members)
+	{
+		const uint32 Num = static_cast<uint32>(Members.Num());
+		FMember* Data = Arena.NewArray<FMember>(Num);
+		if (Num)
+		{
+			FMemory::Memcpy(Data, Members.GetData(), sizeof(FMember) * Num);
+		}
+		Object.Obj = FNode::FObj{ Data, Num, Num, nullptr };
+		if (Num > IndexThreshold)
+		{
+			BuildIndex(Object);
+		}
+	}
+
+	FNode* FDocument::DeepCopy(const FNode& Src)
+	{
+		switch (Src.Type)
+		{
+		case EVaRestJsonType::None:
+		case EVaRestJsonType::Null:
+			return NewNull();
+		case EVaRestJsonType::Bool:
+			return NewBool(Src.Bool);
+		case EVaRestJsonType::Number:
+			switch (Src.NumKind)
+			{
+			case ENumKind::Int:    return NewInt(Src.Int);
+			case ENumKind::UInt:   return NewUInt(Src.UInt);
+			case ENumKind::Double: return NewDouble(Src.Double);
+			}
+			return NewNull();
+		case EVaRestJsonType::String:
+			return NewString(Src.Str.View());
+		case EVaRestJsonType::Array:
+		{
+			const uint32 Num = Src.Arr.Num;
+			FNode* Node = NewArray(Num);
+			for (uint32 i = 0; i < Num; ++i)
+			{
+				Node->Arr.Items[i] = DeepCopy(*Src.Arr.Items[i]);
+			}
+			Node->Arr.Num = Num;
+			return Node;
+		}
+		case EVaRestJsonType::Object:
+		{
+			const uint32 Num = Src.Obj.Num;
+			FNode* Node = NewObject(Num);
+			for (uint32 i = 0; i < Num; ++i)
+			{
+				const FMember& M = Src.Obj.Members[i];
+				FStr Key = CopyStr(M.Key.View(), false);
+				Key.Hash = M.Key.Hash;
+				Node->Obj.Members[i] = FMember{ Key, DeepCopy(*M.Value) };
+			}
+			Node->Obj.Num = Num;
+			if (Num > IndexThreshold)
+			{
+				BuildIndex(*Node);
+			}
+			return Node;
+		}
+		}
+		return NewNull();
+	}
+
+	bool FDocument::Equals(const FNode& A, const FNode& B)
+	{
+		if (A.Type != B.Type)
+		{
+			return false;
+		}
+		switch (A.Type)
+		{
+		case EVaRestJsonType::None:
+		case EVaRestJsonType::Null:
+			return true;
+		case EVaRestJsonType::Bool:
+			return A.Bool == B.Bool;
+		case EVaRestJsonType::Number:
+			return NumbersEqual(A, B);
+		case EVaRestJsonType::String:
+			return KeyEquals(A.Str, B.Str.View());
+		case EVaRestJsonType::Array:
+			if (A.Arr.Num != B.Arr.Num)
+			{
+				return false;
+			}
+			for (uint32 i = 0; i < A.Arr.Num; ++i)
+			{
+				if (!Equals(*A.Arr.Items[i], *B.Arr.Items[i]))
+				{
+					return false;
+				}
+			}
+			return true;
+		case EVaRestJsonType::Object:
+		{
+			// Distinct keys, each by its last occurrence -- the same view Find gives.
+			uint32 DistinctA = 0;
+			for (uint32 i = 0; i < A.Obj.Num; ++i)
+			{
+				const FMember& M = A.Obj.Members[i];
+				if (FindMember(A, M.Key.View(), M.Key.Hash) != static_cast<int32>(i))
+				{
+					continue; // an earlier duplicate
+				}
+				++DistinctA;
+				const int32 j = FindMember(B, M.Key.View(), M.Key.Hash);
+				if (j == INDEX_NONE || !Equals(*M.Value, *B.Obj.Members[j].Value))
+				{
+					return false;
+				}
+			}
+			uint32 DistinctB = 0;
+			for (uint32 i = 0; i < B.Obj.Num; ++i)
+			{
+				const FMember& M = B.Obj.Members[i];
+				DistinctB += FindMember(B, M.Key.View(), M.Key.Hash) == static_cast<int32>(i);
+			}
+			return DistinctA == DistinctB;
+		}
+		}
+		return false;
+	}
+}
