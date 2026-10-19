@@ -177,6 +177,9 @@ bool FVaRestJsonParseConcurrentReadTest::RunTest(const FString& Parameters)
 	}
 	Text += TEXT("}");
 	const FVaRestJson J = P(*this, *Text);
+	// The index exists before any read: readers never build it lazily (no writes on read paths)
+	const VaRest::Json::FIndex* const Index = J.IsObject() ? J.GetNodeInternal()->Obj.Index : nullptr;
+	TestTrue(TEXT("index built at parse time"), Index != nullptr);
 	std::atomic<int32> Wrong{ 0 };
 	ParallelFor(64, [&J, &Wrong](int32 Worker)
 	{
@@ -190,6 +193,7 @@ bool FVaRestJsonParseConcurrentReadTest::RunTest(const FString& Parameters)
 		}
 	});
 	TestEqual(TEXT("concurrent lookups on a parsed object"), Wrong.load(), 0);
+	TestTrue(TEXT("readers left the index alone"), J.GetNodeInternal()->Obj.Index == Index);
 	return true;
 }
 

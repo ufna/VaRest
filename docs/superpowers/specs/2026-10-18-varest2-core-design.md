@@ -541,15 +541,21 @@ Android and iOS compile checks before release.
 
 ### 7.3 Benchmark gate (first implementation milestone)
 
-`VaRest.Bench.*` (perf filter, not in the default suite), deterministic fixtures from
-`Tools/gen_bench_json.py` (1 MiB and 10 MiB realistic API payloads). Measured: parse time (median of
-N), peak memory, typed decode, serialize. Compared against `FJsonSerializer` + `FJsonObject`,
-`FJsonObjectConverter`, and the v1 request path. Results are recorded in `docs/passport/`.
-**Gate:** if the VaRest DOM is not clearly ahead (≥2× faster parse **or** ≥2× lower peak memory on
-the 10 MiB fixture, and not worse on the other), fall back to an `FJsonValue`-backed
+`Bench.VaRest.*` (perf filter; the runner's anchored `^VaRest` filter keeps them out of the default
+suite), deterministic fixtures from `Tools/gen_bench_json.py` (1 MiB and 10 MiB realistic API
+payloads). Measured in M1: parse time (median of N), retained memory (LLM bytes still allocated while
+the result is alive; peak is not measured separately), serialize. Compared against `FJsonSerializer` +
+`FJsonObject`. Typed decode, `FJsonObjectConverter` and the v1 request path are deferred to M2/M3,
+where those pieces exist. Results are recorded in `docs/passport/`.
+**Gate:** if the VaRest DOM is not clearly ahead (≥2× faster parse **or** ≥2× lower retained memory
+on the 10 MiB fixture, and not worse on the other), fall back to an `FJsonValue`-backed
 `FVaRestJson`. API and BP stay the same, and the decision is recorded.
 
-**Gate result (2026-10-19):** PASS — see docs/passport/2026-10-19-json-bench.md. Measured: parse time and *retained* memory (peak was not measured; the engine path's peak is larger than its retained figure, so the memory comparison holds a fortiori). `FJsonObjectConverter`, typed decode and the v1 request path are deferred to M2/M3.
+**Gate result (2026-10-19):** PASS — see docs/passport/2026-10-19-json-bench.md (re-checked after the
+final review's arena change, passport addendum: 25.1× faster parse, 1.64× less retained memory). Measured:
+parse time and *retained* memory (peak was not measured; the engine path's peak is larger than its retained
+figure, so the memory comparison holds a fortiori). `FJsonObjectConverter`, typed decode and the v1 request
+path are deferred to M2/M3.
 
 ---
 
