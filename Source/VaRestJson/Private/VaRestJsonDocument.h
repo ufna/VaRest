@@ -15,7 +15,7 @@ namespace VaRest::Json
 	class FDocument
 	{
 	public:
-		explicit FDocument(SIZE_T ArenaFirstChunk = 4096)
+		explicit FDocument(SIZE_T ArenaFirstChunk = FArena::MinChunkSize)
 			: Arena(ArenaFirstChunk)
 		{
 		}

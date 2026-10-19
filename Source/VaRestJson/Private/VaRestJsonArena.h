@@ -16,9 +16,21 @@ namespace VaRest::Json
 	class FArena
 	{
 	public:
-		static constexpr SIZE_T MaxChunkSize = 64 * 1024;
+		/**
+		 * Smallest chunk, and the default first chunk: a small document (`{}`, a SaveGame field, a pin
+		 * default) costs one 256 B chunk, not 4 KiB.
+		 */
+		static constexpr SIZE_T MinChunkSize = 256;
 
-		explicit FArena(SIZE_T InFirstChunkSize = 4096);
+		/**
+		 * Growth chunks double from the previous chunk size up to this. 1 MiB keeps a 40 MB DOM (the 10 MiB
+		 * benchmark fixture) at about 40 chunks (about 465 at 64 KiB); the cost is at most one partly filled
+		 * chunk per document (docs/passport/2026-10-19-json-bench.md, addendum).
+		 * A block larger than MaxChunkSize / 2 gets a chunk of its own.
+		 */
+		static constexpr SIZE_T MaxChunkSize = 1024 * 1024;
+
+		explicit FArena(SIZE_T InFirstChunkSize = MinChunkSize);
 		~FArena();
 
 		FArena(const FArena&) = delete;

@@ -66,7 +66,7 @@ FVaRestJson FVaRestJson::Array()
 
 FVaRestJson FVaRestJson::Null()
 {
-	FDocumentRef NewDoc = NewDocument(256);
+	FDocumentRef NewDoc = NewDocument();
 	FNode* Root = NewDoc->NewNull();
 	NewDoc->Root = Root;
 	return FVaRestJson(MoveTemp(NewDoc), Root);
@@ -322,7 +322,8 @@ FVaRestJson FVaRestJson::Clone() const
 	{
 		return {};
 	}
-	FDocumentRef NewDoc = NewDocument(Node == Doc->Root ? FMath::Max<SIZE_T>(4096, Doc->Arena.GetUsedBytes()) : SIZE_T(4096));
+	// A root clone needs about what the source used; a subtree clone starts small and grows.
+	FDocumentRef NewDoc = NewDocument(Node == Doc->Root ? FMath::Max<SIZE_T>(FArena::MinChunkSize, Doc->Arena.GetUsedBytes()) : FArena::MinChunkSize);
 	FNode* Root = NewDoc->DeepCopy(*Node);
 	NewDoc->Root = Root;
 	return FVaRestJson(MoveTemp(NewDoc), Root);

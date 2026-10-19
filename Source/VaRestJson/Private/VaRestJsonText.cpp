@@ -28,10 +28,17 @@ FString FVaRestJson::ToString(EVaRestJsonFormat Format) const
 
 namespace
 {
-	/** First arena chunk sized from the input (factor 1, tuned by the Task 10 benchmark, docs/passport/2026-10-19-json-bench.md); later chunks are fixed 64 KiB, so the factor barely moves retained memory. */
+	/**
+	 * First arena chunk for a parse: input / 32, clamped to [FArena::MinChunkSize, FArena::MaxChunkSize].
+	 * Parsed strings stay in the input buffer (in situ), so the DOM can be far smaller than the input: a
+	 * 1 MiB single-string document holds one node. Sizing the first chunk like the input reserved that
+	 * whole size for nothing; at 1/32 the worst case (all strings) wastes ~3% of the input the document
+	 * already owns. Node-heavy input (the DOM is ~4.2x the input, docs/passport/2026-10-19-json-bench.md)
+	 * reaches MaxChunkSize after a few doublings; the passport's addendum measures this sizing.
+	 */
 	SIZE_T ArenaHintFor(int64 InputBytes)
 	{
-		return static_cast<SIZE_T>(FMath::Clamp<int64>(InputBytes, 4096, 256ll * 1024 * 1024));
+		return static_cast<SIZE_T>(FMath::Clamp<int64>(InputBytes / 32, FArena::MinChunkSize, FArena::MaxChunkSize));
 	}
 
 	/** Rejects oversize input before anything is allocated */

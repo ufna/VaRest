@@ -119,8 +119,9 @@ The DOM is **ours**, not `rapidjson::GenericDocument`. Reason: RapidJSON stores 
 and array elements in contiguous, reallocating arrays. A handle to a child would dangle the moment
 its parent grows. Our DOM gives handle stability by construction:
 
-* `FVaRestJsonDocument` owns a chunked bump arena (first chunk sized from the input length when
-  parsing; growth chunks up to 64 KiB). Nodes never move once allocated.
+* `FVaRestJsonDocument` owns a chunked bump arena (first chunk 256 B, or input length / 32 clamped
+  to 256 B..1 MiB when parsing — in-situ strings stay in the input, so the DOM can be far smaller than
+  the input; growth chunks double up to 1 MiB). Nodes never move once allocated.
 * A node is `{type tag, payload}`: bool; number as `int64` / `uint64` / `double` (integral literals
   that fit keep integer precision — 64-bit IDs survive); string as UTF-8 bytes + length in the arena;
   array as an arena vector of `Node*`; object as an arena vector of `{key UTF-8, Node*}` in

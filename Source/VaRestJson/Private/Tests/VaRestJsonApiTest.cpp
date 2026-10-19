@@ -265,7 +265,7 @@ bool FVaRestJsonApiEdgeCasesTest::RunTest(const FString& Parameters)
 		Big.Set(*FString::Printf(TEXT("key%d"), i), FString::Printf(TEXT("value number %d"), i));
 	}
 	FVaRestJson Sub = Big[TEXT("key5")].Clone();
-	TestTrue(TEXT("subtree clone arena is small"), Sub.GetDocumentInternal()->Arena.GetReservedBytes() < 64 * 1024);
+	TestTrue(TEXT("subtree clone arena is small"), Sub.GetDocumentInternal()->Arena.GetReservedBytes() < 1024);
 	TestEqual(TEXT("subtree clone value"), Sub.AsString(), FString(TEXT("value number 5")));
 	TestTrue(TEXT("root clone equals"), Big.Clone().Equals(Big));
 

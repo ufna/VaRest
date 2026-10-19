@@ -118,3 +118,58 @@ memory, and is not worse on the other.
 - Memory (retained, not peak): 47.1 MiB vs 78.4 MiB = 1.66x less (not 2x, but not worse; peak favours VaRest more). The memory arm alone would not pass; the speed arm does.
 
 **Decision:** PASS — VaRest arena DOM stays.
+
+## Addendum (2026-10-19): arena first-chunk sizing after the final review (I3)
+
+Change: small documents no longer pay a 4 KiB first chunk, and a parse no longer reserves a first chunk the
+size of the input (in situ, parsed strings stay in the input buffer, so a string-heavy document's DOM can be
+tiny). The default first chunk is now 256 B (`FArena::MinChunkSize`; `FVaRestJson::NewDocument`, `FDocument`,
+`ImportTextItem`, `FromJsonValue`, `Serialize` load), a parse sizes it as `Clamp(InputBytes / 32, 256 B, 1 MiB)`,
+and growth chunks double from the previous chunk size up to `FArena::MaxChunkSize`, raised from 64 KiB to
+1 MiB (blocks above `MaxChunkSize / 2` still get a chunk of their own). The `/ 32` is a deviation from the
+review's `Clamp(InputBytes, 256 B, 1 MiB)`: with factor 1, a 1 MiB single-string document still reserves a
+1 MiB chunk for one node, which the review's own test (< 64 KiB) forbids; at 1/32 the worst case wastes ~3% of
+the input the document already owns.
+
+Same machine, fixtures and command as above (`VAREST_EXTRA_ARGS=-llm Tools/run_tests.sh Bench.VaRest`), three
+invocations, median shown, raw values in brackets. LLM calibration: 8.0 MiB and 6,400,000 B, both checks passed.
+
+| fixture | path | parse ms | retained memory | write ms |
+|---|---|---|---|---|
+| bench_1mb.json | engine (FString, v1 path) | 110.21 [111.31, 110.21, 109.30] | 7.9 MiB | 45.22 [44.12, 45.59, 45.22] |
+| bench_1mb.json | engine (UTF-8 reader) | 114.46 [115.29, 111.31, 114.46] | | |
+| bench_1mb.json | VaRest Parse (copy + in situ) | 3.69 [3.69, 3.64, 3.72] | 5.7 MiB | 2.11 [2.06, 2.11, 2.18] |
+| bench_1mb.json | VaRest ParseOwned (minus the test's copy) | 3.65 [3.66, 3.65, 3.64] | | |
+| bench_10mb.json | engine (FString, v1 path) | 1008.50 [1008.50, 1005.74, 1016.50] | 78.4 MiB | 471.38 [471.38, 452.04, 473.28] |
+| bench_10mb.json | engine (UTF-8 reader) | 1062.33 [1053.93, 1062.33, 1063.24] | | |
+| bench_10mb.json | VaRest Parse (copy + in situ) | 40.17 [40.43, 40.17, 40.14] | 47.9 MiB | 31.09 [31.09, 24.27, 32.29] |
+| bench_10mb.json | VaRest ParseOwned (minus the test's copy) | 36.81 [35.85, 36.81, 37.28] | | |
+
+Arena accounting (identical in all three invocations):
+
+| fixture | input B | arena used B | arena reserved B | used / input | reserved / input |
+|---|---|---|---|---|---|
+| bench_1mb.json | 944204 | 4015872 | 5004678 | 4.253 | 5.300 |
+| bench_10mb.json | 9448081 | 39886464 | 40731964 | 4.222 | 4.311 |
+
+Small documents (new row): 1000 parses of `{"id":1,"name":"x"}` kept alive, retained bytes per document (LLM,
+arrays reserved outside the tagged scope), and the time for all 1000 parses (median of 15 per invocation):
+
+| path | parse ms for 1000 | retained per document |
+|---|---|---|
+| engine `FJsonObject` (FString reader) | 2.930 [2.962, 2.879, 2.930] | 364 B |
+| VaRest `Parse` | 0.679 [0.679, 0.671, 0.691] | 372 B |
+
+A VaRest small document is one 256 B arena chunk (264 B with its header; 144 B used), the 20 B input buffer and
+the shared `FDocument`. Before this change the same document reserved a 4 KiB first chunk (4104 B with its
+header), so roughly 4.2 KB per document (an estimate: this row is new and was not run on the old code; the
+`VaRest.Json.Arena.DocumentSizing` test failed there on every small-document check).
+
+What moved: parse time is unchanged within the cross-session noise noted above (10 MiB Parse 40.17 ms vs
+45.44 / 38.94 in Sessions B / A). Retained memory rose by up to one partly filled 1 MiB chunk per document:
+1 MiB fixture 4.7 -> 5.7 MiB (reserved / input 4.26 -> 5.30; the last 1 MiB chunk is mostly empty), 10 MiB
+fixture 47.1 -> 47.9 MiB (+1.7%). That is the price of the 1 MiB growth cap; in exchange the 10 MiB DOM takes about 40
+chunks instead of about 465.
+
+**Gate re-check (10 MiB):** parse 40.17 ms vs 1008.50 ms = **25.1x faster** (ParseOwned 27.4x); retained 47.9 vs
+78.4 MiB = 1.64x less (not worse). **Still PASS.**

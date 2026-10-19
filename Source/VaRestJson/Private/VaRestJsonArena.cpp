@@ -8,7 +8,7 @@
 namespace VaRest::Json
 {
 	FArena::FArena(SIZE_T InFirstChunkSize)
-		: NextChunkSize(FMath::Max<SIZE_T>(InFirstChunkSize, 256))
+		: NextChunkSize(FMath::Max<SIZE_T>(InFirstChunkSize, MinChunkSize))
 	{
 	}
 
@@ -62,9 +62,9 @@ namespace VaRest::Json
 		FChunk* Chunk = NewChunk(Payload);
 		Cursor = reinterpret_cast<uint8*>(Chunk + 1);
 		End = Cursor + Payload;
-		// The first chunk may be sized from a hint (a parse sizes it from the input);
-		// growth chunks double from 4 KiB up to MaxChunkSize.
-		NextChunkSize = FMath::Min<SIZE_T>(FMath::Max<SIZE_T>(NextChunkSize, 4096) * 2, MaxChunkSize);
+		// The first chunk may be sized from a hint (a parse sizes it from the input, Clone from the source);
+		// growth chunks double from the previous chunk size up to MaxChunkSize.
+		NextChunkSize = FMath::Min<SIZE_T>(FMath::Max<SIZE_T>(NextChunkSize, MinChunkSize) * 2, MaxChunkSize);
 
 		uint8* Aligned = Align(Cursor, Alignment);
 		UsedBytes += (Aligned - Cursor) + Size;

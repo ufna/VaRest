@@ -406,7 +406,8 @@ private:
 	{
 	}
 
-	static FDocumentRef NewDocument(SIZE_T ArenaFirstChunk = 4096);
+	/** 256 = VaRest::Json::FArena::MinChunkSize (private header): small documents pay one 256 B chunk */
+	static FDocumentRef NewDocument(SIZE_T ArenaFirstChunk = 256);
 
 	VaRest::Json::FDocument* PrepareContainer(EVaRestJsonType Kind, const TCHAR* Operation);
 	void SetNode(FStringView Key, VaRest::Json::FNode* Value);

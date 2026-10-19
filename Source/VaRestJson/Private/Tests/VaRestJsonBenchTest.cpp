@@ -2,6 +2,7 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
+#include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "HAL/LowLevelMemTracker.h"
 #include "HAL/PlatformTime.h"
@@ -173,6 +174,57 @@ bool FVaRestJsonBenchTest::RunTest(const FString& Parameters)
 	}
 
 	Report += TEXT("\n") + ArenaReport;
+
+	// Many small documents kept alive (SaveGame fields, pin defaults, small API responses): what each
+	// one retains. The arrays are reserved outside the tagged scope so only the documents are counted.
+	{
+		const int32 Count = 1000;
+		const FUtf8StringView SmallText(UTF8TEXT("{\"id\":1,\"name\":\"x\"}"));
+		const FString SmallString = FString::ConstructFromPtrSize(SmallText.GetData(), SmallText.Len());
+
+		TArray<TSharedPtr<FJsonObject>> EngineDocs;
+		EngineDocs.Reserve(Count);
+		const int64 EngineSmallMem = RetainedBytes(TEXT("VaRestBenchSmallDocEngine"), [&] {
+			for (int32 i = 0; i < Count; ++i)
+			{
+				TSharedPtr<FJsonObject> Object;
+				FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(SmallString), Object);
+				EngineDocs.Add(MoveTemp(Object));
+			}
+		});
+		TArray<FVaRestJson> OurDocs;
+		OurDocs.Reserve(Count);
+		const int64 OursSmallMem = RetainedBytes(TEXT("VaRestBenchSmallDocVaRest"), [&] {
+			for (int32 i = 0; i < Count; ++i)
+			{
+				OurDocs.Add(FVaRestJson::Parse(SmallText).StealValue());
+			}
+		});
+		const double EngineSmallMs = MedianMs(15, [&] {
+			for (int32 i = 0; i < Count; ++i)
+			{
+				TSharedPtr<FJsonObject> Object;
+				FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(SmallString), Object);
+			}
+		});
+		const double OursSmallMs = MedianMs(15, [&] {
+			for (int32 i = 0; i < Count; ++i)
+			{
+				auto R = FVaRestJson::Parse(SmallText);
+				(void)R;
+			}
+		});
+		TestTrue(TEXT("small docs parsed"), EngineDocs.Num() == Count && EngineDocs.Last().IsValid() && OurDocs.Num() == Count && OurDocs.Last()[TEXT("id")].AsInt() == 1);
+
+		const auto PerDoc = [Count](int64 Bytes) { return Bytes < 0 ? FString(TEXT("n/a")) : FString::Printf(TEXT("%lld B"), Bytes / Count); };
+		Report += FString::Printf(TEXT("| small document x%d (`%s`) | path | parse ms for all %d (median of 15) | retained per document |\n|---|---|---|---|\n"), Count, *SmallString, Count);
+		Report += FString::Printf(TEXT("| | engine FJsonObject (FString reader) | %.3f | %s |\n"), EngineSmallMs, *PerDoc(EngineSmallMem));
+		Report += FString::Printf(TEXT("| | VaRest Parse | %.3f | %s |\n"), OursSmallMs, *PerDoc(OursSmallMem));
+		Report += FString::Printf(TEXT("\nsmall document arena: used %llu B, reserved %llu B; input buffer %llu B allocated\n"),
+			(uint64)OurDocs[0].GetDocumentInternal()->Arena.GetUsedBytes(), (uint64)OurDocs[0].GetDocumentInternal()->Arena.GetReservedBytes(),
+			(uint64)OurDocs[0].GetDocumentInternal()->Input.GetAllocatedSize());
+	}
+
 	AddInfo(Report);
 	FFileHelper::SaveStringToFile(Report, *(FPaths::ProjectSavedDir() / TEXT("VaRestBench") / TEXT("results.md")));
 	return true;
