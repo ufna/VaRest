@@ -237,9 +237,16 @@ struct VARESTJSON_API FVaRestJson
 	bool Has(FStringView Key) const { return Get(Key).IsValid(); }
 	bool Has(FUtf8StringView Key) const { return Get(Key).IsValid(); }
 
-	/** Sets (copies) Value under Key. An invalid handle becomes a new object first. */
+	/**
+	 * Sets (copies) Value under Key. An invalid handle becomes a new object first.
+	 *
+	 * Set/Add/SetAt are ref-qualified: on an lvalue they return *this by reference (chaining on a
+	 * variable), on a temporary they return the handle by value, so
+	 * `const FVaRestJson& B = FVaRestJson::Object().Set(...)` (or auto&&) owns its handle instead of
+	 * dangling. A temporary still writes through: `Root[TEXT("user")].Set(...)` changes Root's document.
+	 */
 	template <typename ValueType>
-	FVaRestJson& Set(FStringView Key, ValueType&& Value)
+	FVaRestJson& Set(FStringView Key, ValueType&& Value) &
 	{
 		if (VaRest::Json::FDocument* TargetDoc = PrepareContainer(EVaRestJsonType::Object, TEXT("Set a field")))
 		{
@@ -248,9 +255,16 @@ struct VARESTJSON_API FVaRestJson
 		return *this;
 	}
 
+	template <typename ValueType>
+	FVaRestJson Set(FStringView Key, ValueType&& Value) &&
+	{
+		Set(Key, Forward<ValueType>(Value)); // *this is an lvalue here: the & overload
+		return MoveTemp(*this);
+	}
+
 	/** UTF-8 key: no TCHAR -> UTF-8 conversion on hot paths */
 	template <typename ValueType>
-	FVaRestJson& Set(FUtf8StringView Key, ValueType&& Value)
+	FVaRestJson& Set(FUtf8StringView Key, ValueType&& Value) &
 	{
 		if (VaRest::Json::FDocument* TargetDoc = PrepareContainer(EVaRestJsonType::Object, TEXT("Set a field")))
 		{
@@ -260,10 +274,31 @@ struct VARESTJSON_API FVaRestJson
 	}
 
 	template <typename ValueType>
-	FVaRestJson& Set(const TCHAR* Key, ValueType&& Value) { return Set(FStringView(Key), Forward<ValueType>(Value)); }
+	FVaRestJson Set(FUtf8StringView Key, ValueType&& Value) &&
+	{
+		Set(Key, Forward<ValueType>(Value));
+		return MoveTemp(*this);
+	}
 
 	template <typename ValueType>
-	FVaRestJson& Set(const UTF8CHAR* Key, ValueType&& Value) { return Set(FUtf8StringView(Key), Forward<ValueType>(Value)); }
+	FVaRestJson& Set(const TCHAR* Key, ValueType&& Value) & { return Set(FStringView(Key), Forward<ValueType>(Value)); }
+
+	template <typename ValueType>
+	FVaRestJson Set(const TCHAR* Key, ValueType&& Value) &&
+	{
+		Set(FStringView(Key), Forward<ValueType>(Value));
+		return MoveTemp(*this);
+	}
+
+	template <typename ValueType>
+	FVaRestJson& Set(const UTF8CHAR* Key, ValueType&& Value) & { return Set(FUtf8StringView(Key), Forward<ValueType>(Value)); }
+
+	template <typename ValueType>
+	FVaRestJson Set(const UTF8CHAR* Key, ValueType&& Value) &&
+	{
+		Set(FUtf8StringView(Key), Forward<ValueType>(Value));
+		return MoveTemp(*this);
+	}
 
 	bool Remove(FStringView Key);
 	bool Remove(FUtf8StringView Key);
@@ -278,9 +313,9 @@ struct VARESTJSON_API FVaRestJson
 	FVaRestJson At(int32 Index) const;
 	FVaRestJson operator[](int32 Index) const { return At(Index); }
 
-	/** Appends (copies) Value. An invalid handle becomes a new array first. */
+	/** Appends (copies) Value. An invalid handle becomes a new array first. Ref-qualified like Set. */
 	template <typename ValueType>
-	FVaRestJson& Add(ValueType&& Value)
+	FVaRestJson& Add(ValueType&& Value) &
 	{
 		if (VaRest::Json::FDocument* TargetDoc = PrepareContainer(EVaRestJsonType::Array, TEXT("Add an element")))
 		{
@@ -290,13 +325,27 @@ struct VARESTJSON_API FVaRestJson
 	}
 
 	template <typename ValueType>
-	FVaRestJson& SetAt(int32 Index, ValueType&& Value)
+	FVaRestJson Add(ValueType&& Value) &&
+	{
+		Add(Forward<ValueType>(Value));
+		return MoveTemp(*this);
+	}
+
+	template <typename ValueType>
+	FVaRestJson& SetAt(int32 Index, ValueType&& Value) &
 	{
 		if (VaRest::Json::FDocument* TargetDoc = PrepareSetAt(Index))
 		{
 			SetAtNode(Index, MakeNodeFor(*TargetDoc, Forward<ValueType>(Value)));
 		}
 		return *this;
+	}
+
+	template <typename ValueType>
+	FVaRestJson SetAt(int32 Index, ValueType&& Value) &&
+	{
+		SetAt(Index, Forward<ValueType>(Value));
+		return MoveTemp(*this);
 	}
 
 	bool RemoveAt(int32 Index);

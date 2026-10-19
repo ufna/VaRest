@@ -7,6 +7,9 @@
 #include "VaRestJson.h"
 #include "VaRestJsonDocument.h"
 
+#include <atomic>
+#include <utility>
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonApiBuildReadTest, "VaRest.Json.Api.BuildAndRead",
 	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
 
@@ -127,6 +130,49 @@ bool FVaRestJsonApiSemanticsTest::RunTest(const FString& Parameters)
 	FVaRestJson Str = FVaRestJson::From(TEXT("s"));
 	Str.Set(TEXT("a"), 1);
 	TestTrue(TEXT("still a string"), Str.IsString());
+	return true;
+}
+
+// A fluent chain on a temporary returns the handle by value, so binding it to a reference extends a
+// handle's lifetime instead of dangling (Set/Add/SetAt are ref-qualified).
+static_assert(std::is_same_v<decltype(FVaRestJson::Object().Set(TEXT("a"), 1)), FVaRestJson>, "Set on a temporary returns by value");
+static_assert(std::is_same_v<decltype(FVaRestJson::Object().Set(UTF8TEXT("a"), 1)), FVaRestJson>, "Set(UTF8CHAR*) on a temporary returns by value");
+static_assert(std::is_same_v<decltype(FVaRestJson::Object().Set(FStringView(), 1)), FVaRestJson>, "Set(FStringView) on a temporary returns by value");
+static_assert(std::is_same_v<decltype(FVaRestJson::Object().Set(FUtf8StringView(), 1)), FVaRestJson>, "Set(FUtf8StringView) on a temporary returns by value");
+static_assert(std::is_same_v<decltype(FVaRestJson::Array().Add(1)), FVaRestJson>, "Add on a temporary returns by value");
+static_assert(std::is_same_v<decltype(FVaRestJson::Array().SetAt(0, 1)), FVaRestJson>, "SetAt on a temporary returns by value");
+static_assert(std::is_same_v<decltype(std::declval<FVaRestJson&>().Set(TEXT("a"), 1)), FVaRestJson&>, "Set on an lvalue chains by reference");
+static_assert(std::is_same_v<decltype(std::declval<FVaRestJson&>().Add(1)), FVaRestJson&>, "Add on an lvalue chains by reference");
+static_assert(std::is_same_v<decltype(std::declval<FVaRestJson&>().SetAt(0, 1)), FVaRestJson&>, "SetAt on an lvalue chains by reference");
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonApiTemporariesTest, "VaRest.Json.Api.TemporariesDoNotDangle",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestJsonApiTemporariesTest::RunTest(const FString& Parameters)
+{
+	const FVaRestJson& B = FVaRestJson::Object().Set(TEXT("a"), 1);
+	TestEqual(TEXT("const& to a temporary chain"), B[TEXT("a")].AsInt(), 1);
+
+	auto&& C = FVaRestJson::Array().Add(1).Add(2);
+	TestEqual(TEXT("auto&& to a temporary chain"), C.Num(), 2);
+
+	const FVaRestJson& D = FVaRestJson::Object().Set(UTF8TEXT("u"), 1).Set(FStringView(TEXT("v")), 2).Set(FUtf8StringView(UTF8TEXT("w")), 3);
+	TestEqual(TEXT("every key overload"), D.Num(), 3);
+
+	const FVaRestJson& E = FVaRestJson::Array(1, 2).SetAt(1, 5);
+	TestEqual(TEXT("SetAt on a temporary"), E[1].AsInt(), 5);
+
+	// A temporary handle still writes through into the shared document
+	FVaRestJson Root = FVaRestJson::Object().Set(TEXT("user"), FVaRestJson::Object()).Set(TEXT("list"), FVaRestJson::Array());
+	Root[TEXT("user")].Set(TEXT("x"), 1).Set(TEXT("y"), 2);
+	Root[TEXT("list")].Add(7);
+	TestEqual(TEXT("write through a temporary child"), Root[TEXT("user")][TEXT("y")].AsInt(), 2);
+	TestEqual(TEXT("Add through a temporary child"), Root[TEXT("list")][0].AsInt(), 7);
+
+	// Chaining on a variable still mutates that variable
+	FVaRestJson Var = FVaRestJson::Object();
+	FVaRestJson& Same = Var.Set(TEXT("k"), 1).Set(TEXT("l"), 2);
+	TestTrue(TEXT("lvalue chain returns the variable"), &Same == &Var && Var.Num() == 2);
 	return true;
 }
 
