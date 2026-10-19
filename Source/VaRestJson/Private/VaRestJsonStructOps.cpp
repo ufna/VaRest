@@ -99,21 +99,21 @@ bool FVaRestJson::Identical(const FVaRestJson* Other, uint32 PortFlags) const
 
 bool FVaRestJson::Serialize(FArchive& Ar)
 {
-	// Format v1: uint8 Version, uint8 bValid, and when valid: int64 Length + Length raw UTF-8 bytes.
-	// The archive may be corrupt or hostile (this runs on every asset load), so nothing read is trusted
-	// before it is bounded, and the payload is never read through TArray's count-then-allocate path.
 	// Reference collectors that neither load nor save (FArchiveReplaceObjectRef, FArchiveReferenceMarker:
 	// ArchiveReplaceObjectRef.h:196, ArchiveReferenceMarker.h:25) walk every property looking for UObject
-	// pointers. A handle holds none, so writing its JSON text there is pure
-	// cost. A collector that also loads or saves (FImportExportCollector sets IsSaving + IsPersistent,
-	// ImportExportCollector.cpp:11-14) still gets the full format, so its byte stream stays consistent.
-	// Counting archives are not skipped: FArchiveCountMem only sums CountBytes (ArchiveCountMem.h:35-39),
-	// but other counting archives may measure the serialized bytes.
+	// pointers. A handle holds none, so writing its JSON text there is pure cost. A collector that also
+	// loads or saves (FImportExportCollector sets IsSaving + IsPersistent, ImportExportCollector.cpp:11-14)
+	// still gets the full format, so its byte stream stays consistent. Counting archives are not skipped:
+	// FArchiveCountMem only sums CountBytes (ArchiveCountMem.h:35-39), but other counting archives may
+	// measure the serialized bytes.
 	if (Ar.IsObjectReferenceCollector() && !Ar.IsLoading() && !Ar.IsSaving())
 	{
 		return true;
 	}
 
+	// Format v1: uint8 Version, uint8 bValid, and when valid: int64 Length + Length raw UTF-8 bytes.
+	// The archive may be corrupt or hostile (this runs on every asset load), so nothing read is trusted
+	// before it is bounded, and the payload is never read through TArray's count-then-allocate path.
 	uint8 Version = SerializeVersion;
 	uint8 ValidByte = IsValid() ? 1 : 0;
 

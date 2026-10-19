@@ -173,3 +173,7 @@ chunks instead of about 465.
 
 **Gate re-check (10 MiB):** parse 40.17 ms vs 1008.50 ms = **25.1x faster** (ParseOwned 27.4x); retained 47.9 vs
 78.4 MiB = 1.64x less (not worse). **Still PASS.**
+
+Sanity run on the final M1 fix commit (0ab7421: the RapidJSON reader and writer stacks now allocate through
+FMemory, otherwise the code measured above), one invocation: 10 MiB engine 1015.59 ms, VaRest Parse 40.16 ms
+(25.3x), ParseOwned 38.35 ms, retained 47.9 vs 78.4 MiB; small documents 372 B vs 364 B. Same verdict.
