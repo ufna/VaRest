@@ -71,7 +71,11 @@ struct VARESTJSON_API FVaRestJsonError
 
 struct FVaRestJsonParseOptions
 {
-	/** Nesting deeper than this fails the parse (hostile-input guard) */
+	/**
+	 * Nesting deeper than this fails the parse (hostile-input guard). The parser itself is iterative, but
+	 * ToString/ToUtf8, Clone, Equals and the FJsonValue bridges recurse once per level, so raising this far
+	 * above 512 risks a stack overflow later, on a worker thread's smaller stack first.
+	 */
 	int32 MaxDepth = 512;
 
 	/** Accept comments and trailing commas (config files, not wire data) */
@@ -165,6 +169,12 @@ struct VARESTJSON_API FVaRestJson
 		if constexpr (std::is_same_v<U, bool>)
 		{
 			return TryGetBool();
+		}
+		else if constexpr (std::is_same_v<U, char> || std::is_same_v<U, wchar_t> || std::is_same_v<U, char8_t> || std::is_same_v<U, char16_t> || std::is_same_v<U, char32_t>)
+		{
+			// Like MakeNodeFor: a character type would otherwise read a number as a code unit
+			static_assert(sizeof(U) == 0, "FVaRestJson::TryGet: a single character is not a JSON value; read a string");
+			return {};
 		}
 		else if constexpr (std::is_integral_v<U> && std::is_signed_v<U>)
 		{
@@ -356,13 +366,19 @@ struct VARESTJSON_API FVaRestJson
 	FVaRestJson Clone() const;
 	bool Equals(const FVaRestJson& Other) const;
 	bool operator==(const FVaRestJson& Other) const { return Equals(Other); }
-	bool IsSameNode(const FVaRestJson& Other) const { return Node == Other.Node; }
+	/** Both handles point at the same node. Two node-less handles (misses, default handles) are not the same node. */
+	bool IsSameNode(const FVaRestJson& Other) const { return Node && Node == Other.Node; }
 
 	/** "a.b[2].c", or an RFC 6901 pointer when it starts with '/'. Invalid syntax or a miss -> invalid handle. (Task 7) */
 	FVaRestJson Path(FStringView Expression) const;
 
 	// ---- text (Tasks 5-6)
 
+	/**
+	 * Numbers: integer literals that fit int64/uint64 stay exact integers; others are doubles. "-0" is the
+	 * integer 0 (RapidJSON emits it through Int, reader.h:1491-1493, :1739-1740), so it writes back as "0",
+	 * as JSON.stringify(-0) does; "-0.0" stays the double -0.0.
+	 */
 	static TValueOrError<FVaRestJson, FVaRestJsonError> Parse(FUtf8StringView Text, const FVaRestJsonParseOptions& Options = FVaRestJsonParseOptions());
 	static TValueOrError<FVaRestJson, FVaRestJsonError> Parse(FStringView Text, const FVaRestJsonParseOptions& Options = FVaRestJsonParseOptions());
 	static TValueOrError<FVaRestJson, FVaRestJsonError> Parse(TConstArrayView<uint8> Utf8Bytes, const FVaRestJsonParseOptions& Options = FVaRestJsonParseOptions());
@@ -381,7 +397,12 @@ struct VARESTJSON_API FVaRestJson
 	// ---- engine interop (Task 8)
 
 	TSharedPtr<FJsonValue> ToJsonValue() const;
-	/** Null when this is not an object */
+	/**
+	 * Null when this is not an object. FJsonObject keys compare case-insensitively (its map is keyed by
+	 * UE::FSharedString, JsonObject.h:99 and :237, whose equality and hash ignore case, SharedString.h:100-107
+	 * and :132-135 -> StringView.h:509-513), so members whose keys differ only by case ("id" and "ID")
+	 * collapse into one: the last one wins.
+	 */
 	TSharedPtr<FJsonObject> ToJsonObject() const;
 	static FVaRestJson FromJsonValue(const TSharedPtr<FJsonValue>& Value);
 	static FVaRestJson FromJsonObject(const TSharedPtr<FJsonObject>& InObject);
@@ -488,6 +509,11 @@ private:
 	FDocumentRef Doc;
 	VaRest::Json::FNode* Node = nullptr;
 };
+
+// Document pointer + reference controller + node pointer. Handles are copied freely (members, ranges, BP
+// pins), so growing this is an API-visible cost. Not wrapped in #if PLATFORM_64BITS: UE 5.8 deprecates that
+// macro with a warning (HAL/Platform.h:737) because it only supports 64-bit targets.
+static_assert(sizeof(FVaRestJson) == 24, "FVaRestJson is a 24-byte handle");
 
 template <>
 struct TStructOpsTypeTraits<FVaRestJson> : public TStructOpsTypeTraitsBase2<FVaRestJson>

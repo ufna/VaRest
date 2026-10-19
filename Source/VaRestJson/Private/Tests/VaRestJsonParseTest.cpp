@@ -8,6 +8,10 @@
 #include "VaRestJsonDocument.h"
 
 #include <atomic>
+#include <cmath>
+
+// Usings live inside each test function: a file-scope using would leak into the files after this one
+// in a unity blob.
 
 namespace VaRestJsonParseTest
 {
@@ -33,13 +37,14 @@ namespace VaRestJsonParseTest
 		return R.GetError();
 	}
 }
-using namespace VaRestJsonParseTest;
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonParseScalarsTest, "VaRest.Json.Parse.Scalars",
 	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
 
 bool FVaRestJsonParseScalarsTest::RunTest(const FString& Parameters)
 {
+	using namespace VaRestJsonParseTest;
+
 	TestTrue(TEXT("null"), P(*this, TEXT("null")).IsNull());
 	TestTrue(TEXT("true"), P(*this, TEXT("true")).AsBool());
 	TestEqual(TEXT("int32 overflow -> int64"), P(*this, TEXT("2147483648")).AsInt64(), 2147483648ll);
@@ -52,7 +57,15 @@ bool FVaRestJsonParseScalarsTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("1e308"), P(*this, TEXT("1e308")).AsDouble(), 1e308);
 	TestEqual(TEXT("denormal"), P(*this, TEXT("5e-324")).AsDouble(), 5e-324);
 	TestEqual(TEXT("full precision"), P(*this, TEXT("0.1")).AsDouble(), 0.1);
-	TestEqual(TEXT("-0 is zero"), P(*this, TEXT("-0")).AsDouble(), 0.0);
+	// "-0" is the integer 0, so it writes back as "0" (JSON.stringify(-0) is "0"); "-0.0" keeps its sign
+	const FVaRestJson NegZero = P(*this, TEXT("-0"));
+	TestTrue(TEXT("-0 is an integer"), NegZero.GetNodeInternal() && NegZero.GetNodeInternal()->NumKind == VaRest::Json::ENumKind::Int);
+	TestEqual(TEXT("-0 reads as int64 0"), NegZero.TryGet<int64>().Get(-1), (int64)0);
+	TestFalse(TEXT("-0 is not a negative zero"), std::signbit(NegZero.AsDouble()));
+	TestEqualSensitive(TEXT("-0 writes as 0"), NegZero.ToString(), FString(TEXT("0")));
+	const FVaRestJson NegZeroDouble = P(*this, TEXT("-0.0"));
+	TestTrue(TEXT("-0.0 is a negative-zero double"), std::signbit(NegZeroDouble.AsDouble()) && NegZeroDouble.AsDouble() == 0.0);
+	TestEqualSensitive(TEXT("-0.0 writes as -0.0"), NegZeroDouble.ToString(), FString(TEXT("-0.0")));
 	return true;
 }
 
@@ -61,6 +74,8 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonParseStringsTest, "VaRest.Json.Parse
 
 bool FVaRestJsonParseStringsTest::RunTest(const FString& Parameters)
 {
+	using namespace VaRestJsonParseTest;
+
 	TestEqualSensitive(TEXT("escapes"), P(*this, TEXT("\"\\\"\\\\\\/\\b\\f\\n\\r\\t\"")).AsString(), FString(TEXT("\"\\/\b\f\n\r\t")));
 	TestEqualSensitive(TEXT("\\u00e9"), P(*this, TEXT("\"\\u00e9\"")).AsString(), FString(TEXT("é")));
 	TestEqual(TEXT("surrogate pair -> 4-byte UTF-8"), P(*this, TEXT("\"\\ud83d\\ude00\"")).AsUtf8View().Len(), 4);
@@ -83,6 +98,8 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonParseStructureTest, "VaRest.Json.Par
 
 bool FVaRestJsonParseStructureTest::RunTest(const FString& Parameters)
 {
+	using namespace VaRestJsonParseTest;
+
 	const FVaRestJson J = P(*this, TEXT(" { \"a\" : [ 1 , { \"b\" : null } , [ ] ] , \"c\" : {} } "));
 	TestEqual(TEXT("nested"), J[TEXT("a")].Num(), 3);
 	TestTrue(TEXT("deep null"), J[TEXT("a")][1][TEXT("b")].IsNull());
@@ -129,6 +146,8 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonParseErrorsTest, "VaRest.Json.Parse.
 
 bool FVaRestJsonParseErrorsTest::RunTest(const FString& Parameters)
 {
+	using namespace VaRestJsonParseTest;
+
 	const FVaRestJsonError Trailing = E(*this, UTF8TEXT("{\"a\":1,}"));
 	TestEqual(TEXT("trailing comma offset"), Trailing.Offset, (int64)7);
 	TestEqual(TEXT("trailing comma line"), Trailing.Line, 1);
@@ -170,6 +189,8 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonParseConcurrentReadTest, "VaRest.Jso
 
 bool FVaRestJsonParseConcurrentReadTest::RunTest(const FString& Parameters)
 {
+	using namespace VaRestJsonParseTest;
+
 	FString Text = TEXT("{");
 	for (int32 i = 0; i < 2000; ++i)
 	{
@@ -202,6 +223,8 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonParseHardeningTest, "VaRest.Json.Par
 
 bool FVaRestJsonParseHardeningTest::RunTest(const FString& Parameters)
 {
+	using namespace VaRestJsonParseTest;
+
 	// A raw NUL must not end the document silently (RapidJSON stops at NUL, reader.h:2199)
 	const uint8 NulThenGarbage[] = { '{', '}', 0, 'x' };
 	TValueOrError<FVaRestJson, FVaRestJsonError> A = FVaRestJson::Parse(TConstArrayView<uint8>(NulThenGarbage, 4));

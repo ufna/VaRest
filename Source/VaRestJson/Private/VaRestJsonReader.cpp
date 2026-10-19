@@ -3,6 +3,7 @@
 #include "VaRestJsonReader.h"
 
 #include "RapidJsonIncludes.h"
+#include "JsonUtils/RapidJsonUtils.h"
 
 #include <cstdint>
 
@@ -108,11 +109,21 @@ namespace VaRest::Json
 			}
 		};
 
+		/**
+		 * The reader's parse stack goes through FMemory (LLM, Insights and the engine allocator see it) via the
+		 * engine's own RapidJSON allocator, UE::Json::Private::FAllocatorImpl (JsonUtils/RapidJsonUtils.h:19-53).
+		 * The default rapidjson::CrtAllocator calls RAPIDJSON_MALLOC (allocators.h:86-88), which is std::malloc
+		 * (rapidjson.h:694-696) because RapidJsonIncludes.h:29-44 keeps its FMemory override disabled.
+		 * The allocator is the reader's StackAllocator argument (reader.h:538, :547).
+		 */
+		using FReader = rapidjson::GenericReader<rapidjson::UTF8<>, rapidjson::UTF8<>, UE::Json::Private::FAllocatorImpl>;
+
 		template <unsigned Flags>
 		rapidjson::ParseResult Run(char* Text, FBuildHandler& Handler, int64& OutConsumed)
 		{
 			rapidjson::InsituStringStream Stream(Text);
-			rapidjson::Reader Reader;
+			UE::Json::Private::FAllocatorImpl StackAllocator;
+			FReader Reader(&StackAllocator);
 			const rapidjson::ParseResult Result = Reader.Parse<Flags>(Stream, Handler);
 			OutConsumed = static_cast<int64>(Stream.Tell());
 			return Result;

@@ -117,7 +117,7 @@ bool FVaRestJsonStructOpsIdentitySerializeTest::RunTest(const FString& Parameter
 	return true;
 }
 
-namespace
+namespace VaRestJsonStructOpsTest // named, not anonymous: unity blobs share one anonymous namespace
 {
 	TArray<uint8> GoldenBytes()
 	{
@@ -126,6 +126,24 @@ namespace
 		FVaRestJson::Object().Set(TEXT("a"), 1).Serialize(Writer);
 		return Bytes;
 	}
+
+	/** Counts the bytes a struct writes into it; optionally a reference collector, optionally saving */
+	class FCountingArchive : public FArchive
+	{
+	public:
+		FCountingArchive(bool bReferenceCollector, bool bSaving)
+		{
+			ArIsObjectReferenceCollector = bReferenceCollector;
+			SetIsSaving(bSaving);
+		}
+
+		virtual void Serialize(void* Data, int64 Length) override
+		{
+			Written += Length;
+		}
+
+		int64 Written = 0;
+	};
 
 	FVaRestJson LoadFrom(const TArray<uint8>& Bytes, bool& bOutError)
 	{
@@ -142,20 +160,20 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonStructOpsHostileArchiveTest, "VaRest
 
 bool FVaRestJsonStructOpsHostileArchiveTest::RunTest(const FString& Parameters)
 {
-	const TArray<uint8> Golden = GoldenBytes();
+	const TArray<uint8> Golden = VaRestJsonStructOpsTest::GoldenBytes();
 	const uint8 Expected[] = {1, 1, 7, 0, 0, 0, 0, 0, 0, 0, '{', '"', 'a', '"', ':', '1', '}'};
 	TestEqual(TEXT("golden size"), Golden.Num(), static_cast<int32>(sizeof(Expected)));
 	TestTrue(TEXT("golden bytes"), Golden.Num() == sizeof(Expected) && FMemory::Memcmp(Golden.GetData(), Expected, sizeof(Expected)) == 0);
 
 	bool bError = false;
-	FVaRestJson Good = LoadFrom(Golden, bError);
+	FVaRestJson Good = VaRestJsonStructOpsTest::LoadFrom(Golden, bError);
 	TestTrue(TEXT("golden loads"), Good.IsValid() && !bError);
 
 	// (b) truncated mid-payload
 	{
 		TArray<uint8> Cut(Golden.GetData(), 13);
 		AddExpectedError(TEXT("implausible payload length"), EAutomationExpectedErrorFlags::Contains, 0);
-		const FVaRestJson Loaded = LoadFrom(Cut, bError);
+		const FVaRestJson Loaded = VaRestJsonStructOpsTest::LoadFrom(Cut, bError);
 		TestFalse(TEXT("truncated invalid"), Loaded.IsValid());
 		TestTrue(TEXT("truncated errors"), bError);
 	}
@@ -165,7 +183,7 @@ bool FVaRestJsonStructOpsHostileArchiveTest::RunTest(const FString& Parameters)
 		FMemory::Memzero(Huge.GetData() + 2, 8);
 		Huge[2 + 5] = 1;
 		AddExpectedError(TEXT("implausible payload length"), EAutomationExpectedErrorFlags::Contains, 1);
-		const FVaRestJson Loaded = LoadFrom(Huge, bError);
+		const FVaRestJson Loaded = VaRestJsonStructOpsTest::LoadFrom(Huge, bError);
 		TestFalse(TEXT("huge invalid"), Loaded.IsValid());
 		TestTrue(TEXT("huge errors"), bError);
 	}
@@ -174,7 +192,7 @@ bool FVaRestJsonStructOpsHostileArchiveTest::RunTest(const FString& Parameters)
 		TArray<uint8> Bad = Golden;
 		Bad[0] = 2;
 		AddExpectedError(TEXT("unsupported serialized version 2"), EAutomationExpectedErrorFlags::Contains, 1);
-		const FVaRestJson Loaded = LoadFrom(Bad, bError);
+		const FVaRestJson Loaded = VaRestJsonStructOpsTest::LoadFrom(Bad, bError);
 		TestFalse(TEXT("version invalid"), Loaded.IsValid());
 		TestTrue(TEXT("version errors"), bError);
 	}
@@ -185,10 +203,28 @@ bool FVaRestJsonStructOpsHostileArchiveTest::RunTest(const FString& Parameters)
 		Bad[2] = 4;
 		Bad.Append(reinterpret_cast<const uint8*>("{bad"), 4);
 		AddExpectedError(TEXT("stored JSON does not parse"), EAutomationExpectedErrorFlags::Contains, 1);
-		const FVaRestJson Loaded = LoadFrom(Bad, bError);
+		const FVaRestJson Loaded = VaRestJsonStructOpsTest::LoadFrom(Bad, bError);
 		TestFalse(TEXT("bad json invalid"), Loaded.IsValid());
 		TestFalse(TEXT("bad json is not an archive error"), bError);
 	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonStructOpsReferenceCollectorTest, "VaRest.Json.StructOps.ReferenceCollectorSkipsText",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestJsonStructOpsReferenceCollectorTest::RunTest(const FString& Parameters)
+{
+	FVaRestJson J = FVaRestJson::Object().Set(TEXT("a"), FString::ChrN(1000, TEXT('x')));
+
+	VaRestJsonStructOpsTest::FCountingArchive Collector(true, false);
+	TestTrue(TEXT("collector: Serialize handled"), J.Serialize(Collector));
+	TestEqual(TEXT("a pure reference collector gets no JSON text"), Collector.Written, (int64)0);
+	TestTrue(TEXT("handle untouched"), J[TEXT("a")].AsString().Len() == 1000);
+
+	VaRestJsonStructOpsTest::FCountingArchive SavingCollector(true, true);
+	J.Serialize(SavingCollector);
+	TestTrue(TEXT("a collector that saves still gets the full format"), SavingCollector.Written > 1000);
 	return true;
 }
 

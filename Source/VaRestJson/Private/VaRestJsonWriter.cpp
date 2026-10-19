@@ -3,6 +3,7 @@
 #include "VaRestJsonWriter.h"
 
 #include "RapidJsonIncludes.h"
+#include "JsonUtils/RapidJsonUtils.h"
 #include "VaRestJsonLog.h"
 
 namespace VaRest::Json
@@ -98,17 +99,22 @@ namespace VaRest::Json
 
 	void Write(const FNode& Node, EVaRestJsonFormat Format, TArray<uint8>& Out)
 	{
+		// The writers' level stack goes through FMemory via the engine's RapidJSON allocator
+		// (JsonUtils/RapidJsonUtils.h:19-53), passed as the StackAllocator argument (writer.h:90, :103;
+		// prettywriter.h:47, :58), instead of the default CrtAllocator's std::malloc (rapidjson.h:694-696).
+		using FAllocator = UE::Json::Private::FAllocatorImpl;
 		FUtf8Sink Sink{ Out };
+		FAllocator StackAllocator;
 		int32 NonFinite = 0;
 		if (Format == EVaRestJsonFormat::Pretty)
 		{
-			rapidjson::PrettyWriter<FUtf8Sink> Writer(Sink);
+			rapidjson::PrettyWriter<FUtf8Sink, rapidjson::UTF8<>, rapidjson::UTF8<>, FAllocator> Writer(Sink, &StackAllocator);
 			Writer.SetIndent(' ', 2);
 			WriteNode(Writer, Node, NonFinite);
 		}
 		else
 		{
-			rapidjson::Writer<FUtf8Sink> Writer(Sink);
+			rapidjson::Writer<FUtf8Sink, rapidjson::UTF8<>, rapidjson::UTF8<>, FAllocator> Writer(Sink, &StackAllocator);
 			WriteNode(Writer, Node, NonFinite);
 		}
 		if (NonFinite > 0)

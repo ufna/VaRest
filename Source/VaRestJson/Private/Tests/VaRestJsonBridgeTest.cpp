@@ -46,11 +46,16 @@ bool FVaRestJsonBridgeTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("dup -> last"), Dup.ToJsonObject()->GetNumberField(TEXT("a")), 2.0);
 
 	TestFalse(TEXT("ToJsonObject on array is null"), FromEngine.ToJsonObject().IsValid());
+
+	// FJsonObject keys are case-insensitive (UE::FSharedString): keys differing only by case collapse, last wins
+	const TSharedPtr<FJsonObject> Collapsed = FVaRestJson::Object().Set(TEXT("id"), 1).Set(TEXT("ID"), 2).ToJsonObject();
+	TestEqual(TEXT("case-only keys collapse into one engine field"), Collapsed->Values.Num(), 1);
+	TestEqual(TEXT("the last one wins"), Collapsed->GetNumberField(TEXT("id")), 2.0);
 	TestFalse(TEXT("null shared ptr -> invalid"), FVaRestJson::FromJsonValue(nullptr).IsValid());
 	return true;
 }
 
-namespace
+namespace VaRestJsonBridgeTest // named, not anonymous: unity blobs share one anonymous namespace
 {
 	/** An engine value whose Type is None: the bridge must treat it as null */
 	class FNoneTypedJsonValue : public FJsonValue
@@ -118,7 +123,7 @@ bool FVaRestJsonBridgeNumbersTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("null element -> null"), Arr.At(0).IsNull());
 
 	const TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
-	Obj->SetField(FStringView(TEXT("x")), MakeShared<FNoneTypedJsonValue>());
+	Obj->SetField(FStringView(TEXT("x")), MakeShared<VaRestJsonBridgeTest::FNoneTypedJsonValue>());
 	const FVaRestJson Nested = FVaRestJson::FromJsonObject(Obj);
 	TestTrue(TEXT("None-typed member -> null"), Nested.Get(TEXT("x")).IsNull());
 

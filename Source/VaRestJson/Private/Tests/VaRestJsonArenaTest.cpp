@@ -11,13 +11,16 @@
 #include "VaRestJsonArena.h"
 #include "VaRestJsonDocument.h"
 
-using VaRest::Json::FArena;
+// Usings live inside each test function: a file-scope using would leak into the files after this one
+// in a unity blob.
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonArenaAlignmentTest, "VaRest.Json.Arena.Alignment",
 	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
 
 bool FVaRestJsonArenaAlignmentTest::RunTest(const FString& Parameters)
 {
+	using VaRest::Json::FArena;
+
 	FArena Arena(256);
 	for (SIZE_T Alignment : { 1, 2, 4, 8, 16, 64 })
 	{
@@ -33,6 +36,8 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonArenaStabilityTest, "VaRest.Json.Are
 
 bool FVaRestJsonArenaStabilityTest::RunTest(const FString& Parameters)
 {
+	using VaRest::Json::FArena;
+
 	FArena Arena;
 	TArray<uint32*> Blocks;
 	for (uint32 i = 0; i < 100000; ++i)
@@ -63,6 +68,8 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonArenaBigBlockTest, "VaRest.Json.Aren
 
 bool FVaRestJsonArenaBigBlockTest::RunTest(const FString& Parameters)
 {
+	using VaRest::Json::FArena;
+
 	FArena Arena(4096);
 	uint8* Small1 = static_cast<uint8*>(Arena.Allocate(16, 8));
 	const SIZE_T Big = FArena::MaxChunkSize / 2 + 1; // just above the own-chunk threshold
@@ -83,6 +90,8 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonArenaGrowthTest, "VaRest.Json.Arena.
 
 bool FVaRestJsonArenaGrowthTest::RunTest(const FString& Parameters)
 {
+	using VaRest::Json::FArena;
+
 	FArena Arena;
 	TArray<SIZE_T> Chunks; // payload of each new chunk, from the change in reserved bytes
 	SIZE_T Reserved = 0;
@@ -131,6 +140,8 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonArenaDocumentSizingTest, "VaRest.Jso
 
 bool FVaRestJsonArenaDocumentSizingTest::RunTest(const FString& Parameters)
 {
+	using VaRest::Json::FArena;
+
 	const auto Reserved = [](const FVaRestJson& J) -> SIZE_T
 	{
 		return J.GetDocumentInternal() ? J.GetDocumentInternal()->Arena.GetReservedBytes() : 0;

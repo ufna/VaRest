@@ -25,13 +25,13 @@ bool FVaRestJsonApiBuildReadTest::RunTest(const FString& Parameters)
 
 	TestTrue(TEXT("type"), J.GetType() == EVaRestJsonType::Object);
 	TestEqual(TEXT("Num"), J.Num(), 6);
-	TestEqual(TEXT("string"), J[TEXT("name")].AsString(), FString(TEXT("Neo")));
+	TestEqualSensitive(TEXT("string"), J[TEXT("name")].AsString(), FString(TEXT("Neo")));
 	TestEqual(TEXT("int"), J[TEXT("level")].AsInt(), 42);
 	TestEqual(TEXT("double"), J[TEXT("ratio")].AsDouble(), 0.5);
 	TestTrue(TEXT("bool"), J[TEXT("alive")].AsBool());
 	TestTrue(TEXT("null"), J[TEXT("nothing")].IsNull());
 	TestEqual(TEXT("array len"), J[TEXT("tags")].Num(), 3);
-	TestEqual(TEXT("array elem"), J[TEXT("tags")][1].AsString(), FString(TEXT("b")));
+	TestEqualSensitive(TEXT("array elem"), J[TEXT("tags")][1].AsString(), FString(TEXT("b")));
 	TestEqual(TEXT("utf8 key"), J[UTF8TEXT("level")].AsInt(), 42);
 
 	// Missing keys and wrong types give the default, never a crash
@@ -39,14 +39,14 @@ bool FVaRestJsonApiBuildReadTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("missing -> default"), J[TEXT("nope")].AsInt(7), 7);
 	TestEqual(TEXT("wrong type -> default"), J[TEXT("name")].AsInt(-1), -1);
 	TestTrue(TEXT("index on object -> invalid"), J[0].GetType() == EVaRestJsonType::None);
-	TestEqual(TEXT("chained on missing"), J[TEXT("a")][TEXT("b")][3].AsString(TEXT("d")), FString(TEXT("d")));
+	TestEqualSensitive(TEXT("chained on missing"), J[TEXT("a")][TEXT("b")][3].AsString(TEXT("d")), FString(TEXT("d")));
 
 	// FName / FText / FString / UTF-8 values
 	J.Set(TEXT("n"), FName(TEXT("Nm"))).Set(TEXT("t"), FText::FromString(TEXT("Tx"))).Set(TEXT("s"), FString(TEXT("St"))).Set(TEXT("u"), FUtf8StringView(UTF8TEXT("Ут")));
-	TestEqual(TEXT("FName"), J[TEXT("n")].AsString(), FString(TEXT("Nm")));
-	TestEqual(TEXT("FText"), J[TEXT("t")].AsString(), FString(TEXT("Tx")));
-	TestEqual(TEXT("FString"), J[TEXT("s")].AsString(), FString(TEXT("St")));
-	TestEqual(TEXT("UTF-8"), J[TEXT("u")].AsString(), FString(TEXT("Ут")));
+	TestEqualSensitive(TEXT("FName"), J[TEXT("n")].AsString(), FString(TEXT("Nm")));
+	TestEqualSensitive(TEXT("FText"), J[TEXT("t")].AsString(), FString(TEXT("Tx")));
+	TestEqualSensitive(TEXT("FString"), J[TEXT("s")].AsString(), FString(TEXT("St")));
+	TestEqualSensitive(TEXT("UTF-8"), J[TEXT("u")].AsString(), FString(TEXT("Ут")));
 	TestTrue(TEXT("zero-copy view"), J[TEXT("u")].AsUtf8View().Equals(FUtf8StringView(UTF8TEXT("Ут")), ESearchCase::CaseSensitive));
 	J.Set(UTF8TEXT("raw"), 5);
 	TestTrue(TEXT("UTF-8 key Set/Has"), J.Has(FUtf8StringView(UTF8TEXT("raw"))) && J[TEXT("raw")].AsInt() == 5);
@@ -115,7 +115,7 @@ bool FVaRestJsonApiSemanticsTest::RunTest(const FString& Parameters)
 		FVaRestJson Scoped = FVaRestJson::Object().Set(TEXT("k"), TEXT("v"));
 		Survivor = Scoped[TEXT("k")];
 	}
-	TestEqual(TEXT("child outlives its root handle"), Survivor.AsString(), FString(TEXT("v")));
+	TestEqualSensitive(TEXT("child outlives its root handle"), Survivor.AsString(), FString(TEXT("v")));
 
 	// Auto-vivify: an invalid handle becomes the container the first write needs
 	FVaRestJson Fresh;
@@ -184,7 +184,7 @@ bool FVaRestJsonApiArrayTest::RunTest(const FString& Parameters)
 	FVaRestJson A = FVaRestJson::Array(1, 2, 3);
 	A.Add(4).SetAt(0, TEXT("zero"));
 	TestEqual(TEXT("Num"), A.Num(), 4);
-	TestEqual(TEXT("SetAt"), A[0].AsString(), FString(TEXT("zero")));
+	TestEqualSensitive(TEXT("SetAt"), A[0].AsString(), FString(TEXT("zero")));
 	TestTrue(TEXT("RemoveAt"), A.RemoveAt(1));
 	TestEqual(TEXT("shifted"), A[1].AsInt(), 3);
 	TestFalse(TEXT("RemoveAt out of range"), A.RemoveAt(99));
@@ -211,8 +211,8 @@ bool FVaRestJsonApiIterationTest::RunTest(const FString& Parameters)
 	{
 		Keys.Add(FString::ConstructFromPtrSize(Key.GetData(), Key.Len()));
 	}
-	TestEqual(TEXT("insertion order"), FString::Join(Keys, TEXT(",")), FString(TEXT("b,a,c")));
-	TestEqual(TEXT("GetKeys"), FString::Join(J.GetKeys(), TEXT(",")), FString(TEXT("b,a,c")));
+	TestEqualSensitive(TEXT("insertion order"), FString::Join(Keys, TEXT(",")), FString(TEXT("b,a,c")));
+	TestEqualSensitive(TEXT("GetKeys"), FString::Join(J.GetKeys(), TEXT(",")), FString(TEXT("b,a,c")));
 
 	// Removing while iterating must not crash or read out of range
 	int32 Visited = 0;
@@ -223,7 +223,7 @@ bool FVaRestJsonApiIterationTest::RunTest(const FString& Parameters)
 	}
 	// Deterministic: visit b (removed -> [a,c]), index 1 is c (removed -> [a]), index 2 >= Num stops.
 	TestEqual(TEXT("visits"), Visited, 2);
-	TestEqual(TEXT("survivor"), FString::Join(J.GetKeys(), TEXT(",")), FString(TEXT("a")));
+	TestEqualSensitive(TEXT("survivor"), FString::Join(J.GetKeys(), TEXT(",")), FString(TEXT("a")));
 	return true;
 }
 
@@ -266,7 +266,7 @@ bool FVaRestJsonApiEdgeCasesTest::RunTest(const FString& Parameters)
 	}
 	FVaRestJson Sub = Big[TEXT("key5")].Clone();
 	TestTrue(TEXT("subtree clone arena is small"), Sub.GetDocumentInternal()->Arena.GetReservedBytes() < 1024);
-	TestEqual(TEXT("subtree clone value"), Sub.AsString(), FString(TEXT("value number 5")));
+	TestEqualSensitive(TEXT("subtree clone value"), Sub.AsString(), FString(TEXT("value number 5")));
 	TestTrue(TEXT("root clone equals"), Big.Clone().Equals(Big));
 
 	// UTF-8 Remove
@@ -285,6 +285,10 @@ bool FVaRestJsonApiEdgeCasesTest::RunTest(const FString& Parameters)
 	Def.Set(TEXT("x"), 1);
 	TestTrue(TEXT("default handle still auto-vivifies"), Def.IsObject());
 	TestTrue(TEXT("node-less handles equal"), Parent[TEXT("a")].Equals(Parent[TEXT("b")]));
+	TestFalse(TEXT("node-less handles are not the same node"), Parent[TEXT("a")].IsSameNode(Parent[TEXT("b")]));
+	TestFalse(TEXT("default handles are not the same node"), FVaRestJson().IsSameNode(FVaRestJson()));
+	TestTrue(TEXT("a handle is its own node"), Parent.IsSameNode(Parent));
+	TestTrue(TEXT("two handles to one node"), FVaRestJson(Parent).IsSameNode(Parent));
 
 	// TryGet<float> range
 	FVaRestJson F = FVaRestJson::Object().Set(TEXT("huge"), 1e300).Set(TEXT("ok"), 1.5);

@@ -5,16 +5,17 @@
 #include "Misc/AutomationTest.h"
 #include "VaRestJsonDocument.h"
 
-using namespace VaRest::Json;
+// Usings live inside each test function: a file-scope using would leak into the files after this one
+// in a unity blob.
 
 namespace VaRestJsonDocumentTest
 {
 	FUtf8StringView K(const char* S) { return FUtf8StringView(reinterpret_cast<const UTF8CHAR*>(S)); }
 
 	/** A missing member fails the test and yields an inert Null node instead of a null dereference. */
-	const FNode& Need(FAutomationTestBase& Test, const FNode* Node, const TCHAR* What)
+	const VaRest::Json::FNode& Need(FAutomationTestBase& Test, const VaRest::Json::FNode* Node, const TCHAR* What)
 	{
-		static FNode Missing;
+		static VaRest::Json::FNode Missing;
 		if (!Node)
 		{
 			Test.AddError(FString::Printf(TEXT("Missing node: %s"), What));
@@ -23,14 +24,16 @@ namespace VaRestJsonDocumentTest
 		return *Node;
 	}
 }
-using VaRestJsonDocumentTest::K;
-using VaRestJsonDocumentTest::Need;
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonDocNumbersTest, "VaRest.Json.Document.Numbers",
 	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
 
 bool FVaRestJsonDocNumbersTest::RunTest(const FString& Parameters)
 {
+	using namespace VaRest::Json;
+	using VaRestJsonDocumentTest::K;
+	using VaRestJsonDocumentTest::Need;
+
 	FDocument Doc;
 	FNode* Small = Doc.NewUInt(42);
 	TestTrue(TEXT("uint that fits int64 is stored as Int"), Small->NumKind == ENumKind::Int && Small->Int == 42);
@@ -47,6 +50,10 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonDocObjectTest, "VaRest.Json.Document
 
 bool FVaRestJsonDocObjectTest::RunTest(const FString& Parameters)
 {
+	using namespace VaRest::Json;
+	using VaRestJsonDocumentTest::K;
+	using VaRestJsonDocumentTest::Need;
+
 	FDocument Doc;
 	FNode* Obj = Doc.NewObject();
 	Doc.Set(*Obj, K("a"), Doc.NewInt(1));
@@ -78,6 +85,10 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonDocIndexTest, "VaRest.Json.Document.
 
 bool FVaRestJsonDocIndexTest::RunTest(const FString& Parameters)
 {
+	using namespace VaRest::Json;
+	using VaRestJsonDocumentTest::K;
+	using VaRestJsonDocumentTest::Need;
+
 	FDocument Doc;
 	FNode* Obj = Doc.NewObject();
 	for (int32 i = 0; i < (int32)IndexThreshold; ++i)
@@ -115,6 +126,10 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonDocStabilityTest, "VaRest.Json.Docum
 
 bool FVaRestJsonDocStabilityTest::RunTest(const FString& Parameters)
 {
+	using namespace VaRest::Json;
+	using VaRestJsonDocumentTest::K;
+	using VaRestJsonDocumentTest::Need;
+
 	FDocument Doc;
 	FNode* Root = Doc.NewObject();
 	FNode* Child = Doc.NewObject();
@@ -142,6 +157,10 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonDocCopyTest, "VaRest.Json.Document.D
 
 bool FVaRestJsonDocCopyTest::RunTest(const FString& Parameters)
 {
+	using namespace VaRest::Json;
+	using VaRestJsonDocumentTest::K;
+	using VaRestJsonDocumentTest::Need;
+
 	FDocument Target;
 	FNode* Copy = nullptr;
 	{
@@ -187,6 +206,10 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonDocEqualsTest, "VaRest.Json.Document
 
 bool FVaRestJsonDocEqualsTest::RunTest(const FString& Parameters)
 {
+	using namespace VaRest::Json;
+	using VaRestJsonDocumentTest::K;
+	using VaRestJsonDocumentTest::Need;
+
 	FDocument Doc;
 	FNode* A = Doc.NewObject();
 	Doc.Set(*A, K("x"), Doc.NewInt(1));
@@ -215,6 +238,10 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonDocRemoveArenaTest, "VaRest.Json.Doc
 
 bool FVaRestJsonDocRemoveArenaTest::RunTest(const FString& Parameters)
 {
+	using namespace VaRest::Json;
+	using VaRestJsonDocumentTest::K;
+	using VaRestJsonDocumentTest::Need;
+
 	FDocument Doc;
 	FNode* Obj = Doc.NewObject();
 	auto Key = [](int32 i) { return FString::Printf(TEXT("r%d"), i); };
