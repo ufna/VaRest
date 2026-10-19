@@ -2,9 +2,10 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
+#include "Async/ParallelFor.h"
 #include "Misc/AutomationTest.h"
 #include "VaRestJson.h"
-#include "Async/ParallelFor.h"
+#include "VaRestJsonDocument.h"
 
 #include <atomic>
 
@@ -111,6 +112,15 @@ bool FVaRestJsonParseStructureTest::RunTest(const FString& Parameters)
 	TValueOrError<FVaRestJson, FVaRestJsonError> O = FVaRestJson::ParseOwned(MoveTemp(Owned));
 	TestTrue(TEXT("owned parse"), O.HasValue() && O.GetValue()[0].AsString().Equals(TEXT("s"), ESearchCase::CaseSensitive));
 	TestEqual(TEXT("buffer was moved"), Owned.Num(), 0);
+
+	// With one byte of slack for the terminator, ParseOwned keeps the caller's allocation (the HTTP layer
+	// relies on it; Serialize load and ImportTextItem reserve that byte too)
+	TArray<uint8> Slack;
+	Slack.Reserve(6);
+	Slack.Append(reinterpret_cast<const uint8*>("[\"s\"]"), 5);
+	const uint8* const OriginalData = Slack.GetData();
+	TValueOrError<FVaRestJson, FVaRestJsonError> Z = FVaRestJson::ParseOwned(MoveTemp(Slack));
+	TestTrue(TEXT("zero-copy with slack: same data pointer"), Z.HasValue() && Z.GetValue().GetDocumentInternal()->Input.GetData() == OriginalData);
 	return true;
 }
 

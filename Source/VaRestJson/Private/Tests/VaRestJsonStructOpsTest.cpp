@@ -7,6 +7,7 @@
 #include "Serialization/MemoryWriter.h"
 #include "Tests/VaRestJsonTestTypes.h"
 #include "VaRestJson.h"
+#include "VaRestJsonDocument.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonStructOpsTextTest, "VaRest.Json.StructOps.Text",
 	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
@@ -54,6 +55,31 @@ bool FVaRestJsonStructOpsTextTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("ImportTextItem"), Pin.ImportTextItem(Buffer, PPF_None, nullptr, GLog));
 	TestEqualSensitive(TEXT("value"), Pin.ToString(), FString(TEXT("[1,\"x\"]")));
 	TestEqualSensitive(TEXT("buffer advanced past the value only"), FString(Buffer), FString(TEXT(" trailing")));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonStructOpsImportRetentionTest, "VaRest.Json.StructOps.ImportKeepsOnlyTheValue",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestJsonStructOpsImportRetentionTest::RunTest(const FString& Parameters)
+{
+	// A handle imported from the middle of a long text (a T3D blob, a struct's exported text) must keep
+	// only its own value's bytes, not the whole remaining text.
+	FString Text = TEXT("[1]");
+	Text += TEXT(",After=7)");
+	Text += FString::ChrN(64 * 1024, TEXT('x'));
+	const TCHAR* Buffer = *Text;
+
+	FVaRestJson Pin;
+	TestTrue(TEXT("ImportTextItem"), Pin.ImportTextItem(Buffer, PPF_None, nullptr, GLog));
+	TestEqualSensitive(TEXT("value"), Pin.ToString(), FString(TEXT("[1]")));
+	TestEqual(TEXT("consumed exactly the value"), static_cast<int32>(Buffer - *Text), 3);
+	if (Pin.GetDocumentInternal())
+	{
+		const TArray<uint8>& Input = Pin.GetDocumentInternal()->Input;
+		TestTrue(*FString::Printf(TEXT("document input is the value + NUL (Num %d)"), Input.Num()), Input.Num() <= 3 + 1);
+		TestTrue(*FString::Printf(TEXT("document input allocation is small (%llu B)"), (uint64)Input.GetAllocatedSize()), Input.GetAllocatedSize() < 256);
+	}
 	return true;
 }
 
