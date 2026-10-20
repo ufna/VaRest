@@ -182,7 +182,7 @@ struct VARESTJSON_API FVaRestJsonConvert
 		const FVaRestJsonConvertOptions& Options = FVaRestJsonConvertOptions(), FVaRestJsonDecodeReport* OutReport = nullptr);
 
 	/**
-	 * JsonToStruct into a new T (USTRUCT or TBaseStructure type); the error is the first error (or warning) reported; warnings of a successful decode are dropped.
+	 * JsonToStruct into a new T (USTRUCT, TBaseStructure type or FTimespan); the error is the first error (or warning) reported; warnings of a successful decode are dropped.
 	 * JSON null gives a default T (null keeps a struct's values, spec 2.4); TryGet treats null as absent instead.
 	 */
 	template <typename T>

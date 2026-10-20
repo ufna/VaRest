@@ -2,7 +2,9 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
+#include "Async/Async.h"
 #include "Misc/AutomationTest.h"
+#include "Tasks/Task.h"
 #include "VaRestJson.h"
 #include "VaRestJsonConvert.h"
 #include "VaRestJsonConvertTestTypes.h"
@@ -92,6 +94,10 @@ bool FVaRestJsonTypedGetTest::RunTest(const FString& Parameters)
 	const TValueOrError<FVaRestJsonTestInner, FVaRestJsonError> FromNull = FVaRestJsonConvert::FromJson<FVaRestJsonTestInner>(J[TEXT("n")]);
 	TestTrue(TEXT("FromJson on null gives a default T"), FromNull.HasValue() && FromNull.GetValue().Id == FVaRestJsonTestInner().Id);
 	TestTrue(TEXT("FromJson on a missing value is an error"), FVaRestJsonConvert::FromJson<FVaRestJsonTestInner>(J[TEXT("nope")]).HasError());
+
+	// A worker must not need the game thread: the Timespan struct is resolved at module startup
+	const TOptional<FTimespan> OnWorker = UE::Tasks::Launch(UE_SOURCE_LOCATION, [&V]() { return V[TEXT("span")].TryGet<FTimespan>(); }).GetResult();
+	TestTrue(TEXT("TryGet<FTimespan> on a UE::Tasks worker"), OnWorker.IsSet() && OnWorker->GetTotalSeconds() == 90.5);
 	return true;
 }
 
