@@ -126,4 +126,70 @@ public:
 	/** Deep JSON equality (1 == 1.0, member order ignored) */
 	UFUNCTION(BlueprintPure, Category = "VaRest|Json", meta = (DisplayName = "Equals (Json)"))
 	static bool JsonEquals(const FVaRestJson& A, const FVaRestJson& B);
+
+	// ---- wildcard nodes (CustomThunk, like the engine's JsonBlueprintFunctionLibrary.h:34-46). The int32 in each
+	// signature is a placeholder: CustomStructureParam makes the pin a wildcard that takes the connected type
+	// (K2Node_CallFunction.cpp:96-170), and the thunk reads the real property from the VM stack.
+
+	/** The field converted to the connected type. Found is false, and Value the type's default, when the key is missing, null, or does not convert. */
+	UFUNCTION(BlueprintPure, CustomThunk, Category = "VaRest|Json", meta = (CustomStructureParam = "Value", DisplayName = "Get Field"))
+	static UPARAM(DisplayName = "Found") bool GetField(const FVaRestJson& Json, const FString& Key, int32& Value);
+	DECLARE_FUNCTION(execGetField);
+
+	/**
+	 * Sets Key on the object Json to Value (any type) and returns Json. A connected invalid Json handle removes the key
+	 * (spec 2.2); a value that cannot be encoded leaves the key as it was. Struct values use camelCase field names
+	 * (Struct To Json has a Naming input).
+	 */
+	UFUNCTION(BlueprintCallable, CustomThunk, Category = "VaRest|Json", meta = (CustomStructureParam = "Value", AutoCreateRefTerm = "Value", DisplayName = "Set Field"))
+	static FVaRestJson SetField(const FVaRestJson& Json, const FString& Key, const int32& Value);
+	DECLARE_FUNCTION(execSetField);
+
+	/** Like Get Field, by path: "a.b[2].c", or an RFC 6901 pointer starting with '/' */
+	UFUNCTION(BlueprintPure, CustomThunk, Category = "VaRest|Json", meta = (CustomStructureParam = "Value", DisplayName = "Get Path"))
+	static UPARAM(DisplayName = "Found") bool GetPath(const FVaRestJson& Json, const FString& Path, int32& Value);
+	DECLARE_FUNCTION(execGetPath);
+
+	UFUNCTION(BlueprintPure, CustomThunk, Category = "VaRest|Json", meta = (CustomStructureParam = "Value", DisplayName = "Array Get"))
+	static UPARAM(DisplayName = "Found") bool ArrayGet(const FVaRestJson& Json, int32 Index, int32& Value);
+	DECLARE_FUNCTION(execArrayGet);
+
+	/** Appends Value (any type) to the array Json and returns Json; nothing when Value cannot be encoded. Structs use camelCase field names. */
+	UFUNCTION(BlueprintCallable, CustomThunk, Category = "VaRest|Json", meta = (CustomStructureParam = "Value", AutoCreateRefTerm = "Value", DisplayName = "Array Add"))
+	static FVaRestJson ArrayAdd(const FVaRestJson& Json, const int32& Value);
+	DECLARE_FUNCTION(execArrayAdd);
+
+	/** Value (a struct, an array of structs, any type) as new JSON. Impure: each call makes a new document, so a Set on one is not lost to another consumer. */
+	UFUNCTION(BlueprintCallable, CustomThunk, Category = "VaRest|Json", meta = (CustomStructureParam = "Value", AutoCreateRefTerm = "Value", DisplayName = "Struct To Json"))
+	static FVaRestJson StructToJson(const int32& Value, EVaRestJsonNaming Naming = EVaRestJsonNaming::CamelCase);
+	DECLARE_FUNCTION(execStructToJson);
+
+	/** Fills Value (any type) from Json: tolerant names; strict refuses coercions. Success is false when Json does not fit. */
+	UFUNCTION(BlueprintCallable, CustomThunk, Category = "VaRest|Json", meta = (CustomStructureParam = "Value", DisplayName = "Json To Struct"))
+	static UPARAM(DisplayName = "Success") bool JsonToStruct(const FVaRestJson& Json, int32& Value, EVaRestJsonNaming Naming = EVaRestJsonNaming::CamelCase, bool bStrict = false);
+	DECLARE_FUNCTION(execJsonToStruct);
+
+	UFUNCTION(BlueprintPure, CustomThunk, Category = "VaRest|Json", meta = (CustomStructureParam = "Value", AutoCreateRefTerm = "Value", DisplayName = "Struct To Json String"))
+	static FString StructToJsonString(const int32& Value, EVaRestJsonNaming Naming = EVaRestJsonNaming::CamelCase, bool bPretty = false);
+	DECLARE_FUNCTION(execStructToJsonString);
+
+	/** Make Json node expansion (K2Node_VaRestMakeJson): a fresh object, pure so the expanded chain stays pure */
+	UFUNCTION(BlueprintPure, meta = (BlueprintInternalUseOnly = "true"))
+	static FVaRestJson MakeJsonInternalObject();
+
+	/** Make Json node expansion: Set Field, pure */
+	UFUNCTION(BlueprintPure, CustomThunk, meta = (BlueprintInternalUseOnly = "true", CustomStructureParam = "Value", AutoCreateRefTerm = "Value"))
+	static FVaRestJson MakeJsonInternalSet(const FVaRestJson& Json, const FString& Key, const int32& Value);
+	DECLARE_FUNCTION(execMakeJsonInternalSet);
+
+	// ---- the wildcard nodes' work, callable from C++: Property/Address describe the connected value
+
+	static bool GetFieldImpl(const FVaRestJson& Json, const FString& Key, const FProperty* Property, void* Address);
+	static FVaRestJson SetFieldImpl(const FVaRestJson& Json, const FString& Key, const FProperty* Property, const void* Address);
+	static bool GetPathImpl(const FVaRestJson& Json, const FString& Path, const FProperty* Property, void* Address);
+	static bool ArrayGetImpl(const FVaRestJson& Json, int32 Index, const FProperty* Property, void* Address);
+	static FVaRestJson ArrayAddImpl(const FVaRestJson& Json, const FProperty* Property, const void* Address);
+	static FVaRestJson StructToJsonImpl(const FProperty* Property, const void* Address, EVaRestJsonNaming Naming);
+	static bool JsonToStructImpl(const FVaRestJson& Json, const FProperty* Property, void* Address, EVaRestJsonNaming Naming, bool bStrict);
+	static FString StructToJsonStringImpl(const FProperty* Property, const void* Address, EVaRestJsonNaming Naming, bool bPretty);
 };
