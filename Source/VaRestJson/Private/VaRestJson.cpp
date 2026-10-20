@@ -139,6 +139,13 @@ FVaRestJson FVaRestJson::Get(FUtf8StringView Key) const
 	{
 		return Miss();
 	}
+	// Set stores an invalid key repaired, so a lookup by the same bytes must repair the same way (quietly: it stores nothing)
+	VaRest::Json::FUtf8Scratch Scratch;
+	if (!VaRest::Json::IsValidUtf8(Key))
+	{
+		VaRest::Json::AppendRepairedUtf8(Key, Scratch);
+		Key = FUtf8StringView(Scratch.GetData(), Scratch.Num());
+	}
 	VaRest::Json::FNode* Found = VaRest::Json::FDocument::Find(*Node, Key);
 	return Found ? FVaRestJson(Doc, Found) : Miss();
 }
@@ -201,7 +208,17 @@ void FVaRestJson::SetAtNode(int32 Index, VaRest::Json::FNode* Value)
 
 bool FVaRestJson::Remove(FUtf8StringView Key)
 {
-	return IsObject() && Doc->Remove(*Node, Key) > 0;
+	if (!IsObject())
+	{
+		return false;
+	}
+	VaRest::Json::FUtf8Scratch Scratch; // as in Get: the key Set stored is the repaired one
+	if (!VaRest::Json::IsValidUtf8(Key))
+	{
+		VaRest::Json::AppendRepairedUtf8(Key, Scratch);
+		Key = FUtf8StringView(Scratch.GetData(), Scratch.Num());
+	}
+	return Doc->Remove(*Node, Key) > 0;
 }
 
 bool FVaRestJson::Remove(FStringView Key)

@@ -163,45 +163,67 @@ namespace VaRest::Json
 		return Bytes;
 	}
 
-	int32 WriteUtf8(FStringView Text, UTF8CHAR* Dest)
+	int32 WriteUtf8(FStringView Text, TArrayView<UTF8CHAR> Dest, int32& OutReplaced)
 	{
 		const TCHAR* Data = Text.GetData();
 		const int32 Count = Text.Len();
-		int32 Replaced = 0;
+		const int32 Capacity = Dest.Num();
+		int32 Written = 0;
+		OutReplaced = 0;
+		// Room for a whole character is checked before any of its bytes are written: nothing past Dest, and no
+		// character cut in half. (The engine's ConvertedLength counts an unpaired surrogate as 1 byte, '?':
+		// GenericPlatformString.cpp:791-797; this converter writes 3, so a buffer sized by it is too small.)
+		const auto Reserve = [&](int32 Bytes) { return Capacity - Written >= Bytes; };
 		for (int32 i = 0; i < Count; ++i)
 		{
 			uint32 C = static_cast<uint16>(Data[i]);
 			if (C < 0x80)
 			{
-				*Dest++ = static_cast<UTF8CHAR>(C);
+				if (!Reserve(1))
+				{
+					return INDEX_NONE;
+				}
+				Dest[Written++] = static_cast<UTF8CHAR>(C);
 			}
 			else if (C < 0x800)
 			{
-				*Dest++ = static_cast<UTF8CHAR>(0xC0 | (C >> 6));
-				*Dest++ = static_cast<UTF8CHAR>(0x80 | (C & 0x3F));
+				if (!Reserve(2))
+				{
+					return INDEX_NONE;
+				}
+				Dest[Written++] = static_cast<UTF8CHAR>(0xC0 | (C >> 6));
+				Dest[Written++] = static_cast<UTF8CHAR>(0x80 | (C & 0x3F));
 			}
 			else if (Utf8Private::IsHighSurrogate(C) && i + 1 < Count && Utf8Private::IsLowSurrogate(static_cast<uint16>(Data[i + 1])))
 			{
+				if (!Reserve(4))
+				{
+					return INDEX_NONE;
+				}
 				const uint32 CodePoint = 0x10000 + ((C - 0xD800) << 10) + (static_cast<uint16>(Data[i + 1]) - 0xDC00);
-				*Dest++ = static_cast<UTF8CHAR>(0xF0 | (CodePoint >> 18));
-				*Dest++ = static_cast<UTF8CHAR>(0x80 | ((CodePoint >> 12) & 0x3F));
-				*Dest++ = static_cast<UTF8CHAR>(0x80 | ((CodePoint >> 6) & 0x3F));
-				*Dest++ = static_cast<UTF8CHAR>(0x80 | (CodePoint & 0x3F));
+				Dest[Written++] = static_cast<UTF8CHAR>(0xF0 | (CodePoint >> 18));
+				Dest[Written++] = static_cast<UTF8CHAR>(0x80 | ((CodePoint >> 12) & 0x3F));
+				Dest[Written++] = static_cast<UTF8CHAR>(0x80 | ((CodePoint >> 6) & 0x3F));
+				Dest[Written++] = static_cast<UTF8CHAR>(0x80 | (CodePoint & 0x3F));
 				++i;
 			}
 			else
 			{
+				if (!Reserve(3))
+				{
+					return INDEX_NONE;
+				}
 				if (C >= 0xD800 && C <= 0xDFFF)
 				{
 					C = 0xFFFD;
-					++Replaced;
+					++OutReplaced;
 				}
-				*Dest++ = static_cast<UTF8CHAR>(0xE0 | (C >> 12));
-				*Dest++ = static_cast<UTF8CHAR>(0x80 | ((C >> 6) & 0x3F));
-				*Dest++ = static_cast<UTF8CHAR>(0x80 | (C & 0x3F));
+				Dest[Written++] = static_cast<UTF8CHAR>(0xE0 | (C >> 12));
+				Dest[Written++] = static_cast<UTF8CHAR>(0x80 | ((C >> 6) & 0x3F));
+				Dest[Written++] = static_cast<UTF8CHAR>(0x80 | (C & 0x3F));
 			}
 		}
-		return Replaced;
+		return Written;
 	}
 
 	FUtf8StringView ConvertForDocument(FStringView Text, FUtf8Scratch& Scratch, bool bWarn)
@@ -214,7 +236,9 @@ namespace VaRest::Json
 			return FUtf8StringView(Scratch.GetData(), 0);
 		}
 		Scratch.SetNumUninitialized(static_cast<int32>(Length));
-		const int32 Replaced = WriteUtf8(Text, Scratch.GetData());
+		int32 Replaced = 0;
+		const int32 Written = WriteUtf8(Text, TArrayView<UTF8CHAR>(Scratch.GetData(), Scratch.Num()), Replaced);
+		check(Written == Scratch.Num()); // sized by Utf8Length, the same rules
 		if (Replaced > 0 && bWarn)
 		{
 			UE_LOG(LogVaRestJson, Warning, TEXT("FVaRestJson: %d unpaired UTF-16 surrogate(s) replaced with U+FFFD"), Replaced);

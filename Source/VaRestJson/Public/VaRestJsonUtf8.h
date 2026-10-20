@@ -23,8 +23,13 @@ namespace VaRest::Json
 	/** UTF-8 length of UTF-16 Text, an unpaired surrogate counted as U+FFFD (3 bytes) */
 	VARESTJSON_API int64 Utf8Length(FStringView Text);
 
-	/** Writes exactly Utf8Length(Text) bytes to Dest; returns how many unpaired surrogates became U+FFFD */
-	VARESTJSON_API int32 WriteUtf8(FStringView Text, UTF8CHAR* Dest);
+	/**
+	 * Writes Text as UTF-8 into Dest and returns the bytes written (Utf8Length(Text) when Dest is that big), or
+	 * INDEX_NONE when Dest is too small. Never writes past Dest and never half a character; after INDEX_NONE the
+	 * contents of Dest are unspecified. OutReplaced is how many unpaired surrogates became U+FFFD (3 bytes each, which
+	 * the engine's FPlatformString::ConvertedLength does not count: size Dest with Utf8Length, not with that).
+	 */
+	VARESTJSON_API int32 WriteUtf8(FStringView Text, TArrayView<UTF8CHAR> Dest, int32& OutReplaced);
 
 	/**
 	 * Text as UTF-8 for a document (spec 2.2): converted into Scratch, unpaired surrogates as U+FFFD, one warning when

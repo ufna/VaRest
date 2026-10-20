@@ -133,6 +133,20 @@ namespace VaRest::Json::BridgePrivate
 		return Doc.NewInt(Magnitude == 9223372036854775808ull ? MIN_int64 : -static_cast<int64>(Magnitude));
 	}
 
+	// Out of line on purpose: the 256-byte scratch must not sit in the frame of FromEngine, which recurses to
+	// MaxDepth (512) and may run on a small worker-thread stack.
+	FORCENOINLINE FNode* NewStringNode(FDocument& Doc, const FString& Text)
+	{
+		FUtf8Scratch Scratch;
+		return Doc.NewString(ConvertForDocument(Text, Scratch));
+	}
+
+	FORCENOINLINE void SetMember(FDocument& Doc, FNode& Object, const FString& Key, FNode* Member)
+	{
+		FUtf8Scratch Scratch;
+		Doc.Set(Object, ConvertForDocument(Key, Scratch), Member);
+	}
+
 	/** Our node for Value; nullptr with bTooDeep past MaxDepth (an FJsonObject graph may even be cyclic) */
 	FNode* FromEngine(FDocument& Doc, const FJsonValue& Value, int32 Depth, bool& bTooDeep)
 	{
@@ -145,8 +159,7 @@ namespace VaRest::Json::BridgePrivate
 			return Doc.NewBool(Value.AsBool());
 		case EJson::String:
 		{
-			FUtf8Scratch Scratch;
-			return Doc.NewString(ConvertForDocument(Value.AsString(), Scratch));
+			return NewStringNode(Doc, Value.AsString());
 		}
 		case EJson::Number:
 		{
@@ -211,8 +224,7 @@ namespace VaRest::Json::BridgePrivate
 					{
 						return nullptr;
 					}
-					FUtf8Scratch Scratch;
-					Doc.Set(*Result, ConvertForDocument(FString(*Pair.Key), Scratch), Member); // FSharedString or FString key: both dereference to TCHAR*
+					SetMember(Doc, *Result, FString(*Pair.Key), Member); // FSharedString or FString key: both dereference to TCHAR*
 				}
 			}
 			return Result;

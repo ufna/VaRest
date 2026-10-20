@@ -151,7 +151,9 @@ TValueOrError<FVaRestJson, FVaRestJsonError> FVaRestJson::Parse(FStringView Text
 	TArray<uint8> Bytes;
 	Bytes.Reserve(static_cast<int32>(Utf8Len) + 1); // the in-situ terminator fits without a reallocation
 	Bytes.AddUninitialized(static_cast<int32>(Utf8Len));
-	const int32 Replaced = WriteUtf8(Text, reinterpret_cast<UTF8CHAR*>(Bytes.GetData()));
+	int32 Replaced = 0;
+	const int32 Written = WriteUtf8(Text, TArrayView<UTF8CHAR>(reinterpret_cast<UTF8CHAR*>(Bytes.GetData()), Bytes.Num()), Replaced);
+	check(Written == Bytes.Num()); // sized by Utf8Length, the same rules
 	if (Replaced > 0)
 	{
 		UE_LOG(LogVaRestJson, Warning, TEXT("FVaRestJson::Parse: %d unpaired UTF-16 surrogate(s) replaced with U+FFFD"), Replaced);
@@ -164,7 +166,8 @@ TValueOrError<FVaRestJson, FVaRestJsonError> FVaRestJson::Parse(FStringView Text
 		FVaRestJsonError Diagnosed = Result.GetError();
 		TArray<UTF8CHAR> Original;
 		Original.SetNumUninitialized(static_cast<int32>(Utf8Len));
-		WriteUtf8(Text, Original.GetData());
+		int32 Unused = 0;
+		WriteUtf8(Text, TArrayView<UTF8CHAR>(Original.GetData(), Original.Num()), Unused);
 		FillLineColumn(Diagnosed, FUtf8StringView(Original.GetData(), Original.Num()));
 		return MakeError(MoveTemp(Diagnosed));
 	}
