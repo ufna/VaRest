@@ -11,6 +11,7 @@
 #include "Engine/BlueprintGeneratedClass.h"
 #include "K2Node_CallFunction.h"
 #include "K2Node_FunctionEntry.h"
+#include "K2Node_VariableGet.h"
 #include "K2Node_VariableSet.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/CompilerResultsLog.h"
@@ -65,10 +66,24 @@ namespace VaRest::Json::BlueprintTest
 		return Node;
 	}
 
+	/** A Get node for a member variable; add the variable first */
+	inline UK2Node_VariableGet* AddVariableGet(UEdGraph* Graph, FName VariableName)
+	{
+		FGraphNodeCreator<UK2Node_VariableGet> Creator(*Graph);
+		UK2Node_VariableGet* Node = Creator.CreateNode(false);
+		Node->VariableReference.SetSelfMember(VariableName);
+		Creator.Finalize();
+		return Node;
+	}
+
+	inline bool AddVariable(UBlueprint* Blueprint, FName VariableName, const FEdGraphPinType& Type)
+	{
+		return FBlueprintEditorUtils::AddMemberVariable(Blueprint, VariableName, Type);
+	}
+
 	inline bool AddVariable(UBlueprint* Blueprint, FName VariableName, FName Category)
 	{
-		return FBlueprintEditorUtils::AddMemberVariable(Blueprint, VariableName,
-			FEdGraphPinType(Category, NAME_None, nullptr, EPinContainerType::None, false, FEdGraphTerminalType()));
+		return AddVariable(Blueprint, VariableName, FEdGraphPinType(Category, NAME_None, nullptr, EPinContainerType::None, false, FEdGraphTerminalType()));
 	}
 
 	/** TryCreateConnection notifies both nodes, so wildcard pins take the linked type (EdGraphSchema.cpp:518-524) */
