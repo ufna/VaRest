@@ -48,6 +48,8 @@ public class VaRestEditor : ModuleRules
                 "DetailCustomizations",
                 "Settings",
                 "RenderCore",
+                // VaRest 2: the v2 Make Json node's "Remove key" context menu (UToolMenu)
+                "ToolMenus",
                 // VaRest 2: struct <-> JSON cache invalidation, the v2 Make Json node, their tests
                 "VaRestJson"
 			});
