@@ -933,6 +933,19 @@ A4): `SocketFrame.Protocol` = `eio:ping`, `sio:EVENT`, `sio:BINARY_ACK`, … wit
 up / down / refused for namespaces with reason and `bRecovered`. The Inspector shows the socket row with a
 namespace column; `eio:*` frames are filtered by default.
 
+**Amendment (Inspector rev 1, 2026-10-20)**, per Inspector spec §9.4 (IS-1–IS-3):
+
+* `ProtocolTag` takes exactly these values: `eio:open`, `eio:close`, `eio:ping`, `eio:noop`, `eio:upgrade`,
+  `sio:CONNECT`, `sio:DISCONNECT`, `sio:EVENT`, `sio:ACK`, `sio:CONNECT_ERROR`, `sio:BINARY_EVENT`,
+  `sio:BINARY_ACK`.
+* `SocketFrame` fields carry the Socket.IO data: `Route` = the event name, `Channel` = the namespace, `MsgId` =
+  the ack id, and `AttachmentSizes` is set.
+* CONNECT payload values, `pid` and the EIO OPEN `sid` are `***` in excerpts and in channel notes. The CONNECT
+  values join the known-secret set.
+* The namespace lifecycle travels as `SocketNote.Channel`, with `Reason` = the `EVaRestSioDisconnectReason`
+  name. Acks travel as `SocketNote.RequestEnded`. `SocketChannel` is no longer a separate event (WS §12
+  amendment).
+
 **Stats**: `FVaRestSioStats` per socket and per namespace: connected namespaces, events in/out, acks pending /
 timed out, connect errors, recoveries ok/failed, pings answered (by the auto-reply) and the longest pong delay,
 attachments and attachment bytes in/out. `stat VaRest` gains Socket.IO lines (namespaces, events, pending

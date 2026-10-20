@@ -430,6 +430,17 @@ out in Shipping. Always redacted (replaced by `***`):
 * JSON body fields `password`, `token`, `access_token`, `refresh_token`, `secret`, `client_secret`;
 * plus per-client additions.
 
+**Superseded (Inspector rev 1, 2026-10-20).** The redaction defaults are now specified by Inspector spec IN-13
+(its §2.2 and §9.2), which replaces the lists above. Logs use the same redactor. The rules are:
+
+* key matching that ignores case and separators, against a substring set;
+* rules fed by each client's auth configuration;
+* a scrub of known secret values;
+* binary bodies captured as descriptors only;
+* redaction of every URL field.
+
+Core log lines about a request include `#<RequestId>` (Inspector IN-16).
+
 Logged bodies are truncated to 4 KiB. (v1 logged every response body on desktop regardless of
 `bExtendedLog`: `VaRestRequestJSON.cpp:510`.)
 
@@ -449,6 +460,17 @@ CacheHit, Queued, Completed) with **already-redacted** copies and body excerpts 
 only, size-capped) to registered `IVaRestTraceSink`s. The Network Inspector spec consumes this.
 Stats: `stat VaRest` (requests, in-flight, bytes up/down, retries, cache hit ratio) and an LLM tag
 `VaRest`.
+
+**Superseded (Inspector rev 1, 2026-10-20).** The trace event kinds and the sink contract are now specified by
+Inspector spec §9 (IN-1–IN-17), which replaces the kind list above. It defines:
+
+* thirteen kinds, all emitted on the game thread except excerpts, which come from background tasks; none from
+  the HTTP thread;
+* the detail mask and zero-cost rule;
+* the late-attach snapshot;
+* ids that are always assigned;
+* excerpts under `VAREST_WITH_TRACE_EXCERPTS`;
+* golden sequences.
 
 ---
 

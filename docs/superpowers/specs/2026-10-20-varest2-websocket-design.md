@@ -900,6 +900,27 @@ protocol tag set by the codec (e.g. `eio:ping`, `sio:EVENT`) and an attachment c
 events report a channel going up, down or refused (reason, recovered). The Inspector shows a socket as one
 long-lived row with its frame list.
 
+**Amendment (Inspector rev 1, 2026-10-20).** The event names above are superseded by Inspector spec §9.3
+(IW-1–IW-6), which is the trace contract for W5. There are four socket events:
+
+* `Socket` (Created / Released).
+* `SocketAttempt` (Connecting / Open / Closed). It absorbs `SocketConnecting`, `SocketOpen` and `SocketClosed`.
+  `SocketRetryScheduled` becomes `Closed.bWillReconnect` + `Delay`, and `SocketGaveUp` becomes `Closed.bGaveUp`.
+* `SocketFrame`, same name, adding `FrameId`, `MsgKind`, `bAutoReplied`, the lane and the times.
+  * The inbound excerpt is inline, redacted on the socket's pipe.
+  * The outbound excerpt is taken at hand-off and delivered as a core `Excerpt` event, keyed by `FrameId`.
+* `SocketNote`: `SendDropped`, `RequestEnded`, `Flow`, `Backpressure`, `Channel` (was `SocketChannel`) and
+  `Ping` (was `SocketPing`).
+
+Rules for all four:
+
+* Their payload types are `VaRestHttp` types (`FVaRestTraceSocketClose`, small enums, `FName`s), and WS maps its
+  own types onto them.
+* All are emitted on the game thread.
+* Sockets contribute to the late-attach snapshot (`OnAttached`, Inspector IN-12).
+* Auth-placement fields join the socket's redaction keys, and the `FirstMessage` token joins the known-secret
+  set (Inspector IN-13).
+
 **Stats.** `stat VaRest` gains: sockets open, attempts, reconnects, frames and bytes in/out, buffered,
 queued, average RTT. `FVaRestSocketStats` per socket.
 
