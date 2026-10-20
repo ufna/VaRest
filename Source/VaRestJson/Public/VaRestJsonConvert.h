@@ -182,13 +182,14 @@ struct VARESTJSON_API FVaRestJsonConvert
 		const FVaRestJsonConvertOptions& Options = FVaRestJsonConvertOptions(), FVaRestJsonDecodeReport* OutReport = nullptr);
 
 	/**
-	 * JsonToStruct into a new T (USTRUCT or TBaseStructure type); the error is the first error (or warning) reported.
+	 * JsonToStruct into a new T (USTRUCT or TBaseStructure type); the error is the first error (or warning) reported; warnings of a successful decode are dropped.
 	 * JSON null gives a default T (null keeps a struct's values, spec 2.4); TryGet treats null as absent instead.
 	 */
 	template <typename T>
 	static TValueOrError<T, FVaRestJsonError> FromJson(const FVaRestJson& Json, const FVaRestJsonConvertOptions& Options = FVaRestJsonConvertOptions())
 	{
-		UScriptStruct* Struct = TBaseStructure<T>::Get();
+		static_assert(VaRest::Json::bHasScriptStruct<T>, "FromJson<T>: T must be a USTRUCT, an engine struct with a TBaseStructure, or FTimespan");
+		UScriptStruct* Struct = VaRest::Json::GetScriptStruct<T>();
 		alignas(T) uint8 Storage[sizeof(T)];
 		Struct->InitializeStruct(Storage);
 		FVaRestJsonDecodeReport Report;

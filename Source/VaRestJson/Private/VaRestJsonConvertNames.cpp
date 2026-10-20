@@ -583,3 +583,10 @@ int32 FVaRestJsonConvert::NumCachedFieldMapsInternal()
 	FReadScopeLock ReadLock(Shared.Lock);
 	return Shared.Maps.Num();
 }
+
+UScriptStruct* VaRest::Json::GetTimespanStruct()
+{
+	// Looked up once: a CoreUObject noexport struct, never unloaded
+	static UScriptStruct* const Struct = FindObjectChecked<UScriptStruct>(nullptr, TEXT("/Script/CoreUObject.Timespan"));
+	return Struct;
+}

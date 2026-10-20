@@ -208,10 +208,12 @@ struct VARESTJSON_API FVaRestJson
 
 	/**
 	 * The value as T, unset when it is not one: bool, every integer type (range-checked), float, double, FString, FName,
-	 * FText, FVaRestJson, any USTRUCT (and engine structs with a TBaseStructure such as FVector), TArray<T> and
-	 * TMap<FString, T>. No coercion between JSON types. A struct is decoded with default options (camelCase, lenient)
-	 * and must be an object (a value struct such as FDateTime or FGuid: its own JSON form; null is never a value); one
-	 * element or value that does not convert makes a whole TArray/TMap unset. Defined at the end of this header.
+	 * FText, FVaRestJson, any USTRUCT (and engine structs with a TBaseStructure such as FVector, plus FTimespan),
+	 * TArray<T> and TMap<FString, T>. Scalars take no coercion between JSON types. A struct must be a JSON object (a
+	 * value struct such as FDateTime, FGuid, FTimespan or a soft path: its own scalar form; null is never a value) and
+	 * its fields are decoded tolerantly with default options (camelCase, lenient): {"id":"7"} sets an int Id to 7 and
+	 * {} gives the defaults. For strict field typing and the error, use FVaRestJsonConvert::FromJson with
+	 * bStrict. One element or value that does not convert makes a whole TArray/TMap unset. Defined at the end of this header.
 	 */
 	template <typename T>
 	TOptional<T> TryGet() const;
@@ -646,6 +648,26 @@ namespace VaRest::Json
 	/** TryGet<USTRUCT>: decodes with default options; false when Json is not an object. Defined in VaRestJsonConvertDecode.cpp. */
 	VARESTJSON_API bool DecodeStructForTryGet(const FVaRestJson& Json, const UScriptStruct* Struct, void* Data);
 
+	/** The reflection of FTimespan (/Script/CoreUObject.Timespan): the engine has no TBaseStructure<FTimespan> (NoExportTypes.h:2252-2253) */
+	VARESTJSON_API UScriptStruct* GetTimespanStruct();
+
+	/** True for a type TryGet/FromJson can reflect: a USTRUCT, a TBaseStructure type, or FTimespan */
+	template <typename T>
+	inline constexpr bool bHasScriptStruct = std::is_same_v<T, FTimespan> || requires { TBaseStructure<T>::Get(); };
+
+	template <typename T>
+	UScriptStruct* GetScriptStruct()
+	{
+		if constexpr (std::is_same_v<T, FTimespan>)
+		{
+			return GetTimespanStruct();
+		}
+		else
+		{
+			return TBaseStructure<T>::Get();
+		}
+	}
+
 	template <typename T>
 	struct TStringKeyedMap
 	{
@@ -770,11 +792,11 @@ TOptional<T> FVaRestJson::TryGet() const
 		}
 		return TOptional<U>(MoveTemp(Result));
 	}
-	else if constexpr (requires { TBaseStructure<U>::Get(); })
+	else if constexpr (VaRest::Json::bHasScriptStruct<U>)
 	{
 		// Any USTRUCT, and engine structs with a TBaseStructure (FVector, FGuid, FDateTime...). Built the way reflection
 		// builds it, so fields the JSON lacks keep the struct's defaults even for no-op-constructed types.
-		UScriptStruct* Struct = TBaseStructure<U>::Get();
+		UScriptStruct* Struct = VaRest::Json::GetScriptStruct<U>();
 		alignas(U) uint8 Storage[sizeof(U)];
 		Struct->InitializeStruct(Storage);
 		TOptional<U> Result;

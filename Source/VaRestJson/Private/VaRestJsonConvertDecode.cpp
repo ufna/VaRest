@@ -991,6 +991,11 @@ bool VaRest::Json::DecodeStructForTryGet(const FVaRestJson& Json, const UScriptS
 	{
 		return false;
 	}
+	// Decode would also read seconds from a string (lenient); TryGet asks "is this a timespan", and the answer is a number
+	if (Convert::ClassifyStruct(Struct) == Convert::ESpecialStruct::Timespan && !Json.IsNumber())
+	{
+		return false;
+	}
 	FVaRestJsonDecodeReport Report; // a report keeps TryGet quiet; lenient warnings are not failures
 	return FVaRestJsonConvert::JsonToStruct(Json, Struct, Data, FVaRestJsonConvertOptions(), &Report);
 }
