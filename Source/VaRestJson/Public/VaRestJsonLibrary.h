@@ -119,7 +119,8 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json", meta = (DisplayName = "Array Remove At"))
 	static UPARAM(DisplayName = "Removed") bool ArrayRemoveAt(const FVaRestJson& Json, int32 Index);
 
-	UFUNCTION(BlueprintPure, Category = "VaRest|Json", meta = (DisplayName = "Clone (Json)"))
+	/** An independent deep copy. Impure: each call makes a new independent copy, so a Set on one is not lost to another consumer. */
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Json", meta = (DisplayName = "Clone (Json)"))
 	static FVaRestJson CloneJson(const FVaRestJson& Json);
 
 	/** Deep JSON equality (1 == 1.0, member order ignored) */
