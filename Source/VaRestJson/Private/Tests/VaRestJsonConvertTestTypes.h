@@ -317,3 +317,77 @@ struct FVaRestJsonTestAttachments
 	UPROPERTY()
 	TMap<FString, FVaRestJsonTestBlob> ByName;
 };
+
+/** The shape of Tools/gen_bench_json.py. Bools are Ok/Active, not bOk/bActive: FJsonObjectConverter matches
+ *  GetAuthoredName() and keeps a 'b' prefix, so with these names both converters decode every field. */
+USTRUCT()
+struct FVaRestJsonBenchOwner
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	int32 Id = 0;
+
+	UPROPERTY()
+	FString Nick;
+};
+
+USTRUCT()
+struct FVaRestJsonBenchItem
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	int32 Id = 0;
+
+	UPROPERTY()
+	int64 Uid = 0;
+
+	UPROPERTY()
+	FString Name;
+
+	UPROPERTY()
+	FString Desc;
+
+	UPROPERTY()
+	double Price = 0.0;
+
+	UPROPERTY()
+	double Weight = 0.0;
+
+	UPROPERTY()
+	bool Active = false;
+
+	UPROPERTY()
+	FVaRestJsonBenchOwner Owner;
+
+	UPROPERTY()
+	TArray<FString> Tags;
+
+	UPROPERTY()
+	TMap<FString, int32> Stats;
+};
+
+USTRUCT()
+struct FVaRestJsonBenchData
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	TArray<FVaRestJsonBenchItem> Items;
+
+	UPROPERTY()
+	int32 Count = 0;
+};
+
+USTRUCT()
+struct FVaRestJsonBenchResponse
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	bool Ok = false;
+
+	UPROPERTY()
+	FVaRestJsonBenchData Data;
+};

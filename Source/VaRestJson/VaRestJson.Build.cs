@@ -21,5 +21,12 @@ public class VaRestJson : ModuleRules
 			// (WebSocket/Socket.IO envelopes). Json re-exports it too (Json.Build.cs:9-15); declared, not inherited.
 			"RapidJSON",
 		});
+
+		PrivateDependencyModuleNames.AddRange(new string[]
+		{
+			// Bench.VaRest.Json.TypedConvert compares against FJsonObjectConverter. Engine already depends on
+			// JsonUtilities publicly (Engine.Build.cs:88), so every game links it anyway and gains no code from this.
+			"JsonUtilities",
+		});
 	}
 }
