@@ -20,6 +20,10 @@ public class VaRestJson : ModuleRules
 			// PUBLIC: VaRestJsonWriterInternal.h hands the RapidJSON writer type to sibling modules
 			// (WebSocket/Socket.IO envelopes). Json re-exports it too (Json.Build.cs:9-15); declared, not inherited.
 			"RapidJSON",
+
+			// PUBLIC: VaRestJsonLibrary.h derives from UBlueprintFunctionLibrary (Engine/Classes/Kismet/
+			// BlueprintFunctionLibrary.h). Every game links Engine; v1's VaRest module needs it at PreDefault too.
+			"Engine",
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[]
