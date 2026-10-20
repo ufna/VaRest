@@ -59,6 +59,30 @@ namespace VaRest::Json::Convert::DecodePrivate
 		return Text.Len() < NAME_SIZE;
 	}
 
+	/**
+	 * Text as an object path, for FSoftObjectPath and soft pointer targets; what was expected when it is not one. "" (what
+	 * encode writes for the null path) and "None" are the null path (SoftObjectPath.cpp:189-193). Any other text that
+	 * SetPath resets to the null path is not a path: SetPath resets text without the leading '/', with a trailing or a
+	 * doubled delimiter, without a log (SoftObjectPath.cpp:200-217), which would clear the field silently (spec 2.4).
+	 */
+	const TCHAR* ParseObjectPath(const FString& Text, FSoftObjectPath& Out)
+	{
+		if (!FitsName(Text))
+		{
+			return TEXT("an object path shorter than 1024 characters");
+		}
+		if (ContainsNul(Text))
+		{
+			return TEXT("an object path without U+0000");
+		}
+		Out.SetPath(FStringView(Text));
+		if (Out.IsNull() && !Text.IsEmpty() && !Text.Equals(TEXT("None"), ESearchCase::CaseSensitive))
+		{
+			return TEXT("an object path (\"/Package/Path.Asset\")");
+		}
+		return nullptr;
+	}
+
 	struct FDecodeContext
 	{
 		const FVaRestJsonConvertOptions& Options;
@@ -411,6 +435,12 @@ namespace VaRest::Json::Convert::DecodePrivate
 				Context.Record(Context.Options.bStrict, FString::Printf(TEXT("map key of %d characters is too long for a name"), KeyText.Len()));
 				return false;
 			}
+			if (ContainsNul(KeyText))
+			{
+				// FName(TCHAR*) would stop at it: "a\u0000b" and "a\u0000c" would both be the key a, and merge
+				Context.Record(Context.Options.bStrict, TEXT("map key with U+0000 cannot be a name"));
+				return false;
+			}
 			NameKey->SetPropertyValue(Key, FName(*KeyText));
 			return true;
 		}
@@ -635,11 +665,16 @@ namespace VaRest::Json::Convert::DecodePrivate
 		{
 		case ESpecialStruct::DateTime:
 		{
-			FDateTime Parsed;
-			if (Value.Type == EVaRestJsonType::String && FDateTime::ParseIso8601(*TextOf(Value), Parsed))
+			if (Value.Type == EVaRestJsonType::String)
 			{
-				*static_cast<FDateTime*>(Data) = Parsed;
-				return true;
+				// ParseIso8601 reads a C string: "...Z\u0000junk" would read as the date before the U+0000
+				const FString Text = TextOf(Value);
+				FDateTime Parsed;
+				if (!ContainsNul(Text) && FDateTime::ParseIso8601(*Text, Parsed))
+				{
+					*static_cast<FDateTime*>(Data) = Parsed;
+					return true;
+				}
 			}
 			return Context.Mismatch(Value, TEXT("an ISO 8601 date-time"));
 		}
@@ -665,23 +700,28 @@ namespace VaRest::Json::Convert::DecodePrivate
 		}
 		case ESpecialStruct::Guid:
 		{
-			FGuid Parsed;
-			if (Value.Type == EVaRestJsonType::String && FGuid::Parse(TextOf(Value), Parsed))
+			if (Value.Type == EVaRestJsonType::String)
 			{
-				*static_cast<FGuid*>(Data) = Parsed;
-				return true;
+				const FString Text = TextOf(Value);
+				FGuid Parsed;
+				if (!ContainsNul(Text) && FGuid::Parse(Text, Parsed))
+				{
+					*static_cast<FGuid*>(Data) = Parsed;
+					return true;
+				}
 			}
 			return Context.Mismatch(Value, TEXT("a GUID"));
 		}
 		case ESpecialStruct::SoftObjectPath:
 			if (Value.Type == EVaRestJsonType::String)
 			{
-				const FString Text = TextOf(Value);
-				if (!FitsName(Text))
+				FSoftObjectPath Parsed;
+				if (const TCHAR* Expected = ParseObjectPath(TextOf(Value), Parsed))
 				{
-					return Context.Mismatch(Value, TEXT("an object path shorter than 1024 characters"));
+					return Context.Mismatch(Value, Expected);
 				}
-				static_cast<FSoftObjectPath*>(Data)->SetPath(FStringView(Text));
+				// The whole value for FSoftClassPath too: it adds no data members (SoftObjectPath.h:531-591)
+				*static_cast<FSoftObjectPath*>(Data) = MoveTemp(Parsed);
 				return true;
 			}
 			return Context.Mismatch(Value, TEXT("an object path"));
@@ -816,6 +856,10 @@ namespace VaRest::Json::Convert::DecodePrivate
 			{
 				return Context.Mismatch(Value, TEXT("a name shorter than 1024 characters"));
 			}
+			if (ContainsNul(Text))
+			{
+				return Context.Mismatch(Value, TEXT("a name without U+0000")); // FName(TCHAR*) would stop at it
+			}
 			NameProperty->SetPropertyValue(Address, FName(*Text));
 			return true;
 		}
@@ -875,12 +919,12 @@ namespace VaRest::Json::Convert::DecodePrivate
 			}
 			if (Value.Type == EVaRestJsonType::String)
 			{
-				const FString Text = TextOf(Value);
-				if (!FitsName(Text))
+				FSoftObjectPath Parsed;
+				if (const TCHAR* Expected = ParseObjectPath(TextOf(Value), Parsed))
 				{
-					return Context.Mismatch(Value, TEXT("an object path shorter than 1024 characters"));
+					return Context.Mismatch(Value, Expected);
 				}
-				SoftProperty->SetPropertyValue(Address, FSoftObjectPtr(FSoftObjectPath(Text)));
+				SoftProperty->SetPropertyValue(Address, FSoftObjectPtr(MoveTemp(Parsed)));
 				return true;
 			}
 			return Context.Mismatch(Value, TEXT("an object path"));

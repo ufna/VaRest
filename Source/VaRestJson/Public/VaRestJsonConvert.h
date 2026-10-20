@@ -166,6 +166,8 @@ struct VARESTJSON_API FVaRestJsonConvert
 	 * Untrusted input: [0,0,...] into a TArray of a large struct allocates Count * sizeof(element) (two input bytes per
 	 * element), and every distinct string decoded into an FName stays in the name table for the process's life. Text of
 	 * 1024 characters or more bound for an FName (a field, a map key) or an object path is a mismatch: FName would abort.
+	 * So is text with U+0000 bound for an FName, a date, a GUID or an object path (it would be cut there), and text
+	 * bound for an object path that is not one ("Game/X": SetPath would make it the null path; "" and "None" are that).
 	 * A string bound for a number field is coerced only up to 64 bytes. A report keeps the first 100 issues plus one
 	 * closing entry that counts the rest. Keys over 256 bytes match a field only exactly or ignoring case, and are
 	 * shortened ("...") in issue paths.

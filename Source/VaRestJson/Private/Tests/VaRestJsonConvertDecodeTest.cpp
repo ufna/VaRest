@@ -632,4 +632,111 @@ bool FVaRestJsonDecodeBoundsTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonDecodeHostileValuesTest, "VaRest.Json.Convert.Decode.HostileValues",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestJsonDecodeHostileValuesTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRestJsonConvertDecodeTest;
+	// Values a server can send that do not fit their fields (Task 8 review): each one is a mismatch at its path, and the
+	// field keeps its value (spec 2.4) -- no wrap, no truncation, no UB
+	const FVaRestJson Input = ParseText(UTF8TEXT("{"
+		"\"int64Value\":9223372036854775808,"
+		"\"uint32Value\":-1,"
+		"\"uint64Value\":-1,"
+		"\"int32Value\":1e308,"
+		"\"floatValue\":1e308,"
+		"\"int16Value\":1.5,"
+		"\"when\":\"2026-13-45T00:00:00Z\","
+		"\"guid\":\"not-a-guid\","
+		"\"bytes\":\"@@@@\"}"));
+	const FVaRestJsonTestAll Filled = MakeFilled();
+	for (int32 Variant = 0; Variant < 2; ++Variant)
+	{
+		const bool bStrictMode = Variant == 1;
+		FVaRestJsonTestAll All = MakeFilled();
+		FVaRestJsonDecodeReport Report;
+		FVaRestJsonConvertOptions Options;
+		Options.bStrict = bStrictMode;
+		FVaRestJsonConvert::JsonToStruct(Input, FVaRestJsonTestAll::StaticStruct(), &All, Options, &Report);
+		const TArray<FVaRestJsonError>& Issues = bStrictMode ? Report.Errors : Report.Warnings;
+		const FString Mode = bStrictMode ? TEXT("strict: ") : TEXT("lenient: ");
+		TestTrue(Mode + TEXT("2^63 does not fit an int64"), All.Int64Value == Filled.Int64Value && HasIssueAt(Issues, TEXT("int64Value")));
+		TestTrue(Mode + TEXT("-1 does not fit a uint32"), All.Uint32Value == Filled.Uint32Value && HasIssueAt(Issues, TEXT("uint32Value")));
+		TestTrue(Mode + TEXT("-1 does not fit a uint64"), All.Uint64Value == Filled.Uint64Value && HasIssueAt(Issues, TEXT("uint64Value")));
+		TestTrue(Mode + TEXT("1e308 does not fit an int32"), All.Int32Value == Filled.Int32Value && HasIssueAt(Issues, TEXT("int32Value")));
+		TestTrue(Mode + TEXT("1e308 does not fit a float"), All.FloatValue == Filled.FloatValue && HasIssueAt(Issues, TEXT("floatValue")));
+		TestTrue(Mode + TEXT("1.5 is not an integer"), All.Int16Value == Filled.Int16Value && HasIssueAt(Issues, TEXT("int16Value")));
+		TestTrue(Mode + TEXT("month 13 is not a date"), All.When == Filled.When && HasIssueAt(Issues, TEXT("when")));
+		TestTrue(Mode + TEXT("not a GUID"), All.Guid == Filled.Guid && HasIssueAt(Issues, TEXT("guid")));
+		TestTrue(Mode + TEXT("not base64"), All.Bytes == Filled.Bytes && HasIssueAt(Issues, TEXT("bytes")));
+		TestEqual(Mode + TEXT("nine issues"), Issues.Num(), 9);
+	}
+	FVaRestJsonTestAll Zero = MakeFilled();
+	FVaRestJsonDecodeReport ZeroReport;
+	FVaRestJsonConvert::JsonToStruct(ParseText(UTF8TEXT("{\"int32Value\":-0,\"int64Value\":-0.0}")), FVaRestJsonTestAll::StaticStruct(), &Zero, FVaRestJsonConvertOptions(), &ZeroReport);
+	TestTrue(TEXT("-0 and -0.0 are zero"), Zero.Int32Value == 0 && Zero.Int64Value == 0 && ZeroReport.Warnings.Num() == 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonDecodeUntrustedTextTest, "VaRest.Json.Convert.Decode.UntrustedText",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestJsonDecodeUntrustedTextTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRestJsonConvertDecodeTest;
+	// Spec 2.4: every mismatch is recorded and the field keeps its value. Two ways text from a response used to change a
+	// field silently: U+0000 ends the TCHAR* that FName and ParseIso8601 read ("a\u0000b" became the name a, and two such
+	// map keys merged), and FSoftObjectPath::SetPath resets text that is not a path to the null path without a log.
+	const FVaRestJson WithNul = ParseText(UTF8TEXT("{"
+		"\"nameValue\":\"a\\u0000b\","
+		"\"byName\":{\"a\\u0000b\":1,\"a\\u0000c\":2,\"k\":3},"
+		"\"when\":\"2026-10-20T00:00:00Z\\u0000junk\","
+		"\"guid\":\"01234567-89AB-CDEF-0123-456789ABCDE\\u0000\","
+		"\"assetPath\":\"/Game/Maps/X\\u0000.Y\","
+		"\"softAsset\":\"/Game/B\\u0000.B\"}"));
+	const FVaRestJson NotPaths = ParseText(UTF8TEXT("{\"assetPath\":\"Game/Maps/X\",\"softAsset\":\"/Game/A.\"}"));
+	const FVaRestJsonTestAll Filled = MakeFilled();
+	for (int32 Variant = 0; Variant < 2; ++Variant)
+	{
+		const bool bStrictMode = Variant == 1;
+		const FString Mode = bStrictMode ? TEXT("strict: ") : TEXT("lenient: ");
+		FVaRestJsonConvertOptions Options;
+		Options.bStrict = bStrictMode;
+
+		FVaRestJsonTestAll All = MakeFilled();
+		FVaRestJsonDecodeReport Report;
+		FVaRestJsonConvert::JsonToStruct(WithNul, FVaRestJsonTestAll::StaticStruct(), &All, Options, &Report);
+		const TArray<FVaRestJsonError>& Issues = bStrictMode ? Report.Errors : Report.Warnings;
+		TestTrue(Mode + TEXT("a name with U+0000 keeps the field"), All.NameValue == Filled.NameValue && HasIssueAt(Issues, TEXT("nameValue")));
+		const int32 KeyIssues = Issues.FilterByPredicate([](const FVaRestJsonError& Issue) { return Issue.Path.StartsWith(TEXT("byName.a"), ESearchCase::CaseSensitive); }).Num();
+		TestTrue(Mode + TEXT("name map keys with U+0000 are skipped, not merged"), All.ByName.Num() == 1 && All.ByName.FindRef(FName(TEXT("k"))) == 3 && KeyIssues == 2);
+		TestTrue(Mode + TEXT("a date with U+0000 keeps the field"), All.When == Filled.When && HasIssueAt(Issues, TEXT("when")));
+		TestTrue(Mode + TEXT("a GUID with U+0000 keeps the field"), All.Guid == Filled.Guid && HasIssueAt(Issues, TEXT("guid")));
+		TestTrue(Mode + TEXT("an object path with U+0000 keeps the field"), All.AssetPath == Filled.AssetPath && HasIssueAt(Issues, TEXT("assetPath")));
+		TestTrue(Mode + TEXT("a soft pointer with U+0000 keeps the field"), All.SoftAsset.ToSoftObjectPath() == Filled.SoftAsset.ToSoftObjectPath() && HasIssueAt(Issues, TEXT("softAsset")));
+		TestEqual(Mode + TEXT("seven issues"), Issues.Num(), 7);
+
+		FVaRestJsonTestAll Paths = MakeFilled();
+		FVaRestJsonDecodeReport PathReport;
+		FVaRestJsonConvert::JsonToStruct(NotPaths, FVaRestJsonTestAll::StaticStruct(), &Paths, Options, &PathReport);
+		const TArray<FVaRestJsonError>& PathIssues = bStrictMode ? PathReport.Errors : PathReport.Warnings;
+		TestTrue(Mode + TEXT("text without the leading / is not an object path"), Paths.AssetPath == Filled.AssetPath && HasIssueAt(PathIssues, TEXT("assetPath")));
+		TestTrue(Mode + TEXT("a trailing delimiter is not a soft pointer path"), Paths.SoftAsset.ToSoftObjectPath() == Filled.SoftAsset.ToSoftObjectPath() && HasIssueAt(PathIssues, TEXT("softAsset")));
+		TestEqual(Mode + TEXT("two issues"), PathIssues.Num(), 2);
+	}
+
+	// The null path's own spellings still clear: "" (what encode writes for it) and "None" (what SetPath also takes)
+	FVaRestJsonTestAll Cleared = MakeFilled();
+	FVaRestJsonDecodeReport ClearReport;
+	FVaRestJsonConvert::JsonToStruct(ParseText(UTF8TEXT("{\"assetPath\":\"\",\"softAsset\":\"None\"}")), FVaRestJsonTestAll::StaticStruct(), &Cleared, FVaRestJsonConvertOptions(), &ClearReport);
+	TestTrue(TEXT("\"\" and \"None\" clear a path"), Cleared.AssetPath.IsNull() && Cleared.SoftAsset.IsNull() && ClearReport.Warnings.Num() == 0);
+
+	TestFalse(TEXT("TryGet<FName> of text with U+0000"), ParseText(UTF8TEXT("\"a\\u0000b\"")).TryGet<FName>().IsSet());
+	TestFalse(TEXT("TryGet<FDateTime> of text with U+0000"), ParseText(UTF8TEXT("\"2026-10-20T00:00:00Z\\u0000junk\"")).TryGet<FDateTime>().IsSet());
+	TestFalse(TEXT("TryGet<FSoftObjectPath> of text that is not a path"), FVaRestJson::From(TEXT("garbage")).TryGet<FSoftObjectPath>().IsSet());
+	TestTrue(TEXT("... while a path is one"), FVaRestJson::From(TEXT("/Game/A.A")).TryGet<FSoftObjectPath>().Get(FSoftObjectPath()) == FSoftObjectPath(TEXT("/Game/A.A")));
+	return true;
+}
+
 #endif

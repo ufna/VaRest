@@ -207,9 +207,9 @@ struct VARESTJSON_API FVaRestJson
 	FUtf8StringView AsUtf8View() const;
 
 	/**
-	 * The value as T, unset when it is not one: bool, every integer type (range-checked), float, double, FString, FName,
-	 * FText (culture-invariant, as decode builds one), FVaRestJson, any USTRUCT (and engine structs with a TBaseStructure
-	 * such as FVector, plus FTimespan),
+	 * The value as T, unset when it is not one: bool, every integer type (range-checked), float, double, FString, FName
+	 * (never from 1024+ characters or from text with U+0000), FText (culture-invariant, as decode builds one),
+	 * FVaRestJson, any USTRUCT (and engine structs with a TBaseStructure such as FVector, plus FTimespan),
 	 * TArray<T> and TMap<FString, T>. Scalars take no coercion between JSON types. A struct must be a JSON object (a
 	 * value struct such as FDateTime, FGuid, FTimespan or a soft path: its own scalar form; null is never a value) and
 	 * its fields are decoded tolerantly with default options (camelCase, lenient): {"id":"7"} sets an int Id to 7 and
@@ -653,6 +653,17 @@ private:
 
 namespace VaRest::Json
 {
+	/**
+	 * Text holds U+0000 (JSON "\u0000"). FName(TCHAR*) and FDateTime::ParseIso8601 read a C string, which ends there:
+	 * "a\u0000b" would become the name a. No name, date, GUID or object path holds one, so TryGet and decode refuse such
+	 * text for those targets instead of truncating it.
+	 */
+	inline bool ContainsNul(FStringView Text)
+	{
+		int32 Index = INDEX_NONE;
+		return Text.FindChar(TEXT('\0'), Index);
+	}
+
 	/** TryGet<USTRUCT>: decodes with default options; false when Json is not an object. Defined in VaRestJsonConvertDecode.cpp. */
 	VARESTJSON_API bool DecodeStructForTryGet(const FVaRestJson& Json, const UScriptStruct* Struct, void* Data);
 
@@ -747,10 +758,10 @@ TOptional<T> FVaRestJson::TryGet() const
 	}
 	else if constexpr (std::is_same_v<U, FName>)
 	{
-		// NAME_SIZE characters or more abort FName construction in builds with checks (UnrealNames.cpp:3271-3281): such
-		// text is not a name
+		// NAME_SIZE characters or more abort FName construction in builds with checks (UnrealNames.cpp:3271-3281), and
+		// FName(TCHAR*) would stop at a U+0000: such text is not a name
 		const TOptional<FString> S = TryGetString();
-		return S && S->Len() < NAME_SIZE ? TOptional<FName>(FName(*S)) : TOptional<FName>();
+		return S && S->Len() < NAME_SIZE && !VaRest::Json::ContainsNul(*S) ? TOptional<FName>(FName(*S)) : TOptional<FName>();
 	}
 	else if constexpr (std::is_same_v<U, FText>)
 	{
