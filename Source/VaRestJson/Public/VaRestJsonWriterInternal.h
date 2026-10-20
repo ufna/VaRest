@@ -55,7 +55,15 @@ namespace VaRest::Json
 	 * Writes Struct's fields as members of the object Writer has open: keys and values only, no braces. Same rules and
 	 * naming as FVaRestJsonConvert::StructToUtf8. OpenContainers is how many containers the caller has open around these
 	 * members (the shared depth limit counts them). False past VaRest::Json::MaxDepth, or for a struct written as a
-	 * single value (FVaRestJson, FDateTime, FGuid...); the writer is then mid-object and its output must be discarded.
+	 * single value (FVaRestJson, FDateTime, FGuid...).
+	 *
+	 * After false the WRITER is unusable, not only its output, whichever entry below returned it. A value that fails
+	 * part-way leaves the walk's own containers open, here possibly after a member's key and before its value; an entry
+	 * that refuses before writing (an unsupported property, a null struct) leaves the key the caller wrote for that value
+	 * without one. Closing the envelope as usual then fails a check in every build with checks (RAPIDJSON_ASSERT is
+	 * check(), Json/Public/RapidJsonIncludes.h:18): EndObject asserts on an open array or a key without a value
+	 * (rapidjson/writer.h:234-236), EndArray on an open object (writer.h:249-250). So after false never call Writer again
+	 * except Reset(OutputStream&) (writer.h:135-139), which starts a new output, and discard everything it wrote.
 	 */
 	VARESTJSON_API bool WriteStructMembersInternal(FCondensedWriter& Writer, const UScriptStruct* Struct, const void* Data,
 		const FVaRestJsonConvertOptions& Options = FVaRestJsonConvertOptions(), int32 OpenContainers = 1, FVaRestJsonError* OutError = nullptr);
@@ -63,8 +71,9 @@ namespace VaRest::Json
 		const FVaRestJsonConvertOptions& Options = FVaRestJsonConvertOptions(), int32 OpenContainers = 1, FVaRestJsonError* OutError = nullptr);
 
 	// The entries below share WriteStructMembersInternal's contract: OpenContainers counts the containers the caller has
-	// open (the shared MaxDepth includes them); false past VaRest::Json::MaxDepth, after which the writer's output must
-	// be discarded; OutError receives the failure (without it, an error is logged); any thread, for the caller's data.
+	// open (the shared MaxDepth includes them); false past VaRest::Json::MaxDepth or for a value they refuse, after which
+	// the writer is unusable (closing the envelope asserts; only Reset starts over) and its output must be discarded;
+	// OutError receives the failure (without it, an error is logged); any thread, for the caller's data.
 	// Condensed only: wire encoders are condensed (Socket.IO spec §18.2 J-2).
 
 	/**
@@ -90,9 +99,25 @@ namespace VaRest::Json
 
 	/**
 	 * Writes one property's value (Value points at the value, not at its container) as one JSON value: what
-	 * PropertyToJson builds, without the DOM. Socket.IO's positional encode is
-	 * `for (TFieldIterator<FProperty> It(Struct); It; ++It) WritePropertyInternal(Writer, *It, It->ContainerPtrToValuePtr<void>(Data), Options, 1)`.
+	 * PropertyToJson builds, without the DOM. False, writing nothing, for a property the converter does not support
+	 * (an object reference...). Socket.IO's positional encode (§18.2 J-2), inside the packet's open array:
+	 * `for (const FProperty* Field : GetConvertedFieldsInternal(Struct, Options)) WritePropertyInternal(Writer, Field, Field->ContainerPtrToValuePtr<void>(Data), Options, 1)`.
 	 */
 	VARESTJSON_API bool WritePropertyInternal(FCondensedWriter& Writer, const FProperty* Property, const void* Value,
 		const FVaRestJsonConvertOptions& Options = FVaRestJsonConvertOptions(), int32 OpenContainers = 0, FVaRestJsonError* OutError = nullptr);
+
+	/**
+	 * The fields StructToUtf8 converts for Struct under Options (its naming policy decides which of two fields with one
+	 * JSON name is kept), in the order it writes them: the struct converter's own field list, not a second filter. A
+	 * positional encode or decode (Socket.IO J-2: field i <-> argument i, with WritePropertyInternal / JsonToProperty)
+	 * iterates this, never TFieldIterator, which also yields the fields the converter leaves out: transient and
+	 * deprecated ones, unsupported ones (skipped with a warning), and editor-only ones, which exist in the editor and
+	 * not in a cooked game, so every later argument would shift between PIE and a packaged client (spec 2.4).
+	 * A field StructToUtf8 omits for its value (an unset TOptional, a missing FVaRestJson: spec 2.2) is listed;
+	 * WritePropertyInternal writes null for it, since a positional argument cannot be absent. Empty for null and for a
+	 * struct written as a single value (FVaRestJson, FDateTime, FTimespan, FGuid, soft paths). Any thread; the
+	 * properties belong to Struct and live as long as it does.
+	 */
+	VARESTJSON_API TArray<const FProperty*> GetConvertedFieldsInternal(const UScriptStruct* Struct,
+		const FVaRestJsonConvertOptions& Options = FVaRestJsonConvertOptions());
 }

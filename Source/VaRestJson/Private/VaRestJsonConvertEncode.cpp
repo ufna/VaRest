@@ -614,6 +614,24 @@ bool VaRest::Json::WritePropertyInternal(FCondensedWriter& Writer, const FProper
 	return Finish(EncodeField(Writer, Property, Value, Context), Context, Property->GetName(), OutError);
 }
 
+TArray<const FProperty*> VaRest::Json::GetConvertedFieldsInternal(const UScriptStruct* Struct, const FVaRestJsonConvertOptions& Options)
+{
+	using namespace Convert;
+	TArray<const FProperty*> Result;
+	if (!Struct || ClassifyStruct(Struct) != ESpecialStruct::None)
+	{
+		return Result;
+	}
+	// The very map EncodeMembers walks (and DecodeStruct matches against): one filter, in one place (NamesPrivate::Build)
+	const FFieldMapRef Fields = GetFieldMap(Struct, Options.Naming);
+	Result.Reserve(Fields->Fields.Num());
+	for (const FFieldInfo& Field : Fields->Fields)
+	{
+		Result.Add(Field.Property);
+	}
+	return Result;
+}
+
 bool FVaRestJsonConvert::StructToUtf8(const UScriptStruct* Struct, const void* Data, TArray<uint8>& Out,
 	const FVaRestJsonConvertOptions& Options, EVaRestJsonFormat Format, FVaRestJsonError* OutError)
 {

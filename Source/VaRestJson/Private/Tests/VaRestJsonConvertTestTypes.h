@@ -318,6 +318,37 @@ struct FVaRestJsonTestAttachments
 	TMap<FString, FVaRestJsonTestBlob> ByName;
 };
 
+/**
+ * Socket.IO positional arguments (§18.2 J-2): field i is argument i, so the fields iterated must be the ones the
+ * converter writes. Between the two converted fields sit one of each kind it leaves out: transient, deprecated,
+ * editor-only (present in this editor build, absent from a cooked game) and unsupported (skipped with a warning).
+ */
+USTRUCT()
+struct FVaRestJsonTestPositional
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	int32 PosFirst = 0;
+
+	UPROPERTY(Transient)
+	int32 PosTransient = 0;
+
+	UPROPERTY()
+	int32 PosOld_DEPRECATED = 0;
+
+#if WITH_EDITORONLY_DATA
+	UPROPERTY()
+	int32 PosEditorOnly = 0;
+#endif
+
+	UPROPERTY()
+	TObjectPtr<UObject> PosObject;
+
+	UPROPERTY()
+	FString PosLast;
+};
+
 /** The shape of Tools/gen_bench_json.py. Bools are Ok/Active, not bOk/bActive: FJsonObjectConverter matches
  *  GetAuthoredName() and keeps a 'b' prefix, so with these names both converters decode every field. */
 USTRUCT()

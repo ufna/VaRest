@@ -498,8 +498,10 @@ An event is `[name, arg0, arg1, …]` (P8). VaRest binds **by position**, as Jav
   views — `Array` mode, `OnAny`, `FVaRestSioEvent::Args`, *Get Event Arg Count* — exactly as in JavaScript;
   `FVaRestSioEvent::Offset` says when the last argument was taken as the offset.
 * Asset declarations and BP use one payload type with `EVaRestSioArgs`: `First` (default; payload =
-  `arg0`, the common one-object event), `Positional` (struct field *i* = `arg i`, fields in declaration
-  order, `TFieldIterator` + M2's `JsonToProperty` / `WritePropertyInternal`, §18.2), `Array` (payload =
+  `arg0`, the common one-object event), `Positional` (struct field *i* = `arg i`: M2's `JsonToProperty` /
+  `WritePropertyInternal` over `GetConvertedFieldsInternal`, the converter's own fields in declaration
+  order, never `TFieldIterator`, so transient, deprecated, unsupported and editor-only fields cannot shift
+  the arguments between PIE and a packaged client, §18.2), `Array` (payload =
   `FVaRestJson` array of all args).
 
 ### 4.2 Emit
@@ -1276,7 +1278,7 @@ Checked against the M2 plan (Task 7 encode, Task 8 decode); details and exact si
 | # | Need | M2 as planned | Missing |
 | --- | --- | --- | --- |
 | J-1 | `TArray<uint8>` values inside structs/containers as attachments | no encode-side hook (`bBytesAsBase64` only) | `FVaRestJsonConvertOptions::BytesWriter` (`TFunction<bool(TConstArrayView<uint8>, FVaRestJson& OutReplacement)>`), the encode counterpart of Task 8's `BytesResolver` |
-| J-2 decode | positional args (field *i* ← `arg i`) | **covered**: Task 8 `JsonToProperty` over `TFieldIterator<FProperty>` | none |
+| J-2 decode | positional args (field *i* ← `arg i`) | **covered**: Task 8 `JsonToProperty`, over `GetConvertedFieldsInternal(Struct)` (M2 final review I1: not `TFieldIterator<FProperty>`) | none |
 | J-2 encode | positional args, `FVaRestJson` args and value-struct args written one pass into the packet's writer | `PropertyToJson` builds a DOM, but no public way to write a DOM, a value struct or a property into an open writer (`EmitNode` is private; `WriteStructMembersInternal` refuses value structs) | `WriteJsonInternal`, `WriteStructInternal`, `WritePropertyInternal` (`VaRestJsonWriterInternal.h`, same contract as `WriteStructMembersInternal`) |
 
 No other core changes: redaction additions use the core's per-client list (core §4.5).

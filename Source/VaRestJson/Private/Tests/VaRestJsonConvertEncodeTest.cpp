@@ -372,6 +372,51 @@ bool FVaRestJsonEncodeWriterEntriesTest::RunTest(const FString& Parameters)
 	FUtf8Sink NotObjectSink{ NotObjectBytes };
 	FCondensedWriter NotObjectWriter(NotObjectSink, &StackAllocator);
 	TestFalse(TEXT("members of a non-object"), WriteJsonMembersInternal(NotObjectWriter, FVaRestJson::Array(1), 1, &Error));
+
+	// Positional arguments (J-2) iterate GetConvertedFieldsInternal: the fields StructToUtf8 writes, in its order. Not
+	// TFieldIterator: that also yields the transient, deprecated and editor-only fields (the last exists in PIE only, so
+	// every later argument would shift in a packaged game) and the unsupported one, which StructToUtf8 skips.
+	FVaRestJsonConvert::ResetCache(); // one field-map build below, so one skip warning
+	AddExpectedMessagePlain(TEXT("VaRestJsonTestPositional.PosObject is skipped"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
+	FVaRestJsonTestPositional Args;
+	Args.PosFirst = 3;
+	Args.PosTransient = 4;
+	Args.PosOld_DEPRECATED = 5;
+#if WITH_EDITORONLY_DATA
+	Args.PosEditorOnly = 6;
+#endif
+	Args.PosLast = TEXT("z");
+	const UScriptStruct* ArgsStruct = FVaRestJsonTestPositional::StaticStruct();
+	const TArray<const FProperty*> Fields = GetConvertedFieldsInternal(ArgsStruct);
+	TArray<FString> FieldNames;
+	for (const FProperty* Field : Fields)
+	{
+		FieldNames.Add(Field->GetName());
+	}
+	TestEqualSensitive(TEXT("the converted fields, in declaration order"), FString::Join(FieldNames, TEXT(",")), FString(TEXT("PosFirst,PosLast")));
+
+	TArray<uint8> ArgBytes;
+	FUtf8Sink ArgSink{ ArgBytes };
+	FCondensedWriter ArgWriter(ArgSink, &StackAllocator);
+	ArgWriter.StartArray();
+	bool bAllWritten = true;
+	for (const FProperty* Field : Fields)
+	{
+		bAllWritten &= WritePropertyInternal(ArgWriter, Field, Field->ContainerPtrToValuePtr<void>(&Args), FVaRestJsonConvertOptions(), 1);
+	}
+	ArgWriter.EndArray();
+	TestTrue(TEXT("every converted field writes"), bAllWritten);
+
+	TArray<uint8> ObjectBytes;
+	TestTrue(TEXT("StructToUtf8"), FVaRestJsonConvert::StructToUtf8(ArgsStruct, &Args, ObjectBytes));
+	const FVaRestJson Written = FVaRestJson::Parse(TConstArrayView<uint8>(ObjectBytes)).StealValue();
+	FVaRestJson WrittenValues = FVaRestJson::Array();
+	for (const FVaRestJsonMember& Member : Written.Members())
+	{
+		WrittenValues.Add(Member.Value);
+	}
+	TestEqualSensitive(TEXT("StructToUtf8 writes the two converted fields"), Utf8Text(ObjectBytes), FString(TEXT("{\"posFirst\":3,\"posLast\":\"z\"}")));
+	TestEqualSensitive(TEXT("the positional arguments are StructToUtf8's values, in its order"), Utf8Text(ArgBytes), WrittenValues.ToString());
 	return true;
 }
 
