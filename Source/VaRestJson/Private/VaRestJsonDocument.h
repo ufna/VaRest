@@ -64,8 +64,12 @@ namespace VaRest::Json
 		void AssignArray(FNode& Array, TConstArrayView<FNode*> Items);
 		void AssignObject(FNode& Object, TConstArrayView<FMember> Members);
 
-		/** Deep copy of Src, from any document, into this one; reads Src completely before returning. nullptr when Src nests deeper than MaxDepth (nodes copied so far stay in the arena). */
-		FNode* DeepCopy(const FNode& Src);
+		/**
+		 * Deep copy of Src, from any document, into this one; reads Src completely before returning. nullptr when Src nests
+		 * deeper than MaxDepth (nodes copied so far stay in the arena). OpenContainers: containers already around the copy
+		 * (a struct decode copying a value into a nested FVaRestJson field), counted toward MaxDepth.
+		 */
+		FNode* DeepCopy(const FNode& Src, int32 OpenContainers = 0);
 
 		/** JSON equality: 1 == 1.0, objects ignore member order and compare duplicates by their last occurrence. False, and *bOutTooDeep set, past MaxDepth. */
 		static bool Equals(const FNode& A, const FNode& B, bool* bOutTooDeep = nullptr);

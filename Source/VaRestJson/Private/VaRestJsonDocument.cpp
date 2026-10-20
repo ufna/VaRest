@@ -420,9 +420,9 @@ namespace VaRest::Json
 		Object.bDuplicateKeys = Num > IndexThreshold ? BuildIndex(Object) : DocumentPrivate::HasDuplicateKeys(Data, Num);
 	}
 
-	FNode* FDocument::DeepCopy(const FNode& Src)
+	FNode* FDocument::DeepCopy(const FNode& Src, int32 OpenContainers)
 	{
-		return DeepCopyAt(Src, 0);
+		return DeepCopyAt(Src, FMath::Max(0, OpenContainers));
 	}
 
 	FNode* FDocument::DeepCopyAt(const FNode& Src, int32 Depth)

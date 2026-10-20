@@ -48,6 +48,14 @@ enum class EVaRestJsonNaming : uint8
  */
 using FVaRestJsonBytesWriter = TFunction<bool(TConstArrayView<uint8> Bytes, FVaRestJson& OutReplacement)>;
 
+/**
+ * Decode: offered every value bound for a TArray<uint8> before the built-in forms (an array of numbers, a base64
+ * string). Return true after filling OutBytes; false falls back to the built-in forms. Socket.IO binary attachments
+ * plug in here ({"_placeholder":true,"num":0}). Path is the value's JSON path. Runs on the decoding thread. Value is
+ * read-only: other threads may be reading the same document (spec 2.2 thread contract).
+ */
+using FVaRestJsonBytesResolver = TFunction<bool(const FVaRestJson& Value, const FString& Path, TArray<uint8>& OutBytes)>;
+
 struct FVaRestJsonConvertOptions
 {
 	EVaRestJsonNaming Naming = EVaRestJsonNaming::CamelCase;
@@ -63,6 +71,9 @@ struct FVaRestJsonConvertOptions
 
 	/** Encode: per-value replacement for TArray<uint8> values (see FVaRestJsonBytesWriter); unset: the built-in forms */
 	FVaRestJsonBytesWriter BytesWriter;
+
+	/** Decode: per-value source of TArray<uint8> fields (see FVaRestJsonBytesResolver); unset: the built-in forms only */
+	FVaRestJsonBytesResolver BytesResolver;
 };
 
 /** What a decode found, each entry with the JSON path of the value ("items[3].name"). Strict mode reports Errors. */
@@ -141,6 +152,31 @@ struct VARESTJSON_API FVaRestJsonConvert
 	{
 		return StructToJson(TBaseStructure<T>::Get(), &Value, Options);
 	}
+
+	// ---- decode: bytes -> arena DOM -> struct walk (spec 2.4; a SAX -> struct decoder is M7)
+
+	/**
+	 * Fills Data, an instance of Struct, from Json. Keys match fields exactly, then ignoring case, then normalised
+	 * (user_id ~ UserId ~ userId), the best match winning whatever the member order; unknown keys are ignored; an absent
+	 * field keeps its value; null keeps a struct and clears a container. Lenient coercions ("42" -> 42, 1 -> true) are
+	 * refused in strict mode. Every mismatch is recorded with its JSON path in OutReport (without one: one summary
+	 * warning per call). False when Json is neither an object nor null, past VaRest::Json::MaxDepth, or in strict mode
+	 * on any error; Data may then be partly written. Any thread; Json's document must not be mutated meanwhile.
+	 * Untrusted input: [0,0,...] into a TArray of a large struct allocates Count * sizeof(element) (two input bytes per
+	 * element), and every distinct string decoded into an FName stays in the name table for the process's life (names
+	 * over 1023 characters take the engine's name error path); a string bound for a number field is coerced only up to
+	 * 64 bytes.
+	 */
+	static bool JsonToStruct(const FVaRestJson& Json, const UScriptStruct* Struct, void* Data,
+		const FVaRestJsonConvertOptions& Options = FVaRestJsonConvertOptions(), FVaRestJsonDecodeReport* OutReport = nullptr);
+
+	/** Parse, then JsonToStruct; a syntax error is reported as an Error (with its line and column) */
+	static bool Utf8ToStruct(TConstArrayView<uint8> Utf8, const UScriptStruct* Struct, void* Data,
+		const FVaRestJsonConvertOptions& Options = FVaRestJsonConvertOptions(), FVaRestJsonDecodeReport* OutReport = nullptr);
+
+	/** One property's value (Value points at the value): the BP wildcard nodes' decode. True when the value was stored. */
+	static bool JsonToProperty(const FVaRestJson& Json, const FProperty* Property, void* Value,
+		const FVaRestJsonConvertOptions& Options = FVaRestJsonConvertOptions(), FVaRestJsonDecodeReport* OutReport = nullptr);
 
 	/** Drops every cached field map. The editor calls it when a Blueprint struct changes; FVaRestJsonNames calls it too. */
 	static void ResetCache();
