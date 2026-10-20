@@ -100,10 +100,10 @@ VaRest 2 is being built on branch `v2`. The design is
 
 | Module | Type | Role |
 | --- | --- | --- |
-| `VaRestJson` | Runtime | `FVaRestJson`: own arena DOM, RapidJSON (engine copy) as SAX reader + writer; `FVaRestJsonConvert` struct <-> JSON (reflection-driven, case-sensitive keys, field-map cache); `UVaRestJsonLibrary` BP JSON library (CustomThunk wildcards). Has a module class (`VaRestJsonModule.cpp`); depends on Engine (public) |
+| `VaRestJson` | Runtime | `FVaRestJson`: own arena DOM, RapidJSON (engine copy) as SAX reader + writer; `FVaRestJsonConvert` struct <-> JSON; `UVaRestJsonLibrary` BP JSON library (CustomThunk wildcards). Has a module class (`VaRestJsonModule.cpp`). Depends on Engine (public) |
 | `VaRestHttp` | Runtime | `FVaRestClient`, request pipeline + stages, `UVaRestApi` asset, `UVaRestHub`, async BP actions |
 | `VaRest` | Runtime | the **v1 API at unchanged paths**, reimplemented as deprecated shims (removed in v3) |
-| `VaRestEditor` | UncookedOnly | K2 nodes, v1 and v2 (`K2Node_VaRestMakeJson`); drops the struct <-> JSON cache on Blueprint struct changes (`VaRestJsonStructListener`, owned by the module) |
+| `VaRestEditor` | UncookedOnly | K2 nodes, v1 and v2 (`K2Node_VaRestMakeJson`); drops the convert cache on Blueprint struct changes |
 | `VaRestEditorTools` | Editor | asset definition, validation, menus |
 
 Tag `v1-on-5.8` is v1 with the minimal UE 5.8 port and no behaviour change. The v1 compat
