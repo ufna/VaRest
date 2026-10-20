@@ -51,8 +51,9 @@ using FVaRestJsonBytesWriter = TFunction<bool(TConstArrayView<uint8> Bytes, FVaR
 /**
  * Decode: offered every value bound for a TArray<uint8> before the built-in forms (an array of numbers, a base64
  * string). Return true after filling OutBytes; false falls back to the built-in forms. Socket.IO binary attachments
- * plug in here ({"_placeholder":true,"num":0}). Path is the value's JSON path. Runs on the decoding thread. Value is
- * read-only: other threads may be reading the same document (spec 2.2 thread contract).
+ * plug in here ({"_placeholder":true,"num":0}). Path is the value's JSON path (a key over 256 bytes shortened, as in
+ * decode issues). Runs on the decoding thread. Value is read-only: other threads may be reading the same document (spec
+ * 2.2 thread contract).
  */
 using FVaRestJsonBytesResolver = TFunction<bool(const FVaRestJson& Value, const FString& Path, TArray<uint8>& OutBytes)>;
 
@@ -163,9 +164,11 @@ struct VARESTJSON_API FVaRestJsonConvert
 	 * warning per call). False when Json is neither an object nor null, past VaRest::Json::MaxDepth, or in strict mode
 	 * on any error; Data may then be partly written. Any thread; Json's document must not be mutated meanwhile.
 	 * Untrusted input: [0,0,...] into a TArray of a large struct allocates Count * sizeof(element) (two input bytes per
-	 * element), and every distinct string decoded into an FName stays in the name table for the process's life (names
-	 * over 1023 characters take the engine's name error path); a string bound for a number field is coerced only up to
-	 * 64 bytes.
+	 * element), and every distinct string decoded into an FName stays in the name table for the process's life. Text of
+	 * 1024 characters or more bound for an FName (a field, a map key) or an object path is a mismatch: FName would abort.
+	 * A string bound for a number field is coerced only up to 64 bytes. A report keeps the first 100 issues plus one
+	 * closing entry that counts the rest. Keys over 256 bytes match a field only exactly or ignoring case, and are
+	 * shortened ("...") in issue paths.
 	 */
 	static bool JsonToStruct(const FVaRestJson& Json, const UScriptStruct* Struct, void* Data,
 		const FVaRestJsonConvertOptions& Options = FVaRestJsonConvertOptions(), FVaRestJsonDecodeReport* OutReport = nullptr);

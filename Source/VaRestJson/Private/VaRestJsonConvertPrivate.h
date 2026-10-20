@@ -24,6 +24,13 @@ namespace VaRest::Json::Convert
 		FUtf8StringView NameView() const { return FUtf8StringView(Name.GetData(), Name.Num()); }
 	};
 
+	/**
+	 * JSON keys longer than this skip the policy-normalised field match, and decode shortens them in issue paths. No
+	 * field's other spelling is that long; a hostile key ("n" + a megabyte of '_' + "umbers") would otherwise reach a
+	 * field and repeat in the path of every issue beneath it.
+	 */
+	inline constexpr int32 LongKeyBytes = 256;
+
 	/** The convertible fields of one struct under one naming policy. Immutable once built, so any thread may read it. */
 	struct FFieldMap
 	{
@@ -33,7 +40,10 @@ namespace VaRest::Json::Convert
 		TMultiMap<uint32, int32> ByFolded;
 		TMultiMap<uint32, int32> ByNormalized;
 
-		/** The field a JSON key feeds: exact (OutTier 0), then case-insensitive (1), then normalised (2); INDEX_NONE when none */
+		/**
+		 * The field a JSON key feeds: exact (OutTier 0), then case-insensitive (1), then normalised (2, only for keys of up
+		 * to LongKeyBytes); INDEX_NONE when none
+		 */
 		int32 Match(FUtf8StringView Key, uint32 KeyHash, FUtf8Scratch& Scratch, uint8& OutTier) const;
 	};
 

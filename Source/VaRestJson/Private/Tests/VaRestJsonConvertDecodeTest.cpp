@@ -293,6 +293,7 @@ bool FVaRestJsonDecodeContainersTest::RunTest(const FString& Parameters)
 	// Review Focus: FString map keys ignore case in UE; "a" and "A" become one pair, the last value wins, no broken map
 	TestEqual(TEXT("case-variant keys collapse"), All.Scores.Num(), 1);
 	TestEqual(TEXT("... the last value wins"), All.Scores.FindRef(TEXT("a")), 2);
+	TestTrue(TEXT("... with the last key's spelling"), All.Scores.Num() == 1 && All.Scores.begin()->Key.Equals(TEXT("A"), ESearchCase::CaseSensitive));
 	TestTrue(TEXT("integer keys"), All.ById.Num() == 1 && All.ById.FindRef(5).Equals(TEXT("five"), ESearchCase::CaseSensitive));
 	TestTrue(TEXT("bad integer keys are warnings"), HasIssueAt(Report.Warnings, TEXT("byId.x")) && HasIssueAt(Report.Warnings, TEXT("byId.07")));
 	TestTrue(TEXT("enum keys by name and by number"), All.ByColor.FindRef(EVaRestJsonTestColor::Blue) == 3 && All.ByColor.FindRef(EVaRestJsonTestColor::Green) == 4);
@@ -303,6 +304,18 @@ bool FVaRestJsonDecodeContainersTest::RunTest(const FString& Parameters)
 	FVaRestJsonDecodeReport Bytes;
 	FVaRestJsonConvert::JsonToStruct(ParseText(UTF8TEXT("{\"bytes\":[1,256,3]}")), FVaRestJsonTestAll::StaticStruct(), &All, FVaRestJsonConvertOptions(), &Bytes);
 	TestTrue(TEXT("bytes from numbers; an out-of-range element stays 0"), All.Bytes == TArray<uint8>({ 1, 0, 3 }) && HasIssueAt(Bytes.Warnings, TEXT("bytes[1]")));
+
+	// A negative integer fits no unsigned key or field. Asked through CanHoldValue(int64), a uint64 key would take -1 as
+	// 18446744073709551615 and merge it with that key.
+	FVaRestJsonTestUnsigned Unsigned;
+	FVaRestJsonDecodeReport UnsignedReport;
+	FVaRestJsonConvert::JsonToStruct(ParseText(UTF8TEXT("{\"byBig\":{\"-1\":1,\"18446744073709551615\":2},\"bySmall\":{\"-1\":1,\"255\":2},\"big\":-1,\"mid\":-1}")),
+		FVaRestJsonTestUnsigned::StaticStruct(), &Unsigned, FVaRestJsonConvertOptions(), &UnsignedReport);
+	TestTrue(TEXT("-1 is no uint64 key"), Unsigned.ByBig.Num() == 1 && Unsigned.ByBig.FindRef(MAX_uint64) == 2 && HasIssueAt(UnsignedReport.Warnings, TEXT("byBig.-1")));
+	TestTrue(TEXT("... nor a uint8 key"), Unsigned.BySmall.Num() == 1 && Unsigned.BySmall.FindRef(255) == 2 && HasIssueAt(UnsignedReport.Warnings, TEXT("bySmall.-1")));
+	TestTrue(TEXT("unsigned fields keep their value"), Unsigned.Big == 7 && Unsigned.Mid == 7 && HasIssueAt(UnsignedReport.Warnings, TEXT("big"))
+		&& HasIssueAt(UnsignedReport.Warnings, TEXT("mid")));
+	TestEqual(TEXT("four mismatches"), UnsignedReport.Warnings.Num(), 4);
 	return true;
 }
 
@@ -361,6 +374,21 @@ bool FVaRestJsonDecodeEnumsTest::RunTest(const FString& Parameters)
 	FVaRestJsonDecodeReport LegacyReport;
 	FVaRestJsonConvert::JsonToStruct(ParseText(UTF8TEXT("{\"legacy\":\"Second\"}")), FVaRestJsonTestAll::StaticStruct(), &All, FVaRestJsonConvertOptions(), &LegacyReport);
 	TestTrue(TEXT("a byte enum by name"), All.Legacy == EVaRestJsonTestLegacy::Second);
+
+	// An enum map key spelled in another case is a coercion too, as for an enum field
+	const auto ColorKeys = [&All, &Report](bool bStrictMode)
+	{
+		All.ByColor.Reset();
+		Report = FVaRestJsonDecodeReport();
+		FVaRestJsonConvertOptions Options;
+		Options.bStrict = bStrictMode;
+		FVaRestJsonConvert::JsonToStruct(ParseText(UTF8TEXT("{\"byColor\":{\"blue\":3}}")), FVaRestJsonTestAll::StaticStruct(), &All, Options, &Report);
+	};
+	ColorKeys(false);
+	TestTrue(TEXT("an enum key ignoring case, with a warning"), All.ByColor.FindRef(EVaRestJsonTestColor::Blue) == 3 && Report.Warnings.Num() == 1
+		&& HasIssueAt(Report.Warnings, TEXT("byColor.blue")));
+	ColorKeys(true);
+	TestTrue(TEXT("strict refuses it"), All.ByColor.Num() == 0 && Report.Errors.Num() == 1 && HasIssueAt(Report.Errors, TEXT("byColor.blue")));
 	return true;
 }
 
@@ -514,6 +542,93 @@ bool FVaRestJsonDecodeTimespanRangeTest::RunTest(const FString& Parameters)
 	FVaRestJsonDecodeReport Report;
 	FVaRestJsonConvert::JsonToStruct(ParseText(UTF8TEXT("{\"duration\":1e300}")), FVaRestJsonTestAll::StaticStruct(), &Kept, FVaRestJsonConvertOptions(), &Report);
 	TestTrue(TEXT("seconds past the range keep the field"), Kept.Duration == FTimespan::FromSeconds(5.0) && HasIssueAt(Report.Warnings, TEXT("duration")));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonDecodeNameLengthTest, "VaRest.Json.Convert.Decode.NameLength",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestJsonDecodeNameLengthTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRestJsonConvertDecodeTest;
+	// 1024 characters or more abort FName construction in builds with checks (UnrealNames.cpp:3271-3281): text that long
+	// from a response is a mismatch for an FName field, an FName map key, an object path and a soft pointer
+	const FString Long = FString::ChrN(2000, TEXT('a'));
+	const FVaRestJson Input = FVaRestJson::Object()
+		.Set(TEXT("nameValue"), Long)
+		.Set(TEXT("byName"), FVaRestJson::Object().Set(*Long, 1).Set(TEXT("k"), 2))
+		.Set(TEXT("assetPath"), TEXT("/") + Long)
+		.Set(TEXT("softAsset"), TEXT("/Game/") + Long + TEXT(".A"));
+	for (int32 Variant = 0; Variant < 2; ++Variant)
+	{
+		const bool bStrictMode = Variant == 1;
+		FVaRestJsonTestAll All = MakeFilled();
+		FVaRestJsonDecodeReport Report;
+		FVaRestJsonConvertOptions Options;
+		Options.bStrict = bStrictMode;
+		FVaRestJsonConvert::JsonToStruct(Input, FVaRestJsonTestAll::StaticStruct(), &All, Options, &Report);
+		const TArray<FVaRestJsonError>& Issues = bStrictMode ? Report.Errors : Report.Warnings;
+		const FString Mode = bStrictMode ? TEXT("strict: ") : TEXT("lenient: ");
+		TestTrue(Mode + TEXT("an FName field keeps its value"), All.NameValue == FName(TEXT("Nm")) && HasIssueAt(Issues, TEXT("nameValue")));
+		TestTrue(Mode + TEXT("an FName map key is skipped"), All.ByName.Num() == 1 && All.ByName.FindRef(FName(TEXT("k"))) == 2
+			&& Issues.ContainsByPredicate([](const FVaRestJsonError& Issue) { return Issue.Path.StartsWith(TEXT("byName.aaa"), ESearchCase::CaseSensitive); }));
+		TestTrue(Mode + TEXT("an object path keeps its value"), All.AssetPath == FSoftObjectPath(TEXT("/Game/Maps/Entry.Entry")) && HasIssueAt(Issues, TEXT("assetPath")));
+		TestTrue(Mode + TEXT("a soft pointer keeps its value"), All.SoftAsset.ToSoftObjectPath() == FSoftObjectPath(TEXT("/Game/A.A")) && HasIssueAt(Issues, TEXT("softAsset")));
+		TestEqual(Mode + TEXT("four issues"), Issues.Num(), 4);
+	}
+	TestFalse(TEXT("TryGet<FName> is unset too"), FVaRestJson::From(Long).TryGet<FName>().IsSet());
+	TestTrue(TEXT("... while 1023 characters are a name"), FVaRestJson::From(FString::ChrN(1023, TEXT('a'))).TryGet<FName>().IsSet());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonDecodeBoundsTest, "VaRest.Json.Convert.Decode.Bounds",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestJsonDecodeBoundsTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRestJsonConvertDecodeTest;
+	// Hostile input: 10 000 mismatches, a 1 MB map key, and a 1 MB key that normalises to "numbers". The report keeps 100
+	// issues and counts the rest; the long key is shortened in its path; the other never reaches a field.
+	FString Text = TEXT("{\"scores\":{\"");
+	Text += FString::ChrN(1 << 20, TEXT('k'));
+	Text += TEXT("\":\"x\"");
+	for (int32 i = 0; i < 10000; ++i)
+	{
+		Text += FString::Printf(TEXT(",\"k%d\":\"x\""), i);
+	}
+	Text += TEXT("},\"n");
+	Text += FString::ChrN(1 << 20, TEXT('_'));
+	Text += TEXT("umbers\":[\"x\"]}");
+	TValueOrError<FVaRestJson, FVaRestJsonError> Parsed = FVaRestJson::Parse(FStringView(Text));
+	if (!TestTrue(TEXT("parses"), Parsed.HasValue()))
+	{
+		return false;
+	}
+	const FVaRestJson Input = Parsed.StealValue();
+
+	FVaRestJsonTestAll All;
+	All.Numbers = { 7 };
+	FVaRestJsonDecodeReport Report;
+	TestTrue(TEXT("a lenient decode succeeds"), FVaRestJsonConvert::JsonToStruct(Input, FVaRestJsonTestAll::StaticStruct(), &All, FVaRestJsonConvertOptions(), &Report));
+	TestEqual(TEXT("100 issues kept, plus one entry for the rest"), Report.Warnings.Num(), 101);
+	TestTrue(TEXT("... which counts them"), Report.Warnings.Num() == 101 && Report.Warnings.Last().Message.Contains(TEXT("9901 more issue(s) not recorded")));
+	TestTrue(TEXT("a long key is shortened in a path"), Report.Warnings.Num() > 0 && Report.Warnings[0].Path.StartsWith(TEXT("scores.kkk"), ESearchCase::CaseSensitive)
+		&& Report.Warnings[0].Path.EndsWith(TEXT("..."), ESearchCase::CaseSensitive) && Report.Warnings[0].Path.Len() <= 7 + 256 + 3);
+	TestEqual(TEXT("no bad value got in"), All.Scores.Num(), 0);
+	TestTrue(TEXT("a long key never matches a field through normalisation"), All.Numbers == TArray<int32>({ 7 }));
+
+	FVaRestJsonTestAll Strict;
+	FVaRestJsonDecodeReport StrictReport;
+	FVaRestJsonConvertOptions StrictOptions;
+	StrictOptions.bStrict = true;
+	TestFalse(TEXT("strict fails"), FVaRestJsonConvert::JsonToStruct(Input, FVaRestJsonTestAll::StaticStruct(), &Strict, StrictOptions, &StrictReport));
+	TestTrue(TEXT("strict: the same cap, the closing entry among the errors"), StrictReport.Errors.Num() == 101 && StrictReport.Warnings.Num() == 0
+		&& StrictReport.Errors.Last().Message.Contains(TEXT("9901 more issue(s) not recorded")));
+
+	// Without a report: one line with the totals
+	AddExpectedMessagePlain(TEXT("decoding VaRestJsonTestAll: 10001 warning(s), 0 error(s); first at 'scores.kkk"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
+	FVaRestJsonTestAll Quiet;
+	FVaRestJsonConvert::JsonToStruct(Input, FVaRestJsonTestAll::StaticStruct(), &Quiet);
 	return true;
 }
 

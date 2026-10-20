@@ -261,8 +261,10 @@ struct VARESTJSON_API FVaRestJson
 		}
 		else if constexpr (std::is_same_v<U, FName>)
 		{
+			// NAME_SIZE characters or more abort FName construction in builds with checks (UnrealNames.cpp:3271-3281): such
+			// text is not a name
 			const TOptional<FString> S = TryGetString();
-			return S ? TOptional<FName>(FName(*S)) : TOptional<FName>();
+			return S && S->Len() < NAME_SIZE ? TOptional<FName>(FName(*S)) : TOptional<FName>();
 		}
 		else if constexpr (std::is_same_v<U, FText>)
 		{

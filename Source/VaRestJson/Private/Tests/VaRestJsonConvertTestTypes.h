@@ -137,6 +137,28 @@ namespace EVaRestJsonTestLegacy
 	};
 }
 
+/**
+ * Unsigned map keys and fields: a negative JSON integer fits none of them. FNumericProperty::CanHoldValue(int64) says a
+ * uint64 holds -1 ((int64)(uint64)-1 == -1, UnrealType.h:2172-2175), so decode must not ask it.
+ */
+USTRUCT()
+struct FVaRestJsonTestUnsigned
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	TMap<uint64, int32> ByBig;
+
+	UPROPERTY()
+	TMap<uint8, int32> BySmall;
+
+	UPROPERTY()
+	uint64 Big = 7;
+
+	UPROPERTY()
+	uint32 Mid = 7;
+};
+
 /** Every kind of field the converter supports */
 USTRUCT()
 struct FVaRestJsonTestAll

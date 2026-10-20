@@ -43,19 +43,39 @@ namespace VaRest::Json::Convert::DecodePrivate
 		return FString::ConstructFromPtrSize(Value.Str.Data, static_cast<int32>(Value.Str.Len));
 	}
 
+	/**
+	 * Issues a report keeps per decode; later ones are only counted, and one closing entry says how many. Input can hold
+	 * an issue every two bytes ([0,0,...] into strings), and each kept issue formats its path.
+	 */
+	inline constexpr int32 MaxRecordedIssues = 100;
+
+	/**
+	 * Whether Text may become an FName (or an object path, whose parts become FNames, SoftObjectPath.cpp:224-245).
+	 * NAME_SIZE (NameTypes.h:57) characters or more abort FName construction in every build with checks: a checkf in
+	 * FindOrStoreString (UnrealNames.cpp:3271-3281). Text from a response must never get there, so it is a mismatch.
+	 */
+	bool FitsName(const FString& Text)
+	{
+		return Text.Len() < NAME_SIZE;
+	}
+
 	struct FDecodeContext
 	{
 		const FVaRestJsonConvertOptions& Options;
-		/** The document being read: FVaRestJson fields get a Clone of their subtree */
+		/** The document being read, handed to BytesResolver */
 		const FVaRestJson::FDocumentRef& Source;
 		FVaRestJsonDecodeReport* Report;
 		/** Where the walk is; formatted only when an issue is recorded */
 		TArray<FSegment, TInlineAllocator<16>> Path;
 		int32 Depth = 0;
+		/** Every issue, recorded or not */
 		int32 NumWarnings = 0;
 		int32 NumErrors = 0;
+		/** Errors past MaxRecordedIssues: the closing entry goes to Errors when there are any */
+		int32 NumUnrecordedErrors = 0;
 		/** A failure that stops the whole decode (depth): nothing more is read */
 		bool bAborted = false;
+		/** Without a report: the issue the summary line names */
 		FVaRestJsonError FirstIssue;
 		FUtf8Scratch Scratch;
 
@@ -66,7 +86,10 @@ namespace VaRest::Json::Convert::DecodePrivate
 		{
 		}
 
-		/** "items[3].name", the syntax FVaRestJson::Path reads */
+		/**
+		 * "items[3].name", the syntax FVaRestJson::Path reads. A key longer than LongKeyBytes is cut there (at a character
+		 * boundary) and marked "...", so a hostile key costs its length once, not once per issue beneath it.
+		 */
 		FString PathString() const
 		{
 			FString Out;
@@ -81,31 +104,42 @@ namespace VaRest::Json::Convert::DecodePrivate
 				{
 					Out.AppendChar(TEXT('.'));
 				}
-				Out += FString::ConstructFromPtrSize(Segment.Key.GetData(), Segment.Key.Len());
+				if (Segment.Key.Len() <= LongKeyBytes)
+				{
+					Out += FString::ConstructFromPtrSize(Segment.Key.GetData(), Segment.Key.Len());
+					continue;
+				}
+				int32 Cut = LongKeyBytes;
+				while (Cut > 0 && (static_cast<uint8>(Segment.Key[Cut]) & 0xC0) == 0x80)
+				{
+					--Cut; // Segment.Key[Cut] continues a UTF-8 sequence: cut before the sequence starts
+				}
+				Out += FString::ConstructFromPtrSize(Segment.Key.GetData(), Cut);
+				Out += TEXT("...");
 			}
 			return Out;
 		}
 
 		void Record(bool bError, FString Message)
 		{
+			++(bError ? NumErrors : NumWarnings);
+			const int32 NumIssues = NumErrors + NumWarnings;
+			if (Report ? NumIssues > MaxRecordedIssues : NumIssues > 1)
+			{
+				// Counted only, and the path is never formatted (Finish adds the closing entry)
+				NumUnrecordedErrors += bError ? 1 : 0;
+				return;
+			}
 			FVaRestJsonError Issue;
 			Issue.Message = MoveTemp(Message);
 			Issue.Path = PathString();
-			if (bError)
-			{
-				++NumErrors;
-			}
-			else
-			{
-				++NumWarnings;
-			}
-			if (NumErrors + NumWarnings == 1)
-			{
-				FirstIssue = Issue;
-			}
 			if (Report)
 			{
 				(bError ? Report->Errors : Report->Warnings).Add(MoveTemp(Issue));
+			}
+			else
+			{
+				FirstIssue = MoveTemp(Issue);
 			}
 		}
 
@@ -372,6 +406,11 @@ namespace VaRest::Json::Convert::DecodePrivate
 		}
 		if (const FNameProperty* NameKey = CastField<FNameProperty>(KeyProperty))
 		{
+			if (!FitsName(KeyText))
+			{
+				Context.Record(Context.Options.bStrict, FString::Printf(TEXT("map key of %d characters is too long for a name"), KeyText.Len()));
+				return false;
+			}
 			NameKey->SetPropertyValue(Key, FName(*KeyText));
 			return true;
 		}
@@ -394,18 +433,28 @@ namespace VaRest::Json::Convert::DecodePrivate
 			if (Enum && FindEnumerator(Enum, KeyText, !Context.Options.bStrict, EnumValue, bCaseOnly))
 			{
 				Underlying->SetIntPropertyValue(Key, EnumValue);
+				if (bCaseOnly)
+				{
+					Context.Coerced(TEXT("an enumerator name was matched ignoring case"));
+				}
 				return true;
 			}
 			bool bNegative = false;
 			uint64 Magnitude = 0;
 			if (ParseIntegerKey(Text, bNegative, Magnitude)) // "5", "-5" yes; "05", "5.0", "1e0", " 5", "5x" no
 			{
-				if (!bNegative && !Enum && IsUnsignedInteger(Underlying) && Underlying->CanHoldValue(Magnitude))
+				if (!Enum && IsUnsignedInteger(Underlying))
 				{
-					Underlying->SetIntPropertyValue(Key, Magnitude);
-					return true;
+					// Only through CanHoldValue(uint64): CanHoldValue(int64) on a uint64 property accepts -1
+					// ((int64)(uint64)-1 == -1, UnrealType.h:2172-2175), which would store 18446744073709551615 and merge
+					// the pair with that key's
+					if (!bNegative && Underlying->CanHoldValue(Magnitude))
+					{
+						Underlying->SetIntPropertyValue(Key, Magnitude);
+						return true;
+					}
 				}
-				if (bNegative || Magnitude <= static_cast<uint64>(MAX_int64))
+				else if (bNegative || Magnitude <= static_cast<uint64>(MAX_int64))
 				{
 					const int64 Signed = !bNegative ? static_cast<int64>(Magnitude)
 						: Magnitude == 9223372036854775808ull ? MIN_int64 : -static_cast<int64>(Magnitude);
@@ -417,7 +466,8 @@ namespace VaRest::Json::Convert::DecodePrivate
 				}
 			}
 		}
-		Context.Record(Context.Options.bStrict, FString::Printf(TEXT("map key \"%s\" does not fit %s"), *KeyText, *KeyProperty->GetClass()->GetName()));
+		// The key itself is in the path (shortened there when long), not repeated here
+		Context.Record(Context.Options.bStrict, FString::Printf(TEXT("map key does not fit %s"), *KeyProperty->GetClass()->GetName()));
 		return false;
 	}
 
@@ -626,7 +676,12 @@ namespace VaRest::Json::Convert::DecodePrivate
 		case ESpecialStruct::SoftObjectPath:
 			if (Value.Type == EVaRestJsonType::String)
 			{
-				static_cast<FSoftObjectPath*>(Data)->SetPath(FStringView(TextOf(Value)));
+				const FString Text = TextOf(Value);
+				if (!FitsName(Text))
+				{
+					return Context.Mismatch(Value, TEXT("an object path shorter than 1024 characters"));
+				}
+				static_cast<FSoftObjectPath*>(Data)->SetPath(FStringView(Text));
 				return true;
 			}
 			return Context.Mismatch(Value, TEXT("an object path"));
@@ -757,6 +812,10 @@ namespace VaRest::Json::Convert::DecodePrivate
 			{
 				return false;
 			}
+			if (!FitsName(Text))
+			{
+				return Context.Mismatch(Value, TEXT("a name shorter than 1024 characters"));
+			}
 			NameProperty->SetPropertyValue(Address, FName(*Text));
 			return true;
 		}
@@ -816,7 +875,12 @@ namespace VaRest::Json::Convert::DecodePrivate
 			}
 			if (Value.Type == EVaRestJsonType::String)
 			{
-				SoftProperty->SetPropertyValue(Address, FSoftObjectPtr(FSoftObjectPath(TextOf(Value))));
+				const FString Text = TextOf(Value);
+				if (!FitsName(Text))
+				{
+					return Context.Mismatch(Value, TEXT("an object path shorter than 1024 characters"));
+				}
+				SoftProperty->SetPropertyValue(Address, FSoftObjectPtr(FSoftObjectPath(Text)));
 				return true;
 			}
 			return Context.Mismatch(Value, TEXT("an object path"));
@@ -842,7 +906,14 @@ namespace VaRest::Json::Convert::DecodePrivate
 
 	bool Finish(const FDecodeContext& Context, bool bStored, const FString& What)
 	{
-		if (!Context.Report && Context.NumWarnings + Context.NumErrors > 0)
+		const int32 NumIssues = Context.NumWarnings + Context.NumErrors;
+		if (Context.Report && NumIssues > MaxRecordedIssues)
+		{
+			FVaRestJsonError More;
+			More.Message = FString::Printf(TEXT("%d more issue(s) not recorded"), NumIssues - MaxRecordedIssues);
+			(Context.NumUnrecordedErrors > 0 ? Context.Report->Errors : Context.Report->Warnings).Add(MoveTemp(More));
+		}
+		if (!Context.Report && NumIssues > 0)
 		{
 			// One line per decode, not per issue: a big response with a systematic mismatch must not flood the log
 			UE_LOG(LogVaRestJson, Warning, TEXT("FVaRestJsonConvert: decoding %s: %d warning(s), %d error(s); first at '%s': %s"),

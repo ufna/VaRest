@@ -326,6 +326,10 @@ namespace VaRest::Json::Convert
 			OutTier = 1;
 			return Found;
 		}
+		if (Key.Len() > LongKeyBytes)
+		{
+			return INDEX_NONE; // exact and case-insensitive matches only (see LongKeyBytes)
+		}
 		NormalizeUtf8(Key, Scratch);
 		const FUtf8StringView NormalizedKey(Scratch.GetData(), Scratch.Num());
 		Found = NamesPrivate::FindIn(ByNormalized, Fields, &FFieldInfo::Normalized, NormalizedKey, HashKey(NormalizedKey));
