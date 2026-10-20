@@ -106,6 +106,19 @@ struct FVaRestJsonTestEngineName
 	int32 id = 0;
 };
 
+/**
+ * A C++ field named like a Blueprint pin category: not an engine hardcoded name, but the editor's BlueprintGraph module
+ * registers "softobject" first (UEdGraphSchema_K2::PC_SoftObject, EdGraphSchema_K2.cpp:616), a packaged game lacks it
+ */
+USTRUCT()
+struct FVaRestJsonTestEditorName
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	TSoftObjectPtr<UObject> SoftObject;
+};
+
 UENUM()
 enum class EVaRestJsonTestColor : uint8
 {
@@ -226,8 +239,8 @@ struct FVaRestJsonTestAll
 	FSoftObjectPath AssetPath;
 
 	/**
-	 * Not "SoftObject": the editor registers that FName as "softobject" first (UEdGraphSchema_K2::PC_SoftObject,
-	 * EdGraphSchema_K2.cpp:616), so its spelling would depend on which editor modules are loaded
+	 * Not "SoftObject": the editor registers that FName as "softobject" first (EdGraphSchema_K2.cpp:616), so every map
+	 * build of this struct would warn; FVaRestJsonTestEditorName covers that case
 	 */
 	UPROPERTY()
 	TSoftObjectPtr<UObject> SoftAsset;

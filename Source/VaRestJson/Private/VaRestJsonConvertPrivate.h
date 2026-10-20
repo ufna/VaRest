@@ -46,8 +46,9 @@ namespace VaRest::Json::Convert
 	FString StripGuidSuffix(const FString& PropertyName);
 
 	/**
-	 * The name the policy applies to, as a packaged game spells it in every build: a C++ property's FName comparison
-	 * spelling (ID for a field id), or for a Blueprint struct the stripped name (never the editor-only friendly one)
+	 * The name the policy applies to. A C++ property named like an engine hardcoded name (an EName) gets the engine's
+	 * casing, the same in every build (ID for a field id); any other C++ property its declared casing; a Blueprint struct
+	 * field the stripped name (never the editor-only friendly one)
 	 */
 	FString AuthoredFieldName(const UScriptStruct* Owner, const FProperty* Property);
 

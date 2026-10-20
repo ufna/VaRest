@@ -4,6 +4,7 @@
 
 #include "Async/ParallelFor.h"
 #include "Misc/AutomationTest.h"
+#include "Misc/StringBuilder.h"
 #include "VaRestJsonConvert.h"
 #include "VaRestJsonConvertPrivate.h"
 #include "VaRestJsonConvertTestTypes.h"
@@ -97,8 +98,9 @@ bool FVaRestJsonConvertEngineNameTest::RunTest(const FString& Parameters)
 		return false;
 	}
 
-	// The spelling a packaged game sees, in every build, so PIE writes what the packaged game writes
-	TestEqualSensitive(TEXT("a C++ name is its FName's comparison spelling"), AuthoredFieldName(Struct, IdProperty), FString(TEXT("ID")));
+	// An engine hardcoded name: the engine's spelling, the one every build has, so PIE writes what a packaged game writes
+	TestNotNull(TEXT("ID is an engine hardcoded name"), IdProperty->GetFName().ToEName());
+	TestEqualSensitive(TEXT("an engine name keeps the engine's spelling"), AuthoredFieldName(Struct, IdProperty), FString(TEXT("ID")));
 #if WITH_CASE_PRESERVING_NAME
 	// Only AsIs writes something other than what "id" itself would give; the other policies normalise the case away
 	AddExpectedMessagePlain(TEXT("VaRestJsonTestEngineName.id is written as \"ID\""), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
@@ -112,6 +114,45 @@ bool FVaRestJsonConvertEngineNameTest::RunTest(const FString& Parameters)
 	FVaRestJsonNames::Register<FVaRestJsonTestEngineName>({ { TEXT("id"), TEXT("id") } });
 	TestEqualSensitive(TEXT("a rename keeps its case"), Names(GetFieldMap(Struct, EVaRestJsonNaming::AsIs)), FString(TEXT("id")));
 	FVaRestJsonNames::Unregister(Struct);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonConvertEditorNameTest, "VaRest.Json.Convert.EditorNameCase",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestJsonConvertEditorNameTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Json::Convert;
+	using namespace VaRestJsonConvertNamesTest;
+	FVaRestJsonConvert::ResetCache();
+	const UScriptStruct* Struct = FVaRestJsonTestEditorName::StaticStruct();
+	const FProperty* SoftProperty = FindFProperty<FProperty>(Struct, TEXT("SoftObject"));
+	if (!TestNotNull(TEXT("the field exists"), SoftProperty))
+	{
+		return false;
+	}
+	TestNull(TEXT("SoftObject is not an engine hardcoded name"), SoftProperty->GetFName().ToEName());
+
+	// Not an engine name: the declared spelling, whichever casing an editor module registered first
+	TestEqualSensitive(TEXT("a C++ name keeps its declared spelling"), AuthoredFieldName(Struct, SoftProperty), FString(TEXT("SoftObject")));
+#if WITH_CASE_PRESERVING_NAME
+	// Every policy's key differs from what "softobject" gives, so each of the four map builds warns once -- when this
+	// process registered "softobject" first (an editor with BlueprintGraph loaded), the case this test is about
+	TStringBuilder<64> Comparison;
+	SoftProperty->GetFName().GetComparisonNameEntry()->AppendNameToString(Comparison);
+	if (Comparison.ToView().Equals(TEXT("softobject"), ESearchCase::CaseSensitive))
+	{
+		AddExpectedMessagePlain(TEXT("VaRestJsonTestEditorName.SoftObject may be written as"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 4);
+	}
+	else
+	{
+		AddInfo(FString::Printf(TEXT("\"%s\" was registered first here, not \"softobject\": the collision warning is not exercised"), *FString(Comparison.ToView())));
+	}
+#endif
+	TestEqualSensitive(TEXT("AsIs"), Names(GetFieldMap(Struct, EVaRestJsonNaming::AsIs)), FString(TEXT("SoftObject")));
+	TestEqualSensitive(TEXT("camelCase"), Names(GetFieldMap(Struct, EVaRestJsonNaming::CamelCase)), FString(TEXT("softObject")));
+	TestEqualSensitive(TEXT("snake_case"), Names(GetFieldMap(Struct, EVaRestJsonNaming::SnakeCase)), FString(TEXT("soft_object")));
+	TestEqualSensitive(TEXT("PascalCase"), Names(GetFieldMap(Struct, EVaRestJsonNaming::PascalCase)), FString(TEXT("SoftObject")));
 	return true;
 }
 

@@ -19,10 +19,15 @@ UENUM(BlueprintType)
 enum class EVaRestJsonNaming : uint8
 {
 	/**
-	 * The authored field name unchanged: the C++ property name, or a Blueprint struct field's name. A C++ name is
-	 * spelled the way a packaged game has it, where an FName keeps the casing first registered: a field named like an
-	 * engine name in another casing comes out in the engine's (id -> ID, name -> Name), in the editor too. For an exact
-	 * key register a rename (FVaRestJsonNames); the other policies normalise the case of each word anyway.
+	 * The authored field name unchanged: the C++ property name, or a Blueprint struct field's name. A packaged game keeps
+	 * one casing per FName, the one registered first, so for C++ names:
+	 * - named like an engine hardcoded name (id, name) in another casing: the engine's casing (ID, Name) in every build,
+	 *   the editor included;
+	 * - any other name: its declared casing, which a packaged game may still replace with an FName of the same letters
+	 *   registered earlier (the editor warns when it sees one, e.g. Blueprint's "softobject" for a field SoftObject).
+	 * For an exact key register a rename (FVaRestJsonNames). The other policies normalise each word's case, so only a
+	 * casing that moves a word boundary (SoftObject vs softobject) changes their output. FName values and FName map keys
+	 * are written with their FName text and share this hazard, with no rename to fix it.
 	 */
 	AsIs,
 	/** userId (the default) */
@@ -77,8 +82,10 @@ struct FVaRestJsonRename
 /**
  * C++ per-field renames (spec 2.4): FVaRestJsonNames::Register<FMyStruct>({ { TEXT("UserId"), TEXT("user_id") } }).
  * UPROPERTY meta is editor-only data, so names cannot come from meta in a cooked game; register at startup instead.
- * A rename is an FString and keeps its case: it is how a C++ field whose name collides with an engine FName in another
- * casing (id is written ID, name is written Name) gets an exact key.
+ * A rename is an FString and keeps its case: it is how a C++ field gets an exact key when another casing of its FName
+ * wins -- an engine hardcoded name (id is written ID, name is written Name, in every build), or letters some module
+ * registered earlier (in a packaged game it depends on registration order; the editor warns). FName values and FName
+ * map keys are written with their FName text and share that hazard; a rename covers field names only.
  */
 struct VARESTJSON_API FVaRestJsonNames
 {

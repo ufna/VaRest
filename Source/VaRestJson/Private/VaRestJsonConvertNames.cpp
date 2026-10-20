@@ -52,11 +52,10 @@ namespace VaRest::Json::Convert
 		}
 
 		/**
-		 * An FName as a packaged game spells it. Case is preserved only WITH_CASE_PRESERVING_NAME, i.e. with editor-only
-		 * data (NameTypes.h:33); elsewhere the display index is the comparison index (NameTypes.h:1286-1293), the
-		 * casing first registered process-wide -- the engine's hardcoded ID and Name (UnrealNames.inl:206, :71) turn a
-		 * C++ field id or name into ID and Name. Spelled from the comparison entry in every build, the way
-		 * FName::AppendString spells the display entry (UnrealNames.cpp:3819-3826), so PIE writes what a packaged game writes.
+		 * An FName spelled from its comparison entry: the casing registered first process-wide, which is all a build
+		 * without WITH_CASE_PRESERVING_NAME (no editor-only data, NameTypes.h:33) has, since there the display index is
+		 * the comparison index (NameTypes.h:1286-1293). Spelled the way FName::AppendString spells the display entry
+		 * (UnrealNames.cpp:3819-3826).
 		 */
 		void AppendComparisonSpelling(FName FieldName, FWideStringBuilderBase& Out)
 		{
@@ -65,6 +64,34 @@ namespace VaRest::Json::Convert
 			if (InternalNumber != NAME_NO_NUMBER_INTERNAL)
 			{
 				Out << TEXT('_') << NAME_INTERNAL_TO_EXTERNAL(InternalNumber);
+			}
+		}
+
+		/**
+		 * An engine hardcoded name (an EName: FName::ToEName, NameTypes.h:1228-1229), which the name pool registers before
+		 * any module (UnrealNames.inl: ID at :206, Name at :71), so its casing is the same in every build
+		 */
+		bool IsEngineName(FName FieldName)
+		{
+			return FieldName.ToEName() != nullptr;
+		}
+
+		/**
+		 * A C++ field's name as encode spells it. An engine hardcoded name keeps the engine's casing (a field id is ID):
+		 * a packaged game has no other, so PIE writes what it writes. Any other name keeps its declared casing (the
+		 * display entry): the editor's authored spelling, and in a packaged game the casing the module's own generated
+		 * code registers -- unless an earlier module registered the same letters first, which only the editor can see
+		 * and warns about (Build).
+		 */
+		void AppendAuthoredSpelling(FName FieldName, FWideStringBuilderBase& Out)
+		{
+			if (IsEngineName(FieldName))
+			{
+				AppendComparisonSpelling(FieldName, Out);
+			}
+			else
+			{
+				FieldName.AppendString(Out);
 			}
 		}
 
@@ -205,15 +232,36 @@ namespace VaRest::Json::Convert
 					continue;
 				}
 #if WITH_CASE_PRESERVING_NAME
-				// The editor sees the declared casing, AuthoredFieldName the packaged game's. Warned only where that changes
-				// the key: every policy but AsIs turns ID, Id and id into one spelling, so a field id is news only under AsIs.
+				// Only this editor sees both casings of a field's FName. Warned only where the casing changes the key: every
+				// policy but AsIs turns ID, Id and id into one spelling, so a field id is news only under AsIs.
 				if (!Renamed && !Struct->IsA<UUserDefinedStruct>())
 				{
 					const FString Declared = Property->GetName();
-					if (!Declared.Equals(Authored, ESearchCase::CaseSensitive) && !ApplyNaming(Declared, bBool, Naming).Equals(JsonName, ESearchCase::CaseSensitive))
+					TStringBuilder<128> ComparisonSpelling;
+					NamesPrivate::AppendComparisonSpelling(Property->GetFName(), ComparisonSpelling);
+					const FString Comparison(ComparisonSpelling.ToView());
+					if (!Declared.Equals(Comparison, ESearchCase::CaseSensitive))
 					{
-						UE_LOG(LogVaRestJson, Warning, TEXT("FVaRestJsonConvert: %s.%s is written as \"%s\" in the editor and in a packaged game: a packaged game keeps one casing per FName, and \"%s\" was registered first. For exact casing register a rename with FVaRestJsonNames::Register."),
-							*Struct->GetName(), *Declared, *JsonName, *Authored);
+						if (NamesPrivate::IsEngineName(Property->GetFName()))
+						{
+							// Authored is the engine's spelling: what every build writes, so the editor already shows it
+							if (!ApplyNaming(Declared, bBool, Naming).Equals(JsonName, ESearchCase::CaseSensitive))
+							{
+								UE_LOG(LogVaRestJson, Warning, TEXT("FVaRestJsonConvert: %s.%s is written as \"%s\" in the editor and in a packaged game: a packaged game keeps one casing per FName, and \"%s\" was registered first. For exact casing register a rename with FVaRestJsonNames::Register."),
+									*Struct->GetName(), *Declared, *JsonName, *Authored);
+							}
+						}
+						else
+						{
+							// Authored is the declared spelling; an editor module claimed the letters first (Blueprint's
+							// "softobject", EdGraphSchema_K2.cpp:616). A packaged game lacks that module but may have another.
+							const FString PackagedKey = ApplyNaming(Comparison, bBool, Naming);
+							if (!PackagedKey.Equals(JsonName, ESearchCase::CaseSensitive))
+							{
+								UE_LOG(LogVaRestJson, Warning, TEXT("FVaRestJsonConvert: %s.%s may be written as \"%s\" in a packaged game depending on name registration order (\"%s\" was registered first here); register a rename with FVaRestJsonNames::Register for exact casing."),
+									*Struct->GetName(), *Declared, *PackagedKey, *Comparison);
+							}
+						}
 					}
 				}
 #endif
@@ -298,7 +346,7 @@ namespace VaRest::Json::Convert
 				// Only a field whose b the policy dropped: a bool named Old does not answer to "bold". The spelling is the
 				// one ApplyNaming saw (AuthoredFieldName; a Blueprint name's GUID suffix never touches its first characters).
 				TStringBuilder<128> PropertyName;
-				NamesPrivate::AppendComparisonSpelling(Fields[Found].Property->GetFName(), PropertyName);
+				NamesPrivate::AppendAuthoredSpelling(Fields[Found].Property->GetFName(), PropertyName);
 				if (NamesPrivate::HasBoolPrefix(PropertyName.ToView()))
 				{
 					OutTier = 2;
@@ -336,9 +384,9 @@ namespace VaRest::Json::Convert
 		{
 			return StripGuidSuffix(Property->GetName());
 		}
-		// Not GetName() either: in the editor it keeps the declared casing, which a packaged game may not have
+		// The engine's casing for an engine name (every build has it), else the declared casing
 		TStringBuilder<128> Spelling;
-		NamesPrivate::AppendComparisonSpelling(Property->GetFName(), Spelling);
+		NamesPrivate::AppendAuthoredSpelling(Property->GetFName(), Spelling);
 		return FString(Spelling.ToView());
 	}
 
