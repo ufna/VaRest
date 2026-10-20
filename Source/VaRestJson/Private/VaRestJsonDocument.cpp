@@ -20,6 +20,22 @@ namespace VaRest::Json
 			return New;
 		}
 
+		/** At most IndexThreshold members: at most 28 hash comparisons */
+		bool HasDuplicateKeys(const FMember* Members, uint32 Count)
+		{
+			for (uint32 i = 1; i < Count; ++i)
+			{
+				for (uint32 j = 0; j < i; ++j)
+				{
+					if (Members[i].Key.Hash == Members[j].Key.Hash && KeyEquals(Members[j].Key, Members[i].Key.View()))
+					{
+						return true;
+					}
+				}
+			}
+			return false;
+		}
+
 		bool NumbersEqual(const FNode& A, const FNode& B)
 		{
 			if (A.NumKind == B.NumKind)
@@ -182,18 +198,55 @@ namespace VaRest::Json
 
 	void FDocument::Set(FNode& Object, FUtf8StringView Key, FNode* Value)
 	{
-		const int32 i = FindMember(Object, Key, HashKey(Key));
-		if (i != INDEX_NONE)
+		const uint32 Hash = HashKey(Key);
+		if (!Object.bDuplicateKeys)
 		{
-			Object.Obj.Members[i].Value = Value;
+			const int32 Found = FindMember(Object, Key, Hash);
+			if (Found != INDEX_NONE)
+			{
+				Object.Obj.Members[Found].Value = Value;
+				return;
+			}
+			Append(Object, CopyStr(Key, true), Value);
 			return;
 		}
-		Append(Object, CopyStr(Key, true), Value);
+
+		// Parsed with duplicate keys (lookup sees the last). Spec 2.2: Set leaves exactly one member with this key, so
+		// ToString never emits a duplicate it was asked to replace. The survivor keeps the FIRST occurrence's position,
+		// where JSON.parse puts the key ({"a":1,"b":2,"a":3} becomes a:3, b:2).
+		FNode::FObj& O = Object.Obj;
+		int32 First = INDEX_NONE;
+		uint32 Write = 0;
+		for (uint32 Read = 0; Read < O.Num; ++Read)
+		{
+			const FMember M = O.Members[Read]; // by value: the write below may overwrite the slot a reference would still read
+			if (M.Key.Hash == Hash && KeyEquals(M.Key, Key))
+			{
+				if (First != INDEX_NONE)
+				{
+					continue; // a later occurrence: dropped
+				}
+				First = static_cast<int32>(Write);
+			}
+			O.Members[Write++] = M;
+		}
+		if (First == INDEX_NONE)
+		{
+			Append(Object, CopyStr(Key, true), Value);
+			return;
+		}
+		O.Members[First].Value = Value;
+		if (Write != O.Num)
+		{
+			O.Num = Write;
+			Reindex(Object);
+		}
 	}
 
 	void FDocument::Append(FNode& Object, const FStr& Key, FNode* Value)
 	{
 		check(Object.Type == EVaRestJsonType::Object);
+		checkSlow(FindMember(Object, Key.View(), Key.Hash) == INDEX_NONE); // the bDuplicateKeys invariant
 		FNode::FObj& O = Object.Obj;
 		if (O.Num == O.Max)
 		{
@@ -219,7 +272,7 @@ namespace VaRest::Json
 		}
 	}
 
-	void FDocument::IndexInsert(FNode& Object, uint32 MemberIndex)
+	bool FDocument::IndexInsert(FNode& Object, uint32 MemberIndex)
 	{
 		FIndex& Index = *Object.Obj.Index;
 		const FMember& M = Object.Obj.Members[MemberIndex];
@@ -230,18 +283,18 @@ namespace VaRest::Json
 			if (Entry == 0)
 			{
 				Entry = MemberIndex + 1;
-				return;
+				return false;
 			}
 			const FMember& Other = Object.Obj.Members[Entry - 1];
 			if (Other.Key.Hash == M.Key.Hash && KeyEquals(Other.Key, M.Key.View()))
 			{
 				Entry = MemberIndex + 1; // a later duplicate takes the slot: last occurrence wins
-				return;
+				return true;
 			}
 		}
 	}
 
-	void FDocument::BuildIndex(FNode& Object)
+	bool FDocument::BuildIndex(FNode& Object)
 	{
 		FNode::FObj& O = Object.Obj;
 		const uint32 Capacity = FMath::RoundUpToPowerOfTwo(FMath::Max<uint32>(16, O.Num * 2));
@@ -250,9 +303,37 @@ namespace VaRest::Json
 		Index->Slots = Arena.NewArray<uint32>(Capacity);
 		FMemory::Memzero(Index->Slots, sizeof(uint32) * Capacity);
 		O.Index = Index;
+		bool bDuplicates = false;
 		for (uint32 i = 0; i < O.Num; ++i)
 		{
-			IndexInsert(Object, i);
+			if (IndexInsert(Object, i))
+			{
+				bDuplicates = true;
+			}
+		}
+		return bDuplicates;
+	}
+
+	void FDocument::Reindex(FNode& Object)
+	{
+		// Members shifted, so every index slot after the first removal is stale. The arena never frees, so the existing
+		// slot array is cleared and refilled while it is large enough instead of allocating a new one.
+		FNode::FObj& O = Object.Obj;
+		if (O.Num <= IndexThreshold)
+		{
+			O.Index = nullptr;
+		}
+		else if (O.Index && O.Index->Capacity >= O.Num * 2)
+		{
+			FMemory::Memzero(O.Index->Slots, sizeof(uint32) * O.Index->Capacity);
+			for (uint32 i = 0; i < O.Num; ++i)
+			{
+				IndexInsert(Object, i);
+			}
+		}
+		else
+		{
+			BuildIndex(Object);
 		}
 	}
 
@@ -274,24 +355,7 @@ namespace VaRest::Json
 		O.Num = Write;
 		if (Removed > 0)
 		{
-			// Members shifted, so every index slot after the first removal is stale. The arena never
-			// frees, so reuse the existing slot array (clear and reinsert) instead of allocating a new one.
-			if (O.Num <= IndexThreshold)
-			{
-				O.Index = nullptr;
-			}
-			else if (O.Index && O.Index->Capacity >= O.Num * 2)
-			{
-				FMemory::Memzero(O.Index->Slots, sizeof(uint32) * O.Index->Capacity);
-				for (uint32 i = 0; i < O.Num; ++i)
-				{
-					IndexInsert(Object, i);
-				}
-			}
-			else
-			{
-				BuildIndex(Object);
-			}
+			Reindex(Object);
 		}
 		return Removed;
 	}
@@ -351,10 +415,9 @@ namespace VaRest::Json
 			FMemory::Memcpy(Data, Members.GetData(), sizeof(FMember) * Num);
 		}
 		Object.Obj = FNode::FObj{ Data, Num, Num, nullptr };
-		if (Num > IndexThreshold)
-		{
-			BuildIndex(Object);
-		}
+		// Recorded once, here at parse time, so Set pays for duplicate handling only on objects that have duplicates
+		// (spec 2.2): above IndexThreshold the index build sees every collision, below it a pairwise check does.
+		Object.bDuplicateKeys = Num > IndexThreshold ? BuildIndex(Object) : DocumentPrivate::HasDuplicateKeys(Data, Num);
 	}
 
 	FNode* FDocument::DeepCopy(const FNode& Src)
@@ -422,6 +485,7 @@ namespace VaRest::Json
 				Copy->Obj.Members[i] = FMember{ Key, Item };
 			}
 			Copy->Obj.Num = Count;
+			Copy->bDuplicateKeys = Src.bDuplicateKeys;
 			if (Count > IndexThreshold)
 			{
 				BuildIndex(*Copy);

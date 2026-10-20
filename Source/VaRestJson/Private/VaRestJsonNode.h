@@ -60,6 +60,8 @@ namespace VaRest::Json
 
 		EVaRestJsonType Type = EVaRestJsonType::Null;
 		ENumKind NumKind = ENumKind::Int;
+		/** Objects: some key occurs more than once (only parsed or copied input can do that). Set collapses duplicates only where this is set (spec 2.2). */
+		bool bDuplicateKeys = false;
 		union
 		{
 			bool Bool;
@@ -76,6 +78,9 @@ namespace VaRest::Json
 		{
 		}
 	};
+
+	// Type, NumKind and bDuplicateKeys share the padding before the 8-byte-aligned union: the node stays 32 bytes
+	static_assert(sizeof(FNode) == 32, "FNode is 32 bytes");
 
 	/** Objects with more members than this carry an FIndex, built at parse time or on mutation -- never on read */
 	inline constexpr uint32 IndexThreshold = 8;

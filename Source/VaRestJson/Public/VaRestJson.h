@@ -110,7 +110,8 @@ struct FVaRestJsonParseOptions
  * A lookup that misses (Get, operator[], At) returns a handle that keeps the document but has no node:
  * IsValid() is false and GetType() is None. Writing through it (Set/Add) logs an error and does nothing,
  * so a missed lookup never silently writes into a detached temporary. A default-constructed handle
- * (no document) auto-vivifies on its first Set/Add. Two node-less handles compare Equal.
+ * (no document) auto-vivifies on its first Set/Add. A missing value (a miss or a default handle) passed as a VALUE
+ * is undefined (spec 2.2): Set removes the key, Add/SetAt write null. Two node-less handles compare Equal.
  *
  * Threading: any number of threads may read a document nobody mutates; mutation needs exclusive
  * access; handles are safe to copy across threads.
@@ -296,6 +297,11 @@ struct VARESTJSON_API FVaRestJson
 	 * UTF-8 and ANSI keys and values are validated: an invalid sequence becomes U+FFFD with one warning per string;
 	 * FString text maps unpaired surrogates to U+FFFD.
 	 *
+	 * A missing Value is undefined, not null (spec 2.2): the key is removed, the way obj.k = undefined disappears from
+	 * JSON.stringify, so Body.Set("p", Resp["p"]) forwards p only when it exists. Explicit null is FVaRestJson::Null()
+	 * or nullptr. On an object parsed with Key more than once, Set leaves one member with that key, at the first
+	 * occurrence's position.
+	 *
 	 * Set/Add/SetAt are ref-qualified: on an lvalue they return *this by reference (chaining on a
 	 * variable), on a temporary they return the handle by value, so
 	 * `const FVaRestJson& B = FVaRestJson::Object().Set(...)` (or auto&&) owns its handle instead of
@@ -304,6 +310,19 @@ struct VARESTJSON_API FVaRestJson
 	template <typename ValueType>
 	FVaRestJson& Set(FStringView Key, ValueType&& Value) &
 	{
+		if constexpr (std::is_same_v<std::decay_t<ValueType>, FVaRestJson>)
+		{
+			if (!Value.IsValid())
+			{
+				// Spec 2.2: a missing value is undefined, not null -- the key is removed. Checked before PrepareContainer,
+				// which may replace *this, because Value may be *this (Fresh.Set(K, Fresh)).
+				if (PrepareContainer(EVaRestJsonType::Object, TEXT("Set a field")))
+				{
+					Remove(Key);
+				}
+				return *this;
+			}
+		}
 		if (VaRest::Json::FDocument* TargetDoc = PrepareContainer(EVaRestJsonType::Object, TEXT("Set a field")))
 		{
 			// nullptr: copying a value nested deeper than MaxDepth failed (logged); nothing is written
@@ -326,6 +345,19 @@ struct VARESTJSON_API FVaRestJson
 	template <typename ValueType>
 	FVaRestJson& Set(FUtf8StringView Key, ValueType&& Value) &
 	{
+		if constexpr (std::is_same_v<std::decay_t<ValueType>, FVaRestJson>)
+		{
+			if (!Value.IsValid())
+			{
+				// Spec 2.2: a missing value is undefined, not null -- the key is removed. Checked before PrepareContainer,
+				// which may replace *this, because Value may be *this (Fresh.Set(K, Fresh)).
+				if (PrepareContainer(EVaRestJsonType::Object, TEXT("Set a field")))
+				{
+					Remove(Key);
+				}
+				return *this;
+			}
+		}
 		if (VaRest::Json::FDocument* TargetDoc = PrepareContainer(EVaRestJsonType::Object, TEXT("Set a field")))
 		{
 			if (VaRest::Json::FNode* NewValue = MakeNodeFor(*TargetDoc, Forward<ValueType>(Value)))

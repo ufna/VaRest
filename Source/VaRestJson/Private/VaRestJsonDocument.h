@@ -47,13 +47,14 @@ namespace VaRest::Json
 		static int32 FindMember(const FNode& Object, FUtf8StringView Key, uint32 Hash);
 		static FNode* Find(const FNode& Object, FUtf8StringView Key);
 
-		/** Replace the last occurrence's value, or append */
+		/** Replace the value of Key, or append. On an object with duplicate keys the other occurrences are dropped (spec 2.2). */
 		void Set(FNode& Object, FUtf8StringView Key, FNode* Value);
-		/** Append without looking for duplicates (the parser keeps them) */
+		/** Append a member whose key is not present (callers: Set after a miss), so bDuplicateKeys stays true to the object */
 		void Append(FNode& Object, const FStr& Key, FNode* Value);
 		/** Remove every occurrence; returns how many were removed */
 		int32 Remove(FNode& Object, FUtf8StringView Key);
-		void BuildIndex(FNode& Object);
+		/** Returns true when two members share a key (the later one took the slot: last occurrence wins) */
+		bool BuildIndex(FNode& Object);
 
 		void Append(FNode& Array, FNode* Value);
 		bool SetAt(FNode& Array, uint32 Index, FNode* Value);
@@ -73,6 +74,7 @@ namespace VaRest::Json
 		FNode* DeepCopyAt(const FNode& Src, int32 Depth);
 		static bool EqualsAt(const FNode& A, const FNode& B, int32 Depth, bool& bTooDeep);
 		FNode* NewNode(EVaRestJsonType Type);
-		void IndexInsert(FNode& Object, uint32 MemberIndex);
+		bool IndexInsert(FNode& Object, uint32 MemberIndex);
+		void Reindex(FNode& Object);
 	};
 }
