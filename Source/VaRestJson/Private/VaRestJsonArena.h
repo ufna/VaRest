@@ -23,12 +23,13 @@ namespace VaRest::Json
 		static constexpr SIZE_T MinChunkSize = 256;
 
 		/**
-		 * Growth chunks double from the previous chunk size up to this. 1 MiB keeps a 40 MB DOM (the 10 MiB
-		 * benchmark fixture) at about 40 chunks (about 465 at 64 KiB); the cost is at most one partly filled
-		 * chunk per document (docs/passport/2026-10-19-json-bench.md, addendum).
+		 * Growth chunks double from the previous chunk size up to this. 256 KiB bounds the slack of a mid-size document
+		 * (64-300 KB responses reserved ~1.9x what they used with a 1 MiB cap: VaRest-awm) at one partly filled chunk,
+		 * while the 10 MiB benchmark DOM (~40 MB) still takes only ~160 chunks
+		 * (docs/passport/2026-10-19-json-bench.md, addendum of 2026-10-20).
 		 * A block larger than MaxChunkSize / 2 gets a chunk of its own.
 		 */
-		static constexpr SIZE_T MaxChunkSize = 1024 * 1024;
+		static constexpr SIZE_T MaxChunkSize = 256 * 1024;
 
 		explicit FArena(SIZE_T InFirstChunkSize = MinChunkSize);
 		~FArena();

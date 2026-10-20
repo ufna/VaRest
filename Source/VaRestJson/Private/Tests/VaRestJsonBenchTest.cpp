@@ -104,7 +104,7 @@ bool FVaRestJsonBenchTest::RunTest(const FString& Parameters)
 	FString Report = FString::Printf(TEXT("LLM calibration (8 MiB alloc): %s\n\n"), *Mb(Calibrated));
 	Report += SmallLine;
 	Report += TEXT("| fixture | path | parse ms (median) | retained memory | write ms |\n|---|---|---|---|---|\n");
-	for (const TCHAR* Name : { TEXT("bench_1mb.json"), TEXT("bench_10mb.json") })
+	for (const TCHAR* Name : { TEXT("bench_64kb.json"), TEXT("bench_256kb.json"), TEXT("bench_1mb.json"), TEXT("bench_10mb.json") })
 	{
 		const FString Path = FPaths::ProjectSavedDir() / TEXT("VaRestBench") / Name;
 		TArray<uint8> Bytes;
@@ -113,7 +113,7 @@ bool FVaRestJsonBenchTest::RunTest(const FString& Parameters)
 			AddError(FString::Printf(TEXT("missing %s -- run: python3 Tools/gen_bench_json.py <Host>/Saved/VaRestBench"), *Path));
 			return false;
 		}
-		const int32 Runs = Bytes.Num() > (4 << 20) ? 7 : 15;
+		const int32 Runs = Bytes.Num() > (4 << 20) ? 7 : Bytes.Num() > (512 << 10) ? 15 : 51;
 		const FUtf8StringView Utf8(reinterpret_cast<const UTF8CHAR*>(Bytes.GetData()), Bytes.Num());
 
 		// Engine, the v1 way: UTF-8 -> FString first (VaRestRequestJSON.cpp used GetContentAsString)

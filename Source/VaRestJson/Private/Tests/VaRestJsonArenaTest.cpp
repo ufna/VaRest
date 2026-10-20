@@ -187,4 +187,32 @@ bool FVaRestJsonArenaDocumentSizingTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonArenaMidSizeTest, "VaRest.Json.Arena.MidSizeSlack",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestJsonArenaMidSizeTest::RunTest(const FString& Parameters)
+{
+	using VaRest::Json::FArena;
+
+	// A typical mid-size API response (~300 KB, number-heavy): the arena may hold at most one partly filled
+	// growth chunk beyond what the DOM uses. With 1 MiB growth chunks (M1) the slack reached ~950 KB here.
+	FString Text = TEXT("[");
+	for (int32 i = 0; Text.Len() < 300 * 1024; ++i)
+	{
+		Text += FString::Printf(TEXT("%s{\"id\":%d,\"x\":%d.5,\"tags\":[1,2,3],\"ok\":true}"), i ? TEXT(",") : TEXT(""), i, i);
+	}
+	Text += TEXT("]");
+	const FVaRestJson J = FVaRestJson::Parse(FStringView(Text)).StealValue();
+	if (!TestTrue(TEXT("parsed"), J.IsArray()))
+	{
+		return false;
+	}
+	const SIZE_T Used = J.GetDocumentInternal()->Arena.GetUsedBytes();
+	const SIZE_T Reserved = J.GetDocumentInternal()->Arena.GetReservedBytes();
+	TestTrue(*FString::Printf(TEXT("slack %llu B <= one 256 KiB chunk + headers (used %llu, reserved %llu)"), (uint64)(Reserved - Used), (uint64)Used, (uint64)Reserved),
+		Reserved - Used <= 256 * 1024 + 64 * 64);
+	TestEqual(TEXT("growth cap"), FArena::MaxChunkSize, static_cast<SIZE_T>(256 * 1024));
+	return true;
+}
+
 #endif

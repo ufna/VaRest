@@ -3,7 +3,7 @@
 
     python3 Tools/gen_bench_json.py <out_dir>
 
-Writes bench_1mb.json and bench_10mb.json (same seed every run, so numbers are comparable).
+Writes bench_64kb.json, bench_256kb.json, bench_1mb.json and bench_10mb.json (same seed every run, so numbers are comparable).
 """
 import json
 import random
@@ -42,7 +42,8 @@ def build(target_bytes, seed):
 def main():
     out = Path(sys.argv[1])
     out.mkdir(parents=True, exist_ok=True)
-    for name, size in (("bench_1mb.json", 1 << 20), ("bench_10mb.json", 10 << 20)):
+    for name, size in (("bench_64kb.json", 64 << 10), ("bench_256kb.json", 256 << 10),
+                       ("bench_1mb.json", 1 << 20), ("bench_10mb.json", 10 << 20)):
         text = json.dumps(build(size, 20261019), ensure_ascii=False, separators=(",", ":"))
         (out / name).write_text(text, encoding="utf-8")
         print(f"{name}: {len(text.encode('utf-8'))} bytes")

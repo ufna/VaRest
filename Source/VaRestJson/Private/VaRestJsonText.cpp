@@ -8,16 +8,13 @@
 namespace VaRest::Json::TextPrivate
 {
 	/**
-	 * First arena chunk for a parse: input / 32, clamped to [FArena::MinChunkSize, FArena::MaxChunkSize].
-	 * Parsed strings stay in the input buffer (in situ), so the DOM can be far smaller than the input: a
-	 * 1 MiB single-string document holds one node. Sizing the first chunk like the input reserved that
-	 * whole size for nothing; at 1/32 the worst case (all strings) wastes ~3% of the input the document
-	 * already owns. Node-heavy input (the DOM is ~4.2x the input, docs/passport/2026-10-19-json-bench.md)
-	 * reaches MaxChunkSize after a few doublings; the passport's addendum measures this sizing.
+	 * First arena chunk for a parse: the input size clamped to [FArena::MinChunkSize, 32 KiB] (VaRest-awm). A small
+	 * response fits its first chunk; a large one starts at 32 KiB and doubles to FArena::MaxChunkSize, so a string-heavy
+	 * input (strings stay in the input buffer, in situ) never reserves a chunk the size of the input for a few nodes.
 	 */
 	SIZE_T ArenaHintFor(int64 InputBytes)
 	{
-		return static_cast<SIZE_T>(FMath::Clamp<int64>(InputBytes / 32, FArena::MinChunkSize, FArena::MaxChunkSize));
+		return static_cast<SIZE_T>(FMath::Clamp<int64>(InputBytes, FArena::MinChunkSize, 32 * 1024));
 	}
 
 	/** Rejects oversize input before anything is allocated */

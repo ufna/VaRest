@@ -177,3 +177,61 @@ chunks instead of about 465.
 Sanity run on the final M1 fix commit (0ab7421: the RapidJSON reader and writer stacks now allocate through
 FMemory, otherwise the code measured above), one invocation: 10 MiB engine 1015.59 ms, VaRest Parse 40.16 ms
 (25.3x), ParseOwned 38.35 ms, retained 47.9 vs 78.4 MiB; small documents 372 B vs 364 B. Same verdict.
+
+## Addendum (2026-10-20): arena growth cap 256 KiB, first chunk Clamp(input, 256 B, 32 KiB) (VaRest-awm)
+
+Why: with a 1 MiB cap and an input/32 first chunk, 64-300 KB responses reserved ~1.9x the arena they used (the new
+`VaRest.Json.Arena.MidSizeSlack` test measured 840871 B of slack on a 300 KB document before the change). Same
+machine and build settings as above; median of three invocations, raw values in brackets. The generator now also
+writes `bench_64kb.json` and `bench_256kb.json` (59092 and 235991 bytes; the nominal sizes are upper targets, the 1 MiB and 10 MiB
+fixtures are likewise 944204 and 9448081 bytes), measured with
+51 runs each (15 for 1 MiB, 7 for 10 MiB). Both LLM calibration checks passed in all three invocations.
+
+| fixture | path | parse ms (median) | retained memory | write ms |
+|---|---|---|---|---|
+| bench_64kb.json | engine (FString, v1 path) | 4.70 [4.70, 4.82, 4.68] | 0.5 MiB | 2.72 [2.74, 2.72, 2.67] |
+| bench_64kb.json | engine (UTF-8 reader) | 4.96 [5.08, 4.96, 4.85] |  |  |
+| bench_64kb.json | VaRest Parse (copy + in situ) | 0.23 [0.23, 0.23, 0.23] | 0.5 MiB | 0.13 [0.13, 0.13, 0.14] |
+| bench_64kb.json | VaRest ParseOwned (minus the test's copy) | 0.23 [0.23, 0.22, 0.23] |  |  |
+| bench_256kb.json | engine (FString, v1 path) | 24.49 [24.68, 23.80, 24.49] | 2.0 MiB | 10.75 [11.29, 10.75, 10.61] |
+| bench_256kb.json | engine (UTF-8 reader) | 24.86 [24.86, 23.59, 25.90] |  |  |
+| bench_256kb.json | VaRest Parse (copy + in situ) | 0.95 [0.95, 0.97, 0.94] | 1.2 MiB | 0.53 [0.53, 0.53, 0.53] |
+| bench_256kb.json | VaRest ParseOwned (minus the test's copy) | 0.93 [0.93, 0.97, 0.92] |  |  |
+| bench_1mb.json | engine (FString, v1 path) | 112.70 [117.51, 112.70, 112.20] | 7.9 MiB | 47.47 [47.58, 47.40, 47.47] |
+| bench_1mb.json | engine (UTF-8 reader) | 118.23 [118.23, 118.79, 117.80] |  |  |
+| bench_1mb.json | VaRest Parse (copy + in situ) | 3.76 [3.80, 3.74, 3.76] | 4.9 MiB | 2.19 [2.27, 2.12, 2.19] |
+| bench_1mb.json | VaRest ParseOwned (minus the test's copy) | 3.79 [3.79, 3.75, 3.86] |  |  |
+| bench_10mb.json | engine (FString, v1 path) | 1049.57 [1049.57, 1050.62, 1044.88] | 78.4 MiB | 486.06 [490.40, 486.06, 479.14] |
+| bench_10mb.json | engine (UTF-8 reader) | 1103.57 [1104.37, 1103.57, 1089.21] |  |  |
+| bench_10mb.json | VaRest Parse (copy + in situ) | 40.50 [42.59, 39.85, 40.50] | 47.2 MiB | 31.54 [33.62, 31.54, 23.18] |
+| bench_10mb.json | VaRest ParseOwned (minus the test's copy) | 38.09 [38.67, 36.50, 38.09] |  |  |
+
+Arena accounting (identical in all three invocations):
+
+| fixture | input B | arena used B | arena reserved B | used / input | reserved / input |
+|---|---|---|---|---|---|
+| bench_64kb.json | 59092 | 253400 | 491552 | 4.288 | 8.318 |
+| bench_256kb.json | 235991 | 1008928 | 1015856 | 4.275 | 4.305 |
+| bench_1mb.json | 944204 | 4015872 | 4161680 | 4.253 | 4.408 |
+| bench_10mb.json | 9448081 | 39886464 | 40094960 | 4.222 | 4.244 |
+
+Small documents: 1000 parses of `{"id":1,"name":"x"}` kept alive, retained bytes per document, and the time for all
+1000 parses (median of 15 per invocation):
+
+| path | parse ms for 1000 | retained per document |
+|---|---|---|
+| engine `FJsonObject` (FString reader) | 2.974 [2.860, 3.005, 2.974] | 364 B |
+| VaRest `Parse` | 0.689 [0.689, 0.682, 0.695] | 372 B |
+
+The small-document arena is unchanged (used 144 B, reserved 264 B; 20 B input buffer): the first chunk is still the
+256 B minimum.
+
+What moved: reserved / input for the 1 MiB fixture went 5.300 -> 4.408 and for the 10 MiB fixture 4.311 -> 4.244
+(the last partly filled chunk is now at most 256 KiB instead of 1 MiB); retained memory 5.7 -> 4.9 MiB and 47.9 ->
+47.2 MiB. The 64 KiB and 256 KiB fixtures were not run on the old code; after the change the slack is 238152 B at
+64 KiB (32 + 64 + 128 + 256 KiB chunks for a 253400 B DOM, under the 256 KiB bound) and 6928 B at 256 KiB. Parse time at 10 MiB is 40.50 ms vs 40.17 ms
+in the previous addendum, within the cross-session noise noted above; the 10 MiB DOM now takes about 160 chunks
+instead of about 40.
+
+**Gate re-check (10 MiB):** parse 40.50 ms vs 1049.57 ms = **25.9x faster** (ParseOwned 27.6x); retained 47.2 vs
+78.4 MiB = 1.66x less (not worse). **Still PASS.**
