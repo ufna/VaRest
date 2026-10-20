@@ -30,11 +30,19 @@ public:
 	UFUNCTION(BlueprintPure, Category = "VaRest|Json", meta = (DisplayName = "To String (Json)"))
 	static FString JsonToString(const FVaRestJson& Json, bool bPretty = false);
 
-	/** Reads a UTF-8 JSON file (a BOM is skipped) */
+	/**
+	 * Reads a UTF-8 JSON file (a BOM is skipped). Synchronous: the game thread waits while the whole file is read and
+	 * parsed. A relative Path is not relative to the project (on desktop it starts at the executable's folder): build it
+	 * from Get Project Saved Directory or another absolute folder.
+	 */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json", meta = (DisplayName = "Load Json File"))
 	static UPARAM(DisplayName = "Success") bool LoadJsonFile(const FString& Path, FVaRestJson& Json, FVaRestJsonError& Error);
 
-	/** Writes Json as UTF-8 without a BOM */
+	/**
+	 * Writes Json as UTF-8 without a BOM, replacing the file in place. Synchronous: the game thread waits while the
+	 * whole file is written. A relative Path is not relative to the project, as in Load Json File. False when Json is
+	 * invalid or the file cannot be written.
+	 */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json", meta = (DisplayName = "Save Json File"))
 	static UPARAM(DisplayName = "Success") bool SaveJsonFile(const FVaRestJson& Json, const FString& Path, bool bPretty = false);
 
@@ -108,7 +116,11 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json", meta = (DisplayName = "Remove Field"))
 	static UPARAM(DisplayName = "Removed") bool RemoveField(const FVaRestJson& Json, const FString& Key);
 
-	/** Copies every member of Source into Target (shallow, later wins) and returns Target */
+	/**
+	 * Sets every member of Source on Target and returns Target: Target itself is changed, so every copy of its handle
+	 * sees the new members. Each value is copied in; a key Target already has gets Source's value (an object there is
+	 * replaced, not merged key by key).
+	 */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json", meta = (DisplayName = "Merge Json"))
 	static FVaRestJson MergeJson(const FVaRestJson& Target, const FVaRestJson& Source);
 
@@ -119,7 +131,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json", meta = (DisplayName = "Array Remove At"))
 	static UPARAM(DisplayName = "Removed") bool ArrayRemoveAt(const FVaRestJson& Json, int32 Index);
 
-	/** An independent deep copy. Impure: each call makes a new independent copy, so a Set on one is not lost to another consumer. */
+	/**
+	 * An independent deep copy: changes to it never reach Json. Impure, so one call makes one copy that every connected
+	 * node shares; a pure node would run once per connected node and hand each a different copy.
+	 */
 	UFUNCTION(BlueprintCallable, Category = "VaRest|Json", meta = (DisplayName = "Clone (Json)"))
 	static FVaRestJson CloneJson(const FVaRestJson& Json);
 
@@ -131,7 +146,14 @@ public:
 	// signature is a placeholder: CustomStructureParam makes the pin a wildcard that takes the connected type
 	// (K2Node_CallFunction.cpp:96-170), and the thunk reads the real property from the VM stack.
 
-	/** The field converted to the connected type. Found is false, and Value the type's default, when the key is missing, null, or does not convert. */
+	/**
+	 * The field converted to the connected type. Found is false, and Value the type's default, when the key is missing,
+	 * null, or does not convert. A Json pin is the exception: it gets the field itself, a handle into the same JSON (Set
+	 * Field on it changes Json), and a null field is found as JSON null.
+	 * Pure, so it runs again for every node it is connected to: into a type with Json members (a struct with a VaRest
+	 * Json field), each of those nodes decodes its own copy of them, and a Set Field on one copy is not seen by another.
+	 * Store the result in a variable and read that instead.
+	 */
 	UFUNCTION(BlueprintPure, CustomThunk, Category = "VaRest|Json", meta = (CustomStructureParam = "Value", DisplayName = "Get Field"))
 	static UPARAM(DisplayName = "Found") bool GetField(const FVaRestJson& Json, const FString& Key, int32& Value);
 	DECLARE_FUNCTION(execGetField);
@@ -145,11 +167,12 @@ public:
 	static FVaRestJson SetField(const FVaRestJson& Json, const FString& Key, const int32& Value);
 	DECLARE_FUNCTION(execSetField);
 
-	/** Like Get Field, by path: "a.b[2].c", or an RFC 6901 pointer starting with '/' */
+	/** Get Field by path: "a.b[2].c", or an RFC 6901 pointer starting with '/'. The same Found, Json-pin and pure-node rules. */
 	UFUNCTION(BlueprintPure, CustomThunk, Category = "VaRest|Json", meta = (CustomStructureParam = "Value", DisplayName = "Get Path"))
 	static UPARAM(DisplayName = "Found") bool GetPath(const FVaRestJson& Json, const FString& Path, int32& Value);
 	DECLARE_FUNCTION(execGetPath);
 
+	/** Get Field by array index. The same Found, Json-pin and pure-node rules. */
 	UFUNCTION(BlueprintPure, CustomThunk, Category = "VaRest|Json", meta = (CustomStructureParam = "Value", DisplayName = "Array Get"))
 	static UPARAM(DisplayName = "Found") bool ArrayGet(const FVaRestJson& Json, int32 Index, int32& Value);
 	DECLARE_FUNCTION(execArrayGet);
@@ -159,12 +182,21 @@ public:
 	static FVaRestJson ArrayAdd(const FVaRestJson& Json, const int32& Value);
 	DECLARE_FUNCTION(execArrayAdd);
 
-	/** Value (a struct, an array of structs, any type) as new JSON. Impure: each call makes a new document, so a Set on one is not lost to another consumer. */
+	/**
+	 * Value (a struct, an array of structs, any type) as JSON: a new document per call. Impure, so one call gives one
+	 * result that every connected node shares. A connected Json value is returned as itself, the same handle and not a
+	 * copy: Set Field on the result changes it (use Clone (Json) for a copy).
+	 */
 	UFUNCTION(BlueprintCallable, CustomThunk, Category = "VaRest|Json", meta = (CustomStructureParam = "Value", AutoCreateRefTerm = "Value", DisplayName = "Struct To Json"))
 	static FVaRestJson StructToJson(const int32& Value, EVaRestJsonNaming Naming = EVaRestJsonNaming::CamelCase);
 	DECLARE_FUNCTION(execStructToJson);
 
-	/** Fills Value (any type) from Json: tolerant names; strict refuses coercions. Success is false when Json does not fit. */
+	/**
+	 * Fills Value (any type) from Json: tolerant names; strict refuses coercions. Value starts from the type's defaults
+	 * on every call, so fields Json lacks get the defaults, never an earlier call's values. Success is false when Json
+	 * does not fit, and Value may then be partly filled. A Json pin, or a Json field of a struct, gets its own copy of
+	 * the JSON (Get Field hands a Json pin the handle itself instead).
+	 */
 	UFUNCTION(BlueprintCallable, CustomThunk, Category = "VaRest|Json", meta = (CustomStructureParam = "Value", DisplayName = "Json To Struct"))
 	static UPARAM(DisplayName = "Success") bool JsonToStruct(const FVaRestJson& Json, int32& Value, EVaRestJsonNaming Naming = EVaRestJsonNaming::CamelCase, bool bStrict = false);
 	DECLARE_FUNCTION(execJsonToStruct);

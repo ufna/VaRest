@@ -25,6 +25,8 @@ FString UVaRestJsonLibrary::JsonToString(const FVaRestJson& Json, bool bPretty)
 	return Json.ToString(bPretty ? EVaRestJsonFormat::Pretty : EVaRestJsonFormat::Condensed);
 }
 
+// Load/Save hand Path to FFileHelper as given. A relative path then starts at the working directory, which the engine
+// sets to the executable's folder at startup (LaunchEngineLoop.cpp:1801-1804), hence the tooltips' advice.
 bool UVaRestJsonLibrary::LoadJsonFile(const FString& Path, FVaRestJson& Json, FVaRestJsonError& Error)
 {
 	Json = FVaRestJson();
