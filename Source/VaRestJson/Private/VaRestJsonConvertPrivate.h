@@ -98,7 +98,9 @@ namespace VaRest::Json::Convert
 
 	/**
 	 * The double to write for a float: the shortest decimal (6 to 9 significant digits) that reads back as the same
-	 * float, so 0.1f is written 0.1 and not 0.10000000149011612. Falls back to the exact double outside 1e-22..1e22.
+	 * float, so 0.1f is written 0.1 and not 0.10000000149011612. The search scales by a power of ten that must be exact
+	 * (10^22 at most), so it tries all four digit counts from 1e-14 up to 1e28, fewer from 1e-17 up to 1e-14, and none
+	 * outside 1e-17..1e28: there the exact double is written, which still reads back as the same float.
 	 */
 	double FloatToJsonDouble(float Value);
 }

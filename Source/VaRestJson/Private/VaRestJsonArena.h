@@ -24,8 +24,8 @@ namespace VaRest::Json
 
 		/**
 		 * Growth chunks double from the previous chunk size up to this. 256 KiB bounds the slack of a mid-size document
-		 * (64-300 KB responses reserved ~1.9x what they used with a 1 MiB cap: VaRest-awm) at one partly filled chunk,
-		 * while the 10 MiB benchmark DOM (~40 MB) still takes only ~160 chunks
+		 * at one partly filled chunk (with a 1 MiB cap, VaRest.Json.Arena.MidSizeSlack's ~300 KB response measured
+		 * 840871 B of slack: VaRest-awm), while the 10 MiB benchmark DOM (~40 MB) still takes only ~160 chunks
 		 * (docs/passport/2026-10-19-json-bench.md, addendum of 2026-10-20).
 		 * A block larger than MaxChunkSize / 2 gets a chunk of its own.
 		 */

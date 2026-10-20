@@ -195,7 +195,7 @@ bool FVaRestJsonArenaMidSizeTest::RunTest(const FString& Parameters)
 	using VaRest::Json::FArena;
 
 	// A typical mid-size API response (~300 KB, number-heavy): the arena may hold at most one partly filled
-	// growth chunk beyond what the DOM uses. With 1 MiB growth chunks (M1) the slack reached ~950 KB here.
+	// growth chunk beyond what the DOM uses. With 1 MiB growth chunks (M1) this test measured 840871 B of slack.
 	FString Text = TEXT("[");
 	for (int32 i = 0; Text.Len() < 300 * 1024; ++i)
 	{

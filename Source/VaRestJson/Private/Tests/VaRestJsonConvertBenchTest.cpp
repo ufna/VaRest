@@ -100,7 +100,14 @@ bool FVaRestJsonConvertBenchTest::RunTest(const FString& Parameters)
 		FVaRestJsonBenchResponse Engine;
 		FJsonObjectConverter::JsonObjectStringToUStruct(FString::ConstructFromPtrSize(Utf8.GetData(), Utf8.Len()), &Engine);
 		TestEqual(TEXT("same item count"), Engine.Data.Items.Num(), Ours.Data.Items.Num());
-		TestTrue(TEXT("64-bit ids stay exact (generator: 9007199254740993 + i)"), Ours.Data.Items.Num() > 1 && Ours.Data.Items[1].Uid == 9007199254740994ll);
+		// Every item, not a sample: the passport states that VaRest decodes all of them exactly
+		int32 OursInexactUids = 0;
+		for (int32 i = 0; i < Ours.Data.Items.Num(); ++i)
+		{
+			OursInexactUids += Ours.Data.Items[i].Uid != 9007199254740993ll + i ? 1 : 0;
+		}
+		TestTrue(TEXT("items decoded"), Ours.Data.Items.Num() > 1);
+		TestEqual(TEXT("every 64-bit id stays exact (generator: 9007199254740993 + i)"), OursInexactUids, 0);
 		// Not in the brief: proves both converters fill every field (Uid aside, below), so the timings compare equal work
 		TestEqual(TEXT("both converters fill every field (checksum)"), Checksum(Engine), Checksum(Ours));
 		// The engine reads every number through a double (FJsonValueNumber), so a 64-bit id above 2^53 comes back rounded.
@@ -130,7 +137,7 @@ bool FVaRestJsonConvertBenchTest::RunTest(const FString& Parameters)
 		Report += FString::Printf(TEXT("| %s | engine FJsonObjectConverter (FString, v1 path) | %.2f | %.2f |\n"), Name, EngineDecodeMs, EngineEncodeMs);
 		Report += FString::Printf(TEXT("| %s | engine (UTF-8 reader; encode + UTF-8 body) | %.2f | %.2f |\n"), Name, EngineUtf8DecodeMs, EngineEncodeUtf8Ms);
 		Report += FString::Printf(TEXT("| %s | VaRest FVaRestJsonConvert (UTF-8 in, UTF-8 out) | %.2f | %.2f |\n"), Name, OursDecodeMs, OursEncodeMs);
-		Notes += FString::Printf(TEXT("%s: engine decoded %d of %d Uid values (int64 above 2^53) inexactly; VaRest 0.\n"), Name, EngineInexactUids, Ours.Data.Items.Num());
+		Notes += FString::Printf(TEXT("%s: engine decoded %d of %d Uid values (int64 above 2^53) inexactly; VaRest %d.\n"), Name, EngineInexactUids, Ours.Data.Items.Num(), OursInexactUids);
 	}
 	Report += TEXT("\n") + Notes;
 	AddInfo(Report);

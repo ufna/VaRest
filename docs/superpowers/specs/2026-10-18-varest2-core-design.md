@@ -165,8 +165,10 @@ has type `None`.
   `SetAt(I, Missing)` on an array writes `null`, as `JSON.stringify([undefined])` does. Explicit
   `null` is `FVaRestJson::Null()`. So `Body.Set("p", Resp["p"])` forwards `p` only when it exists.
 * **`Set` collapses duplicate keys** (bead VaRest-tpa). Parsed input may carry duplicates (lookup
-  sees the last one); `Set` on such a key removes the earlier occurrences, so the object then holds
-  exactly one member with that key and `ToString` never emits a duplicate it was asked to replace.
+  sees the last one); `Set` on such a key keeps the first occurrence's position, gives it the new
+  value and removes the later occurrences, where `JSON.parse` puts the key (`{"a":1,"b":2,"a":3}`
+  then `Set("a",4)` is `{"a":4,"b":2}`). The object then holds exactly one member with that key and
+  `ToString` never emits a duplicate it was asked to replace.
   Objects record at parse time whether they contain duplicates, so `Set` pays nothing otherwise.
 * **One depth limit: 512** (bead VaRest-a1n). `VaRest::Json::MaxDepth = 512` bounds every recursive
   operation: writer, `Clone`, `Equals`, the `FJsonValue` bridges, `Serialize`, struct convert.

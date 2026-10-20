@@ -180,8 +180,9 @@ FMemory, otherwise the code measured above), one invocation: 10 MiB engine 1015.
 
 ## Addendum (2026-10-20): arena growth cap 256 KiB, first chunk Clamp(input, 256 B, 32 KiB) (VaRest-awm)
 
-Why: with a 1 MiB cap and an input/32 first chunk, 64-300 KB responses reserved ~1.9x the arena they used (the new
-`VaRest.Json.Arena.MidSizeSlack` test measured 840871 B of slack on a 300 KB document before the change). Same
+Why: with a 1 MiB cap and an input/32 first chunk, a mid-size response could keep most of a 1 MiB growth chunk unused:
+the new `VaRest.Json.Arena.MidSizeSlack` test measured 840871 B of slack on its ~300 KB document before the change. That
+is the only before-the-change measurement (the 64 KiB and 256 KiB fixtures below were not run on the old code). Same
 machine and build settings as above; median of three invocations, raw values in brackets. The generator now also
 writes `bench_64kb.json` and `bench_256kb.json` (59092 and 235991 bytes; the nominal sizes are upper targets, the 1 MiB and 10 MiB
 fixtures are likewise 944204 and 9448081 bytes), measured with
@@ -264,5 +265,7 @@ encodes 8.0x faster than the engine's FString path (37.98 vs 302.36 ms) and 8.5x
 produces UTF-8 (321.58 ms); the 1 MiB ratios are 3.8-3.9x and 9.0-10.0x. The typed decode gain is smaller than the
 parse-only gain (25.9x); the split between parse and struct walk was not measured here. Correctness side finding: the engine reads every number through a double, so the fixtures' 64-bit ids above
 2^53 come back rounded for 1764 of 3527 items (1 MiB) and 17537 of 35074 items (10 MiB); VaRest decodes all of them
-exactly. This VaRest decode row is the DOM + walk baseline that M7's SAX -> struct decoder must beat by 1.5x to become
+exactly. (When these numbers were taken the test checked one item's id only; since 2026-10-21 it checks every item
+against the generator's `9007199254740993 + i`, and a re-run on the M2 final-fix code counted 0 inexact ids of 3527 and of
+35074.) This VaRest decode row is the DOM + walk baseline that M7's SAX -> struct decoder must beat by 1.5x to become
 the default for typed responses (spec §2.4).
