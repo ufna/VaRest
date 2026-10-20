@@ -159,6 +159,27 @@ has type `None`.
 * **Thread contract:** any number of threads may read a document no one mutates; mutation needs
   exclusive access; handles are safe to copy across threads; a parsed document is handed off between
   threads by ownership transfer (that is how HTTP responses reach the game thread).
+* **A missing value is `undefined`, not `null`** (ruled 2026-10-20, bead VaRest-4en). A lookup miss or
+  a default-constructed handle passed as a *value*: `Set(Key, Missing)` leaves the key absent (removes
+  it if present), the way `obj.k = undefined` disappears from `JSON.stringify`; `Add(Missing)` /
+  `SetAt(I, Missing)` on an array writes `null`, as `JSON.stringify([undefined])` does. Explicit
+  `null` is `FVaRestJson::Null()`. So `Body.Set("p", Resp["p"])` forwards `p` only when it exists.
+* **`Set` collapses duplicate keys** (bead VaRest-tpa). Parsed input may carry duplicates (lookup
+  sees the last one); `Set` on such a key removes the earlier occurrences, so the object then holds
+  exactly one member with that key and `ToString` never emits a duplicate it was asked to replace.
+  Objects record at parse time whether they contain duplicates, so `Set` pays nothing otherwise.
+* **One depth limit: 512** (bead VaRest-a1n). `VaRest::Json::MaxDepth = 512` bounds every recursive
+  operation: writer, `Clone`, `Equals`, the `FJsonValue` bridges, `Serialize`, struct convert.
+  `FVaRestJsonParseOptions::MaxDepth` is clamped to `[1, 512]`, so anything that parses also writes.
+  Building deeper trees through the mutation API is not checked (it would cost every `Set`); a
+  recursive operation that meets depth > 512 fails as a whole with an error (`ToString` returns an
+  empty string and logs, `TryToString`/`Clone`/bridges return an error or an invalid handle, `Equals`
+  returns false and logs). It never truncates silently.
+* **Strings entering through the API are valid UTF-8** (bead VaRest-qop). Byte-level inputs
+  (`FUtf8StringView`, `FAnsiStringView`) are validated where they are copied into the arena; an
+  invalid sequence becomes U+FFFD and one warning is logged per call. `FString` input goes through
+  the engine's UTF-16→UTF-8 conversion with lone surrogates mapped to U+FFFD. The writer can then
+  assume valid UTF-8, the same as for parsed (already validated) strings.
 
 ### 2.3 C++ API (shape, not final signatures)
 
