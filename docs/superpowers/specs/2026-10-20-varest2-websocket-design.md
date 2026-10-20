@@ -1,7 +1,9 @@
 # VaRest 2 — WebSocket design
 
-Status: revision 1, 2026-10-20 (after the adversarial review `.superpowers/sdd/ws-spec-review.md`
-and the controller's rulings R1–R5). Sub-project 2 of 4 (core spec §0.3).
+Status: revision 2, 2026-10-20. Revision 1 followed the adversarial review
+`.superpowers/sdd/ws-spec-review.md` and the controller's rulings R1–R5; revision 2 adds the hooks
+Socket.IO needs (§22, after `.superpowers/sdd/sio-spec-review.md` and Socket.IO rulings R1–R4) and fixes the
+rev 1 passages they contradict in place (marked "rev 2"). Sub-project 2 of 4 (core spec §0.3).
 Target: Unreal Engine 5.8.1, branch `v2`. Builds on `2026-10-18-varest2-core-design.md` ("the core");
 § numbers prefixed with *core* refer to it. Appendix A maps every review item to its disposition.
 
@@ -172,7 +174,7 @@ static library, so there are two copies. Why it is safe:
 | `FVaRestSocketWeak` | Weak handle for lambda captures (avoids state → handler → handle cycles). |
 | `FVaRestSocketChannel` | Router + readiness gate + backlog + pending requests + events. A socket has one default channel; Socket.IO maps namespaces to channels (§8). The socket's own `On`/`Emit`/`Request`/`OnReady` act on the default channel. |
 | `IVaRestSocketTransport` / `IVaRestSocketConnection` | Seam: one connection per attempt. Shipped: `FVaRestLwsTransport` (§2). Tests: `FVaRestFakeSocketTransport`. |
-| `IVaRestSocketCodec` | Pure, thread-safe: frames ↔ messages (channel, route, data, id, attachments). Default: JSON envelope codec (§7.3). |
+| `IVaRestSocketCodec` | Thread-safe: frames ↔ messages (channel, route, data, id, kind, attachments). Default: JSON envelope codec (§7.3), pure. Rev 2 (§22 SW-2): a codec may create a stateful per-connection decoder, used only on the socket's pipe. |
 | `IVaRestSocketStage` | Stateful, game-thread middleware: app heartbeat, readiness, protocol control packets (§8). |
 | `UVaRestSocketClient` | BP `UObject` around one `FVaRestSocket` (§10). |
 | `UVaRestSocketHub` | `UGameInstanceSubsystem` holding named sockets (§1.4). |
@@ -268,6 +270,9 @@ Per attempt, from a `Connect` command:
   it is valid there. `Could not initialize connection`, `HS: ACCEPT missing`, `HS: Accept hash
   wrong`, `HS: UPGRADE missing`, `HS: CONNECTION missing`, `HS: Rejected by filter cb` and the
   redirect strings are all in the parser tests.
+* **No upgrade response** (rev 2, §22 A2): the upgrade request was sent and the connection closed
+  before any HTTP status line arrived (engine.io's answer to a non-matching path). The transport
+  reports it as its own failure reason, `NoUpgradeResponse`; W0 pins the LWS 3.0 error string.
 
 ### 2.3 Receive
 
@@ -298,13 +303,24 @@ Per attempt, from a `Connect` command:
 * **Buffered amount** (bytes accepted by `Send` and not yet handed to the socket) is exact and
   published to the game thread; it is the basis of backpressure (§6.3). `Drained` fires when it
   returns to zero after crossing the high-water mark.
+* **Auto-replies** (rev 2, §22 SW-5): per-connection rules from the connect command answer an exact
+  inbound **text** frame on the service thread. A reply is a data message, so it never enters a
+  fragmented message (RFC 6455 §5.4 allows only control frames there); it is written at the next
+  message boundary, ahead of every queued data message, is not counted in the buffered amount or
+  backpressure, and is never dropped. Connections with rules get `SO_SNDBUF` 256 KiB
+  (`lws_get_socket_fd` + `setsockopt`), bounding what already sits in the OS buffer ahead of a reply.
+* **Batches** (rev 2, §22 SW-9): the frames of one `SendBatch` are written back to back; only control
+  frames and auto-replies can sit between them.
 
 ### 2.5 Ping, close, end of connection
 
 * **Protocol ping** (§5): a `LWS_WRITE_PING` with an 8-byte payload (sequence + send time) every
   `PingInterval`; `CLIENT_RECEIVE_PONG` (T9) matches the payload and yields an RTT measured on the
   service thread. No pong **and** no inbound bytes within `PingTimeout` → the connection is killed
-  and reported `By = Heartbeat`.
+  and reported `By = Heartbeat`. Rev 2 (§22 SW-5): this deadline, and a stage's idle deadline
+  (`Ctx.SetIdleDeadline`, inbound data frames only), are **suspended while VaRest has paused reading**
+  (flow control, §2.3) — a client that stopped reading cannot blame the server; a connection that ends
+  meanwhile carries `FVaRestSocketClose::bWhileReadPaused`.
 * **Our close**: `lws_close_reason(wsi, Code, Reason)` then a non-zero return from WRITEABLE, as
   `LwsWebSocket.cpp:515-530`; `CloseTimeout` (5 s) bounds a server that never echoes (W0 measures
   whether LWS waits for the echo).
@@ -381,6 +397,10 @@ A socket shares an HTTP client's session with `WithApi(GameApi)` (resolved throu
   client's `OnSessionExpired` (§19 item 2).
 * **Logout** (`OnSessionCleared`, §19 item 2): close 1000 "logout", no reconnect. A token
   refresh does nothing to an open socket.
+* **Session replaced** (rev 2, §22 A1: `OnSessionChanged(Replaced)` — another identity's token via
+  `SetBearerToken`/`ImportSession`, or a login while logged in): `Restart` with the stages' closing
+  hook (SW-7), so a connection authenticated as the old user does not stay open. A `WithBearer` lambda
+  is opaque; code-first apps call `ResetSession()` on a user switch.
 * Code-first without a client: `WithBearer(TFunction<FString()>)`, read per attempt.
 
 ### 3.4 Reconnect
@@ -422,6 +442,7 @@ code sets → the table. Rows are matched on (who closed, code); the transport r
 | upgrade 408, 429, 5xx | reconnect | |
 | upgrade 3xx (redirect not followed or failed), other 4xx | stop | `Http` (`HttpStatus` set; a 403 message names the Origin sent) |
 | `Bad URL`, bad scheme, allowlist refusal, handshake validation, subprotocol mismatch | stop | `Config` |
+| no upgrade response (rev 2, §22 A2: `NoUpgradeResponse`) | reconnect; the reason travels in `FVaRestSocketClose` and `OnRetryScheduled`, so a protocol stage may make it terminal (Socket.IO: after 3, `Config`) | |
 | connect timeout, DNS/TCP/TLS failure, unknown connect error | reconnect | |
 | **anything else** | reconnect | |
 
@@ -443,9 +464,9 @@ Codes VaRest itself sends: 1000 "logout"; 1001 "shutdown", "background", "releas
 | Work | Thread |
 | --- | --- |
 | Config, `Connect`, `Close`, state machine, timers, stages, handlers, BP events | game thread |
-| LWS calls, assembly, UTF-8 validation, ping/pong, connect/close deadlines | VaRest service thread |
-| Parse, codec, typed decode | the socket's `UE::Tasks::FPipe` (§7.1) |
-| Encode for `Send`/`SendBinary`/`Emit` | caller's thread, from an immutable config snapshot (§6.1) |
+| LWS calls, assembly, UTF-8 validation, ping/pong, connect/close deadlines, auto-replies and idle deadlines (rev 2, SW-5) | VaRest service thread |
+| Parse, codec (incl. a per-connection decoder, rev 2 SW-2), typed decode plans | the socket's `UE::Tasks::FPipe` (§7.1) |
+| Encode for `Send`/`SendBinary`/`Emit`, and `SendBatch` (rev 2, SW-9) | caller's thread, from an immutable config snapshot (§6.1) |
 
 Cross-thread structures: the transport command queue (MPSC), each socket's event queue (SPSC:
 service thread → pipe), each socket's delivery queue (pipe → game thread), the off-thread send
@@ -518,9 +539,13 @@ Socket.Emit(TEXT("move"), FMove{ 1, 2 }, EVaRestSend::Volatile);   // drop inste
   reach `OnError`, at most once per second per socket with a count.
 * **Thread contract.** `Send`, `SendBinary` and `Emit` may be called from any thread: they encode
   from the published config snapshot and go through the bounded staging queue, flushed on the next
-  game-thread tick (`Volatile` is decided at flush). Everything else — `Request`, `SendFrame`,
-  `SendBatch`, configuration, lifecycle — is game-thread only and `check`s it. On the game thread, a
-  ready socket with nothing queued sends at once.
+  game-thread tick (`Volatile` is decided at flush). Rev 2 (§22 SW-9): `SendBatch` may also be called
+  from any thread — one staging entry, queued, dropped and written as one unit, optionally pinned to
+  (connection generation, channel epoch) so it is dropped at flush if either changed; the send limit
+  (`Ctx.SetSendLimit`) is enforced at flush for every queued frame; the codec's `EncodeReply` returns
+  a batch through the same path. Everything else — `Request`, `SendFrame`, configuration, lifecycle —
+  is game-thread only and `check`s it. On the game thread, a ready socket with nothing queued sends at
+  once.
 
 ### 6.2 Lanes, readiness, queue
 
@@ -624,7 +649,9 @@ Socket.Request<FJoinReply>(TEXT("join"), FJoin{ Room })   // [[nodiscard]] build
 ```
 
 * Needs `IdField`. A reply is an inbound message whose id matches a pending request (and whose route
-  equals `ReplyRoute` when set); it is consumed, not routed.
+  equals `ReplyRoute` when set); it is consumed, not routed. Rev 2 (§22 SW-1): when the codec sets
+  `FVaRestSocketMessage::Kind`, only `Reply`/`ErrorReply` messages resolve pending requests and only
+  `Request` messages reach `OnRequest`; the pending table checks that a reply's channel matches.
 * **String ids by default**, prefixed per socket (ids are written at encode time, before queueing):
   numeric counters would collide with the app's own `id` fields. `Number` exists for servers that
   need it, paired with `ReplyRoute` or the `JsonRpc` rule.
@@ -654,16 +681,17 @@ Socket.OnRequest(TEXT("accept_match"), this,
 | Need | Hook |
 | --- | --- |
 | Raw frame access | `IVaRestSocketStage::OnInbound/OnOutbound(FVaRestSocketFrame&, Ctx)` → `Continue` / `Consumed`; frames are complete messages with kind, shared payload and `Attachments`. `SendFrame` bypasses the codec. |
-| Protocol codec | `IVaRestSocketCodec` (pure, thread-safe, runs on the pipe): `Decode(Frame) -> FVaRestSocketMessage {Channel, Route, Data, Id, Attachments}`; `Encode(Channel, Route, Payload writer, Id) -> frames` (one or a batch); `EncodeReply(Channel, Id, Payload, bError)`. `Emit`, `On`, `Request`, `OnRequest` work unchanged over any codec. |
-| Namespaces | `FVaRestSocketChannel` (§1.3): `Socket.Channel(TEXT("/chat"))` has its own router, readiness, ready lane, backlog, pending requests and `OnConnected/OnReady/OnDisconnected`. The codec names each message's channel. |
-| Binary attachments | `FVaRestSocketFrame::Attachments` and `FVaRestSocketMessage::Attachments` (shared immutable buffers). Our transport preserves wire order (§2.1), so a header and the binary frames after it arrive in order; the Socket.IO stage collects N binary frames into the header's message. Typed decode binds `TArray<uint8>` fields to attachments through a VaRestJson decode-option resolver (§19 item 10). |
-| Custom heartbeat | a stage returning `true` from `ProvidesHeartbeat()` disables the app heartbeat (protocol ping stays); `Ctx.MarkDead(Reason)`, `Ctx.SendBypass(Frame)`, `Ctx.Timer(Delay, Fn)`. Engine.IO sets `pingInterval`/`pingTimeout` from its OPEN packet. |
+| Protocol codec | `IVaRestSocketCodec` (thread-safe, runs on the pipe): `Decode(Frame) -> FVaRestSocketMessage {Channel, Route, Data, Id, Kind, Attachments}`; `Encode(Channel, Route, Payload writer, Id) -> frames` (one or a batch); `EncodeReply(Channel, Id, Payload, bError)` → a batch (rev 2, SW-9). Rev 2 (§22 SW-2): `MakeDecoder()` creates a stateful per-connection decoder on the connection's Open event; `Decode` may return `NeedMore` (multi-frame messages) or `ProtocolError` (closed 1002, decoder poisoned for that connection); typed decode is a type-erased plan that may decode several positions of an array `Data`. `Emit`, `On`, `Request`, `OnRequest` work unchanged over any codec. |
+| Namespaces | `FVaRestSocketChannel` (§1.3): `Socket.Channel(TEXT("/chat"))` has its own router, readiness, ready lane, backlog, pending requests and `OnConnected/OnReady/OnDisconnected`. The codec names each message's channel. Rev 2 (§22 SW-8): `Ctx.ChannelUp` / `Ctx.ChannelDown(…, WillRetry \| Ended)` drive a channel's lifecycle without closing the socket; `Ctx.HoldInbound(Channel)` queues its inbound messages until its `OnReady` handlers and backlog flush ran. |
+| Binary attachments | `FVaRestSocketFrame::Attachments` and `FVaRestSocketMessage::Attachments` (shared immutable buffers). Our transport preserves wire order (§2.1), so a header and the binary frames after it arrive in order; rev 2: the codec's per-connection decoder (§22 SW-2), not a stage, collects the N binary frames into the header's message on the pipe, so typed decode sees them. Typed decode binds `TArray<uint8>` fields to attachments through a VaRestJson decode-option resolver (§19 item 10). |
+| Custom heartbeat | a stage returning `true` from `ProvidesHeartbeat()` disables the app heartbeat (protocol ping stays); `Ctx.MarkDead(Reason)`, `Ctx.SendBypass(Frame)`, `Ctx.Timer(Delay, Fn)`. Rev 2 (§22 SW-5): auto-reply rules in the connect command (Engine.IO `2` → `3`) and `Ctx.SetIdleDeadline(Seconds)` (Engine.IO `pingInterval + pingTimeout` from its OPEN), both on the service thread. |
 | Handshake | `IVaRestSocketStage::OnHandshake(FVaRestSocketHandshake&)` per attempt (`EIO=4&transport=websocket`). |
 | Session | `Ctx.Session()` (current token for the CONNECT auth payload), `Ctx.RequestRefresh()` (CONNECT_ERROR with an expired token). |
 | Readiness | `Ctx.HoldReady(Channel)` / `Ctx.SetReady(Channel)`. |
+| Closing | rev 2 (§22 SW-7): `OnClosing(Ctx, FVaRestSocketCloseRequest)` runs inside app-initiated closes and session-replacement restarts; its `Ctx.SendBypass` frames precede the close frame. |
 | Reconnect and close | `ShouldReconnect(Close) -> TOptional<bool>`; `Ctx.Close(Code, Reason, EVaRestReconnect)` (explicit decision); `OnOpen` with `bReconnect`; `FVaRestReconnectPolicy` with `Jitter = Ratio(0.5)` = socket.io-client defaults. |
 | Limits | `Ctx.SetSendLimit(Bytes)` (Engine.IO `maxPayload`). |
-| Correlation | the pending-request table (`TVaRestPendingRequests`), reused for acks in both directions. |
+| Correlation | the pending-request table (`TVaRestPendingRequests`), reused for acks in both directions; rev 2 (§22 SW-1): replies by `Kind`, a socket-wide `int64` counter for numeric ids, channel checked. |
 | Transport | `IVaRestSocketTransport`. |
 
 Note: encoding happens before queueing, so per-connection data cannot be baked into queued frames;
@@ -751,7 +779,7 @@ public:
     EVaRestSendResult SendBinary(TArray<uint8>&& Bytes, EVaRestSend Flags = EVaRestSend::Default);
     template <typename T> EVaRestSendResult Emit(FStringView Route, const T& Payload, EVaRestSend Flags = EVaRestSend::Default);
     template <typename TReply = FVaRestJson, typename T> [[nodiscard]] TVaRestSocketRequest<TReply> Request(FStringView Route, const T& Payload);
-    EVaRestSendResult SendFrame(FVaRestSocketFrame Frame);  EVaRestSendResult SendBatch(TArray<FVaRestSocketFrame> Frames);
+    EVaRestSendResult SendFrame(FVaRestSocketFrame Frame);  EVaRestSendResult SendBatch(TArray<FVaRestSocketFrame> Frames);  // SendBatch: any thread (rev 2, SW-9)
 
     // State.
     EVaRestSocketState GetState() const;  FVaRestSocketStatus GetStatus() const;  bool IsConnected() const;  bool IsReady() const;
@@ -762,7 +790,9 @@ public:
 
 `UVaRestSocketHub`: `Get(WorldContext)`, `GetForEditor()`, `Socket(UVaRestApi*, FName)` (named, lazy),
 `Make(Url)` (unnamed, handle-owned), `Make(FName, Url)` (named), `Find(FName)`, `Release(FName)`,
-`GetSockets()`, `CloseAll()`.
+`GetSockets()`, `CloseAll()`. Rev 2 (§22 A3): `Socket`, `Find` and BP *Get Socket* refuse sockets and
+entries owned by another protocol module (Socket.IO) with a `Config` error naming its accessor, so raw
+`Send` never reaches a Socket.IO connection.
 
 ---
 
@@ -780,6 +810,11 @@ public:
   On Message, On Unrouted, On Error, On Drained.
 * Per-attempt values from BP: change headers or query in On Retry Scheduled; the next attempt reads
   them.
+* Rev 2 (§22 SW-10): `UVaRestSocketComponent` (`BlueprintSpawnableComponent`) — `Api` + `Entry` (the entry's
+  hub-named socket, shared with *Get Socket* and the typed nodes, `bCloseOnEndPlay`) or `Url` with `Scope`
+  (`Actor`: unnamed socket closed on `EndPlay`; `GameInstance`: hub-named socket kept across level travel),
+  `bAutoConnect`, `BlueprintAssignable` lifecycle events, `GetClient()`. Protocol modules subclass it
+  (Socket.IO: `UVaRestSioComponent`).
 
 ### 10.2 Library and async nodes
 
@@ -818,8 +853,12 @@ elsewhere *On chat_message* → widget; a button → *Emit send_chat*; *Get Sock
 Core gets one class (ruling R5, review item 18): `UVaRestApi::Sockets` is an array of instanced
 `UVaRestApiSocketConfig` objects (abstract, EditInlineNew, in `VaRestHttp`), plus optional
 `Environments[].SocketBaseUrl`. `VaRestWebSocket` defines the concrete `UVaRestSocketEndpoint` and all
-its structs; `VaRestSocketIO` subclasses it. Designers press "+" and pick *VaRest Socket* (or
-*Socket.IO Socket*).
+its structs. Rev 2 (§22 SW-10): the connection fields live in `UVaRestSocketEndpointBase` (`Name`,
+`Description`, `Path`, `Query`, `Headers`, `Origin`, `bNoAuth`, overrides for reconnect, protocol ping,
+limits, queue and background); `UVaRestSocketEndpoint` adds `Protocols`, routing, `ReadyRoute`,
+`Messages`, the WS auth placement and the app-heartbeat override; `VaRestSocketIO`'s
+`UVaRestSioEndpoint` subclasses the base, not `UVaRestSocketEndpoint`. Designers press "+" and pick
+*VaRest Socket* (or *Socket.IO Socket*).
 
 `UVaRestSocketEndpoint` fields: `Name`, `Description`; `Path` (`/ws/chat`, resolved against
 `SocketBaseUrl`, else `BaseUrl` with the scheme mapped; or an absolute URL); `Query`, `Headers`,
@@ -856,7 +895,9 @@ credentials; VaRest warns once if it sees that combination.
 **Trace tap.** Sockets emit to the core's `IVaRestTraceSink`s with `Source = Socket`, a socket id
 and an attempt id: `SocketConnecting`, `SocketOpen`, `SocketFrame` (emitted **after** decode: direction,
 kind, bytes, channel, route, request id, excerpt in editor/dev builds only), `SocketClosed`,
-`SocketRetryScheduled`, `SocketGaveUp`, `SocketPing` (RTT). The Inspector shows a socket as one
+`SocketRetryScheduled`, `SocketGaveUp`, `SocketPing` (RTT). Rev 2 (§22 A4): `SocketFrame` also carries a
+protocol tag set by the codec (e.g. `eio:ping`, `sio:EVENT`) and an attachment count, and `SocketChannel`
+events report a channel going up, down or refused (reason, recovered). The Inspector shows a socket as one
 long-lived row with its frame list.
 
 **Stats.** `stat VaRest` gains: sockets open, attempts, reconnects, frames and bytes in/out, buffered,
@@ -1030,11 +1071,11 @@ delta per platform.
 | W | Content | Depends on | Exit |
 | --- | --- | --- | --- |
 | W0 | `ws.py` + TLS listener + selftest; LWS 3.0 probe harness; passport | — | probe recorded; §0.3/§2 corrected where needed |
-| W1 | **Transport**: module skeleton and Build.cs, context + service thread, command/event queues, connect (allowlist, URL, origin, protocols, headers, TLS, proxy, timeouts, status), receive (assembly, UTF-8, limits, flow control), send (LWS_PRE encode buffers, fragments, buffered amount), ping/RTT, close semantics; `IVaRestSocketTransport` + fake | W0; core M3 test harness | transport suite (§16.2) green on Linux ws + wss; editor coexistence; monolithic build; restore-the-bug 5, 6, 9, 10, 16 |
+| W1 | **Transport**: module skeleton and Build.cs, context + service thread, command/event queues, connect (allowlist, URL, origin, protocols, headers, TLS, proxy, timeouts, status), receive (assembly, UTF-8, limits, flow control), send (LWS_PRE encode buffers, fragments, buffered amount), ping/RTT, close semantics; `IVaRestSocketTransport` + fake; rev 2: frame payload offset (SW-4), auto-replies with priority, `SO_SNDBUF`, idle deadline, deadline suspension (SW-5), `NoUpgradeResponse` (A2) | W0; core M3 test harness | transport suite (§16.2) green on Linux ws + wss; editor coexistence; monolithic build; restore-the-bug 5, 6, 9, 10, 16 |
 | W2 | Client layer: `FVaRestSocket`, state machine (full table), attempts, generation guard, re-entrancy deferral, reconnect policy + classification, close | W1; **core M4** (clock, timers, backoff) | `State`/`Reconnect`/`Close` green; restore-the-bug 1–4, 13 |
-| W3 | Sending (lanes, readiness, backlog, backpressure, thread contract), ordered delivery + decode pipe, app heartbeat, logging/redaction | W2 | `Send`/`Receive`/`Heartbeat` green; restore-the-bug 7, 8, 15 |
-| W4 | Codec, routing, channels, typed handlers, requests both ways, attachments, stages API (§8) | W3; VaRestJson items §19 | `Route`/`Request` green; restore-the-bug 11, 14 |
-| W5 | `UVaRestSocketHub`, session/auth, connectivity + lifecycle, trace/stats/console, asset entries + validation, `UVaRestSocketClient`, async nodes, K2 + spawner, settings | W4; **core M5** | BP chat sample end-to-end; two PIE clients isolated; restore-the-bug 12 |
+| W3 | Sending (lanes, readiness, backlog, backpressure, thread contract), ordered delivery + decode pipe, app heartbeat, logging/redaction; rev 2: closing hook (SW-7), any-thread pinned `SendBatch` with flush-time send limit (SW-9) | W2 | `Send`/`Receive`/`Heartbeat` green; restore-the-bug 7, 8, 15 |
+| W4 | Codec, routing, channels, typed handlers, requests both ways, attachments, stages API (§8); rev 2: message `Kind` + int64 ids (SW-1), codec contract v2 (SW-2), channel lifecycle + inbound hold (SW-8) | W3; VaRestJson items §19 | `Route`/`Request` green; restore-the-bug 11, 14 |
+| W5 | `UVaRestSocketHub`, session/auth, connectivity + lifecycle, trace/stats/console, asset entries + validation, `UVaRestSocketClient`, async nodes, K2 + spawner, settings; rev 2: endpoint base + `UVaRestSocketComponent` (SW-10), declarations with a channel (SW-11), session kinds (A1), protocol lookups refused (A3), trace tag + channel events (A4) | W4; **core M5** | BP chat sample end-to-end; two PIE clients isolated; restore-the-bug 12 |
 | W6 | Docs (README section; note for v1 users of raw `IWebSocket`), sample, monolithic/Shipping/packaged runs, benchmarks, size measurement | W5 | builds green; numbers in the passport |
 
 Each W gets its own plan in `docs/superpowers/plans/`, written when the previous one lands. W0 and
@@ -1070,7 +1111,9 @@ For the core plans (one list; nothing else in core changes):
    `FRandomStream`, public in `VaRestHttp`.
 2. **Auth and session (M4):** `IVaRestAuth::Apply(FVaRestAuthTarget&)` (headers + query) and a public
    single-flight `Refresh()`; client events `OnSessionCleared` (logout, distinct from a refresh) and
-   a callable `NotifySessionExpired()`.
+   a callable `NotifySessionExpired()`. Rev 2 (§22 A1): `OnSessionChanged(EVaRestSessionChange)` with
+   `Refreshed` (same identity, new token), `Replaced` (another identity: `SetBearerToken`/`ImportSession`
+   with a different subject, or a login while logged in) and `Cleared` (logout).
 3. **Redactor (M3):** public URL, header and JSON-excerpt redaction.
 4. **Trace (M4):** `FVaRestTraceEvent` carries `Source` (`Http`, `Socket`) and connection/attempt ids;
    sinks ignore types they do not know.
@@ -1083,6 +1126,10 @@ For the core plans (one list; nothing else in core changes):
 9. **VaRestJson (M2):** struct encode into an open RapidJSON writer (members only), for one-pass `Emit`.
 10. **VaRestJson (M2):** a decode-option resolver for `TArray<uint8>` fields (attachments).
 11. **VaRestJson (M2):** export the byte-level UTF-8 validator of core §2.2.
+12. **VaRestJson (M2, rev 2, Socket.IO J-1):** an encode-option hook `BytesWriter` for `TArray<uint8>` values
+    (the counterpart of item 10), and public writer entries `WriteJsonInternal`, `WriteStructInternal`,
+    `WritePropertyInternal` next to item 9's members-only entry; exact signatures in
+    `.superpowers/sdd/sio-m2-gap.md`.
 
 ---
 
@@ -1150,6 +1197,56 @@ no reconnect on clean server closes such as 1012 (`DwSocketClient.cpp:205-207`);
 `IsConnected()` sockets, which leaves a connecting one to open later (`DwSocketClient.cpp:150-153`).
 
 ---
+
+## 22. Revision 2 (2026-10-20): hooks for Socket.IO
+
+Source: `2026-10-20-varest2-socketio-design.md` revision 1 (§18) after its adversarial review
+(`.superpowers/sdd/sio-spec-review.md`, §C) and Socket.IO ruling R3 (the reduced set). The SW numbers are
+the Socket.IO spec's; SW-3, SW-6 and SW-12 of its first draft are merged, replaced and folded as noted.
+Everything here keeps the §4 threading rule (control on the game thread, data off it, nothing parsed on
+the game thread) and the §7.1 single ordered path. The rev 1 passages that said otherwise are fixed in
+place and marked "rev 2".
+
+### 22.1 Hooks
+
+| # | Hook | Lands in | Tests |
+| --- | --- | --- | --- |
+| SW-1 | **Message kinds and numeric ids.** `FVaRestSocketMessage::Kind` (`Message`, `Request`, `Reply`, `ErrorReply`, `Control`), set by the codec (the default codec keeps today's rules). Pending requests resolve only from `Reply`/`ErrorReply`; `OnRequest` receives only `Request`. Codecs with numeric ids take them from one socket-wide `int64` counter on the game thread (requests are game-thread only, §6.1); the pending table is keyed by id and checks the reply's channel. (§7.5, §8) | W4 | `Request`: an EVENT-kind message with a pending id is routed, not consumed; channel mismatch dropped |
+| SW-2 | **Codec contract v2** (Socket.IO draft SW-2 + SW-3). `IVaRestSocketCodec::MakeDecoder()` → `IVaRestSocketDecoder`, created when the connection's Open event passes through the pipe and destroyed with its Closed event, used only on the pipe. `Decode(Frame)` returns `Message`, `NeedMore` (frame consumed, multi-frame message incomplete) or `ProtocolError(Reason)` — closed 1002 through the normal path, and the decoder is poisoned: it drops the rest of that connection's frames. Typed decode is a type-erased plan registered by the handler adapter; a plan may decode several positions of an array `Data` and bind attachments (VaRestJson `BytesResolver`, §19 item 10). WS's single-`T` handlers are one plan kind. (§1.3, §7.2, §8) | W4 | `Receive`: NeedMore across frames, poisoned decoder, decoder per attempt |
+| SW-4 | **Frame payload offset.** `FVaRestSocketFrame` = storage + offset (≥ `LWS_PRE`) + length; the transport writes from the offset, so an encoder can reserve a header gap and write a variable-length prefix after the body. (§2.4) | W1 | transport: frames with offsets > `LWS_PRE` |
+| SW-5 | **Service-thread auto-replies and deadlines.** (a) Connect options carry exact-bytes rules for inbound **text** frames (`"2"` → `"3"`), applied on the service thread for that connection; the frame is still delivered, flagged `bAutoReplied`. (b) A reply is a data message: written at the next message boundary ahead of every queued data message, never inside a fragmented message (RFC 6455 §5.4 permits only control frames there), outside buffered amount and backpressure, never dropped. (c) Connections with rules get `SO_SNDBUF` 256 KiB. (d) `Ctx.SetIdleDeadline(Seconds)`: no inbound data frame (text or binary; PONGs do not count) within it → killed, `By = Heartbeat`, measured on the service thread (D32). (e) The idle deadline and the protocol-ping deadline are suspended while VaRest has paused reading (§2.3); a connection that ends meanwhile carries `FVaRestSocketClose::bWhileReadPaused`. (§2.4, §2.5, §5) | W1 | transport: reply during a 16 MiB fragmented send arrives at the next boundary; slow-consumer test does not trip deadlines |
+| SW-7 | **Closing hook.** `IVaRestSocketStage::OnClosing(Ctx, const FVaRestSocketCloseRequest&)`, called synchronously by app-initiated closes (`Close()`, logout, owner gone, hub shutdown, `Release`) and by session-replacement restarts (A1); not by drops, background, other `Restart`s or attempts abandoned before open. Frames sent there with `Ctx.SendBypass` precede the close frame, bounded by `CloseTimeout`. (§3.5, §8) | W3 | `Close`: bypass frames before the close frame; none on drop or background |
+| SW-8 | **Stage-driven channel lifecycle and inbound hold.** `Ctx.ChannelUp(Channel, FVaRestSocketOpen)` = `SetReady` + the channel's `OnConnected`/`OnReady`. `Ctx.ChannelDown(Channel, FVaRestSocketClose, EVaRestChannelEnd {WillRetry, Ended})` fails the channel's sent requests (`Connection`, retryable) and fires its `OnDisconnected`; `Ended` also cancels its backlog. `Ctx.HoldInbound(Channel)`: inbound messages for a held channel queue in arrival order (bounded; overflow → a stage callback) and are dispatched right after the channel's `OnReady` handlers and backlog flush. (§6.2, §8) | W4 | `Send`/`Receive`: channel down without socket close; held messages after `OnReady` |
+| SW-9 | **Any-thread batches.** `SendBatch` callable from any thread: one staging entry, queued, dropped and written as one unit and back to back (only control frames and SW-5 replies between its frames); an optional pin (connection generation, channel epoch) drops the batch at flush if either changed; the send limit (`Ctx.SetSendLimit`) is enforced at flush for every queued frame; `EncodeReply` returns a batch through this path. (§6.1) | W3 | `Send`: off-thread batch contiguity; stale pin dropped; limit re-checked at flush |
+| SW-10 | **Endpoint base class and component base.** `UVaRestSocketEndpointBase` (connection fields) ← `UVaRestSocketEndpoint` (`Protocols`, routing, `ReadyRoute`, `Messages`, WS auth placement, app-heartbeat override) and ← protocol entries such as `UVaRestSioEndpoint`; asset-level session wiring reads the placement through a virtual on the base. `UVaRestSocketComponent` (`BlueprintSpawnableComponent`): `Api` + `Entry` (uses the entry's hub-named socket, shared with *Get Socket* and the typed nodes; `bCloseOnEndPlay`) or `Url` with `Scope` (`Actor`: unnamed, closed on `EndPlay`; `GameInstance`: hub-named), `bAutoConnect`, `BlueprintAssignable` lifecycle events, `GetClient()`; protocol modules subclass it. (§10.1, §11) | W5 | asset validation per subclass; component BeginPlay/EndPlay per scope; level travel keeps a `GameInstance` socket |
+| SW-11 | **Declarations with a channel; protocol-supplied pins.** K2 identity `{Asset, Entry, Channel, Route}`; spawner path *Asset ▸ Entry ▸ [Channel ▸] Route*; the declaration nodes ask the entry's module (`IVaRestSocketDeclarationProvider`) for extra pins (Socket.IO: `Ack`, args mode, `bOnce`). (§10.3, §19 item 8) | W5 | K2 reconstruction with a channel |
+
+Not adopted: **SW-6** (flow control excluding incomplete messages) — replaced by a configuration invariant
+on the protocol side (Socket.IO: `MaxPacketBytes ≤ MaxPendingInboundBytes / 2`), so §2.3's counting is
+unchanged. **SW-12** (Socket.IO trace items) — folded into the generic trace work of A4.
+
+### 22.2 Other amendments
+
+| # | Amendment | Where | Lands in |
+| --- | --- | --- | --- |
+| A1 | Session change kinds `Refreshed` / `Replaced` / `Cleared` (core §4.2 via §19 item 2); `Replaced` restarts open sockets with the closing hook; `ResetSession()` on the socket for opaque `WithBearer` lambdas | §3.3, §19 item 2 | core M4, W5 |
+| A2 | Transport failure reason `NoUpgradeResponse` (upgrade sent, closed before any status line); default row "reconnect"; W0 pins the LWS 3.0 error string | §2.2, §3.4, §16.4 | W0, W1 |
+| A3 | WS lookups (`Socket`, `Find`, BP *Get Socket*) refuse sockets and entries owned by another protocol module, with a `Config` error naming its accessor | §9 | W5 |
+| A4 | Trace: `SocketFrame` gets a codec-set protocol tag and an attachment count; new `SocketChannel` events (up / down / refused, reason, recovered) | §12, §19 item 4 | W5 |
+| A5 | VaRestJson for protocol codecs: `BytesWriter` encode hook and writer entries (§19 item 12) | §19 | core M2 |
+
+W0 probe additions (§16.4): the `NoUpgradeResponse` string against a server that closes an upgrade
+without answering; `SO_SNDBUF` through `lws_get_socket_fd` on Linux; an auto-reply written between two
+large messages.
+
+### 22.3 Decisions (revision 2)
+
+| # | Decision | Why | Cost if wrong |
+| --- | --- | --- | --- |
+| D33 | The nine hooks above, in the milestones named | Socket.IO needs them; each is small and generic (graphql-ws, Phoenix and JSON-RPC codecs gain too) | W1/W3/W4/W5 grow slightly |
+| D34 | Auto-replies jump the queue at message boundaries, outside backpressure; `SO_SNDBUF` 256 KiB on connections with rules | protocol heartbeats must survive large sends; the OS buffer is the other queue | one such connection is limited to ≈ 20 Mbit/s at 100 ms RTT |
+| D35 | Client deadlines suspended while VaRest pauses reading | the pause is ours; the server decides | a link that dies during a long pause is noticed when reading resumes |
+| D36 | `Replaced` sessions restart open sockets | a socket authenticated as user A must not serve user B | one reconnect per user switch |
 
 ## Appendix A. Review disposition
 
