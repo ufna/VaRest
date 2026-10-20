@@ -77,6 +77,7 @@ struct VARESTJSON_API FVaRestJsonError
 	UPROPERTY(BlueprintReadOnly, Category = "VaRest|Json")
 	int32 Line = 0;
 
+	/** 1-based, in Unicode code points from the start of the line; a leading BOM is not counted. 0 when unknown. */
 	UPROPERTY(BlueprintReadOnly, Category = "VaRest|Json")
 	int32 Column = 0;
 
@@ -292,6 +293,8 @@ struct VARESTJSON_API FVaRestJson
 
 	/**
 	 * Sets (copies) Value under Key. An invalid handle becomes a new object first.
+	 * UTF-8 and ANSI keys and values are validated: an invalid sequence becomes U+FFFD with one warning per string;
+	 * FString text maps unpaired surrogates to U+FFFD.
 	 *
 	 * Set/Add/SetAt are ref-qualified: on an lvalue they return *this by reference (chaining on a
 	 * variable), on a temporary they return the handle by value, so

@@ -4,6 +4,7 @@
 
 #include "VaRestJsonDocument.h"
 #include "VaRestJsonLog.h"
+#include "VaRestJsonUtf8.h"
 
 // The module builds in unity blobs, where a file-scope using-directive or an anonymous namespace leaks into every
 // later .cpp of the same blob. File-local helpers live in a namespace named after the file; member functions spell
@@ -148,8 +149,9 @@ FVaRestJson FVaRestJson::Get(FStringView Key) const
 	{
 		return Miss();
 	}
-	const auto Utf8 = StringCast<UTF8CHAR>(Key.GetData(), Key.Len());
-	return Get(FUtf8StringView(Utf8.Get(), Utf8.Length()));
+	// The same conversion Set uses, so a key with an unpaired surrogate finds what Set stored; a lookup stores nothing, so no warning
+	VaRest::Json::FUtf8Scratch Scratch;
+	return Get(VaRest::Json::ConvertForDocument(Key, Scratch, false));
 }
 
 VaRest::Json::FDocument* FVaRestJson::PrepareContainer(EVaRestJsonType Kind, const TCHAR* Operation)
@@ -174,13 +176,14 @@ VaRest::Json::FDocument* FVaRestJson::PrepareContainer(EVaRestJsonType Kind, con
 
 void FVaRestJson::SetNode(FStringView Key, VaRest::Json::FNode* Value)
 {
-	const auto Utf8 = StringCast<UTF8CHAR>(Key.GetData(), Key.Len());
-	Doc->Set(*Node, FUtf8StringView(Utf8.Get(), Utf8.Length()), Value);
+	VaRest::Json::FUtf8Scratch Scratch;
+	Doc->Set(*Node, VaRest::Json::ConvertForDocument(Key, Scratch), Value);
 }
 
 void FVaRestJson::SetNodeUtf8(FUtf8StringView Key, VaRest::Json::FNode* Value)
 {
-	Doc->Set(*Node, Key, Value);
+	VaRest::Json::FUtf8Scratch Scratch;
+	Doc->Set(*Node, VaRest::Json::ValidateForDocument(Key, Scratch), Value);
 }
 
 void FVaRestJson::AddNode(VaRest::Json::FNode* Value)
@@ -207,8 +210,8 @@ bool FVaRestJson::Remove(FStringView Key)
 	{
 		return false;
 	}
-	const auto Utf8 = StringCast<UTF8CHAR>(Key.GetData(), Key.Len());
-	return Remove(FUtf8StringView(Utf8.Get(), Utf8.Length()));
+	VaRest::Json::FUtf8Scratch Scratch;
+	return Remove(VaRest::Json::ConvertForDocument(Key, Scratch, false));
 }
 
 VaRest::Json::FDocument* FVaRestJson::PrepareSetAt(int32 Index)
@@ -331,12 +334,16 @@ VaRest::Json::FNode* FVaRestJson::MakeBool(VaRest::Json::FDocument& InDoc, bool 
 VaRest::Json::FNode* FVaRestJson::MakeInt(VaRest::Json::FDocument& InDoc, int64 Value) { return InDoc.NewInt(Value); }
 VaRest::Json::FNode* FVaRestJson::MakeUInt(VaRest::Json::FDocument& InDoc, uint64 Value) { return InDoc.NewUInt(Value); }
 VaRest::Json::FNode* FVaRestJson::MakeDouble(VaRest::Json::FDocument& InDoc, double Value) { return InDoc.NewDouble(Value); }
-VaRest::Json::FNode* FVaRestJson::MakeUtf8String(VaRest::Json::FDocument& InDoc, FUtf8StringView Value) { return InDoc.NewString(Value); }
+VaRest::Json::FNode* FVaRestJson::MakeUtf8String(VaRest::Json::FDocument& InDoc, FUtf8StringView Value)
+{
+	VaRest::Json::FUtf8Scratch Scratch;
+	return InDoc.NewString(VaRest::Json::ValidateForDocument(Value, Scratch));
+}
 
 VaRest::Json::FNode* FVaRestJson::MakeString(VaRest::Json::FDocument& InDoc, FStringView Value)
 {
-	const auto Utf8 = StringCast<UTF8CHAR>(Value.GetData(), Value.Len());
-	return InDoc.NewString(FUtf8StringView(Utf8.Get(), Utf8.Length()));
+	VaRest::Json::FUtf8Scratch Scratch;
+	return InDoc.NewString(VaRest::Json::ConvertForDocument(Value, Scratch));
 }
 
 VaRest::Json::FNode* FVaRestJson::MakeCopy(VaRest::Json::FDocument& InDoc, const FVaRestJson& Value)

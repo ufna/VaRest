@@ -7,6 +7,7 @@
 #include "VaRestJsonDocument.h"
 #include "VaRestJsonLog.h"
 #include "VaRestJsonReader.h"
+#include "VaRestJsonUtf8.h"
 #include "VaRestJsonWriter.h"
 
 namespace VaRest::Json::StructOpsPrivate
@@ -40,8 +41,13 @@ bool FVaRestJson::ImportTextItem(const TCHAR*& Buffer, int32 PortFlags, UObject*
 	}
 
 	// Parse a prefix of the rest of the buffer: the JSON value ends where RapidJSON stops
-	// (kParseStopWhenDoneFlag), and the parent's parser continues from there.
-	const auto Utf8 = StringCast<UTF8CHAR>(Cursor);
+	// (kParseStopWhenDoneFlag), and the parent's parser continues from there. The conversion is the one every
+	// other entry point uses (an unpaired surrogate becomes U+FFFD); U+FFFD converts back to one TCHAR, as the
+	// surrogate was, so mapping the consumed bytes back to TCHARs below still lands on the right character.
+	// No warning (bWarn = false): the rest of the buffer is engine-produced text (a pin default, a T3D blob) that may hold
+	// unrelated fields after this one, and a lone surrogate there is not this field's problem.
+	FUtf8Scratch Converted;
+	const FUtf8StringView Utf8 = ConvertForDocument(FStringView(Cursor), Converted, false);
 	// (No parameter is named Num: it would hide FVaRestJson::Num, an MSVC C4458 error.)
 	const auto MakeInput = [](FDocument& Target, const UTF8CHAR* Bytes, int64 Count)
 	{
@@ -50,12 +56,12 @@ bool FVaRestJson::ImportTextItem(const TCHAR*& Buffer, int32 PortFlags, UObject*
 		Target.Input.Add(0);
 	};
 	FDocumentRef NewDoc = MakeShared<FDocument, ESPMode::ThreadSafe>();
-	MakeInput(*NewDoc, Utf8.Get(), Utf8.Length());
+	MakeInput(*NewDoc, Utf8.GetData(), Utf8.Len());
 
 	FVaRestJsonParseOptions Options;
 	FVaRestJsonError Error;
 	int64 Consumed = 0;
-	if (!ParseInSitu(*NewDoc, 0, Options, FUtf8StringView(Utf8.Get(), Utf8.Length()), Error, &Consumed))
+	if (!ParseInSitu(*NewDoc, 0, Options, Utf8, Error, &Consumed))
 	{
 		if (ErrorText)
 		{
@@ -64,14 +70,14 @@ bool FVaRestJson::ImportTextItem(const TCHAR*& Buffer, int32 PortFlags, UObject*
 		return false;
 	}
 
-	if (Consumed < Utf8.Length())
+	if (Consumed < Utf8.Len())
 	{
 		// The document would otherwise own the whole remaining text (a T3D blob, the rest of a parent
 		// struct's text) for as long as the handle lives. Re-parse exactly the value's bytes into a
-		// document of their own: the in-situ parse rewrote NewDoc's copy, never the Utf8 conversion.
+		// document of their own: the in-situ parse rewrote NewDoc's copy, never the converted text.
 		FDocumentRef Exact = MakeShared<FDocument, ESPMode::ThreadSafe>();
-		MakeInput(*Exact, Utf8.Get(), Consumed);
-		if (!ParseInSitu(*Exact, 0, Options, FUtf8StringView(Utf8.Get(), static_cast<int32>(Consumed)), Error))
+		MakeInput(*Exact, Utf8.GetData(), Consumed);
+		if (!ParseInSitu(*Exact, 0, Options, FUtf8StringView(Utf8.GetData(), static_cast<int32>(Consumed)), Error))
 		{
 			// Unreachable for a value that just parsed as a prefix; fail rather than keep the big buffer
 			if (ErrorText)
@@ -84,7 +90,7 @@ bool FVaRestJson::ImportTextItem(const TCHAR*& Buffer, int32 PortFlags, UObject*
 	}
 
 	// Map consumed UTF-8 bytes back to TCHARs of the original buffer
-	const auto Back = StringCast<TCHAR>(Utf8.Get(), static_cast<int32>(Consumed));
+	const auto Back = StringCast<TCHAR>(Utf8.GetData(), static_cast<int32>(Consumed));
 	Buffer = Cursor + Back.Length();
 
 	FNode* Root = NewDoc->Root;

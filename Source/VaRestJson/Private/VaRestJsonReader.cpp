@@ -146,19 +146,27 @@ namespace VaRest::Json
 		{
 			return;
 		}
+		// Columns count code points (bytes that are not 10xxxxxx continuation bytes): "é" is one column, not two.
+		// A leading BOM is not text and is not counted; Offset stays a byte offset into the input.
 		const int64 Limit = FMath::Min<int64>(Error.Offset, Original.Len());
+		const int64 Start = BomLength(reinterpret_cast<const uint8*>(Original.GetData()), Original.Len());
 		int32 Line = 1;
-		int64 LineStart = 0;
-		for (int64 i = 0; i < Limit; ++i)
+		int32 Column = 1;
+		for (int64 i = Start; i < Limit; ++i)
 		{
-			if (Original[i] == UTF8CHAR('\n'))
+			const uint8 Byte = static_cast<uint8>(Original[i]);
+			if (Byte == '\n')
 			{
 				++Line;
-				LineStart = i + 1;
+				Column = 1;
+			}
+			else if ((Byte & 0xC0) != 0x80)
+			{
+				++Column;
 			}
 		}
 		Error.Line = Line;
-		Error.Column = static_cast<int32>(Limit - LineStart) + 1;
+		Error.Column = Column;
 	}
 
 	bool ParseInSitu(FDocument& Doc, int64 StartOffset, const FVaRestJsonParseOptions& Options,

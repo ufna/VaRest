@@ -6,6 +6,7 @@
 #include "Dom/JsonValue.h"
 #include "VaRestJsonDocument.h"
 #include "VaRestJsonLog.h"
+#include "VaRestJsonUtf8.h"
 
 namespace VaRest::Json::BridgePrivate
 {
@@ -144,9 +145,8 @@ namespace VaRest::Json::BridgePrivate
 			return Doc.NewBool(Value.AsBool());
 		case EJson::String:
 		{
-			const FString S = Value.AsString();
-			const auto Utf8 = StringCast<UTF8CHAR>(*S, S.Len());
-			return Doc.NewString(FUtf8StringView(Utf8.Get(), Utf8.Length()));
+			FUtf8Scratch Scratch;
+			return Doc.NewString(ConvertForDocument(Value.AsString(), Scratch));
 		}
 		case EJson::Number:
 		{
@@ -211,9 +211,8 @@ namespace VaRest::Json::BridgePrivate
 					{
 						return nullptr;
 					}
-					const FString Key(*Pair.Key); // FSharedString or FString storage: both dereference to TCHAR*
-					const auto Utf8 = StringCast<UTF8CHAR>(*Key, Key.Len());
-					Doc.Set(*Result, FUtf8StringView(Utf8.Get(), Utf8.Length()), Member);
+					FUtf8Scratch Scratch;
+					Doc.Set(*Result, ConvertForDocument(FString(*Pair.Key), Scratch), Member); // FSharedString or FString key: both dereference to TCHAR*
 				}
 			}
 			return Result;

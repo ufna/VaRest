@@ -4,6 +4,7 @@
 
 #include "VaRestJsonLog.h"
 #include "VaRestJsonReader.h"
+#include "VaRestJsonUtf8.h"
 #include "VaRestJsonWriter.h"
 
 namespace VaRest::Json::TextPrivate
@@ -133,25 +134,38 @@ TValueOrError<FVaRestJson, FVaRestJsonError> FVaRestJson::Parse(FStringView Text
 {
 	using namespace VaRest::Json;
 	using namespace VaRest::Json::TextPrivate;
-	// One copy: convert straight into the owned buffer (with a byte of slack for the terminator). The in-situ
-	// parse rewrites that buffer, so line/column are computed on the error path only, by converting again.
-	const int32 Utf8Len = FPlatformString::ConvertedLength<UTF8CHAR>(Text.GetData(), Text.Len());
+	// One conversion for the parse and for its diagnostics, so line/column always describe the bytes that were parsed
+	// (M1 converted with FPlatformString::Convert here and StringCast on the error path; spec 2.2 wants U+FFFD for an
+	// unpaired surrogate, the engine writes '?': GenericPlatformString.cpp:791-797).
+	const int64 Utf8Len = Utf8Length(Text);
 	FVaRestJsonError Error;
 	if (ExceedsLimit(Utf8Len, Options, Error))
 	{
 		return MakeError(MoveTemp(Error));
 	}
+	if (Utf8Len >= MAX_int32)
+	{
+		Error.Message = FString::Printf(TEXT("Input of %lld UTF-8 bytes is larger than 2 GiB"), Utf8Len);
+		return MakeError(MoveTemp(Error));
+	}
 	TArray<uint8> Bytes;
-	Bytes.Reserve(Utf8Len + 1);
-	Bytes.AddUninitialized(Utf8Len);
-	FPlatformString::Convert(reinterpret_cast<UTF8CHAR*>(Bytes.GetData()), Utf8Len, Text.GetData(), Text.Len());
+	Bytes.Reserve(static_cast<int32>(Utf8Len) + 1); // the in-situ terminator fits without a reallocation
+	Bytes.AddUninitialized(static_cast<int32>(Utf8Len));
+	const int32 Replaced = WriteUtf8(Text, reinterpret_cast<UTF8CHAR*>(Bytes.GetData()));
+	if (Replaced > 0)
+	{
+		UE_LOG(LogVaRestJson, Warning, TEXT("FVaRestJson::Parse: %d unpaired UTF-16 surrogate(s) replaced with U+FFFD"), Replaced);
+	}
 
 	TValueOrError<FVaRestJson, FVaRestJsonError> Result = ParseIntoDocument(MoveTemp(Bytes), Options, FUtf8StringView());
 	if (!Result.HasValue() && Result.GetError().Offset >= 0)
 	{
+		// The in-situ parse rewrote Bytes; convert again for the diagnostics, with the very same converter
 		FVaRestJsonError Diagnosed = Result.GetError();
-		const auto Original = StringCast<UTF8CHAR>(Text.GetData(), Text.Len());
-		FillLineColumn(Diagnosed, FUtf8StringView(Original.Get(), Original.Length()));
+		TArray<UTF8CHAR> Original;
+		Original.SetNumUninitialized(static_cast<int32>(Utf8Len));
+		WriteUtf8(Text, Original.GetData());
+		FillLineColumn(Diagnosed, FUtf8StringView(Original.GetData(), Original.Num()));
 		return MakeError(MoveTemp(Diagnosed));
 	}
 	return Result;
