@@ -8,9 +8,7 @@
 #include "VaRestJsonLog.h"
 #include "VaRestJsonReader.h"
 
-using namespace VaRest::Json;
-
-namespace
+namespace VaRest::Json::StructOpsPrivate
 {
 	constexpr uint8 SerializeVersion = 1;
 	constexpr int64 MaxSerializedBytes = int64(1) << 30;
@@ -27,6 +25,7 @@ bool FVaRestJson::ExportTextItem(FString& ValueStr, const FVaRestJson& DefaultVa
 // a known cost for large T3D arrays of handles. The resulting document keeps only the value's bytes.
 bool FVaRestJson::ImportTextItem(const TCHAR*& Buffer, int32 PortFlags, UObject* Parent, FOutputDevice* ErrorText)
 {
+	using namespace VaRest::Json;
 	const TCHAR* Cursor = Buffer;
 	while (FChar::IsWhitespace(*Cursor))
 	{
@@ -99,6 +98,7 @@ bool FVaRestJson::Identical(const FVaRestJson* Other, uint32 PortFlags) const
 
 bool FVaRestJson::Serialize(FArchive& Ar)
 {
+	using namespace VaRest::Json::StructOpsPrivate;
 	// Reference collectors that neither load nor save (FArchiveReplaceObjectRef, FArchiveReferenceMarker:
 	// ArchiveReplaceObjectRef.h:196, ArchiveReferenceMarker.h:25) walk every property looking for UObject
 	// pointers. A handle holds none, so writing its JSON text there is pure cost. A collector that also

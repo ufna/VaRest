@@ -67,7 +67,10 @@ rm -f "$LOG" "$PIDFILE"
 # if `timeout` leaves it behind, exactly that process is killed (never by name or pattern).
 START=$SECONDS
 set +e
-timeout --kill-after=30 "$TIMEOUT" bash -c 'echo $$ > "$0"; exec "$@"' "$PIDFILE" \
+# --foreground: without it timeout runs the command in a background process group, so a terminal Ctrl-C no longer
+# reaches the editor and the next run refuses to start ("an editor is running"). The command is the editor itself
+# (exec), so --foreground's "children are not timed out" caveat does not apply.
+timeout --foreground --kill-after=30 "$TIMEOUT" bash -c 'echo $$ > "$0"; exec "$@"' "$PIDFILE" \
 	"$ENGINE/Engine/Binaries/Linux/UnrealEditor-Cmd" "$PROJECT" \
 	-ExecCmds="Automation RunTests $FILTER; Quit" \
 	-unattended -nullrhi -nosplash -nopause -abslog="$LOG" ${VAREST_EXTRA_ARGS:-} >/dev/null 2>&1

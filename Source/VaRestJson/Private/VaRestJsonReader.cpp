@@ -9,7 +9,7 @@
 
 namespace VaRest::Json
 {
-	namespace
+	namespace ReaderPrivate
 	{
 		/**
 		 * SAX handler that builds the arena DOM. Children are collected on two scratch stacks and
@@ -164,6 +164,7 @@ namespace VaRest::Json
 	bool ParseInSitu(FDocument& Doc, int64 StartOffset, const FVaRestJsonParseOptions& Options,
 		FUtf8StringView OriginalForDiagnostics, FVaRestJsonError& OutError, int64* OutConsumed)
 	{
+		using namespace ReaderPrivate;
 		check(Doc.Input.Num() > 0 && Doc.Input.Last() == 0);
 		const int32 MaxDepth = FMath::Max(1, Options.MaxDepth);
 		FBuildHandler Handler(Doc, MaxDepth);

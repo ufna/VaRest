@@ -284,4 +284,26 @@ bool FVaRestJsonDocRemoveArenaTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonDocLastWinsAfterRemoveTest, "VaRest.Json.Document.LastWinsAfterRemove",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestJsonDocLastWinsAfterRemoveTest::RunTest(const FString& Parameters)
+{
+	// 11 members, "k" twice: indexed (more than IndexThreshold = 8), lookup gives the last "k"
+	FVaRestJson J = FVaRestJson::Parse(FUtf8StringView(UTF8TEXT(
+		"{\"k\":1,\"a\":0,\"b\":0,\"c\":0,\"d\":0,\"e\":0,\"f\":0,\"g\":0,\"h\":0,\"k\":2,\"z\":0}"))).StealValue();
+	TestTrue(TEXT("indexed"), J.GetNodeInternal()->Obj.Index != nullptr);
+	TestEqual(TEXT("last occurrence wins"), J[TEXT("k")].AsInt(), 2);
+
+	J.Remove(TEXT("a")); // 10 members: the index is cleared and refilled in place
+	TestTrue(TEXT("still indexed"), J.GetNodeInternal()->Obj.Index != nullptr);
+	TestEqual(TEXT("last occurrence still wins after Remove reindexes"), J[TEXT("k")].AsInt(), 2);
+
+	J.Remove(TEXT("b"));
+	J.Remove(TEXT("c")); // 8 members: the index is dropped, lookups scan from the end
+	TestTrue(TEXT("index released at 8 members"), J.GetNodeInternal()->Obj.Index == nullptr);
+	TestEqual(TEXT("last occurrence still wins on the linear scan"), J[TEXT("k")].AsInt(), 2);
+	return true;
+}
+
 #endif

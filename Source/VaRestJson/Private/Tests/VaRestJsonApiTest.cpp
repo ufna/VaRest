@@ -8,6 +8,7 @@
 #include "VaRestJsonDocument.h"
 
 #include <atomic>
+#include <cmath>
 #include <utility>
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonApiBuildReadTest, "VaRest.Json.Api.BuildAndRead",
@@ -309,6 +310,56 @@ bool FVaRestJsonApiEdgeCasesTest::RunTest(const FString& Parameters)
 	// Small unsigned reads with AsInt
 	FVaRestJson U = FVaRestJson::Object().Set(TEXT("u"), 5u);
 	TestEqual(TEXT("5u AsInt"), U[TEXT("u")].AsInt(), 5);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonApiMoveTest, "VaRest.Json.Api.MoveLeavesSourceEmpty",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestJsonApiMoveTest::RunTest(const FString& Parameters)
+{
+	// The implicit move moved Doc but copied Node, so a moved-from handle claimed IsValid() over a document it no
+	// longer kept alive (VaRest-2o9): reading it was a use-after-free once the new owner let go.
+	FVaRestJson A = FVaRestJson::Object().Set(TEXT("k"), 1);
+	FVaRestJson B = MoveTemp(A);
+	TestFalse(TEXT("moved-from handle is invalid"), A.IsValid());
+	TestTrue(TEXT("moved-from handle has no document"), A.GetDocumentInternal() == nullptr);
+	TestEqual(TEXT("moved-to handle keeps the value"), B[TEXT("k")].AsInt(), 1);
+
+	FVaRestJson C;
+	C = MoveTemp(B);
+	TestFalse(TEXT("move-assigned-from handle is invalid"), B.IsValid());
+	TestTrue(TEXT("move-assigned-from handle has no document"), B.GetDocumentInternal() == nullptr);
+	TestEqual(TEXT("move-assigned-to handle keeps the value"), C[TEXT("k")].AsInt(), 1);
+
+	// The fluent && overloads end in MoveTemp(*this): the named source must end up empty, not dangling
+	FVaRestJson D = FVaRestJson::Object();
+	FVaRestJson E = MoveTemp(D).Set(TEXT("a"), 1);
+	TestFalse(TEXT("MoveTemp(X).Set(...) leaves X invalid"), D.IsValid());
+	TestEqual(TEXT("the chain's result holds the write"), E[TEXT("a")].AsInt(), 1);
+
+	// A moved-from handle behaves like a default handle: its first Set auto-vivifies
+	D.Set(TEXT("b"), 2);
+	TestTrue(TEXT("moved-from handle auto-vivifies"), D.IsObject() && D[TEXT("b")].AsInt() == 2);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonApiFloatLimitTest, "VaRest.Json.Api.FloatAtFltMax",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestJsonApiFloatLimitTest::RunTest(const FString& Parameters)
+{
+	// 3.4028235e38 is the shortest text of FLT_MAX; as a double it lies just above FLT_MAX but still rounds to it
+	FVaRestJson J = FVaRestJson::Object()
+		.Set(TEXT("max"), 3.4028235e38)
+		.Set(TEXT("halfway"), VaRest::Json::FloatRoundsToInfinity)
+		.Set(TEXT("below"), std::nextafter(VaRest::Json::FloatRoundsToInfinity, 0.0))
+		.Set(TEXT("negmax"), -3.4028235e38);
+	TestTrue(TEXT("FLT_MAX text reads as a float"), J[TEXT("max")].TryGet<float>().IsSet());
+	TestEqual(TEXT("... and is FLT_MAX"), J[TEXT("max")].AsFloat(), TNumericLimits<float>::Max());
+	TestEqual(TEXT("-FLT_MAX text reads as -FLT_MAX"), J[TEXT("negmax")].AsFloat(), -TNumericLimits<float>::Max());
+	TestFalse(TEXT("the halfway point rounds to infinity: not a float"), J[TEXT("halfway")].TryGet<float>().IsSet());
+	TestTrue(TEXT("just below halfway is still a float"), J[TEXT("below")].TryGet<float>().IsSet());
 	return true;
 }
 

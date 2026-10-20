@@ -22,6 +22,16 @@ struct FVaRestJsonMember;
 class FVaRestJsonMemberRange;
 class FVaRestJsonElementRange;
 
+namespace VaRest::Json
+{
+	/**
+	 * A double at or above this magnitude rounds to an infinite float: it is halfway between FLT_MAX (2^128 - 2^104)
+	 * and 2^128, and round-half-even rounds FLT_MAX's odd mantissa up. Below it the cast gives FLT_MAX at most.
+	 * Exact as a double: 2^103 * (2^25 - 1).
+	 */
+	inline constexpr double FloatRoundsToInfinity = 340282356779733661637539395458142568448.0;
+}
+
 /** Type of the value a FVaRestJson handle points at. None = invalid handle (no value). */
 UENUM(BlueprintType)
 enum class EVaRestJsonType : uint8
@@ -108,6 +118,31 @@ struct VARESTJSON_API FVaRestJson
 	using FDocumentRef = TSharedPtr<VaRest::Json::FDocument, ESPMode::ThreadSafe>;
 
 	FVaRestJson() = default;
+	FVaRestJson(const FVaRestJson&) = default;
+	FVaRestJson& operator=(const FVaRestJson&) = default;
+
+	/**
+	 * Moving leaves the source an ordinary default handle. The implicit move moved Doc but copied Node, so a
+	 * moved-from handle (MoveTemp(X).Set(...) ends in MoveTemp(*this)) still claimed IsValid() over a document it
+	 * no longer kept alive.
+	 */
+	FVaRestJson(FVaRestJson&& Other)
+		: Doc(MoveTemp(Other.Doc))
+		, Node(Other.Node)
+	{
+		Other.Node = nullptr;
+	}
+
+	FVaRestJson& operator=(FVaRestJson&& Other)
+	{
+		if (this != &Other)
+		{
+			Doc = MoveTemp(Other.Doc);
+			Node = Other.Node;
+			Other.Node = nullptr;
+		}
+		return *this;
+	}
 
 	// ---- construction
 
@@ -203,7 +238,9 @@ struct VARESTJSON_API FVaRestJson
 			}
 			if constexpr (std::is_same_v<U, float>)
 			{
-				if (FMath::IsFinite(*V) && FMath::Abs(*V) > static_cast<double>(TNumericLimits<float>::Max()))
+				// Not "> FLT_MAX": 3.4028235e38, the shortest text of FLT_MAX, parses to a double just above it
+				// and still rounds to FLT_MAX. Only at the halfway point does the cast give infinity.
+				if (FMath::IsFinite(*V) && FMath::Abs(*V) >= VaRest::Json::FloatRoundsToInfinity)
 				{
 					return {};
 				}
@@ -427,8 +464,9 @@ private:
 	{
 	}
 
-	/** 256 = VaRest::Json::FArena::MinChunkSize (private header): small documents pay one 256 B chunk */
-	static FDocumentRef NewDocument(SIZE_T ArenaFirstChunk = 256);
+	/** First arena chunk of an API-built document: FArena::MinChunkSize (static_assert in VaRestJson.cpp), so a small document pays one 256 B chunk */
+	static constexpr SIZE_T DefaultArenaChunk = 256;
+	static FDocumentRef NewDocument(SIZE_T ArenaFirstChunk = DefaultArenaChunk);
 
 	VaRest::Json::FDocument* PrepareContainer(EVaRestJsonType Kind, const TCHAR* Operation);
 	void SetNode(FStringView Key, VaRest::Json::FNode* Value);

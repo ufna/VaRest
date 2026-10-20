@@ -8,7 +8,7 @@
 
 namespace VaRest::Json
 {
-	namespace
+	namespace WriterPrivate
 	{
 		/** RapidJSON output stream over a TArray. Put/PutReserve/PutUnsafe are found by ADL from writer.h. */
 		struct FUtf8Sink
@@ -103,19 +103,19 @@ namespace VaRest::Json
 		// (JsonUtils/RapidJsonUtils.h:19-53), passed as the StackAllocator argument (writer.h:90, :103;
 		// prettywriter.h:47, :58), instead of the default CrtAllocator's std::malloc (rapidjson.h:694-696).
 		using FAllocator = UE::Json::Private::FAllocatorImpl;
-		FUtf8Sink Sink{ Out };
+		WriterPrivate::FUtf8Sink Sink{ Out };
 		FAllocator StackAllocator;
 		int32 NonFinite = 0;
 		if (Format == EVaRestJsonFormat::Pretty)
 		{
-			rapidjson::PrettyWriter<FUtf8Sink, rapidjson::UTF8<>, rapidjson::UTF8<>, FAllocator> Writer(Sink, &StackAllocator);
+			rapidjson::PrettyWriter<WriterPrivate::FUtf8Sink, rapidjson::UTF8<>, rapidjson::UTF8<>, FAllocator> Writer(Sink, &StackAllocator);
 			Writer.SetIndent(' ', 2);
-			WriteNode(Writer, Node, NonFinite);
+			WriterPrivate::WriteNode(Writer, Node, NonFinite);
 		}
 		else
 		{
-			rapidjson::Writer<FUtf8Sink, rapidjson::UTF8<>, rapidjson::UTF8<>, FAllocator> Writer(Sink, &StackAllocator);
-			WriteNode(Writer, Node, NonFinite);
+			rapidjson::Writer<WriterPrivate::FUtf8Sink, rapidjson::UTF8<>, rapidjson::UTF8<>, FAllocator> Writer(Sink, &StackAllocator);
+			WriterPrivate::WriteNode(Writer, Node, NonFinite);
 		}
 		if (NonFinite > 0)
 		{

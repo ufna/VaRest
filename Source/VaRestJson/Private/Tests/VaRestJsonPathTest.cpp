@@ -4,6 +4,7 @@
 
 #include "Misc/AutomationTest.h"
 #include "VaRestJson.h"
+#include "VaRestJsonDocument.h"
 
 namespace VaRestJsonPathTest
 {
@@ -107,6 +108,27 @@ bool FVaRestJsonPathEdgesTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("a[]"), J.Path(TEXT("a[]")).IsValid());
 	TestFalse(TEXT("a]"), J.Path(TEXT("a]")).IsValid());
 	TestEqual(TEXT("a[0] still works"), J.Path(TEXT("a[0]")).AsInt(), 1);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonPathIndexedCaseTest, "VaRest.Json.Path.IndexedCaseSensitive",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestJsonPathIndexedCaseTest::RunTest(const FString& Parameters)
+{
+	// More than 8 members: "User" is found through the hash index, which must stay byte-exact
+	FVaRestJson Wide = FVaRestJson::Object();
+	for (int32 i = 0; i < 12; ++i)
+	{
+		Wide.Set(*FString::Printf(TEXT("k%d"), i), i);
+	}
+	Wide.Set(TEXT("User"), FVaRestJson::Object().Set(TEXT("Id"), 7));
+	TestTrue(TEXT("indexed root"), Wide.GetNodeInternal()->Obj.Index != nullptr);
+	TestEqual(TEXT("exact dotted path"), Wide.Path(TEXT("User.Id")).AsInt(), 7);
+	TestEqual(TEXT("exact pointer"), Wide.Path(TEXT("/User/Id")).AsInt(), 7);
+	TestFalse(TEXT("indexed dotted lookup is case-sensitive"), Wide.Path(TEXT("user.Id")).IsValid());
+	TestFalse(TEXT("indexed pointer lookup is case-sensitive"), Wide.Path(TEXT("/USER/Id")).IsValid());
+	TestFalse(TEXT("inner key is case-sensitive"), Wide.Path(TEXT("User.ID")).IsValid());
 	return true;
 }
 

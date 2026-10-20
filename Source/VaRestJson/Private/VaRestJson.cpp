@@ -5,9 +5,10 @@
 #include "VaRestJsonDocument.h"
 #include "VaRestJsonLog.h"
 
-using namespace VaRest::Json;
-
-namespace
+// The module builds in unity blobs, where a file-scope using-directive or an anonymous namespace leaks into every
+// later .cpp of the same blob. File-local helpers live in a namespace named after the file; member functions spell
+// VaRest::Json:: in their signatures and open a using-directive inside their body when they need many internals.
+namespace VaRest::Json::HandlePrivate
 {
 	const TCHAR* TypeName(EVaRestJsonType Type)
 	{
@@ -45,13 +46,14 @@ FString FVaRestJsonError::ToString() const
 
 FVaRestJson::FDocumentRef FVaRestJson::NewDocument(SIZE_T ArenaFirstChunk)
 {
-	return MakeShared<FDocument, ESPMode::ThreadSafe>(ArenaFirstChunk);
+	static_assert(DefaultArenaChunk == VaRest::Json::FArena::MinChunkSize, "an API-built document starts with one minimum-size arena chunk");
+	return MakeShared<VaRest::Json::FDocument, ESPMode::ThreadSafe>(ArenaFirstChunk);
 }
 
 FVaRestJson FVaRestJson::Object()
 {
 	FDocumentRef NewDoc = NewDocument();
-	FNode* Root = NewDoc->NewObject();
+	VaRest::Json::FNode* Root = NewDoc->NewObject();
 	NewDoc->Root = Root;
 	return FVaRestJson(MoveTemp(NewDoc), Root);
 }
@@ -59,7 +61,7 @@ FVaRestJson FVaRestJson::Object()
 FVaRestJson FVaRestJson::Array()
 {
 	FDocumentRef NewDoc = NewDocument();
-	FNode* Root = NewDoc->NewArray();
+	VaRest::Json::FNode* Root = NewDoc->NewArray();
 	NewDoc->Root = Root;
 	return FVaRestJson(MoveTemp(NewDoc), Root);
 }
@@ -67,7 +69,7 @@ FVaRestJson FVaRestJson::Array()
 FVaRestJson FVaRestJson::Null()
 {
 	FDocumentRef NewDoc = NewDocument();
-	FNode* Root = NewDoc->NewNull();
+	VaRest::Json::FNode* Root = NewDoc->NewNull();
 	NewDoc->Root = Root;
 	return FVaRestJson(MoveTemp(NewDoc), Root);
 }
@@ -94,68 +96,20 @@ TOptional<bool> FVaRestJson::TryGetBool() const
 
 TOptional<int64> FVaRestJson::TryGetInt64() const
 {
-	if (!IsNumber())
-	{
-		return {};
-	}
-	switch (Node->NumKind)
-	{
-	case ENumKind::Int:
-		return Node->Int;
-	case ENumKind::UInt:
-		return {}; // only values above INT64_MAX are stored as UInt
-	case ENumKind::Double:
-	{
-		const double D = Node->Double;
-		// [-2^63, 2^63) is the int64 range; both bounds are exact doubles
-		if (FMath::IsFinite(D) && FMath::TruncToDouble(D) == D && D >= -9223372036854775808.0 && D < 9223372036854775808.0)
-		{
-			return static_cast<int64>(D);
-		}
-		return {};
-	}
-	}
-	return {};
+	int64 Value = 0;
+	return Node && VaRest::Json::NodeToInt64(*Node, Value) ? TOptional<int64>(Value) : TOptional<int64>();
 }
 
 TOptional<uint64> FVaRestJson::TryGetUInt64() const
 {
-	if (!IsNumber())
-	{
-		return {};
-	}
-	switch (Node->NumKind)
-	{
-	case ENumKind::Int:
-		return Node->Int >= 0 ? TOptional<uint64>(static_cast<uint64>(Node->Int)) : TOptional<uint64>();
-	case ENumKind::UInt:
-		return Node->UInt;
-	case ENumKind::Double:
-	{
-		const double D = Node->Double;
-		if (FMath::IsFinite(D) && FMath::TruncToDouble(D) == D && D >= 0.0 && D < 18446744073709551616.0)
-		{
-			return static_cast<uint64>(D);
-		}
-		return {};
-	}
-	}
-	return {};
+	uint64 Value = 0;
+	return Node && VaRest::Json::NodeToUInt64(*Node, Value) ? TOptional<uint64>(Value) : TOptional<uint64>();
 }
 
 TOptional<double> FVaRestJson::TryGetDouble() const
 {
-	if (!IsNumber())
-	{
-		return {};
-	}
-	switch (Node->NumKind)
-	{
-	case ENumKind::Int:    return static_cast<double>(Node->Int);
-	case ENumKind::UInt:   return static_cast<double>(Node->UInt);
-	case ENumKind::Double: return Node->Double;
-	}
-	return {};
+	double Value = 0.0;
+	return Node && VaRest::Json::NodeToDouble(*Node, Value) ? TOptional<double>(Value) : TOptional<double>();
 }
 
 TOptional<FString> FVaRestJson::TryGetString() const
@@ -184,7 +138,7 @@ FVaRestJson FVaRestJson::Get(FUtf8StringView Key) const
 	{
 		return Miss();
 	}
-	FNode* Found = FDocument::Find(*Node, Key);
+	VaRest::Json::FNode* Found = VaRest::Json::FDocument::Find(*Node, Key);
 	return Found ? FVaRestJson(Doc, Found) : Miss();
 }
 
@@ -198,7 +152,7 @@ FVaRestJson FVaRestJson::Get(FStringView Key) const
 	return Get(FUtf8StringView(Utf8.Get(), Utf8.Length()));
 }
 
-FDocument* FVaRestJson::PrepareContainer(EVaRestJsonType Kind, const TCHAR* Operation)
+VaRest::Json::FDocument* FVaRestJson::PrepareContainer(EVaRestJsonType Kind, const TCHAR* Operation)
 {
 	if (!Node)
 	{
@@ -214,27 +168,27 @@ FDocument* FVaRestJson::PrepareContainer(EVaRestJsonType Kind, const TCHAR* Oper
 	{
 		return Doc.Get();
 	}
-	UE_LOG(LogVaRestJson, Error, TEXT("FVaRestJson: cannot %s on a %s"), Operation, TypeName(Node->Type));
+	UE_LOG(LogVaRestJson, Error, TEXT("FVaRestJson: cannot %s on a %s"), Operation, VaRest::Json::HandlePrivate::TypeName(Node->Type));
 	return nullptr;
 }
 
-void FVaRestJson::SetNode(FStringView Key, FNode* Value)
+void FVaRestJson::SetNode(FStringView Key, VaRest::Json::FNode* Value)
 {
 	const auto Utf8 = StringCast<UTF8CHAR>(Key.GetData(), Key.Len());
 	Doc->Set(*Node, FUtf8StringView(Utf8.Get(), Utf8.Length()), Value);
 }
 
-void FVaRestJson::SetNodeUtf8(FUtf8StringView Key, FNode* Value)
+void FVaRestJson::SetNodeUtf8(FUtf8StringView Key, VaRest::Json::FNode* Value)
 {
 	Doc->Set(*Node, Key, Value);
 }
 
-void FVaRestJson::AddNode(FNode* Value)
+void FVaRestJson::AddNode(VaRest::Json::FNode* Value)
 {
 	Doc->Append(*Node, Value);
 }
 
-void FVaRestJson::SetAtNode(int32 Index, FNode* Value)
+void FVaRestJson::SetAtNode(int32 Index, VaRest::Json::FNode* Value)
 {
 	if (Index >= 0)
 	{
@@ -257,11 +211,29 @@ bool FVaRestJson::Remove(FStringView Key)
 	return Remove(FUtf8StringView(Utf8.Get(), Utf8.Length()));
 }
 
-FDocument* FVaRestJson::PrepareSetAt(int32 Index)
+VaRest::Json::FDocument* FVaRestJson::PrepareSetAt(int32 Index)
 {
-	if (!IsArray() || Index < 0 || Index >= static_cast<int32>(Node->Arr.Num))
+	// One message per cause: "an invalid handle of 0 elements" (M1) named neither the missed lookup nor the type.
+	if (!Node)
 	{
-		UE_LOG(LogVaRestJson, Error, TEXT("FVaRestJson: cannot SetAt index %d on a %s of %d elements"), Index, TypeName(GetType()), Num());
+		if (Doc)
+		{
+			UE_LOG(LogVaRestJson, Error, TEXT("FVaRestJson: cannot SetAt index %d on a missing value (a lookup missed)"), Index);
+		}
+		else
+		{
+			UE_LOG(LogVaRestJson, Error, TEXT("FVaRestJson: cannot SetAt index %d on an invalid handle"), Index);
+		}
+		return nullptr;
+	}
+	if (Node->Type != EVaRestJsonType::Array)
+	{
+		UE_LOG(LogVaRestJson, Error, TEXT("FVaRestJson: cannot SetAt index %d on a %s"), Index, VaRest::Json::HandlePrivate::TypeName(Node->Type));
+		return nullptr;
+	}
+	if (Index < 0 || Index >= static_cast<int32>(Node->Arr.Num))
+	{
+		UE_LOG(LogVaRestJson, Error, TEXT("FVaRestJson: cannot SetAt index %d on an array of %d elements"), Index, static_cast<int32>(Node->Arr.Num));
 		return nullptr;
 	}
 	return Doc.Get();
@@ -275,7 +247,7 @@ TArray<FString> FVaRestJson::GetKeys() const
 		Keys.Reserve(Node->Obj.Num);
 		for (uint32 i = 0; i < Node->Obj.Num; ++i)
 		{
-			const FStr& Key = Node->Obj.Members[i].Key;
+			const VaRest::Json::FStr& Key = Node->Obj.Members[i].Key;
 			Keys.Add(FString::ConstructFromPtrSize(Key.Data, static_cast<int32>(Key.Len)));
 		}
 	}
@@ -293,7 +265,7 @@ FVaRestJsonMember FVaRestJson::MemberAt(int32 Index) const
 	{
 		return FVaRestJsonMember{};
 	}
-	const FMember& M = Node->Obj.Members[Index];
+	const VaRest::Json::FMember& M = Node->Obj.Members[Index];
 	return FVaRestJsonMember{ M.Key.View(), FVaRestJson(Doc, M.Value) };
 }
 
@@ -318,13 +290,14 @@ FVaRestJsonElementRange FVaRestJson::Elements() const
 
 FVaRestJson FVaRestJson::Clone() const
 {
+	using VaRest::Json::FArena;
 	if (!Node)
 	{
 		return {};
 	}
 	// A root clone needs about what the source used; a subtree clone starts small and grows.
 	FDocumentRef NewDoc = NewDocument(Node == Doc->Root ? FMath::Max<SIZE_T>(FArena::MinChunkSize, Doc->Arena.GetUsedBytes()) : FArena::MinChunkSize);
-	FNode* Root = NewDoc->DeepCopy(*Node);
+	VaRest::Json::FNode* Root = NewDoc->DeepCopy(*Node);
 	NewDoc->Root = Root;
 	return FVaRestJson(MoveTemp(NewDoc), Root);
 }
@@ -335,23 +308,23 @@ bool FVaRestJson::Equals(const FVaRestJson& Other) const
 	{
 		return !Node && !Other.Node;
 	}
-	return Node == Other.Node || FDocument::Equals(*Node, *Other.Node);
+	return Node == Other.Node || VaRest::Json::FDocument::Equals(*Node, *Other.Node);
 }
 
-FNode* FVaRestJson::MakeNull(FDocument& InDoc) { return InDoc.NewNull(); }
-FNode* FVaRestJson::MakeBool(FDocument& InDoc, bool bValue) { return InDoc.NewBool(bValue); }
-FNode* FVaRestJson::MakeInt(FDocument& InDoc, int64 Value) { return InDoc.NewInt(Value); }
-FNode* FVaRestJson::MakeUInt(FDocument& InDoc, uint64 Value) { return InDoc.NewUInt(Value); }
-FNode* FVaRestJson::MakeDouble(FDocument& InDoc, double Value) { return InDoc.NewDouble(Value); }
-FNode* FVaRestJson::MakeUtf8String(FDocument& InDoc, FUtf8StringView Value) { return InDoc.NewString(Value); }
+VaRest::Json::FNode* FVaRestJson::MakeNull(VaRest::Json::FDocument& InDoc) { return InDoc.NewNull(); }
+VaRest::Json::FNode* FVaRestJson::MakeBool(VaRest::Json::FDocument& InDoc, bool bValue) { return InDoc.NewBool(bValue); }
+VaRest::Json::FNode* FVaRestJson::MakeInt(VaRest::Json::FDocument& InDoc, int64 Value) { return InDoc.NewInt(Value); }
+VaRest::Json::FNode* FVaRestJson::MakeUInt(VaRest::Json::FDocument& InDoc, uint64 Value) { return InDoc.NewUInt(Value); }
+VaRest::Json::FNode* FVaRestJson::MakeDouble(VaRest::Json::FDocument& InDoc, double Value) { return InDoc.NewDouble(Value); }
+VaRest::Json::FNode* FVaRestJson::MakeUtf8String(VaRest::Json::FDocument& InDoc, FUtf8StringView Value) { return InDoc.NewString(Value); }
 
-FNode* FVaRestJson::MakeString(FDocument& InDoc, FStringView Value)
+VaRest::Json::FNode* FVaRestJson::MakeString(VaRest::Json::FDocument& InDoc, FStringView Value)
 {
 	const auto Utf8 = StringCast<UTF8CHAR>(Value.GetData(), Value.Len());
 	return InDoc.NewString(FUtf8StringView(Utf8.Get(), Utf8.Length()));
 }
 
-FNode* FVaRestJson::MakeCopy(FDocument& InDoc, const FVaRestJson& Value)
+VaRest::Json::FNode* FVaRestJson::MakeCopy(VaRest::Json::FDocument& InDoc, const FVaRestJson& Value)
 {
 	// A node has exactly one parent, so even a value from this same document is copied.
 	return Value.Node ? InDoc.DeepCopy(*Value.Node) : InDoc.NewNull();

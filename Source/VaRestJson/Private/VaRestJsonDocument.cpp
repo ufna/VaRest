@@ -4,7 +4,7 @@
 
 namespace VaRest::Json
 {
-	namespace
+	namespace DocumentPrivate
 	{
 		template <typename T>
 		T* GrowVector(FArena& Arena, T* Old, uint32 Num, uint32& InOutMax)
@@ -197,7 +197,7 @@ namespace VaRest::Json
 		FNode::FObj& O = Object.Obj;
 		if (O.Num == O.Max)
 		{
-			O.Members = GrowVector(Arena, O.Members, O.Num, O.Max);
+			O.Members = DocumentPrivate::GrowVector(Arena, O.Members, O.Num, O.Max);
 		}
 		O.Members[O.Num] = FMember{ Key, Value };
 		++O.Num;
@@ -302,7 +302,7 @@ namespace VaRest::Json
 		FNode::FArr& A = Array.Arr;
 		if (A.Num == A.Max)
 		{
-			A.Items = GrowVector(Arena, A.Items, A.Num, A.Max);
+			A.Items = DocumentPrivate::GrowVector(Arena, A.Items, A.Num, A.Max);
 		}
 		A.Items[A.Num++] = Value;
 	}
@@ -423,7 +423,7 @@ namespace VaRest::Json
 		case EVaRestJsonType::Bool:
 			return A.Bool == B.Bool;
 		case EVaRestJsonType::Number:
-			return NumbersEqual(A, B);
+			return DocumentPrivate::NumbersEqual(A, B);
 		case EVaRestJsonType::String:
 			return KeyEquals(A.Str, B.Str.View());
 		case EVaRestJsonType::Array:

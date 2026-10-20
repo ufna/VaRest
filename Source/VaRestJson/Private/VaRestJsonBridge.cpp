@@ -6,9 +6,7 @@
 #include "Dom/JsonValue.h"
 #include "VaRestJsonDocument.h"
 
-using namespace VaRest::Json;
-
-namespace
+namespace VaRest::Json::BridgePrivate
 {
 	constexpr int64 MaxExactDoubleInt = 9007199254740992ll; // 2^53
 
@@ -184,11 +182,13 @@ namespace
 
 TSharedPtr<FJsonValue> FVaRestJson::ToJsonValue() const
 {
+	using namespace VaRest::Json::BridgePrivate;
 	return Node ? ToEngine(*Node) : TSharedPtr<FJsonValue>();
 }
 
 TSharedPtr<FJsonObject> FVaRestJson::ToJsonObject() const
 {
+	using namespace VaRest::Json::BridgePrivate;
 	return IsObject() ? ToEngine(*Node)->AsObject() : TSharedPtr<FJsonObject>();
 }
 
@@ -198,6 +198,8 @@ FVaRestJson FVaRestJson::FromJsonValue(const TSharedPtr<FJsonValue>& Value)
 	{
 		return FVaRestJson();
 	}
+	using namespace VaRest::Json;
+	using namespace VaRest::Json::BridgePrivate;
 	FDocumentRef NewDoc = NewDocument();
 	FNode* Root = FromEngine(*NewDoc, *Value);
 	NewDoc->Root = Root;

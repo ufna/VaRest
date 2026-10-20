@@ -5,28 +5,7 @@
 #include "VaRestJsonReader.h"
 #include "VaRestJsonWriter.h"
 
-using namespace VaRest::Json;
-
-void FVaRestJson::ToUtf8(TArray<uint8>& Out, EVaRestJsonFormat Format) const
-{
-	if (Node)
-	{
-		Write(*Node, Format, Out);
-	}
-}
-
-FString FVaRestJson::ToString(EVaRestJsonFormat Format) const
-{
-	if (!Node)
-	{
-		return FString();
-	}
-	TArray<uint8> Bytes;
-	Write(*Node, Format, Bytes);
-	return FString::ConstructFromPtrSize(reinterpret_cast<const UTF8CHAR*>(Bytes.GetData()), Bytes.Num());
-}
-
-namespace
+namespace VaRest::Json::TextPrivate
 {
 	/**
 	 * First arena chunk for a parse: input / 32, clamped to [FArena::MinChunkSize, FArena::MaxChunkSize].
@@ -76,13 +55,33 @@ namespace
 	}
 }
 
+void FVaRestJson::ToUtf8(TArray<uint8>& Out, EVaRestJsonFormat Format) const
+{
+	if (Node)
+	{
+		VaRest::Json::Write(*Node, Format, Out);
+	}
+}
+
+FString FVaRestJson::ToString(EVaRestJsonFormat Format) const
+{
+	if (!Node)
+	{
+		return FString();
+	}
+	TArray<uint8> Bytes;
+	VaRest::Json::Write(*Node, Format, Bytes);
+	return FString::ConstructFromPtrSize(reinterpret_cast<const UTF8CHAR*>(Bytes.GetData()), Bytes.Num());
+}
+
 TValueOrError<FVaRestJson, FVaRestJsonError> FVaRestJson::ParseOwned(TArray<uint8>&& Utf8Bytes, const FVaRestJsonParseOptions& Options)
 {
-	return ParseIntoDocument(MoveTemp(Utf8Bytes), Options, FUtf8StringView());
+	return VaRest::Json::TextPrivate::ParseIntoDocument(MoveTemp(Utf8Bytes), Options, FUtf8StringView());
 }
 
 TValueOrError<FVaRestJson, FVaRestJsonError> FVaRestJson::Parse(TConstArrayView<uint8> Utf8Bytes, const FVaRestJsonParseOptions& Options)
 {
+	using namespace VaRest::Json::TextPrivate;
 	FVaRestJsonError Error;
 	if (ExceedsLimit(Utf8Bytes.Num(), Options, Error))
 	{
@@ -101,6 +100,8 @@ TValueOrError<FVaRestJson, FVaRestJsonError> FVaRestJson::Parse(FUtf8StringView 
 
 TValueOrError<FVaRestJson, FVaRestJsonError> FVaRestJson::Parse(FStringView Text, const FVaRestJsonParseOptions& Options)
 {
+	using namespace VaRest::Json;
+	using namespace VaRest::Json::TextPrivate;
 	// One copy: convert straight into the owned buffer (with a byte of slack for the terminator). The in-situ
 	// parse rewrites that buffer, so line/column are computed on the error path only, by converting again.
 	const int32 Utf8Len = FPlatformString::ConvertedLength<UTF8CHAR>(Text.GetData(), Text.Len());
