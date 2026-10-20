@@ -181,6 +181,33 @@ struct VARESTJSON_API FVaRestJsonConvert
 	static bool JsonToProperty(const FVaRestJson& Json, const FProperty* Property, void* Value,
 		const FVaRestJsonConvertOptions& Options = FVaRestJsonConvertOptions(), FVaRestJsonDecodeReport* OutReport = nullptr);
 
+	/**
+	 * JsonToStruct into a new T (USTRUCT or TBaseStructure type); the error is the first error (or warning) reported.
+	 * JSON null gives a default T (null keeps a struct's values, spec 2.4); TryGet treats null as absent instead.
+	 */
+	template <typename T>
+	static TValueOrError<T, FVaRestJsonError> FromJson(const FVaRestJson& Json, const FVaRestJsonConvertOptions& Options = FVaRestJsonConvertOptions())
+	{
+		UScriptStruct* Struct = TBaseStructure<T>::Get();
+		alignas(T) uint8 Storage[sizeof(T)];
+		Struct->InitializeStruct(Storage);
+		FVaRestJsonDecodeReport Report;
+		const bool bDecoded = JsonToStruct(Json, Struct, Storage, Options, &Report);
+		if (bDecoded)
+		{
+			T Value(MoveTemp(*reinterpret_cast<T*>(Storage)));
+			Struct->DestroyStruct(Storage);
+			return MakeValue(MoveTemp(Value));
+		}
+		Struct->DestroyStruct(Storage);
+		FVaRestJsonError Error = Report.Errors.Num() > 0 ? Report.Errors[0] : Report.Warnings.Num() > 0 ? Report.Warnings[0] : FVaRestJsonError();
+		if (Error.Message.IsEmpty())
+		{
+			Error.Message = TEXT("the value is not an object");
+		}
+		return MakeError(MoveTemp(Error));
+	}
+
 	/** Drops every cached field map. The editor calls it when a Blueprint struct changes; FVaRestJsonNames calls it too. */
 	static void ResetCache();
 

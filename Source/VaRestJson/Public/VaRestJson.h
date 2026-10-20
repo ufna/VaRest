@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Templates/ValueOrError.h"
+#include "UObject/Class.h"
 
 #include <type_traits>
 
@@ -205,81 +206,22 @@ struct VARESTJSON_API FVaRestJson
 	/** Zero-copy view of a string value; empty if not a string. Valid while any handle to the document lives. */
 	FUtf8StringView AsUtf8View() const;
 
+	/**
+	 * The value as T, unset when it is not one: bool, every integer type (range-checked), float, double, FString, FName,
+	 * FText, FVaRestJson, any USTRUCT (and engine structs with a TBaseStructure such as FVector), TArray<T> and
+	 * TMap<FString, T>. No coercion between JSON types. A struct is decoded with default options (camelCase, lenient)
+	 * and must be an object (a value struct such as FDateTime or FGuid: its own JSON form; null is never a value); one
+	 * element or value that does not convert makes a whole TArray/TMap unset. Defined at the end of this header.
+	 */
 	template <typename T>
-	TOptional<T> TryGet() const
+	TOptional<T> TryGet() const;
+
+	/** TryGet with a fallback: the value as T, or Default */
+	template <typename T>
+	T As(T Default = T()) const
 	{
-		using U = std::decay_t<T>;
-		if constexpr (std::is_same_v<U, bool>)
-		{
-			return TryGetBool();
-		}
-		else if constexpr (std::is_same_v<U, char> || std::is_same_v<U, wchar_t> || std::is_same_v<U, char8_t> || std::is_same_v<U, char16_t> || std::is_same_v<U, char32_t>)
-		{
-			// Like MakeNodeFor: a character type would otherwise read a number as a code unit
-			static_assert(sizeof(U) == 0, "FVaRestJson::TryGet: a single character is not a JSON value; read a string");
-			return {};
-		}
-		else if constexpr (std::is_integral_v<U> && std::is_signed_v<U>)
-		{
-			const TOptional<int64> V = TryGetInt64();
-			if (V && *V >= static_cast<int64>(TNumericLimits<U>::Min()) && *V <= static_cast<int64>(TNumericLimits<U>::Max()))
-			{
-				return static_cast<U>(*V);
-			}
-			return {};
-		}
-		else if constexpr (std::is_integral_v<U>)
-		{
-			const TOptional<uint64> V = TryGetUInt64();
-			if (V && *V <= static_cast<uint64>(TNumericLimits<U>::Max()))
-			{
-				return static_cast<U>(*V);
-			}
-			return {};
-		}
-		else if constexpr (std::is_floating_point_v<U>)
-		{
-			const TOptional<double> V = TryGetDouble();
-			if (!V)
-			{
-				return {};
-			}
-			if constexpr (std::is_same_v<U, float>)
-			{
-				// Not "> FLT_MAX": 3.4028235e38, the shortest text of FLT_MAX, parses to a double just above it
-				// and still rounds to FLT_MAX. Only at the halfway point does the cast give infinity.
-				if (FMath::IsFinite(*V) && FMath::Abs(*V) >= VaRest::Json::FloatRoundsToInfinity)
-				{
-					return {};
-				}
-			}
-			return TOptional<U>(static_cast<U>(*V));
-		}
-		else if constexpr (std::is_same_v<U, FString>)
-		{
-			return TryGetString();
-		}
-		else if constexpr (std::is_same_v<U, FName>)
-		{
-			// NAME_SIZE characters or more abort FName construction in builds with checks (UnrealNames.cpp:3271-3281): such
-			// text is not a name
-			const TOptional<FString> S = TryGetString();
-			return S && S->Len() < NAME_SIZE ? TOptional<FName>(FName(*S)) : TOptional<FName>();
-		}
-		else if constexpr (std::is_same_v<U, FText>)
-		{
-			const TOptional<FString> S = TryGetString();
-			return S ? TOptional<FText>(FText::FromString(*S)) : TOptional<FText>();
-		}
-		else if constexpr (std::is_same_v<U, FVaRestJson>)
-		{
-			return IsValid() ? TOptional<FVaRestJson>(*this) : TOptional<FVaRestJson>();
-		}
-		else
-		{
-			static_assert(sizeof(U) == 0, "FVaRestJson::TryGet: unsupported type (structs arrive with FVaRestJsonConvert in M2)");
-			return {};
-		}
+		TOptional<T> Value = TryGet<T>();
+		return Value ? MoveTemp(Value.GetValue()) : MoveTemp(Default);
 	}
 
 	// ---- objects
@@ -606,7 +548,7 @@ private:
 		}
 		else
 		{
-			static_assert(sizeof(U) == 0, "FVaRestJson: unsupported value type (structs arrive with FVaRestJsonConvert in M2)");
+			static_assert(sizeof(U) == 0, "FVaRestJson: unsupported value type; encode a struct with FVaRestJsonConvert::ToJson / StructToJson");
 			return nullptr;
 		}
 	}
@@ -698,3 +640,154 @@ public:
 private:
 	FVaRestJson Owner;
 };
+
+namespace VaRest::Json
+{
+	/** TryGet<USTRUCT>: decodes with default options; false when Json is not an object. Defined in VaRestJsonConvertDecode.cpp. */
+	VARESTJSON_API bool DecodeStructForTryGet(const FVaRestJson& Json, const UScriptStruct* Struct, void* Data);
+
+	template <typename T>
+	struct TStringKeyedMap
+	{
+		static constexpr bool bValue = false;
+	};
+
+	template <typename ValueType, typename SetAllocator, typename KeyFuncs>
+	struct TStringKeyedMap<TMap<FString, ValueType, SetAllocator, KeyFuncs>>
+	{
+		static constexpr bool bValue = true;
+		using FValue = ValueType;
+	};
+}
+
+// Defined out of the class so FVaRestJsonMember and the ranges are complete types here
+template <typename T>
+TOptional<T> FVaRestJson::TryGet() const
+{
+	using U = std::decay_t<T>;
+	if constexpr (std::is_same_v<U, bool>)
+	{
+		return TryGetBool();
+	}
+	else if constexpr (std::is_same_v<U, char> || std::is_same_v<U, wchar_t> || std::is_same_v<U, char8_t> || std::is_same_v<U, char16_t> || std::is_same_v<U, char32_t>)
+	{
+		// Like MakeNodeFor: a character type would otherwise read a number as a code unit
+		static_assert(sizeof(U) == 0, "FVaRestJson::TryGet: a single character is not a JSON value; read a string");
+		return {};
+	}
+	else if constexpr (std::is_integral_v<U> && std::is_signed_v<U>)
+	{
+		const TOptional<int64> V = TryGetInt64();
+		if (V && *V >= static_cast<int64>(TNumericLimits<U>::Min()) && *V <= static_cast<int64>(TNumericLimits<U>::Max()))
+		{
+			return static_cast<U>(*V);
+		}
+		return {};
+	}
+	else if constexpr (std::is_integral_v<U>)
+	{
+		const TOptional<uint64> V = TryGetUInt64();
+		if (V && *V <= static_cast<uint64>(TNumericLimits<U>::Max()))
+		{
+			return static_cast<U>(*V);
+		}
+		return {};
+	}
+	else if constexpr (std::is_floating_point_v<U>)
+	{
+		const TOptional<double> V = TryGetDouble();
+		if (!V)
+		{
+			return {};
+		}
+		if constexpr (std::is_same_v<U, float>)
+		{
+			// Not "> FLT_MAX": 3.4028235e38, the shortest text of FLT_MAX, parses to a double just above it
+			// and still rounds to FLT_MAX. Only at the halfway point does the cast give infinity.
+			if (FMath::IsFinite(*V) && FMath::Abs(*V) >= VaRest::Json::FloatRoundsToInfinity)
+			{
+				return {};
+			}
+		}
+		return TOptional<U>(static_cast<U>(*V));
+	}
+	else if constexpr (std::is_same_v<U, FString>)
+	{
+		return TryGetString();
+	}
+	else if constexpr (std::is_same_v<U, FName>)
+	{
+		// NAME_SIZE characters or more abort FName construction in builds with checks (UnrealNames.cpp:3271-3281): such
+		// text is not a name
+		const TOptional<FString> S = TryGetString();
+		return S && S->Len() < NAME_SIZE ? TOptional<FName>(FName(*S)) : TOptional<FName>();
+	}
+	else if constexpr (std::is_same_v<U, FText>)
+	{
+		const TOptional<FString> S = TryGetString();
+		return S ? TOptional<FText>(FText::FromString(*S)) : TOptional<FText>();
+	}
+	else if constexpr (std::is_same_v<U, FVaRestJson>)
+	{
+		return IsValid() ? TOptional<FVaRestJson>(*this) : TOptional<FVaRestJson>();
+	}
+	else if constexpr (TIsTArray_V<U>)
+	{
+		using FElement = typename U::ElementType;
+		if (!IsArray())
+		{
+			return {};
+		}
+		U Result;
+		Result.Reserve(Num());
+		for (int32 i = 0; i < Num(); ++i)
+		{
+			TOptional<FElement> Item = At(i).template TryGet<FElement>();
+			if (!Item)
+			{
+				return {};
+			}
+			Result.Add(MoveTemp(Item.GetValue()));
+		}
+		return TOptional<U>(MoveTemp(Result));
+	}
+	else if constexpr (VaRest::Json::TStringKeyedMap<U>::bValue)
+	{
+		using FMapValue = typename VaRest::Json::TStringKeyedMap<U>::FValue;
+		if (!IsObject())
+		{
+			return {};
+		}
+		U Result;
+		for (const FVaRestJsonMember& Member : Members())
+		{
+			TOptional<FMapValue> Item = Member.Value.template TryGet<FMapValue>();
+			if (!Item)
+			{
+				return {};
+			}
+			Result.Add(Member.GetKey(), MoveTemp(Item.GetValue())); // a later duplicate overwrites: the last wins, as lookups do
+		}
+		return TOptional<U>(MoveTemp(Result));
+	}
+	else if constexpr (requires { TBaseStructure<U>::Get(); })
+	{
+		// Any USTRUCT, and engine structs with a TBaseStructure (FVector, FGuid, FDateTime...). Built the way reflection
+		// builds it, so fields the JSON lacks keep the struct's defaults even for no-op-constructed types.
+		UScriptStruct* Struct = TBaseStructure<U>::Get();
+		alignas(U) uint8 Storage[sizeof(U)];
+		Struct->InitializeStruct(Storage);
+		TOptional<U> Result;
+		if (VaRest::Json::DecodeStructForTryGet(*this, Struct, Storage))
+		{
+			Result.Emplace(MoveTemp(*reinterpret_cast<U*>(Storage)));
+		}
+		Struct->DestroyStruct(Storage);
+		return Result;
+	}
+	else
+	{
+		static_assert(sizeof(U) == 0, "FVaRestJson::TryGet: unsupported type");
+		return {};
+	}
+}

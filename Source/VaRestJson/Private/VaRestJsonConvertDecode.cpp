@@ -977,3 +977,20 @@ bool FVaRestJsonConvert::JsonToProperty(const FVaRestJson& Json, const FProperty
 	const bool bStored = DecodeField(*Json.GetNodeInternal(), Property, Value, Context);
 	return Finish(Context, bStored, Property->GetName());
 }
+
+bool VaRest::Json::DecodeStructForTryGet(const FVaRestJson& Json, const UScriptStruct* Struct, void* Data)
+{
+	// TryGet asks "is this a T". A missing value or null is not one, not even for a struct with a scalar form, whose
+	// field decode keeps the value on null (spec 2.4) and would hand back a default FDateTime/FGuid as if one was sent.
+	if (!Json.IsValid() || Json.IsNull())
+	{
+		return false;
+	}
+	// Anything but an object is not an ordinary struct; a value struct (FGuid, FDateTime...) takes its scalar form
+	if (Convert::ClassifyStruct(Struct) == Convert::ESpecialStruct::None && !Json.IsObject())
+	{
+		return false;
+	}
+	FVaRestJsonDecodeReport Report; // a report keeps TryGet quiet; lenient warnings are not failures
+	return FVaRestJsonConvert::JsonToStruct(Json, Struct, Data, FVaRestJsonConvertOptions(), &Report);
+}
