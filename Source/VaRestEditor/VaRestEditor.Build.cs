@@ -47,7 +47,9 @@ public class VaRestEditor : ModuleRules
                 "Sequencer",
                 "DetailCustomizations",
                 "Settings",
-                "RenderCore"
+                "RenderCore",
+                // VaRest 2: struct <-> JSON cache invalidation, the v2 Make Json node, their tests
+                "VaRestJson"
 			});
 		
 		
