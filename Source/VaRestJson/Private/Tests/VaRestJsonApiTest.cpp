@@ -3,8 +3,13 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "Async/ParallelFor.h"
+#include "Internationalization/Culture.h"
+#include "Internationalization/Internationalization.h"
 #include "Misc/AutomationTest.h"
+#include "Misc/ScopeExit.h"
 #include "VaRestJson.h"
+#include "VaRestJsonConvert.h"
+#include "VaRestJsonConvertTestTypes.h"
 #include "VaRestJsonDocument.h"
 
 #include <atomic>
@@ -360,6 +365,46 @@ bool FVaRestJsonApiFloatLimitTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("-FLT_MAX text reads as -FLT_MAX"), J[TEXT("negmax")].AsFloat(), -TNumericLimits<float>::Max());
 	TestFalse(TEXT("the halfway point rounds to infinity: not a float"), J[TEXT("halfway")].TryGet<float>().IsSet());
 	TestTrue(TEXT("just below halfway is still a float"), J[TEXT("below")].TryGet<float>().IsSet());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonApiTextCultureTest, "VaRest.Json.Api.TextIsCultureInvariant",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestJsonApiTextCultureTest::RunTest(const FString& Parameters)
+{
+	// Spec 2.4: an FText is its culture-invariant string, through Set/Add/From as through a struct field, so a request
+	// body does not change with the player's language. German formats 1234.5 differently from the invariant culture.
+	FInternationalization& I18N = FInternationalization::Get();
+	const FString Previous = I18N.GetCurrentCulture()->GetName();
+	if (!TestTrue(TEXT("the de culture can be set"), I18N.SetCurrentCulture(TEXT("de"))))
+	{
+		return false;
+	}
+	ON_SCOPE_EXIT
+	{
+		I18N.SetCurrentCulture(Previous);
+	};
+	const FText Price = FText::AsNumber(1234.5);
+	const FString Invariant = Price.BuildSourceString();
+	if (!TestFalse(*FString::Printf(TEXT("the German display string (%s) differs from the invariant one (%s)"), *Price.ToString(), *Invariant),
+		Price.ToString().Equals(Invariant, ESearchCase::CaseSensitive)))
+	{
+		return false;
+	}
+	FVaRestJsonTestAll All;
+	All.TextValue = Price;
+	const FString FromStruct = FVaRestJsonConvert::StructToJson(FVaRestJsonTestAll::StaticStruct(), &All)[TEXT("textValue")].AsString();
+	TestEqualSensitive(TEXT("a struct field writes the invariant string"), FromStruct, Invariant);
+	TestEqualSensitive(TEXT("Set writes what a struct field writes"), FVaRestJson::Object().Set(TEXT("price"), Price)[TEXT("price")].AsString(), FromStruct);
+	TestEqualSensitive(TEXT("Add too"), FVaRestJson::Array().Add(Price)[0].AsString(), FromStruct);
+	TestEqualSensitive(TEXT("From too"), FVaRestJson::From(Price).AsString(), FromStruct);
+	TestEqualSensitive(TEXT("Array(...) too"), FVaRestJson::Array(Price)[0].AsString(), FromStruct);
+
+	// Read back the way decode reads a text field: flagged culture-invariant in the editor too (FromString is not)
+	const TOptional<FText> Read = FVaRestJson::From(Invariant).TryGet<FText>();
+	TestTrue(TEXT("TryGet<FText> is culture-invariant"), Read.IsSet() && Read->IsCultureInvariant());
+	TestTrue(TEXT("... with the JSON string"), Read.IsSet() && Read->ToString().Equals(Invariant, ESearchCase::CaseSensitive));
 	return true;
 }
 

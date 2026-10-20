@@ -208,7 +208,8 @@ struct VARESTJSON_API FVaRestJson
 
 	/**
 	 * The value as T, unset when it is not one: bool, every integer type (range-checked), float, double, FString, FName,
-	 * FText, FVaRestJson, any USTRUCT (and engine structs with a TBaseStructure such as FVector, plus FTimespan),
+	 * FText (culture-invariant, as decode builds one), FVaRestJson, any USTRUCT (and engine structs with a TBaseStructure
+	 * such as FVector, plus FTimespan),
 	 * TArray<T> and TMap<FString, T>. Scalars take no coercion between JSON types. A struct must be a JSON object (a
 	 * value struct such as FDateTime, FGuid, FTimespan or a soft path: its own scalar form; null is never a value) and
 	 * its fields are decoded tolerantly with default options (camelCase, lenient): {"id":"7"} sets an int Id to 7 and
@@ -241,7 +242,8 @@ struct VARESTJSON_API FVaRestJson
 	/**
 	 * Sets (copies) Value under Key. An invalid handle becomes a new object first.
 	 * UTF-8 and ANSI keys and values are validated: an invalid sequence becomes U+FFFD with one warning per string;
-	 * FString text maps unpaired surrogates to U+FFFD.
+	 * FString text maps unpaired surrogates to U+FFFD. An FText is written as its culture-invariant string
+	 * (BuildSourceString), as a struct field is (spec 2.4): FText::AsNumber(1234.5) is "1234.5" in every culture.
 	 *
 	 * A missing Value is undefined, not null (spec 2.2): the key is removed, the way obj.k = undefined disappears from
 	 * JSON.stringify, so Body.Set("p", Resp["p"]) forwards p only when it exists. Explicit null is FVaRestJson::Null()
@@ -536,9 +538,15 @@ private:
 		{
 			return MakeCopy(InDoc, Value);
 		}
-		else if constexpr (std::is_same_v<U, FName> || std::is_same_v<U, FText>)
+		else if constexpr (std::is_same_v<U, FName>)
 		{
 			return MakeString(InDoc, FStringView(Value.ToString()));
+		}
+		else if constexpr (std::is_same_v<U, FText>)
+		{
+			// Culture-invariant (spec 2.4), as a struct field writes it: ToString() is the current culture's display text,
+			// so FText::AsNumber(1234.5) would be "1.234,5" in German and a localized text its translation
+			return MakeString(InDoc, FStringView(Value.BuildSourceString()));
 		}
 		else if constexpr (std::is_convertible_v<ValueType, FUtf8StringView>)
 		{
@@ -746,8 +754,10 @@ TOptional<T> FVaRestJson::TryGet() const
 	}
 	else if constexpr (std::is_same_v<U, FText>)
 	{
-		const TOptional<FString> S = TryGetString();
-		return S ? TOptional<FText>(FText::FromString(*S)) : TOptional<FText>();
+		// As decode builds a text field (spec 2.4). FText::FromString is flagged culture-invariant only outside the editor
+		// (Text.cpp:1158-1161), so PIE and a packaged game would build different texts.
+		TOptional<FString> S = TryGetString();
+		return S ? TOptional<FText>(FText::AsCultureInvariant(MoveTemp(S.GetValue()))) : TOptional<FText>();
 	}
 	else if constexpr (std::is_same_v<U, FVaRestJson>)
 	{
