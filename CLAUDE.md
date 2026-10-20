@@ -120,4 +120,8 @@ fixture is authored from it.
   and BP events run on the game thread; parse/decode/disk IO run on `UE::Tasks`.
 - **v1 paths are frozen.** Never rename, move or change the signature of anything under
   `Source/VaRest` or `Source/VaRestEditor` that v1 shipped; v1 projects load it by path.
+- **The v2 Blueprint-visible surface is frozen too** (from M2, 2026-10-21): `UVaRestJsonLibrary` function
+  names and *parameter names* (they are pin names in saved graphs), `MakeJsonInternal*`, `UK2Node_VaRestMakeJson`
+  and every `UENUM`/`USTRUCT` name under `/Script/VaRestJson` and `/Script/VaRestEditor`. A rename needs a
+  CoreRedirect in the same commit.
 - **Push back with sources** when a premise is wrong.
