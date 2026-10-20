@@ -16,7 +16,12 @@ class FProperty;
 UENUM(BlueprintType)
 enum class EVaRestJsonNaming : uint8
 {
-	/** The authored field name unchanged: the C++ property name, or a Blueprint struct field's name */
+	/**
+	 * The authored field name unchanged: the C++ property name, or a Blueprint struct field's name. A C++ name is
+	 * spelled the way a packaged game has it, where an FName keeps the casing first registered: a field named like an
+	 * engine name in another casing comes out in the engine's (id -> ID, name -> Name), in the editor too. For an exact
+	 * key register a rename (FVaRestJsonNames); the other policies normalise the case of each word anyway.
+	 */
 	AsIs,
 	/** userId (the default) */
 	CamelCase,
@@ -57,6 +62,8 @@ struct FVaRestJsonRename
 /**
  * C++ per-field renames (spec 2.4): FVaRestJsonNames::Register<FMyStruct>({ { TEXT("UserId"), TEXT("user_id") } }).
  * UPROPERTY meta is editor-only data, so names cannot come from meta in a cooked game; register at startup instead.
+ * A rename is an FString and keeps its case: it is how a C++ field whose name collides with an engine FName in another
+ * casing (id is written ID, name is written Name) gets an exact key.
  */
 struct VARESTJSON_API FVaRestJsonNames
 {

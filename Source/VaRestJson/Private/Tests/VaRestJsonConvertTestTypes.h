@@ -90,3 +90,16 @@ struct FVaRestJsonTestBoolPrefix
 	UPROPERTY()
 	bool Old = false;
 };
+
+/**
+ * A C++ field named like an engine FName in another casing: "ID" is hardcoded (UnrealNames.inl:206), so the FName id
+ * reads ID wherever names do not preserve case -- a packaged game (NameTypes.h:33, :1286-1293)
+ */
+USTRUCT()
+struct FVaRestJsonTestEngineName
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	int32 id = 0;
+};

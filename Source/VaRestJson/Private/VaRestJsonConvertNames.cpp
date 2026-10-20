@@ -51,6 +51,23 @@ namespace VaRest::Json::Convert
 			return Name.Len() >= 2 && Name[0] == TEXT('b') && FChar::IsUpper(Name[1]);
 		}
 
+		/**
+		 * An FName as a packaged game spells it. Case is preserved only WITH_CASE_PRESERVING_NAME, i.e. with editor-only
+		 * data (NameTypes.h:33); elsewhere the display index is the comparison index (NameTypes.h:1286-1293), the
+		 * casing first registered process-wide -- the engine's hardcoded ID and Name (UnrealNames.inl:206, :71) turn a
+		 * C++ field id or name into ID and Name. Spelled from the comparison entry in every build, the way
+		 * FName::AppendString spells the display entry (UnrealNames.cpp:3819-3826), so PIE writes what a packaged game writes.
+		 */
+		void AppendComparisonSpelling(FName FieldName, FWideStringBuilderBase& Out)
+		{
+			FieldName.GetComparisonNameEntry()->AppendNameToString(Out);
+			const int32 InternalNumber = FieldName.GetNumber();
+			if (InternalNumber != NAME_NO_NUMBER_INTERNAL)
+			{
+				Out << TEXT('_') << NAME_INTERNAL_TO_EXTERNAL(InternalNumber);
+			}
+		}
+
 		/** "URLPath" -> URL|Path, "UserId" -> User|Id, "user_id" -> user|id, "HTTPStatus2" -> HTTP|Status2, "Vector3D" -> Vector3|D */
 		TArray<FString> SplitWords(const FString& Name)
 		{
@@ -187,6 +204,19 @@ namespace VaRest::Json::Convert
 					UE_LOG(LogVaRestJson, Warning, TEXT("FVaRestJsonConvert: %s.%s is skipped: its JSON name \"%s\" is already used by another field"), *Struct->GetName(), *Property->GetName(), *JsonName);
 					continue;
 				}
+#if WITH_CASE_PRESERVING_NAME
+				// The editor sees the declared casing, AuthoredFieldName the packaged game's. Warned only where that changes
+				// the key: every policy but AsIs turns ID, Id and id into one spelling, so a field id is news only under AsIs.
+				if (!Renamed && !Struct->IsA<UUserDefinedStruct>())
+				{
+					const FString Declared = Property->GetName();
+					if (!Declared.Equals(Authored, ESearchCase::CaseSensitive) && !ApplyNaming(Declared, bBool, Naming).Equals(JsonName, ESearchCase::CaseSensitive))
+					{
+						UE_LOG(LogVaRestJson, Warning, TEXT("FVaRestJsonConvert: %s.%s is written as \"%s\" in the editor and in a packaged game: a packaged game keeps one casing per FName, and \"%s\" was registered first. For exact casing register a rename with FVaRestJsonNames::Register."),
+							*Struct->GetName(), *Declared, *JsonName, *Authored);
+					}
+				}
+#endif
 				FUtf8Scratch Scratch;
 				FoldUtf8(View(Field.Name), Scratch);
 				Field.Folded.Append(Scratch.GetData(), Scratch.Num());
@@ -265,9 +295,10 @@ namespace VaRest::Json::Convert
 			Found = NamesPrivate::FindIn(ByNormalized, Fields, &FFieldInfo::Normalized, WithoutPrefix, HashKey(WithoutPrefix));
 			if (Found != INDEX_NONE && Fields[Found].Property->IsA<FBoolProperty>())
 			{
-				// Only a field whose b the policy dropped: a bool named Old does not answer to "bold"
+				// Only a field whose b the policy dropped: a bool named Old does not answer to "bold". The spelling is the
+				// one ApplyNaming saw (AuthoredFieldName; a Blueprint name's GUID suffix never touches its first characters).
 				TStringBuilder<128> PropertyName;
-				Fields[Found].Property->GetFName().ToString(PropertyName);
+				NamesPrivate::AppendComparisonSpelling(Fields[Found].Property->GetFName(), PropertyName);
 				if (NamesPrivate::HasBoolPrefix(PropertyName.ToView()))
 				{
 					OutTier = 2;
@@ -299,8 +330,16 @@ namespace VaRest::Json::Convert
 	{
 		// Never Property->GetAuthoredName(): for a Blueprint struct it is the editor-only friendly name in editor builds
 		// (UserDefinedStruct.cpp:289-298) and the stripped name in cooked ones, so PIE and a packaged game would write
-		// different JSON (spec 2.4). The cooked algorithm runs everywhere instead.
-		return Owner && Owner->IsA<UUserDefinedStruct>() ? StripGuidSuffix(Property->GetName()) : Property->GetName();
+		// different JSON (spec 2.4). The cooked algorithm runs everywhere instead. Its names carry a GUID, so only one
+		// casing of them exists and GetName() is the packaged game's spelling.
+		if (Owner && Owner->IsA<UUserDefinedStruct>())
+		{
+			return StripGuidSuffix(Property->GetName());
+		}
+		// Not GetName() either: in the editor it keeps the declared casing, which a packaged game may not have
+		TStringBuilder<128> Spelling;
+		NamesPrivate::AppendComparisonSpelling(Property->GetFName(), Spelling);
+		return FString(Spelling.ToView());
 	}
 
 	FString ApplyNaming(const FString& AuthoredName, bool bBoolField, EVaRestJsonNaming Naming)

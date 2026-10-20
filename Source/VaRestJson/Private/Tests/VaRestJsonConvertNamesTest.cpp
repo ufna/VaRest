@@ -82,6 +82,39 @@ bool FVaRestJsonConvertUserStructNameTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonConvertEngineNameTest, "VaRest.Json.Convert.EngineNameCase",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestJsonConvertEngineNameTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Json::Convert;
+	using namespace VaRestJsonConvertNamesTest;
+	FVaRestJsonConvert::ResetCache();
+	const UScriptStruct* Struct = FVaRestJsonTestEngineName::StaticStruct();
+	const FProperty* IdProperty = FindFProperty<FProperty>(Struct, TEXT("id"));
+	if (!TestNotNull(TEXT("the field exists"), IdProperty))
+	{
+		return false;
+	}
+
+	// The spelling a packaged game sees, in every build, so PIE writes what the packaged game writes
+	TestEqualSensitive(TEXT("a C++ name is its FName's comparison spelling"), AuthoredFieldName(Struct, IdProperty), FString(TEXT("ID")));
+#if WITH_CASE_PRESERVING_NAME
+	// Only AsIs writes something other than what "id" itself would give; the other policies normalise the case away
+	AddExpectedMessagePlain(TEXT("VaRestJsonTestEngineName.id is written as \"ID\""), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
+#endif
+	TestEqualSensitive(TEXT("AsIs"), Names(GetFieldMap(Struct, EVaRestJsonNaming::AsIs)), FString(TEXT("ID")));
+	TestEqualSensitive(TEXT("camelCase"), Names(GetFieldMap(Struct, EVaRestJsonNaming::CamelCase)), FString(TEXT("id")));
+	TestEqualSensitive(TEXT("snake_case"), Names(GetFieldMap(Struct, EVaRestJsonNaming::SnakeCase)), FString(TEXT("id")));
+	TestEqualSensitive(TEXT("PascalCase"), Names(GetFieldMap(Struct, EVaRestJsonNaming::PascalCase)), FString(TEXT("Id")));
+
+	// The way to an exact key: a rename is an FString and keeps its case (and a renamed field is not warned about)
+	FVaRestJsonNames::Register<FVaRestJsonTestEngineName>({ { TEXT("id"), TEXT("id") } });
+	TestEqualSensitive(TEXT("a rename keeps its case"), Names(GetFieldMap(Struct, EVaRestJsonNaming::AsIs)), FString(TEXT("id")));
+	FVaRestJsonNames::Unregister(Struct);
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonConvertFieldMapTest, "VaRest.Json.Convert.FieldMap",
 	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
 
@@ -154,6 +187,10 @@ bool FVaRestJsonConvertCacheTest::RunTest(const FString& Parameters)
 	// Decode runs off the game thread: many threads asking for the same maps at once must end with one map per key
 	const UScriptStruct* Structs[] = { FVaRestJsonTestNaming::StaticStruct(), FVaRestJsonTestInner::StaticStruct() };
 	const EVaRestJsonNaming Policies[] = { EVaRestJsonNaming::AsIs, EVaRestJsonNaming::CamelCase, EVaRestJsonNaming::SnakeCase, EVaRestJsonNaming::PascalCase };
+#if WITH_CASE_PRESERVING_NAME
+	// FVaRestJsonTestInner::Id is written ID under AsIs (see EngineNameCase); every racing first build may log it
+	AddExpectedMessagePlain(TEXT("VaRestJsonTestInner.Id is written as \"ID\""), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 0);
+#endif
 	TArray<const FFieldMap*> Seen;
 	Seen.SetNumZeroed(64 * 8);
 	ParallelFor(64, [&Seen, &Structs, &Policies](int32 Worker)

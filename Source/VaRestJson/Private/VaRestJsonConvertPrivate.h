@@ -45,7 +45,10 @@ namespace VaRest::Json::Convert
 	/** The cooked-build Blueprint struct field name: "Score_3_<32 hex>" -> "Score" (UserDefinedStruct.cpp:300-313) */
 	FString StripGuidSuffix(const FString& PropertyName);
 
-	/** The name the policy applies to: the property name, or for a Blueprint struct the stripped name (never the editor-only friendly one) */
+	/**
+	 * The name the policy applies to, as a packaged game spells it in every build: a C++ property's FName comparison
+	 * spelling (ID for a field id), or for a Blueprint struct the stripped name (never the editor-only friendly one)
+	 */
 	FString AuthoredFieldName(const UScriptStruct* Owner, const FProperty* Property);
 
 	FString ApplyNaming(const FString& AuthoredName, bool bBoolField, EVaRestJsonNaming Naming);
