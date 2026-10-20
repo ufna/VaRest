@@ -7,6 +7,7 @@
 #include "VaRestJsonDocument.h"
 #include "VaRestJsonLog.h"
 #include "VaRestJsonReader.h"
+#include "VaRestJsonWriter.h"
 
 namespace VaRest::Json::StructOpsPrivate
 {
@@ -177,11 +178,17 @@ bool FVaRestJson::Serialize(FArchive& Ar)
 	}
 
 	Ar << Version;
+	// Write the text first: a value nested deeper than MaxDepth cannot be written, and a load would reject it anyway
+	// (spec 2.2), so it is saved as an invalid handle plus an error instead of a payload nothing reads back.
+	TArray<uint8> Bytes;
+	if (ValidByte != 0 && !VaRest::Json::Write(*Node, EVaRestJsonFormat::Condensed, Bytes))
+	{
+		UE_LOG(LogVaRestJson, Error, TEXT("FVaRestJson::Serialize: cannot save a value nested deeper than %d levels; saved as an invalid handle"), VaRest::Json::MaxDepth);
+		ValidByte = 0;
+	}
 	Ar << ValidByte;
 	if (ValidByte != 0)
 	{
-		TArray<uint8> Bytes;
-		ToUtf8(Bytes);
 		int64 Length = Bytes.Num();
 		Ar << Length;
 		if (Length > 0)

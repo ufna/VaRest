@@ -25,16 +25,16 @@ namespace VaRest::Json
 			};
 
 			FDocument& Doc;
-			int32 MaxDepth;
+			int32 DepthLimit;
 			TArray<FFrame> Frames;
 			TArray<FMember> Members;
 			TArray<FNode*> Elements;
 			FNode* Result = nullptr;
 			bool bDepthExceeded = false;
 
-			FBuildHandler(FDocument& InDoc, int32 InMaxDepth)
+			FBuildHandler(FDocument& InDoc, int32 InDepthLimit)
 				: Doc(InDoc)
-				, MaxDepth(InMaxDepth)
+				, DepthLimit(InDepthLimit)
 			{
 			}
 
@@ -57,7 +57,7 @@ namespace VaRest::Json
 
 			bool Open(FNode* Container)
 			{
-				if (Frames.Num() >= MaxDepth)
+				if (Frames.Num() >= DepthLimit)
 				{
 					bDepthExceeded = true;
 					return false; // RapidJSON stops with kParseErrorTermination
@@ -166,8 +166,8 @@ namespace VaRest::Json
 	{
 		using namespace ReaderPrivate;
 		check(Doc.Input.Num() > 0 && Doc.Input.Last() == 0);
-		const int32 MaxDepth = FMath::Max(1, Options.MaxDepth);
-		FBuildHandler Handler(Doc, MaxDepth);
+		const int32 DepthLimit = FMath::Clamp(Options.MaxDepth, 1, MaxDepth); // spec 2.2: one limit, so anything that parses also writes
+		FBuildHandler Handler(Doc, DepthLimit);
 		char* Text = reinterpret_cast<char*>(Doc.Input.GetData() + StartOffset);
 
 		const bool bLenient = Options.bAllowCommentsAndTrailingCommas;
@@ -184,7 +184,7 @@ namespace VaRest::Json
 			OutError = FVaRestJsonError();
 			OutError.Offset = StartOffset + static_cast<int64>(Result.Offset());
 			OutError.Message = Handler.bDepthExceeded
-				? FString::Printf(TEXT("Nesting deeper than %d"), MaxDepth)
+				? FString::Printf(TEXT("Nesting deeper than %d"), DepthLimit)
 				: FString(rapidjson::GetParseError_En(Result.Code()));
 			FillLineColumn(OutError, OriginalForDiagnostics);
 			return false;

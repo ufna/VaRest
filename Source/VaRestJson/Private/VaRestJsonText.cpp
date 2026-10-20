@@ -2,11 +2,19 @@
 
 #include "VaRestJson.h"
 
+#include "VaRestJsonLog.h"
 #include "VaRestJsonReader.h"
 #include "VaRestJsonWriter.h"
 
 namespace VaRest::Json::TextPrivate
 {
+	FVaRestJsonError TooDeepToWrite()
+	{
+		FVaRestJsonError Error;
+		Error.Message = FString::Printf(TEXT("cannot write a value nested deeper than %d levels"), MaxDepth);
+		return Error;
+	}
+
 	/**
 	 * First arena chunk for a parse: the input size clamped to [FArena::MinChunkSize, 32 KiB] (VaRest-awm). A small
 	 * response fits its first chunk; a large one starts at 32 KiB and doubles to FArena::MaxChunkSize, so a string-heavy
@@ -54,9 +62,9 @@ namespace VaRest::Json::TextPrivate
 
 void FVaRestJson::ToUtf8(TArray<uint8>& Out, EVaRestJsonFormat Format) const
 {
-	if (Node)
+	if (Node && !VaRest::Json::Write(*Node, Format, Out))
 	{
-		VaRest::Json::Write(*Node, Format, Out);
+		UE_LOG(LogVaRestJson, Error, TEXT("FVaRestJson::ToUtf8: cannot write a value nested deeper than %d levels"), VaRest::Json::MaxDepth);
 	}
 }
 
@@ -67,8 +75,34 @@ FString FVaRestJson::ToString(EVaRestJsonFormat Format) const
 		return FString();
 	}
 	TArray<uint8> Bytes;
-	VaRest::Json::Write(*Node, Format, Bytes);
+	if (!VaRest::Json::Write(*Node, Format, Bytes))
+	{
+		UE_LOG(LogVaRestJson, Error, TEXT("FVaRestJson::ToString: cannot write a value nested deeper than %d levels"), VaRest::Json::MaxDepth);
+		return FString();
+	}
 	return FString::ConstructFromPtrSize(reinterpret_cast<const UTF8CHAR*>(Bytes.GetData()), Bytes.Num());
+}
+
+TValueOrError<FString, FVaRestJsonError> FVaRestJson::TryToString(EVaRestJsonFormat Format) const
+{
+	TArray<uint8> Bytes;
+	if (Node && !VaRest::Json::Write(*Node, Format, Bytes))
+	{
+		FVaRestJsonError Error = VaRest::Json::TextPrivate::TooDeepToWrite();
+		return MakeError(MoveTemp(Error));
+	}
+	FString Text = FString::ConstructFromPtrSize(reinterpret_cast<const UTF8CHAR*>(Bytes.GetData()), Bytes.Num());
+	return MakeValue(MoveTemp(Text));
+}
+
+TValueOrError<void, FVaRestJsonError> FVaRestJson::TryToUtf8(TArray<uint8>& Out, EVaRestJsonFormat Format) const
+{
+	if (Node && !VaRest::Json::Write(*Node, Format, Out))
+	{
+		FVaRestJsonError Error = VaRest::Json::TextPrivate::TooDeepToWrite();
+		return MakeError(MoveTemp(Error));
+	}
+	return MakeValue();
 }
 
 TValueOrError<FVaRestJson, FVaRestJsonError> FVaRestJson::ParseOwned(TArray<uint8>&& Utf8Bytes, const FVaRestJsonParseOptions& Options)

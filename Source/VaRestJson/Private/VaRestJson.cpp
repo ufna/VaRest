@@ -298,6 +298,11 @@ FVaRestJson FVaRestJson::Clone() const
 	// A root clone needs about what the source used; a subtree clone starts small and grows.
 	FDocumentRef NewDoc = NewDocument(Node == Doc->Root ? FMath::Max<SIZE_T>(FArena::MinChunkSize, Doc->Arena.GetUsedBytes()) : FArena::MinChunkSize);
 	VaRest::Json::FNode* Root = NewDoc->DeepCopy(*Node);
+	if (!Root)
+	{
+		UE_LOG(LogVaRestJson, Error, TEXT("FVaRestJson::Clone: cannot copy a value nested deeper than %d levels"), VaRest::Json::MaxDepth);
+		return {};
+	}
 	NewDoc->Root = Root;
 	return FVaRestJson(MoveTemp(NewDoc), Root);
 }
@@ -308,7 +313,17 @@ bool FVaRestJson::Equals(const FVaRestJson& Other) const
 	{
 		return !Node && !Other.Node;
 	}
-	return Node == Other.Node || VaRest::Json::FDocument::Equals(*Node, *Other.Node);
+	if (Node == Other.Node)
+	{
+		return true;
+	}
+	bool bTooDeep = false;
+	const bool bEqual = VaRest::Json::FDocument::Equals(*Node, *Other.Node, &bTooDeep);
+	if (bTooDeep)
+	{
+		UE_LOG(LogVaRestJson, Error, TEXT("FVaRestJson::Equals: cannot compare values nested deeper than %d levels; treated as not equal"), VaRest::Json::MaxDepth);
+	}
+	return bEqual;
 }
 
 VaRest::Json::FNode* FVaRestJson::MakeNull(VaRest::Json::FDocument& InDoc) { return InDoc.NewNull(); }
@@ -326,6 +341,15 @@ VaRest::Json::FNode* FVaRestJson::MakeString(VaRest::Json::FDocument& InDoc, FSt
 
 VaRest::Json::FNode* FVaRestJson::MakeCopy(VaRest::Json::FDocument& InDoc, const FVaRestJson& Value)
 {
+	if (!Value.Node)
+	{
+		return InDoc.NewNull();
+	}
 	// A node has exactly one parent, so even a value from this same document is copied.
-	return Value.Node ? InDoc.DeepCopy(*Value.Node) : InDoc.NewNull();
+	VaRest::Json::FNode* Copy = InDoc.DeepCopy(*Value.Node);
+	if (!Copy)
+	{
+		UE_LOG(LogVaRestJson, Error, TEXT("FVaRestJson: cannot copy a value nested deeper than %d levels; nothing was written"), VaRest::Json::MaxDepth);
+	}
+	return Copy;
 }

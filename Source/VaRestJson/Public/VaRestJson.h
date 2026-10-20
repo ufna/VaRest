@@ -30,6 +30,14 @@ namespace VaRest::Json
 	 * Exact as a double: 2^103 * (2^25 - 1).
 	 */
 	inline constexpr double FloatRoundsToInfinity = 340282356779733661637539395458142568448.0;
+
+	/**
+	 * The one nesting limit (spec 2.2). Parse, write, Clone, Equals, the FJsonValue bridges, Serialize and struct convert
+	 * all recurse once per level (the parser is iterative but shares the limit), so this bounds stack use on worker
+	 * threads too. A tree built deeper through Set/Add is not checked on the way in (that would cost every Set); every
+	 * recursive operation on it fails as a whole with an error instead of truncating.
+	 */
+	inline constexpr int32 MaxDepth = 512;
 }
 
 /** Type of the value a FVaRestJson handle points at. None = invalid handle (no value). */
@@ -81,12 +89,8 @@ struct VARESTJSON_API FVaRestJsonError
 
 struct FVaRestJsonParseOptions
 {
-	/**
-	 * Nesting deeper than this fails the parse (hostile-input guard). The parser itself is iterative, but
-	 * ToString/ToUtf8, Clone, Equals and the FJsonValue bridges recurse once per level, so raising this far
-	 * above 512 risks a stack overflow later, on a worker thread's smaller stack first.
-	 */
-	int32 MaxDepth = 512;
+	/** Nesting deeper than this fails the parse. Clamped to [1, VaRest::Json::MaxDepth]: anything that parses also writes. */
+	int32 MaxDepth = VaRest::Json::MaxDepth;
 
 	/** Accept comments and trailing commas (config files, not wire data) */
 	bool bAllowCommentsAndTrailingCommas = false;
@@ -167,7 +171,9 @@ struct VARESTJSON_API FVaRestJson
 		// shadow-variable warnings as errors.
 		FDocumentRef NewDoc = NewDocument();
 		VaRest::Json::FNode* Root = MakeNodeFor(*NewDoc, Forward<ValueType>(Value));
-		return FVaRestJson(MoveTemp(NewDoc), Root);
+		// A value that could not be made (a copy past MaxDepth, logged) gives a default handle, not a "miss" handle
+		// that holds a document and would refuse writes with "a lookup missed" errors
+		return Root ? FVaRestJson(MoveTemp(NewDoc), Root) : FVaRestJson();
 	}
 
 	// ---- type
@@ -297,7 +303,11 @@ struct VARESTJSON_API FVaRestJson
 	{
 		if (VaRest::Json::FDocument* TargetDoc = PrepareContainer(EVaRestJsonType::Object, TEXT("Set a field")))
 		{
-			SetNode(Key, MakeNodeFor(*TargetDoc, Forward<ValueType>(Value)));
+			// nullptr: copying a value nested deeper than MaxDepth failed (logged); nothing is written
+			if (VaRest::Json::FNode* NewValue = MakeNodeFor(*TargetDoc, Forward<ValueType>(Value)))
+			{
+				SetNode(Key, NewValue);
+			}
 		}
 		return *this;
 	}
@@ -315,7 +325,10 @@ struct VARESTJSON_API FVaRestJson
 	{
 		if (VaRest::Json::FDocument* TargetDoc = PrepareContainer(EVaRestJsonType::Object, TEXT("Set a field")))
 		{
-			SetNodeUtf8(Key, MakeNodeFor(*TargetDoc, Forward<ValueType>(Value)));
+			if (VaRest::Json::FNode* NewValue = MakeNodeFor(*TargetDoc, Forward<ValueType>(Value)))
+			{
+				SetNodeUtf8(Key, NewValue);
+			}
 		}
 		return *this;
 	}
@@ -366,7 +379,10 @@ struct VARESTJSON_API FVaRestJson
 	{
 		if (VaRest::Json::FDocument* TargetDoc = PrepareContainer(EVaRestJsonType::Array, TEXT("Add an element")))
 		{
-			AddNode(MakeNodeFor(*TargetDoc, Forward<ValueType>(Value)));
+			if (VaRest::Json::FNode* NewValue = MakeNodeFor(*TargetDoc, Forward<ValueType>(Value)))
+			{
+				AddNode(NewValue);
+			}
 		}
 		return *this;
 	}
@@ -383,7 +399,10 @@ struct VARESTJSON_API FVaRestJson
 	{
 		if (VaRest::Json::FDocument* TargetDoc = PrepareSetAt(Index))
 		{
-			SetAtNode(Index, MakeNodeFor(*TargetDoc, Forward<ValueType>(Value)));
+			if (VaRest::Json::FNode* NewValue = MakeNodeFor(*TargetDoc, Forward<ValueType>(Value)))
+			{
+				SetAtNode(Index, NewValue);
+			}
 		}
 		return *this;
 	}
@@ -400,7 +419,9 @@ struct VARESTJSON_API FVaRestJson
 
 	// ---- whole value
 
+	/** Past VaRest::Json::MaxDepth: an invalid handle (nullptr / false) and an error log, never a truncated copy */
 	FVaRestJson Clone() const;
+	/** Past VaRest::Json::MaxDepth: an invalid handle (nullptr / false) and an error log, never a truncated copy */
 	bool Equals(const FVaRestJson& Other) const;
 	bool operator==(const FVaRestJson& Other) const { return Equals(Other); }
 	/** Both handles point at the same node. Two node-less handles (misses, default handles) are not the same node. */
@@ -426,13 +447,21 @@ struct VARESTJSON_API FVaRestJson
 	 */
 	static TValueOrError<FVaRestJson, FVaRestJsonError> ParseOwned(TArray<uint8>&& Utf8Bytes, const FVaRestJsonParseOptions& Options = FVaRestJsonParseOptions());
 
-	/** "" for an invalid handle, "null" for a null value */
+	/**
+	 * "" for an invalid handle, "null" for a null value. A value nested deeper than VaRest::Json::MaxDepth (possible
+	 * only when built through Set/Add) gives "" and an error log (spec 2.2); TryToString reports it instead.
+	 */
 	FString ToString(EVaRestJsonFormat Format = EVaRestJsonFormat::Condensed) const;
-	/** Appends UTF-8 to Out; nothing for an invalid handle */
+	/** Appends UTF-8 to Out; nothing for an invalid handle; nothing plus an error log past MaxDepth */
 	void ToUtf8(TArray<uint8>& Out, EVaRestJsonFormat Format = EVaRestJsonFormat::Condensed) const;
+	/** ToString with the depth failure as an error value instead of a log line ("" for an invalid handle) */
+	TValueOrError<FString, FVaRestJsonError> TryToString(EVaRestJsonFormat Format = EVaRestJsonFormat::Condensed) const;
+	/** ToUtf8 with the depth failure as an error value; Out keeps its previous contents on failure */
+	TValueOrError<void, FVaRestJsonError> TryToUtf8(TArray<uint8>& Out, EVaRestJsonFormat Format = EVaRestJsonFormat::Condensed) const;
 
 	// ---- engine interop (Task 8)
 
+	/** Past VaRest::Json::MaxDepth: an invalid handle (nullptr / false) and an error log, never a truncated copy */
 	TSharedPtr<FJsonValue> ToJsonValue() const;
 	/**
 	 * Null when this is not an object. FJsonObject keys compare case-insensitively (its map is keyed by
@@ -441,6 +470,7 @@ struct VARESTJSON_API FVaRestJson
 	 * collapse into one: the last one wins.
 	 */
 	TSharedPtr<FJsonObject> ToJsonObject() const;
+	/** Past VaRest::Json::MaxDepth: an invalid handle (nullptr / false) and an error log, never a truncated copy */
 	static FVaRestJson FromJsonValue(const TSharedPtr<FJsonValue>& Value);
 	static FVaRestJson FromJsonObject(const TSharedPtr<FJsonObject>& InObject);
 

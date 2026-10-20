@@ -5,6 +5,7 @@
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "VaRestJsonDocument.h"
+#include "VaRestJsonLog.h"
 
 namespace VaRest::Json::BridgePrivate
 {
@@ -15,52 +16,73 @@ namespace VaRest::Json::BridgePrivate
 		return FString::ConstructFromPtrSize(S.Data, static_cast<int32>(S.Len));
 	}
 
-	TSharedPtr<FJsonValue> ToEngine(const FNode& Node)
+	/** Engine value for Value; nullptr with bTooDeep past MaxDepth. Depth counts the containers around Value. */
+	TSharedPtr<FJsonValue> ToEngine(const FNode& Value, int32 Depth, bool& bTooDeep)
 	{
-		switch (Node.Type)
+		switch (Value.Type)
 		{
 		case EVaRestJsonType::None:
 		case EVaRestJsonType::Null:
 			return MakeShared<FJsonValueNull>();
 		case EVaRestJsonType::Bool:
-			return MakeShared<FJsonValueBoolean>(Node.Bool);
+			return MakeShared<FJsonValueBoolean>(Value.Bool);
 		case EVaRestJsonType::Number:
-			switch (Node.NumKind)
+			switch (Value.NumKind)
 			{
 			case ENumKind::Int:
 				// FJsonValueNumber holds a double; beyond 2^53 keep the exact digits instead
-				if (Node.Int >= -MaxExactDoubleInt && Node.Int <= MaxExactDoubleInt)
+				if (Value.Int >= -MaxExactDoubleInt && Value.Int <= MaxExactDoubleInt)
 				{
-					return MakeShared<FJsonValueNumber>(static_cast<double>(Node.Int));
+					return MakeShared<FJsonValueNumber>(static_cast<double>(Value.Int));
 				}
-				return MakeShared<FJsonValueNumberString>(LexToString(Node.Int));
+				return MakeShared<FJsonValueNumberString>(LexToString(Value.Int));
 			case ENumKind::UInt:
-				return MakeShared<FJsonValueNumberString>(LexToString(Node.UInt));
+				return MakeShared<FJsonValueNumberString>(LexToString(Value.UInt));
 			case ENumKind::Double:
-				return MakeShared<FJsonValueNumber>(Node.Double);
+				return MakeShared<FJsonValueNumber>(Value.Double);
 			}
 			break;
 		case EVaRestJsonType::String:
-			return MakeShared<FJsonValueString>(Utf8ToString(Node.Str));
+			return MakeShared<FJsonValueString>(Utf8ToString(Value.Str));
 		case EVaRestJsonType::Array:
 		{
-			TArray<TSharedPtr<FJsonValue>> Items;
-			Items.Reserve(Node.Arr.Num);
-			for (uint32 i = 0; i < Node.Arr.Num; ++i)
+			if (Depth >= MaxDepth)
 			{
-				Items.Add(ToEngine(*Node.Arr.Items[i]));
+				bTooDeep = true;
+				return nullptr;
+			}
+			TArray<TSharedPtr<FJsonValue>> Items;
+			Items.Reserve(Value.Arr.Num);
+			for (uint32 i = 0; i < Value.Arr.Num; ++i)
+			{
+				TSharedPtr<FJsonValue> Item = ToEngine(*Value.Arr.Items[i], Depth + 1, bTooDeep);
+				if (bTooDeep)
+				{
+					return nullptr;
+				}
+				Items.Add(MoveTemp(Item));
 			}
 			return MakeShared<FJsonValueArray>(Items);
 		}
 		case EVaRestJsonType::Object:
 		{
-			TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
-			for (uint32 i = 0; i < Node.Obj.Num; ++i)
+			if (Depth >= MaxDepth)
 			{
-				const FMember& M = Node.Obj.Members[i];
-				Object->SetField(FStringView(Utf8ToString(M.Key)), ToEngine(*M.Value)); // later duplicates overwrite
+				bTooDeep = true;
+				return nullptr;
 			}
-			return MakeShared<FJsonValueObject>(Object);
+			TSharedPtr<FJsonObject> Fields = MakeShared<FJsonObject>();
+			for (uint32 i = 0; i < Value.Obj.Num; ++i)
+			{
+				const FMember& M = Value.Obj.Members[i];
+				TSharedPtr<FJsonValue> Member = ToEngine(*M.Value, Depth + 1, bTooDeep);
+				if (bTooDeep)
+				{
+					return nullptr;
+				}
+				Fields->SetField(FStringView(Utf8ToString(M.Key)), Member); // later duplicates overwrite
+			}
+			return MakeShared<FJsonValueObject>(Fields);
 		}
 		}
 		return MakeShared<FJsonValueNull>();
@@ -110,7 +132,8 @@ namespace VaRest::Json::BridgePrivate
 		return Doc.NewInt(Magnitude == 9223372036854775808ull ? MIN_int64 : -static_cast<int64>(Magnitude));
 	}
 
-	FNode* FromEngine(FDocument& Doc, const FJsonValue& Value)
+	/** Our node for Value; nullptr with bTooDeep past MaxDepth (an FJsonObject graph may even be cyclic) */
+	FNode* FromEngine(FDocument& Doc, const FJsonValue& Value, int32 Depth, bool& bTooDeep)
 	{
 		switch (Value.Type)
 		{
@@ -152,28 +175,48 @@ namespace VaRest::Json::BridgePrivate
 		}
 		case EJson::Array:
 		{
+			if (Depth >= MaxDepth)
+			{
+				bTooDeep = true;
+				return nullptr;
+			}
 			const TArray<TSharedPtr<FJsonValue>>& Items = Value.AsArray();
-			FNode* Array = Doc.NewArray(Items.Num());
+			FNode* Result = Doc.NewArray(Items.Num());
 			for (const TSharedPtr<FJsonValue>& Item : Items)
 			{
-				Doc.Append(*Array, Item.IsValid() ? FromEngine(Doc, *Item) : Doc.NewNull());
+				FNode* Element = Item.IsValid() ? FromEngine(Doc, *Item, Depth + 1, bTooDeep) : Doc.NewNull();
+				if (!Element)
+				{
+					return nullptr;
+				}
+				Doc.Append(*Result, Element);
 			}
-			return Array;
+			return Result;
 		}
 		case EJson::Object:
 		{
-			const TSharedPtr<FJsonObject>& Object = Value.AsObject();
-			FNode* Node = Doc.NewObject(Object.IsValid() ? Object->Values.Num() : 0);
-			if (Object.IsValid())
+			if (Depth >= MaxDepth)
 			{
-				for (const auto& Pair : Object->Values)
+				bTooDeep = true;
+				return nullptr;
+			}
+			const TSharedPtr<FJsonObject>& Fields = Value.AsObject();
+			FNode* Result = Doc.NewObject(Fields.IsValid() ? Fields->Values.Num() : 0);
+			if (Fields.IsValid())
+			{
+				for (const auto& Pair : Fields->Values)
 				{
+					FNode* Member = Pair.Value.IsValid() ? FromEngine(Doc, *Pair.Value, Depth + 1, bTooDeep) : Doc.NewNull();
+					if (!Member)
+					{
+						return nullptr;
+					}
 					const FString Key(*Pair.Key); // FSharedString or FString storage: both dereference to TCHAR*
 					const auto Utf8 = StringCast<UTF8CHAR>(*Key, Key.Len());
-					Doc.Set(*Node, FUtf8StringView(Utf8.Get(), Utf8.Length()), Pair.Value.IsValid() ? FromEngine(Doc, *Pair.Value) : Doc.NewNull());
+					Doc.Set(*Result, FUtf8StringView(Utf8.Get(), Utf8.Length()), Member);
 				}
 			}
-			return Node;
+			return Result;
 		}
 		}
 		return Doc.NewNull();
@@ -182,14 +225,28 @@ namespace VaRest::Json::BridgePrivate
 
 TSharedPtr<FJsonValue> FVaRestJson::ToJsonValue() const
 {
-	using namespace VaRest::Json::BridgePrivate;
-	return Node ? ToEngine(*Node) : TSharedPtr<FJsonValue>();
+	if (!Node)
+	{
+		return nullptr;
+	}
+	bool bTooDeep = false;
+	TSharedPtr<FJsonValue> Result = VaRest::Json::BridgePrivate::ToEngine(*Node, 0, bTooDeep);
+	if (bTooDeep)
+	{
+		UE_LOG(LogVaRestJson, Error, TEXT("FVaRestJson::ToJsonValue: cannot convert a value nested deeper than %d levels"), VaRest::Json::MaxDepth);
+		return nullptr;
+	}
+	return Result;
 }
 
 TSharedPtr<FJsonObject> FVaRestJson::ToJsonObject() const
 {
-	using namespace VaRest::Json::BridgePrivate;
-	return IsObject() ? ToEngine(*Node)->AsObject() : TSharedPtr<FJsonObject>();
+	if (!IsObject())
+	{
+		return nullptr;
+	}
+	const TSharedPtr<FJsonValue> Converted = ToJsonValue();
+	return Converted.IsValid() ? Converted->AsObject() : nullptr;
 }
 
 FVaRestJson FVaRestJson::FromJsonValue(const TSharedPtr<FJsonValue>& Value)
@@ -198,10 +255,14 @@ FVaRestJson FVaRestJson::FromJsonValue(const TSharedPtr<FJsonValue>& Value)
 	{
 		return FVaRestJson();
 	}
-	using namespace VaRest::Json;
-	using namespace VaRest::Json::BridgePrivate;
 	FDocumentRef NewDoc = NewDocument();
-	FNode* Root = FromEngine(*NewDoc, *Value);
+	bool bTooDeep = false;
+	VaRest::Json::FNode* Root = VaRest::Json::BridgePrivate::FromEngine(*NewDoc, *Value, 0, bTooDeep);
+	if (bTooDeep)
+	{
+		UE_LOG(LogVaRestJson, Error, TEXT("FVaRestJson::FromJsonValue: cannot convert a value nested deeper than %d levels (or a cyclic FJsonObject graph)"), VaRest::Json::MaxDepth);
+		return FVaRestJson();
+	}
 	NewDoc->Root = Root;
 	return FVaRestJson(MoveTemp(NewDoc), Root);
 }

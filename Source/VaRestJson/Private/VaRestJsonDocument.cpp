@@ -359,6 +359,11 @@ namespace VaRest::Json
 
 	FNode* FDocument::DeepCopy(const FNode& Src)
 	{
+		return DeepCopyAt(Src, 0);
+	}
+
+	FNode* FDocument::DeepCopyAt(const FNode& Src, int32 Depth)
+	{
 		switch (Src.Type)
 		{
 		case EVaRestJsonType::None:
@@ -378,38 +383,67 @@ namespace VaRest::Json
 			return NewString(Src.Str.View());
 		case EVaRestJsonType::Array:
 		{
-			const uint32 Num = Src.Arr.Num;
-			FNode* Node = NewArray(Num);
-			for (uint32 i = 0; i < Num; ++i)
+			if (Depth >= MaxDepth)
 			{
-				Node->Arr.Items[i] = DeepCopy(*Src.Arr.Items[i]);
+				return nullptr;
 			}
-			Node->Arr.Num = Num;
-			return Node;
+			const uint32 Count = Src.Arr.Num;
+			FNode* Copy = NewArray(Count);
+			for (uint32 i = 0; i < Count; ++i)
+			{
+				FNode* Item = DeepCopyAt(*Src.Arr.Items[i], Depth + 1);
+				if (!Item)
+				{
+					return nullptr;
+				}
+				Copy->Arr.Items[i] = Item;
+			}
+			Copy->Arr.Num = Count;
+			return Copy;
 		}
 		case EVaRestJsonType::Object:
 		{
-			const uint32 Num = Src.Obj.Num;
-			FNode* Node = NewObject(Num);
-			for (uint32 i = 0; i < Num; ++i)
+			if (Depth >= MaxDepth)
+			{
+				return nullptr;
+			}
+			const uint32 Count = Src.Obj.Num;
+			FNode* Copy = NewObject(Count);
+			for (uint32 i = 0; i < Count; ++i)
 			{
 				const FMember& M = Src.Obj.Members[i];
+				FNode* Item = DeepCopyAt(*M.Value, Depth + 1);
+				if (!Item)
+				{
+					return nullptr;
+				}
 				FStr Key = CopyStr(M.Key.View(), false);
 				Key.Hash = M.Key.Hash;
-				Node->Obj.Members[i] = FMember{ Key, DeepCopy(*M.Value) };
+				Copy->Obj.Members[i] = FMember{ Key, Item };
 			}
-			Node->Obj.Num = Num;
-			if (Num > IndexThreshold)
+			Copy->Obj.Num = Count;
+			if (Count > IndexThreshold)
 			{
-				BuildIndex(*Node);
+				BuildIndex(*Copy);
 			}
-			return Node;
+			return Copy;
 		}
 		}
 		return NewNull();
 	}
 
-	bool FDocument::Equals(const FNode& A, const FNode& B)
+	bool FDocument::Equals(const FNode& A, const FNode& B, bool* bOutTooDeep)
+	{
+		bool bTooDeep = false;
+		const bool bEqual = EqualsAt(A, B, 0, bTooDeep);
+		if (bOutTooDeep)
+		{
+			*bOutTooDeep = bTooDeep;
+		}
+		return bEqual && !bTooDeep;
+	}
+
+	bool FDocument::EqualsAt(const FNode& A, const FNode& B, int32 Depth, bool& bTooDeep)
 	{
 		if (A.Type != B.Type)
 		{
@@ -431,9 +465,14 @@ namespace VaRest::Json
 			{
 				return false;
 			}
+			if (Depth >= MaxDepth)
+			{
+				bTooDeep = true;
+				return false;
+			}
 			for (uint32 i = 0; i < A.Arr.Num; ++i)
 			{
-				if (!Equals(*A.Arr.Items[i], *B.Arr.Items[i]))
+				if (!EqualsAt(*A.Arr.Items[i], *B.Arr.Items[i], Depth + 1, bTooDeep))
 				{
 					return false;
 				}
@@ -441,6 +480,11 @@ namespace VaRest::Json
 			return true;
 		case EVaRestJsonType::Object:
 		{
+			if (Depth >= MaxDepth)
+			{
+				bTooDeep = true;
+				return false;
+			}
 			// Distinct keys, each by its last occurrence -- the same view Find gives.
 			uint32 DistinctA = 0;
 			for (uint32 i = 0; i < A.Obj.Num; ++i)
@@ -452,7 +496,7 @@ namespace VaRest::Json
 				}
 				++DistinctA;
 				const int32 j = FindMember(B, M.Key.View(), M.Key.Hash);
-				if (j == INDEX_NONE || !Equals(*M.Value, *B.Obj.Members[j].Value))
+				if (j == INDEX_NONE || !EqualsAt(*M.Value, *B.Obj.Members[j].Value, Depth + 1, bTooDeep))
 				{
 					return false;
 				}
