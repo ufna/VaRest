@@ -177,7 +177,7 @@ has type `None`.
   returns false and logs). It never truncates silently.
 * **Strings entering through the API are valid UTF-8** (bead VaRest-qop). Byte-level inputs
   (`FUtf8StringView`, `FAnsiStringView`) are validated where they are copied into the arena; an
-  invalid sequence becomes U+FFFD and one warning is logged per call. `FString` input goes through
+  invalid sequence becomes U+FFFD and one warning is logged per repaired string. `FString` input goes through
   the engine's UTF-16→UTF-8 conversion with lone surrogates mapped to U+FFFD. The writer can then
   assume valid UTF-8, the same as for parsed (already validated) strings.
 

@@ -10,12 +10,24 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-18-varest2-core-design.md` — §1 (modules, threading), §2.2 (all, including the four rulings of 2026-10-20), §2.3 (typed access), §2.4 (struct ↔ JSON), §2.5 (BP surface), §5.4 (JSON nodes), §7.1, §7.3 (deferred typed benchmarks), §8 row M2 ("Convert tests green; BP smoke"), §9.
 
+## Controller rulings applied to this plan (2026-10-20)
+
+Revision 1 after the adversarial review (`.superpowers/sdd/m2-plan-review.md`) and the Socket.IO gap note (`.superpowers/sdd/sio-m2-gap.md`):
+
+- R1: Json To Struct resets its output before decoding (Task 12); `TryGet` of `FDateTime`/`FGuid`/`FTimespan`/soft paths refuses null and missing values (Task 9); both with tests and restore-the-bug steps.
+- R2: the struct-change listener is a raw pointer created in `FVaRestEditorModule::StartupModule` and deleted in `ShutdownModule` through `VaRestEditor::StructListener::Start/Stop` (Task 13); leaking it at exit is accepted.
+- R3: Socket.IO J-1 (`FVaRestJsonBytesWriter`, `FVaRestJsonConvertOptions::BytesWriter`) and the writer entries `WriteJsonInternal`, `WriteStructInternal`, `WritePropertyInternal`, `WriteJsonMembersInternal` are part of Task 7, in `VaRestJsonWriterInternal.h`, with tests `Encode.BytesWriter` and `Encode.WriterEntries`.
+- R4: a `TOptional` field keeps its previous value when the JSON value does not fit (Task 8).
+- R5: one warning per repaired string stays (Task 4); spec §2.2 now says "one warning is logged per repaired string".
+- R6: Review Focus gains Json To Struct defaults, `TryGet` on null, cooked Blueprint struct names, forwarding an absent field and the decode half of the field-name collision; the pure Make Json node's tooltip states its caveat.
+- R7: the review's cheap, local minors are applied in their tasks; anything declined is listed under "Deferred review minors" at the end.
+
 ## Global Constraints
 
 - Engine: UE 5.8 only. Build host: `/w/Unreal/VaRestHost` (plugin symlinked). Build + test: `Tools/run_tests.sh [Filter]` (bare filters are anchored, so `VaRest.Json` never runs `Bench.VaRest.*`).
 - Runtime module `VaRestJson`: `"Type": "Runtime"`, `"LoadingPhase": "PreDefault"`, `"PlatformAllowList": ["Win64","Mac","Linux","Android","IOS"]` (unchanged in `VaRest.uplugin`). No new modules in M2.
 - RapidJSON only through `#include "RapidJsonIncludes.h"` (engine macro configuration: `RAPIDJSON_ASSERT`→`check`, SSE4.2/NEON). No new third-party code.
-- **v1 paths are frozen.** Nothing under `Source/VaRest/` changes. Under `Source/VaRestEditor/` only **new** files are added, plus the `VaRestJson` entry in `VaRestEditor.Build.cs`; `VaRest_BreakJson.*`, `VaRestEditor.cpp/.h` are not edited.
+- **v1 paths are frozen.** Nothing under `Source/VaRest/` changes. Under `Source/VaRestEditor/` only **new** files are added, plus the `VaRestJson` and `ToolMenus` entries in `VaRestEditor.Build.cs`; `VaRestEditor.cpp` gains exactly two calls in the module's StartupModule/ShutdownModule bodies; no v1 signature, path or type changes. `VaRest_BreakJson.*` and `VaRestEditor.h` are not edited.
 - Public types: `FVaRestJson*`, `EVaRestJson*`, `UVaRestJson*`, `UK2Node_VaRest*`. Internals: namespace `VaRest::Json` (struct conversion in `VaRest::Json::Convert`). Private headers are named `VaRestJson*.h`, **never `VaRestJsonParser.h`** (v1 owns that name).
 - **JSON keys are case-sensitive.** Never compare keys with `FString`/`TStringView` `operator==` or `TestEqual` (case-insensitive in UE); use `VaRest::Json::KeyEquals`, byte compares, `ESearchCase::CaseSensitive` and `TestEqualSensitive`. `TSet<FString>`/`TMap<FString,…>` keys are case-insensitive too.
 - One depth limit: `VaRest::Json::MaxDepth` (512) for every recursive operation (spec §2.2). Exceeding it fails the whole operation with an error; nothing truncates silently.
@@ -39,6 +51,12 @@
 - **A cyclic `FJsonObject` graph passed to `FromJsonValue`** (engine JSON objects can hold themselves through shared pointers): must fail with the depth error, not overflow the stack. Test owner: Task 3 (`VaRest.Json.Depth.PastLimitFails`).
 - **A Blueprint `Get Field` reused in a loop whose later call misses**: the output must be reset to the type's default, never keep the previous iteration's value. Test owner: Task 12 (`VaRest.Json.Library.WildcardImpl`).
 - **`Make Json` keys that differ only by case (`id` and `ID`)**: pin names are case-insensitive `FName`s, JSON keys are not — both keys must reach the JSON. Test owner: Task 15 (`VaRest.Json.Blueprint.MakeJsonSmoke`).
+- **`Json To Struct` called twice (a loop, or a later event) with a field missing the second time**: the field must get its default, not the previous call's value (the output is a reused BP temporary). Test owner: Task 12 (`VaRest.Json.Library.WildcardImpl`, `... starts from defaults`).
+- **`TryGet<FDateTime>` / `TryGet<FGuid>` on JSON `null`**: unset, never a set `0001-01-01` / zero GUID. Test owner: Task 9 (`VaRest.Json.Api.TryGetTyped`, `null is not a date`).
+- **A Blueprint struct encoded in PIE**: it writes the cooked names (`PlayerScore`, not the friendly `Player Score`), so PIE and a packaged game send the same JSON (spec §2.4). Test owner: Task 13 (`VaRest.Json.Convert.UserStruct.Names`).
+- **Forwarding an absent field** (`Body.Set("p", Resp["p"])` when the response has no `p`): nothing is written, no `null`. Test owner: Task 5 (`VaRest.Json.Semantics.MissingIsUndefined`).
+- **Decoding the key two fields share** (`{"userId":5}` into `user_id` + `UserId`): only the surviving first field is filled. Test owner: Task 8 (`VaRest.Json.Convert.Decode.TolerantNames`).
+- **A pure `Make Json` read by two nodes, one of them through Set Field**: each reader gets its own object, so the second does not see the Set. Not cheaply testable; the node's tooltip says so (Task 14).
 
 ---
 
@@ -56,14 +74,16 @@ Source/VaRestJson/
   Private/VaRestJsonNode.h                + bDuplicateKeys flag, NodeToInt64/UInt64/Double
   Private/VaRestJsonDocument.h/.cpp       + duplicate tracking, Set collapse, depth-limited DeepCopy/Equals
   Private/VaRestJsonArena.h               MaxChunkSize 256 KiB
-  Private/VaRestJsonSax.h                 NEW: UTF-8 writer sink, writer typedefs, EmitNode (depth-limited SAX walk)
+  Private/VaRestJsonSax.h                 NEW: EmitNode (depth-limited SAX walk); its writer types move to the public
+                                          VaRestJsonWriterInternal.h in Task 7
   Private/VaRestJsonBuilder.h             NEW: FDomBuilder (SAX -> arena DOM), moved out of the reader
   Private/VaRestJsonWriter.h/.cpp         Write() returns false past MaxDepth
   Private/VaRestJsonReader.h/.cpp         depth clamp, code-point columns, uses FDomBuilder
   Private/VaRestJsonText.cpp              hint Clamp(input, 256 B, 32 KiB), TryToString/TryToUtf8, one UTF-16 converter
   Public/VaRestJsonUtf8.h                 NEW, exported: UTF-8 validation/repair, UTF-16 -> UTF-8 with U+FFFD (other VaRest modules validate the same way)
   Private/VaRestJsonUtf8.cpp
-  Public/VaRestJsonWriterInternal.h       NEW, internal API for sibling modules: UTF-8 writer types, WriteStructMembersInternal
+  Public/VaRestJsonWriterInternal.h       NEW, internal API for sibling modules: UTF-8 writer types, WriteStructMembersInternal,
+                                          WriteJsonInternal, WriteJsonMembersInternal, WriteStructInternal, WritePropertyInternal
   Private/VaRestJsonBridge.cpp            depth-limited bridges, U+FFFD strings
   Private/VaRestJsonStructOps.cpp         Serialize refuses past MaxDepth, ImportTextItem converter
   Private/VaRestJsonConvertPrivate.h      NEW: field map, cache, naming helpers, special structs, contexts
@@ -76,7 +96,8 @@ Source/VaRestJson/
   Private/Tests/VaRestJsonConvertBenchTest.cpp NEW: Bench.VaRest.Json.TypedConvert
 Source/VaRestEditor/
   VaRestEditor.Build.cs                   + VaRestJson, ToolMenus (private)
-  Private/VaRestJsonStructListener.cpp    NEW: drops the field-map cache on Blueprint struct changes
+  Private/VaRestEditor.cpp                two calls in StartupModule/ShutdownModule bodies (controller ruling R2)
+  Private/VaRestJsonStructListener.h/.cpp NEW: drops the field-map cache on Blueprint struct changes (Start/Stop)
   Private/K2Node_VaRestMakeJson.h/.cpp    NEW: v2 Make Json node (FVaRestMakeJsonEntry, UK2Node_VaRestMakeJson)
   Private/Tests/VaRestJsonBlueprintTestUtils.h NEW: build/compile/run helpers for test Blueprints
   Private/Tests/VaRestJsonUserStructTest.cpp   NEW: BP struct names, cache invalidation
@@ -1041,7 +1062,7 @@ Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: Task 1's hygiene namespaces.
-- Produces: `inline constexpr int32 VaRest::Json::MaxDepth = 512;` (`VaRestJson.h`); `TValueOrError<FString, FVaRestJsonError> FVaRestJson::TryToString(EVaRestJsonFormat) const`; `TValueOrError<void, FVaRestJsonError> FVaRestJson::TryToUtf8(TArray<uint8>&, EVaRestJsonFormat) const`; `bool VaRest::Json::Write(const FNode&, EVaRestJsonFormat, TArray<uint8>&)` (false past `MaxDepth`, `Out` restored); `VaRestJsonSax.h`: `VaRest::Json::FUtf8Sink`, `FWriterAllocator`, `FCondensedWriter`, `FPrettyWriter`, `FEmitState { int32 NonFinite; bool bTooDeep; }`, `template <typename SinkType> bool EmitNode(SinkType&, const FNode&, int32 Depth, FEmitState&)`; `FNode* FDocument::DeepCopy(const FNode&)` returns `nullptr` past `MaxDepth`; `static bool FDocument::Equals(const FNode&, const FNode&, bool* bOutTooDeep = nullptr)`. Depth = number of containers around a value: the 512th nested container is allowed, the 513th fails — the parser's rule (`Frames.Num() >= limit` before opening).
+- Produces: `inline constexpr int32 VaRest::Json::MaxDepth = 512;` (`VaRestJson.h`); `FVaRestJson::From(V)` returns a default (invalid) handle when the value cannot be made; `TValueOrError<FString, FVaRestJsonError> FVaRestJson::TryToString(EVaRestJsonFormat) const`; `TValueOrError<void, FVaRestJsonError> FVaRestJson::TryToUtf8(TArray<uint8>&, EVaRestJsonFormat) const`; `bool VaRest::Json::Write(const FNode&, EVaRestJsonFormat, TArray<uint8>&)` (false past `MaxDepth`, `Out` restored); `VaRestJsonSax.h`: `VaRest::Json::FUtf8Sink`, `FWriterAllocator`, `FCondensedWriter`, `FPrettyWriter`, `FEmitState { int32 NonFinite; bool bTooDeep; }`, `template <typename SinkType> bool EmitNode(SinkType&, const FNode&, int32 Depth, FEmitState&)`; `FNode* FDocument::DeepCopy(const FNode&)` returns `nullptr` past `MaxDepth`; `static bool FDocument::Equals(const FNode&, const FNode&, bool* bOutTooDeep = nullptr)`. Depth = number of containers around a value: the 512th nested container is allowed, the 513th fails — the parser's rule (`Frames.Num() >= limit` before opening).
 
 - [ ] **Step 1: Write the failing tests** — `Source/VaRestJson/Private/Tests/VaRestJsonDepthTest.cpp`
 
@@ -1337,6 +1358,14 @@ and the array writers:
 ```
 
 and add to the `Clone`, `Equals`, `ToJsonValue` and `FromJsonValue` declarations a line each: `/** Past VaRest::Json::MaxDepth: an invalid handle (nullptr / false) and an error log, never a truncated copy */`.
+
+5. `MakeNodeFor` can now return null (a copy past `MaxDepth`), so in `From` replace `return FVaRestJson(MoveTemp(NewDoc), Root);` with:
+
+```cpp
+		// A value that could not be made (a copy past MaxDepth, logged) gives a default handle, not a "miss" handle
+		// that holds a document and would refuse writes with "a lookup missed" errors
+		return Root ? FVaRestJson(MoveTemp(NewDoc), Root) : FVaRestJson();
+```
 
 - [ ] **Step 4: Create `Source/VaRestJson/Private/VaRestJsonSax.h`**
 
@@ -2184,7 +2213,7 @@ Also the VaRest-rfd items "error columns in bytes incl. BOM" and "StringCast vs 
 
 **Files:**
 - Create: `Source/VaRestJson/Public/VaRestJsonUtf8.h` (public and exported: the WebSocket/Socket.IO modules validate byte strings the same way, WebSocket spec §19 item 11), `Source/VaRestJson/Private/VaRestJsonUtf8.cpp`
-- Modify: `Source/VaRestJson/Public/VaRestJson.h` (`FVaRestJsonError::Column` doc, ANSI value branch, Set doc)
+- Modify: `Source/VaRestJson/Public/VaRestJson.h` (`FVaRestJsonError::Column` doc, Set doc)
 - Modify: `VaRestJson.cpp` (`Get`, `Remove`, `SetNode`, `SetNodeUtf8`, `MakeString`, `MakeUtf8String`), `VaRestJsonText.cpp` (`Parse(FStringView)`), `VaRestJsonReader.cpp` (`FillLineColumn`), `VaRestJsonBridge.cpp` (`FromEngine` strings and keys), `VaRestJsonStructOps.cpp` (`ImportTextItem`)
 - Test: `Source/VaRestJson/Private/Tests/VaRestJsonUtf8Test.cpp`
 
@@ -2347,7 +2376,7 @@ bool FVaRestJsonUtf8ColumnsTest::RunTest(const FString& Parameters)
 - [ ] **Step 2: Run to verify they fail**
 
 Run: `Tools/run_tests.sh VaRest.Json.Utf8`
-Expected: compile error (`VaRestJsonUtf8.h` not found). After Step 3 only (helpers exist, call sites unchanged), `ApiStrings` and `ParseAndColumns` fail (no U+FFFD, byte columns), `Repair` passes.
+Expected: compile error (`VaRestJsonUtf8.h` not found). After Step 3 only (helpers exist, call sites unchanged), `ApiStrings` and `ParseAndColumns` fail (no U+FFFD, byte columns), `Repair` passes. The `ansi` assertion is not a RED: an ANSI literal already takes the validated `FUtf8StringView` branch; it pins that behaviour.
 
 - [ ] **Step 3: Create the helpers**
 
@@ -2685,18 +2714,7 @@ VaRest::Json::FNode* FVaRestJson::MakeString(VaRest::Json::FDocument& InDoc, FSt
 }
 ```
 
-`VaRestJson.h`, in `MakeNodeFor`, insert between the `FUtf8StringView` branch and the `FStringView` branch:
-
-```cpp
-		else if constexpr (std::is_convertible_v<ValueType, FAnsiStringView>)
-		{
-			// ANSICHAR text is taken as UTF-8 bytes (a "..." literal is UTF-8 in UE sources) and validated like any byte input
-			const FAnsiStringView Ansi(Value);
-			return MakeUtf8String(InDoc, FUtf8StringView(reinterpret_cast<const UTF8CHAR*>(Ansi.GetData()), Ansi.Len()));
-		}
-```
-
-and in `FVaRestJsonError` replace the `Column` member's (missing) comment by `/** 1-based, in Unicode code points from the start of the line; a leading BOM is not counted. 0 when unknown. */`. Add to the `Set` doc comment: `UTF-8 and ANSI keys and values are validated: an invalid sequence becomes U+FFFD with one warning per string; FString text maps unpaired surrogates to U+FFFD.`
+`VaRestJson.h`: no branch is added to `MakeNodeFor` for ANSI text. `ANSICHAR` is encoding-compatible with `UTF8CHAR` (`Traits/IsCharEncodingCompatibleWith.h:25`) and `TStringView` has a non-explicit converting constructor from any compatible character pointer (`StringView.h:139-144`), so `"plain"` and an `FAnsiStringView` already take the `FUtf8StringView` branch, which validates them. In `FVaRestJsonError` replace the `Column` member's (missing) comment by `/** 1-based, in Unicode code points from the start of the line; a leading BOM is not counted. 0 when unknown. */`. Add to the `Set` doc comment: `UTF-8 and ANSI keys and values are validated: an invalid sequence becomes U+FFFD with one warning per string; FString text maps unpaired surrogates to U+FFFD.`
 
 `VaRestJsonText.cpp`: add `#include "VaRestJsonUtf8.h"` and replace `FVaRestJson::Parse(FStringView Text, ...)`:
 
@@ -2816,8 +2834,10 @@ bool FVaRestJson::ImportTextItem(const TCHAR*& Buffer, int32 PortFlags, UObject*
 	// (kParseStopWhenDoneFlag), and the parent's parser continues from there. The conversion is the one every
 	// other entry point uses (an unpaired surrogate becomes U+FFFD); U+FFFD converts back to one TCHAR, as the
 	// surrogate was, so mapping the consumed bytes back to TCHARs below still lands on the right character.
+	// No warning (bWarn = false): the rest of the buffer is engine-produced text (a pin default, a T3D blob) that may hold
+	// unrelated fields after this one, and a lone surrogate there is not this field's problem.
 	FUtf8Scratch Converted;
-	const FUtf8StringView Utf8 = ConvertForDocument(FStringView(Cursor), Converted);
+	const FUtf8StringView Utf8 = ConvertForDocument(FStringView(Cursor), Converted, false);
 	// (No parameter is named Num: it would hide FVaRestJson::Num, an MSVC C4458 error.)
 	const auto MakeInput = [](FDocument& Target, const UTF8CHAR* Bytes, int64 Count)
 	{
@@ -3203,6 +3223,12 @@ and replace `Set`, `IndexInsert`, `BuildIndex`, `Remove`, `AssignObject` with:
 
 In `DeepCopyAt`'s `Object` case, after `Copy->Obj.Num = Count;` add `Copy->bDuplicateKeys = Src.bDuplicateKeys;`.
 
+`Append(FNode& Object, const FStr& Key, FNode* Value)` never sets `bDuplicateKeys`, so it must only add a key that is not there. In `VaRestJsonDocument.h` replace its comment (`the parser keeps them`, stale: the parser uses `AssignObject`) with `/** Append a member whose key is not present (callers: Set after a miss), so bDuplicateKeys stays true to the object */`, and in `VaRestJsonDocument.cpp` add after its `check(...)`:
+
+```cpp
+		checkSlow(FindMember(Object, Key.View(), Key.Hash) == INDEX_NONE); // the bDuplicateKeys invariant
+```
+
 - [ ] **Step 5: Missing = undefined in `VaRestJson.h`** — replace the two view `Set` `&` overloads (Task 3's text) with:
 
 ```cpp
@@ -3299,7 +3325,7 @@ Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 - Produces (private, `VaRest::Json::Convert`): `FFieldInfo { const FProperty* Property; TArray<UTF8CHAR> Name, Folded, Normalized; FUtf8StringView NameView() const; }`; `FFieldMap { TArray<FFieldInfo> Fields; TMultiMap<uint32,int32> ByName, ByFolded, ByNormalized; int32 Match(FUtf8StringView Key, uint32 KeyHash, FUtf8Scratch& Scratch, uint8& OutTier) const; }`; `using FFieldMapRef = TSharedRef<const FFieldMap, ESPMode::ThreadSafe>`; `FFieldMapRef GetFieldMap(const UScriptStruct*, EVaRestJsonNaming)`; `FString StripGuidSuffix(const FString&)`; `FString AuthoredFieldName(const UScriptStruct* Owner, const FProperty*)`; `FString ApplyNaming(const FString& AuthoredName, bool bBoolField, EVaRestJsonNaming)`; `void FoldUtf8(FUtf8StringView, FUtf8Scratch&)`; `void NormalizeUtf8(FUtf8StringView, FUtf8Scratch&)`; `bool IsSupported(const FProperty*, FString& OutWhy)`; `enum class ESpecialStruct : uint8 { None, Json, DateTime, Timespan, Guid, SoftObjectPath }`; `ESpecialStruct ClassifyStruct(const UScriptStruct*)`; `bool IsUnsignedInteger(const FNumericProperty*)`; `bool IsPlainByteArray(const FArrayProperty*)`.
 - Test types (`VaRestJsonConvertTestTypes.h`): `FVaRestJsonTestInner { int32 Id; FString Name; }`, `FVaRestJsonTestNaming { int32 UserId; bool bIsActive; FString URLPath; int32 HTTPStatus2; FString user_name; UPROPERTY(Transient) int32 TransientValue; }`, `FVaRestJsonTestCollision { int32 user_id = 1; int32 UserId = 2; }`, `FVaRestJsonTestSkipped { int32 Kept; TObjectPtr<UObject> ObjectRef; TMap<FGuid, int32> GuidKeys; TArray<TObjectPtr<UObject>> Objects; }`.
 
-Decisions this task makes (the spec leaves them open): camelCase/snake_case/PascalCase split words at `_`/`-`/space, at lower→upper and digit→upper changes, and at the end of an acronym (`URLPath` → URL|Path), and lowercase the rest of each word (`UserID` → `userId`); a bool's UE `b` prefix (`bIsActive`) is dropped by every policy except `AsIs`; deprecated and transient properties are not converted; a field whose JSON name repeats an earlier field's is skipped with a warning; a spelling two fields share is left out of the tolerant tables (only an exact key reaches either); a registered rename is the exact key under every policy.
+Decisions this task makes (the spec leaves them open): camelCase/snake_case/PascalCase split words at `_`/`-`/space, at lower→upper and digit→upper changes, and at the end of an acronym (`URLPath` → URL|Path), and lowercase the rest of each word (`UserID` → `userId`); a bool's UE `b` prefix (`bIsActive`) is dropped by every policy except `AsIs`; deprecated, transient and editor-only (`CPF_EditorOnly`, absent from a cooked game) properties are not converted; a map built while the cache was reset or a rename registered is used once and not cached (an epoch counter); a field whose JSON name repeats an earlier field's is skipped with a warning; a spelling two fields share is left out of the tolerant tables (only an exact key reaches either); a registered rename is the exact key under every policy.
 
 - [ ] **Step 1: Test types** — `Source/VaRestJson/Private/Tests/VaRestJsonConvertTestTypes.h`
 
@@ -3650,7 +3676,12 @@ struct VARESTJSON_API FVaRestJsonNames
 	static void Unregister(const UScriptStruct* Struct);
 };
 
-/** Struct <-> JSON (spec 2.4). Every function may run on any thread. */
+/**
+ * Struct <-> JSON (spec 2.4). Every function may run on any thread. The struct's reflection must not change meanwhile:
+ * a Blueprint struct recompiled in the editor while a worker thread decodes into it frees the FProperty objects that
+ * decode is reading (UserDefinedStructureCompilerUtils.cpp:221-225), and dropping the cache cannot help a decode
+ * already in flight. Any reflection user shares that hazard; it exists only in the editor.
+ */
 struct VARESTJSON_API FVaRestJsonConvert
 {
 	/** Drops every cached field map. The editor calls it when a Blueprint struct changes; FVaRestJsonNames calls it too. */
@@ -3778,6 +3809,11 @@ namespace VaRest::Json::Convert
 		struct FCache
 		{
 			FRWLock Lock;
+			/**
+			 * Bumped by ResetCache, Register and Unregister. Build runs outside the lock, so a map built from the
+			 * renames (or struct) of before a reset could otherwise be inserted after it and outlive it.
+			 */
+			uint64 Epoch = 0;
 			TMap<TPair<FObjectKey, uint8>, FFieldMapRef> Maps;
 			TMap<FObjectKey, TMap<FName, FString>> Renames;
 		};
@@ -3884,11 +3920,13 @@ namespace VaRest::Json::Convert
 			}
 		}
 
-		FFieldMapRef Build(const UScriptStruct* Struct, EVaRestJsonNaming Naming)
+		/** OutEpoch: the cache epoch the renames were read at (read together, under one lock) */
+		FFieldMapRef Build(const UScriptStruct* Struct, EVaRestJsonNaming Naming, uint64& OutEpoch)
 		{
 			TMap<FName, FString> StructRenames;
 			{
 				FReadScopeLock ReadLock(Cache().Lock);
+				OutEpoch = Cache().Epoch;
 				if (const TMap<FName, FString>* Found = Cache().Renames.Find(FObjectKey(Struct)))
 				{
 					StructRenames = *Found;
@@ -3899,8 +3937,9 @@ namespace VaRest::Json::Convert
 			for (TFieldIterator<FProperty> It(Struct); It; ++It)
 			{
 				const FProperty* Property = *It;
-				// The flags FJsonObjectConverter skips by default (JsonObjectConverter.cpp:407-411)
-				if (Property->HasAnyPropertyFlags(CPF_Deprecated | CPF_Transient))
+				// The flags FJsonObjectConverter skips by default (JsonObjectConverter.cpp:407-411), plus editor-only data:
+				// such a field exists in PIE and not in a cooked game, the divergence spec 2.4 rules out for BP struct names
+				if (Property->HasAnyPropertyFlags(CPF_Deprecated | CPF_Transient | CPF_EditorOnly))
 				{
 					continue;
 				}
@@ -3956,11 +3995,16 @@ namespace VaRest::Json::Convert
 			}
 		}
 		// Built outside the lock: Build reads the rename registry under the same lock, and FRWLock is not recursive
-		const FFieldMapRef Built = NamesPrivate::Build(Struct, Naming);
+		uint64 BuiltEpoch = 0;
+		const FFieldMapRef Built = NamesPrivate::Build(Struct, Naming, BuiltEpoch);
 		FWriteScopeLock WriteLock(Shared.Lock);
 		if (const FFieldMapRef* Raced = Shared.Maps.Find(Key))
 		{
 			return *Raced; // another thread built it first: every caller shares one map
+		}
+		if (Shared.Epoch != BuiltEpoch)
+		{
+			return Built; // reset or renamed while this map was built: used for this call, never cached
 		}
 		Shared.Maps.Add(Key, Built);
 		return Built;
@@ -4179,6 +4223,7 @@ void FVaRestJsonNames::Register(const UScriptStruct* Struct, TConstArrayView<FVa
 	FWriteScopeLock WriteLock(Shared.Lock);
 	Shared.Renames.Add(FObjectKey(Struct), MoveTemp(ByField));
 	Shared.Maps.Reset(); // maps built before the rename are stale
+	++Shared.Epoch;
 }
 
 void FVaRestJsonNames::Unregister(const UScriptStruct* Struct)
@@ -4188,6 +4233,7 @@ void FVaRestJsonNames::Unregister(const UScriptStruct* Struct)
 	FWriteScopeLock WriteLock(Shared.Lock);
 	Shared.Renames.Remove(FObjectKey(Struct));
 	Shared.Maps.Reset();
+	++Shared.Epoch;
 }
 
 void FVaRestJsonConvert::ResetCache()
@@ -4196,6 +4242,7 @@ void FVaRestJsonConvert::ResetCache()
 	NamesPrivate::FCache& Shared = NamesPrivate::Cache();
 	FWriteScopeLock WriteLock(Shared.Lock);
 	Shared.Maps.Reset();
+	++Shared.Epoch;
 }
 
 int32 FVaRestJsonConvert::NumCachedFieldMapsInternal()
@@ -4229,24 +4276,24 @@ Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 
 ### Task 7: Encode — straight to UTF-8 bytes, no DOM (spec §2.4)
 
-One templated walker emits SAX events; the RapidJSON writer (bytes) and `FDomBuilder` (a DOM, for the BP nodes and `Set`) are its two sinks, so both outputs agree by construction. Sibling modules get an internal entry that writes a struct's members into a writer they already have open (WebSocket spec `docs/superpowers/specs/2026-10-20-varest2-websocket-design.md` §19 item 9: one-pass envelopes such as `{"type":"x","data":{...}}`).
+One templated walker emits SAX events; the RapidJSON writer (bytes) and `FDomBuilder` (a DOM, for the BP nodes and `Set`) are its two sinks, so both outputs agree by construction. Sibling modules get internal entries that write into a writer they already have open (WebSocket spec `docs/superpowers/specs/2026-10-20-varest2-websocket-design.md` §19 item 9: one-pass envelopes such as `{"type":"x","data":{...}}`; Socket.IO spec §18.2 J-2: positional arguments; WebSocket §6.1: a payload's members next to the route), and an encode hook for `TArray<uint8>` values (Socket.IO §18.2 J-1: binary attachments become placeholders). See `.superpowers/sdd/sio-m2-gap.md`.
 
 **Engine facts:** `rapidjson::Writer` asserts on a null string pointer (`writer.h:198`, `:205`) and on a key without a value (`:236`); `Double` refuses NaN/Inf after `Prefix()` (`:195`). Enum names are written the way `FJsonObjectConverter` writes them, `UEnum::GetAuthoredNameStringByIndex` (`JsonObjectConverter.cpp:109-114`), which for a Blueprint enum is its display text (`UserDefinedEnum.cpp:208-220`). `FDateTime::ToIso8601` is `%Y-%m-%dT%H:%M:%S.%sZ` (`DateTime.cpp:216-219`). `EGuidFormats::DigitsWithHyphens` is `%08X-%04X-%04X-%04X-%04X%08X` (`Guid.cpp:61-62`). The `Json` module depends on `RapidJSON` publicly (`Json.Build.cs:9-15`), so a public VaRestJson header may include `RapidJsonIncludes.h`.
 
 **Files:**
-- Create: `Source/VaRestJson/Public/VaRestJsonWriterInternal.h` (writer types moved out of `VaRestJsonSax.h`, plus `WriteStructMembersInternal`)
+- Create: `Source/VaRestJson/Public/VaRestJsonWriterInternal.h` (writer types moved out of `VaRestJsonSax.h`, plus `WriteStructMembersInternal`, `WriteJsonInternal`, `WriteJsonMembersInternal`, `WriteStructInternal`, `WritePropertyInternal`)
 - Modify: `Source/VaRestJson/Private/VaRestJsonSax.h`, `Source/VaRestJson/VaRestJson.Build.cs`
 - Create: `Source/VaRestJson/Private/VaRestJsonBuilder.h`; replace `Source/VaRestJson/Private/VaRestJsonReader.cpp` (uses it)
 - Create: `Source/VaRestJson/Private/VaRestJsonConvertEncode.cpp`
-- Modify: `Source/VaRestJson/Public/VaRestJsonConvert.h` (encode API), `Source/VaRestJson/Private/VaRestJsonConvertPrivate.h` (`FloatToJsonDouble`)
+- Modify: `Source/VaRestJson/Public/VaRestJsonConvert.h` (encode API, `FVaRestJsonBytesWriter`, `BytesWriter` option), `Source/VaRestJson/Private/VaRestJsonConvertPrivate.h` (`FloatToJsonDouble`)
 - Modify: `Source/VaRestJson/Private/Tests/VaRestJsonConvertTestTypes.h` (append)
 - Test: `Source/VaRestJson/Private/Tests/VaRestJsonConvertEncodeTest.cpp`
 
 **Interfaces:**
 - Consumes: Task 3 (`EmitNode`, `FEmitState`), Task 4 (`ConvertForDocument`), Task 6 (field maps, `ClassifyStruct`, `IsUnsignedInteger`, `IsPlainByteArray`).
-- Produces: public internal header `VaRestJsonWriterInternal.h` with `VaRest::Json::FUtf8Sink`, `FWriterAllocator`, `FCondensedWriter`, `FPrettyWriter` (moved from `VaRestJsonSax.h`, same names) and `VARESTJSON_API bool VaRest::Json::WriteStructMembersInternal(FCondensedWriter& / FPrettyWriter& Writer, const UScriptStruct*, const void* Data, const FVaRestJsonConvertOptions& = {}, int32 OpenContainers = 1, FVaRestJsonError* OutError = nullptr)`; `VaRest::Json::FDomBuilder(FDocument&, int32 DepthLimit)` with the RapidJSON handler interface and `FNode* Result`; `double VaRest::Json::Convert::FloatToJsonDouble(float)`; `FVaRestJsonConvert::StructToUtf8(const UScriptStruct*, const void* Data, TArray<uint8>& Out, const FVaRestJsonConvertOptions& = {}, EVaRestJsonFormat = Condensed, FVaRestJsonError* OutError = nullptr) -> bool`; `StructToString(...) -> FString`; `StructToJson(const UScriptStruct*, const void*, Options) -> FVaRestJson`; `PropertyToJson(const FProperty*, const void* Value, Options) -> FVaRestJson`; `template <typename T> ToUtf8(const T&, Options, Format) -> TArray<uint8>`; `template <typename T> ToJson(const T&, Options) -> FVaRestJson`. Test types `EVaRestJsonTestColor`, `EVaRestJsonTestLegacy::Type`, `FVaRestJsonTestAll`, `FVaRestJsonTestTree`.
+- Produces: public internal header `VaRestJsonWriterInternal.h` with `VaRest::Json::FUtf8Sink`, `FWriterAllocator`, `FCondensedWriter`, `FPrettyWriter` (moved from `VaRestJsonSax.h`, same names) and, all `VARESTJSON_API` in `VaRest::Json`: `bool WriteStructMembersInternal(FCondensedWriter& / FPrettyWriter& Writer, const UScriptStruct*, const void* Data, const FVaRestJsonConvertOptions& = {}, int32 OpenContainers = 1, FVaRestJsonError* OutError = nullptr)`; `bool WriteJsonInternal(FCondensedWriter&, const FVaRestJson& Value, int32 OpenContainers = 0, FVaRestJsonError* = nullptr)`; `bool WriteJsonMembersInternal(FCondensedWriter&, const FVaRestJson& Object, int32 OpenContainers = 1, FVaRestJsonError* = nullptr)`; `bool WriteStructInternal(FCondensedWriter&, const UScriptStruct*, const void* Data, const FVaRestJsonConvertOptions& = {}, int32 OpenContainers = 0, FVaRestJsonError* = nullptr)`; `bool WritePropertyInternal(FCondensedWriter&, const FProperty*, const void* Value, const FVaRestJsonConvertOptions& = {}, int32 OpenContainers = 0, FVaRestJsonError* = nullptr)`; `using FVaRestJsonBytesWriter = TFunction<bool(TConstArrayView<uint8> Bytes, FVaRestJson& OutReplacement)>` and `FVaRestJsonConvertOptions::BytesWriter` (`VaRestJsonConvert.h`); `VaRest::Json::FDomBuilder(FDocument&, int32 DepthLimit)` with the RapidJSON handler interface and `FNode* Result`; `double VaRest::Json::Convert::FloatToJsonDouble(float)`; `FVaRestJsonConvert::StructToUtf8(const UScriptStruct*, const void* Data, TArray<uint8>& Out, const FVaRestJsonConvertOptions& = {}, EVaRestJsonFormat = Condensed, FVaRestJsonError* OutError = nullptr) -> bool`; `StructToString(...) -> FString`; `StructToJson(const UScriptStruct*, const void*, Options) -> FVaRestJson`; `PropertyToJson(const FProperty*, const void* Value, Options) -> FVaRestJson`; `template <typename T> ToUtf8(const T&, Options, Format) -> TArray<uint8>`; `template <typename T> ToJson(const T&, Options) -> FVaRestJson`. Test types `EVaRestJsonTestColor`, `EVaRestJsonTestLegacy::Type`, `FVaRestJsonTestAll`, `FVaRestJsonTestTree`, `FVaRestJsonTestBlob { TArray<uint8> Data; }`, `FVaRestJsonTestAttachments { TArray<uint8> First; TArray<FVaRestJsonTestBlob> List; TMap<FString, FVaRestJsonTestBlob> ByName; }`.
 
-Encode rules (spec §2.4, plus decisions): an unset `TOptional` field and an invalid `FVaRestJson` field are omitted (missing = undefined); inside a container they are `null`; a float is written as the shortest decimal that reads back as the same float; `FTimespan` is total seconds; `TMap` keys become object keys (strings, names, decimal integers, enumerator names or numbers); a C-style array member is a JSON array of `ArrayDim` elements; NaN/Inf become `null` with one warning per encode; any failure (depth) fails the whole encode.
+Encode rules (spec §2.4, plus decisions): an unset `TOptional` field and an invalid `FVaRestJson` field are omitted (missing = undefined); inside a container they are `null`; a float is written as the shortest decimal that reads back as the same float; `FTimespan` is total seconds; `TMap` keys become object keys (strings, names, decimal integers, enumerator names or numbers); a C-style array member is a JSON array of `ArrayDim` elements (never omitted as a whole; an invalid element is `null`); `FText` is written as `BuildSourceString()`, the culture-invariant source text spec §2.4 asks for (`Text.h:591-592` → `BuildInvariantDisplayString`, `Text.cpp:1348-1351`), not `ToString()`'s current-culture display text that `FJsonObjectConverter` writes; a `TArray<uint8>` value is offered to `Options.BytesWriter` first (walk order: field declaration order, then container order; empty arrays too), then written as numbers or base64; NaN/Inf become `null` with one warning per encode; any failure (depth) fails the whole encode. Nested containers (`TArray<TArray<uint8>>`, a `TMap` of arrays) are not reflectable (UHT rejects them), so bytes inside containers always sit in a struct.
 
 - [ ] **Step 1: Append the test types** to `VaRestJsonConvertTestTypes.h` (and add `#include "UObject/SoftObjectPath.h"` and `#include "UObject/SoftObjectPtr.h"` to its include block, before the `.generated.h` include)
 
@@ -4391,6 +4438,32 @@ struct FVaRestJsonTestTree
 
 	UPROPERTY()
 	TArray<FVaRestJsonTestTree> Children;
+};
+
+/** Bytes in a struct, so they can sit inside containers (UHT rejects nested containers) */
+USTRUCT()
+struct FVaRestJsonTestBlob
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	TArray<uint8> Data;
+};
+
+/** Every place a TArray<uint8> can meet the BytesWriter hook: a field, array elements, map values */
+USTRUCT()
+struct FVaRestJsonTestAttachments
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	TArray<uint8> First;
+
+	UPROPERTY()
+	TArray<FVaRestJsonTestBlob> List;
+
+	UPROPERTY()
+	TMap<FString, FVaRestJsonTestBlob> ByName;
 };
 ```
 
@@ -4664,6 +4737,95 @@ bool FVaRestJsonEncodeSkippedTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonEncodeBytesWriterTest, "VaRest.Json.Convert.Encode.BytesWriter",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestJsonEncodeBytesWriterTest::RunTest(const FString& Parameters)
+{
+	// Socket.IO spec §18.2 J-1: binary values become numbered placeholders, written in place in one pass
+	FVaRestJsonTestAttachments Value;
+	Value.First = { 1, 2 };
+	Value.List.AddDefaulted(2);
+	Value.List[0].Data = { 3 }; // List[1].Data stays empty: an empty array is offered too
+	Value.ByName.Add(TEXT("k")).Data = { 4, 5, 6 };
+
+	TArray<int32> Seen; // the sizes the hook was offered, in walk order
+	FVaRestJsonConvertOptions Options;
+	Options.BytesWriter = [&Seen](TConstArrayView<uint8> Bytes, FVaRestJson& OutReplacement)
+	{
+		OutReplacement = FVaRestJson::Object().Set(TEXT("_placeholder"), true).Set(TEXT("num"), Seen.Num());
+		Seen.Add(Bytes.Num());
+		return true;
+	};
+	const FString Text = FVaRestJsonConvert::StructToString(FVaRestJsonTestAttachments::StaticStruct(), &Value, Options);
+	TestEqualSensitive(TEXT("replacements in place, numbered in walk order"), Text, FString(TEXT(
+		"{\"first\":{\"_placeholder\":true,\"num\":0},\"list\":[{\"data\":{\"_placeholder\":true,\"num\":1}},{\"data\":{\"_placeholder\":true,\"num\":2}}],"
+		"\"byName\":{\"k\":{\"data\":{\"_placeholder\":true,\"num\":3}}}}")));
+	TestTrue(TEXT("the hook saw every value's bytes, the empty one too"), Seen == TArray<int32>({ 2, 1, 0, 3 }));
+
+	Seen.Reset();
+	TestEqualSensitive(TEXT("the DOM path agrees"), FVaRestJsonConvert::StructToJson(FVaRestJsonTestAttachments::StaticStruct(), &Value, Options).ToString(), Text);
+
+	FVaRestJsonConvertOptions Declining;
+	Declining.BytesWriter = [](TConstArrayView<uint8> Bytes, FVaRestJson& OutReplacement) { return false; };
+	TestEqualSensitive(TEXT("a declining hook leaves the built-in form"), FVaRestJsonConvert::StructToString(FVaRestJsonTestAttachments::StaticStruct(), &Value, Declining),
+		FString(TEXT("{\"first\":[1,2],\"list\":[{\"data\":[3]},{\"data\":[]}],\"byName\":{\"k\":{\"data\":[4,5,6]}}}")));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonEncodeWriterEntriesTest, "VaRest.Json.Convert.Encode.WriterEntries",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestJsonEncodeWriterEntriesTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Json;
+	using namespace VaRestJsonConvertEncodeTest;
+	// Socket.IO positional arguments (§18.2 J-2) and WebSocket's Emit(Route, FVaRestJson) (§6.1), into one open array
+	FVaRestJsonTestInner Inner;
+	Inner.Id = 7;
+	Inner.Name = TEXT("n");
+	const FDateTime When(2026, 10, 20, 12, 0, 0);
+	const FVaRestJson Payload = FVaRestJson::Object().Set(TEXT("a"), 1).Set(TEXT("b"), FVaRestJson::Array(true, nullptr));
+	const FProperty* NameProperty = FindFProperty<FProperty>(FVaRestJsonTestInner::StaticStruct(), FName(TEXT("Name")));
+	const void* NameValue = NameProperty->ContainerPtrToValuePtr<void>(&Inner);
+
+	TArray<uint8> Bytes;
+	FUtf8Sink Sink{ Bytes };
+	FWriterAllocator StackAllocator;
+	FCondensedWriter Writer(Sink, &StackAllocator);
+	Writer.StartArray();
+	TestTrue(TEXT("WriteJsonInternal"), WriteJsonInternal(Writer, Payload, 1));
+	TestTrue(TEXT("an invalid handle writes null"), WriteJsonInternal(Writer, FVaRestJson(), 1));
+	TestTrue(TEXT("WriteStructInternal, an object"), WriteStructInternal(Writer, FVaRestJsonTestInner::StaticStruct(), &Inner, FVaRestJsonConvertOptions(), 1));
+	TestTrue(TEXT("WriteStructInternal, a value struct"), WriteStructInternal(Writer, TBaseStructure<FDateTime>::Get(), &When, FVaRestJsonConvertOptions(), 1));
+	TestTrue(TEXT("WritePropertyInternal"), WritePropertyInternal(Writer, NameProperty, NameValue, FVaRestJsonConvertOptions(), 1));
+	Writer.StartObject();
+	TestTrue(TEXT("WriteJsonMembersInternal"), WriteJsonMembersInternal(Writer, Payload, 2));
+	Writer.EndObject();
+	Writer.EndArray();
+	const FString Expected = FString::Printf(TEXT("[%s,null,%s,\"%s\",%s,%s]"), *Payload.ToString(),
+		*FVaRestJsonConvert::StructToString(FVaRestJsonTestInner::StaticStruct(), &Inner), *When.ToIso8601(),
+		*FVaRestJsonConvert::PropertyToJson(NameProperty, NameValue).ToString(), *Payload.ToString());
+	TestEqualSensitive(TEXT("each entry writes what the DOM path builds"), Utf8Text(Bytes), Expected);
+
+	// The depth limit counts the caller's open containers; OutError keeps the failure out of the log
+	FVaRestJsonError Error;
+	TArray<uint8> DeepBytes;
+	FUtf8Sink DeepSink{ DeepBytes };
+	FCondensedWriter DeepWriter(DeepSink, &StackAllocator);
+	TestFalse(TEXT("an object inside MaxDepth open containers fails"), WriteJsonInternal(DeepWriter, Payload, MaxDepth, &Error));
+	TestTrue(TEXT("... with the depth error"), Error.Message.Contains(TEXT("deeper than")));
+	TArray<uint8> ScalarBytes;
+	FUtf8Sink ScalarSink{ ScalarBytes };
+	FCondensedWriter ScalarWriter(ScalarSink, &StackAllocator);
+	TestTrue(TEXT("a scalar there is fine"), WriteJsonInternal(ScalarWriter, FVaRestJson::From(1), MaxDepth));
+	TArray<uint8> NotObjectBytes;
+	FUtf8Sink NotObjectSink{ NotObjectBytes };
+	FCondensedWriter NotObjectWriter(NotObjectSink, &StackAllocator);
+	TestFalse(TEXT("members of a non-object"), WriteJsonMembersInternal(NotObjectWriter, FVaRestJson::Array(1), 1, &Error));
+	return true;
+}
+
 #endif
 ```
 
@@ -4740,6 +4902,40 @@ namespace VaRest::Json
 		const FVaRestJsonConvertOptions& Options = FVaRestJsonConvertOptions(), int32 OpenContainers = 1, FVaRestJsonError* OutError = nullptr);
 	VARESTJSON_API bool WriteStructMembersInternal(FPrettyWriter& Writer, const UScriptStruct* Struct, const void* Data,
 		const FVaRestJsonConvertOptions& Options = FVaRestJsonConvertOptions(), int32 OpenContainers = 1, FVaRestJsonError* OutError = nullptr);
+
+	// The entries below share WriteStructMembersInternal's contract: OpenContainers counts the containers the caller has
+	// open (the shared MaxDepth includes them); false past VaRest::Json::MaxDepth, after which the writer's output must
+	// be discarded; OutError receives the failure (without it, an error is logged); any thread, for the caller's data.
+	// Condensed only: wire encoders are condensed (Socket.IO spec §18.2 J-2).
+
+	/**
+	 * Writes Value as one JSON value where Writer expects a value (an array element, or after a key). An invalid
+	 * (missing) handle writes null, as FVaRestJson::Add does (spec 2.2). The NaN/Infinity and depth rules of ToUtf8.
+	 */
+	VARESTJSON_API bool WriteJsonInternal(FCondensedWriter& Writer, const FVaRestJson& Value, int32 OpenContainers = 0,
+		FVaRestJsonError* OutError = nullptr);
+
+	/**
+	 * Writes Object's members (keys and values, no braces) into the object Writer has open: a payload's members next
+	 * to the caller's own keys in one pass (WebSocket spec §6.1). False when Object is not an object.
+	 */
+	VARESTJSON_API bool WriteJsonMembersInternal(FCondensedWriter& Writer, const FVaRestJson& Object, int32 OpenContainers = 1,
+		FVaRestJsonError* OutError = nullptr);
+
+	/**
+	 * Writes Struct as one JSON value: an object for an ordinary struct, the single-value form for FDateTime, FTimespan,
+	 * FGuid, FVaRestJson and soft paths. Same rules and naming as StructToUtf8, including Options.BytesWriter.
+	 */
+	VARESTJSON_API bool WriteStructInternal(FCondensedWriter& Writer, const UScriptStruct* Struct, const void* Data,
+		const FVaRestJsonConvertOptions& Options = FVaRestJsonConvertOptions(), int32 OpenContainers = 0, FVaRestJsonError* OutError = nullptr);
+
+	/**
+	 * Writes one property's value (Value points at the value, not at its container) as one JSON value: what
+	 * PropertyToJson builds, without the DOM. Socket.IO's positional encode is
+	 * `for (TFieldIterator<FProperty> It(Struct); It; ++It) WritePropertyInternal(Writer, *It, It->ContainerPtrToValuePtr<void>(Data), Options, 1)`.
+	 */
+	VARESTJSON_API bool WritePropertyInternal(FCondensedWriter& Writer, const FProperty* Property, const void* Value,
+		const FVaRestJsonConvertOptions& Options = FVaRestJsonConvertOptions(), int32 OpenContainers = 0, FVaRestJsonError* OutError = nullptr);
 }
 ```
 
@@ -5006,7 +5202,28 @@ namespace VaRest::Json
 }
 ```
 
-- [ ] **Step 6: Encode API** — in `VaRestJsonConvert.h`, inside `struct FVaRestJsonConvert` before `ResetCache`:
+- [ ] **Step 6: Encode API** — in `VaRestJsonConvert.h`, add `#include "Containers/ArrayView.h"` and `#include "Templates/Function.h"` to the includes, then before `struct FVaRestJsonConvertOptions`:
+
+```cpp
+/**
+ * Encode: offered every TArray<uint8> value (a field, or bytes inside a struct in a container) before the built-in
+ * forms (an array of numbers; a base64 string with bBytesAsBase64). Return true after setting OutReplacement: the
+ * encoder writes OutReplacement in place of the bytes through the same sink (RapidJSON writer or DOM builder),
+ * counting its depth. Return false for the built-in forms. Called in walk order (field declaration order, then
+ * container order), so a caller that numbers the values gets a deterministic numbering; empty arrays are offered too.
+ * Socket.IO writes {"_placeholder":true,"num":N} and keeps a copy of Bytes (spec §18.2 J-1). Runs on the encoding thread.
+ */
+using FVaRestJsonBytesWriter = TFunction<bool(TConstArrayView<uint8> Bytes, FVaRestJson& OutReplacement)>;
+```
+
+and as the last member of `FVaRestJsonConvertOptions`:
+
+```cpp
+	/** Encode: per-value replacement for TArray<uint8> values (see FVaRestJsonBytesWriter); unset: the built-in forms */
+	FVaRestJsonBytesWriter BytesWriter;
+```
+
+Then inside `struct FVaRestJsonConvert`, before `ResetCache`:
 
 ```cpp
 	// ---- encode: straight to UTF-8 bytes with the RapidJSON writer, no DOM, no FString (spec 2.4)
@@ -5267,28 +5484,32 @@ namespace VaRest::Json::Convert
 		template <typename SinkType>
 		bool EncodeValue(SinkType& Sink, const FProperty* Property, const void* Value, FEncodeContext& Context);
 
+		/** An FVaRestJson value through the sink at the current depth; a missing handle is null (spec 2.2) */
+		template <typename SinkType>
+		bool EmitJson(SinkType& Sink, const FVaRestJson& Json, FEncodeContext& Context)
+		{
+			if (!Json.IsValid())
+			{
+				Sink.Null(); // inside a container; a missing struct FIELD is omitted before this point
+				return true;
+			}
+			FEmitState State;
+			const bool bEmitted = EmitNode(Sink, *Json.GetNodeInternal(), Context.Depth, State);
+			Context.NonFinite += State.NonFinite;
+			if (!bEmitted)
+			{
+				Context.Fail(FString::Printf(TEXT("value nested deeper than %d levels"), MaxDepth));
+			}
+			return bEmitted;
+		}
+
 		template <typename SinkType>
 		bool EncodeSpecial(SinkType& Sink, ESpecialStruct Special, const void* Data, FEncodeContext& Context)
 		{
 			switch (Special)
 			{
 			case ESpecialStruct::Json:
-			{
-				const FVaRestJson& Json = *static_cast<const FVaRestJson*>(Data);
-				if (!Json.IsValid())
-				{
-					Sink.Null(); // inside a container; a missing struct FIELD is omitted before this point
-					return true;
-				}
-				FEmitState State;
-				const bool bEmitted = EmitNode(Sink, *Json.GetNodeInternal(), Context.Depth, State);
-				Context.NonFinite += State.NonFinite;
-				if (!bEmitted)
-				{
-					Context.Fail(FString::Printf(TEXT("value nested deeper than %d levels"), MaxDepth));
-				}
-				return bEmitted;
-			}
+				return EmitJson(Sink, *static_cast<const FVaRestJson*>(Data), Context);
 			case ESpecialStruct::DateTime:
 				WriteText(Sink, static_cast<const FDateTime*>(Data)->ToIso8601(), Context);
 				return true;
@@ -5310,6 +5531,10 @@ namespace VaRest::Json::Convert
 		/** Spec 2.4 / 2.2: an unset TOptional and a missing FVaRestJson are a missing key, not null */
 		bool IsOmitted(const FProperty* Property, const void* Value)
 		{
+			if (Property->ArrayDim != 1)
+			{
+				return false; // a C-style array member is always written; an invalid element is null
+			}
 			if (const FOptionalProperty* Optional = CastField<FOptionalProperty>(Property))
 			{
 				return !Optional->IsSet(Value);
@@ -5416,7 +5641,8 @@ namespace VaRest::Json::Convert
 			}
 			if (const FTextProperty* TextProperty = CastField<FTextProperty>(Property))
 			{
-				WriteText(Sink, TextProperty->GetPropertyValue(Value).ToString(), Context);
+				// Culture-invariant (spec 2.4): ToString() would give the current culture's display text
+				WriteText(Sink, TextProperty->GetPropertyValue(Value).BuildSourceString(), Context);
 				return true;
 			}
 			if (const FStructProperty* StructProperty = CastField<FStructProperty>(Property))
@@ -5426,6 +5652,16 @@ namespace VaRest::Json::Convert
 			if (const FArrayProperty* ArrayProperty = CastField<FArrayProperty>(Property))
 			{
 				FScriptArrayHelper Helper(ArrayProperty, Value);
+				if (Context.Options.BytesWriter && IsPlainByteArray(ArrayProperty))
+				{
+					// Socket.IO attachments (spec §18.2 J-1): the caller's replacement, written in place at this depth
+					const TConstArrayView<uint8> Bytes(Helper.Num() ? Helper.GetRawPtr(0) : nullptr, Helper.Num());
+					FVaRestJson Replacement;
+					if (Context.Options.BytesWriter(Bytes, Replacement))
+					{
+						return EmitJson(Sink, Replacement, Context);
+					}
+				}
 				if (Context.Options.bBytesAsBase64 && IsPlainByteArray(ArrayProperty))
 				{
 					WriteText(Sink, Helper.Num() ? FBase64::Encode(Helper.GetRawPtr(0), static_cast<uint32>(Helper.Num())) : FString(), Context);
@@ -5581,6 +5817,79 @@ bool VaRest::Json::WriteStructMembersInternal(FPrettyWriter& Writer, const UScri
 	return Convert::EncodePrivate::WriteMembers(Writer, Struct, Data, Options, OpenContainers, OutError);
 }
 
+bool VaRest::Json::WriteJsonInternal(FCondensedWriter& Writer, const FVaRestJson& Value, int32 OpenContainers, FVaRestJsonError* OutError)
+{
+	using namespace Convert::EncodePrivate;
+	const FVaRestJsonConvertOptions Defaults;
+	FEncodeContext Context(Defaults);
+	Context.Depth = FMath::Max(0, OpenContainers);
+	return Finish(EmitJson(Writer, Value, Context), Context, TEXT("a VaRest Json value"), OutError);
+}
+
+bool VaRest::Json::WriteJsonMembersInternal(FCondensedWriter& Writer, const FVaRestJson& Object, int32 OpenContainers, FVaRestJsonError* OutError)
+{
+	using namespace Convert::EncodePrivate;
+	const FVaRestJsonConvertOptions Defaults;
+	FEncodeContext Context(Defaults);
+	if (!Object.IsObject())
+	{
+		Context.Fail(TEXT("it is not an object"));
+		return Finish(false, Context, TEXT("a VaRest Json value"), OutError);
+	}
+	Context.Depth = FMath::Max(0, OpenContainers);
+	// The members as stored, duplicates included, exactly as EmitNode writes an object's body
+	const FNode& Source = *Object.GetNodeInternal();
+	bool bEmitted = true;
+	for (uint32 i = 0; i < Source.Obj.Num && bEmitted; ++i)
+	{
+		const FMember& Member = Source.Obj.Members[i];
+		WriteKey(Writer, Member.Key.View());
+		FEmitState State;
+		bEmitted = EmitNode(Writer, *Member.Value, Context.Depth, State);
+		Context.NonFinite += State.NonFinite;
+	}
+	if (!bEmitted)
+	{
+		Context.Fail(FString::Printf(TEXT("value nested deeper than %d levels"), MaxDepth));
+	}
+	return Finish(bEmitted, Context, TEXT("a VaRest Json value"), OutError);
+}
+
+bool VaRest::Json::WriteStructInternal(FCondensedWriter& Writer, const UScriptStruct* Struct, const void* Data,
+	const FVaRestJsonConvertOptions& Options, int32 OpenContainers, FVaRestJsonError* OutError)
+{
+	using namespace Convert::EncodePrivate;
+	FEncodeContext Context(Options);
+	if (!Struct || !Data)
+	{
+		Context.Fail(TEXT("no struct to encode"));
+		return Finish(false, Context, TEXT("a null struct"), OutError);
+	}
+	Context.Depth = FMath::Max(0, OpenContainers);
+	return Finish(EncodeStruct(Writer, Struct, Data, Context), Context, Struct->GetName(), OutError);
+}
+
+bool VaRest::Json::WritePropertyInternal(FCondensedWriter& Writer, const FProperty* Property, const void* Value,
+	const FVaRestJsonConvertOptions& Options, int32 OpenContainers, FVaRestJsonError* OutError)
+{
+	using namespace Convert;
+	using namespace Convert::EncodePrivate;
+	FEncodeContext Context(Options);
+	if (!Property || !Value)
+	{
+		Context.Fail(TEXT("no value to encode"));
+		return Finish(false, Context, TEXT("a null property"), OutError);
+	}
+	FString Why;
+	if (!IsSupported(Property, Why))
+	{
+		Context.Fail(Why);
+		return Finish(false, Context, Property->GetName(), OutError);
+	}
+	Context.Depth = FMath::Max(0, OpenContainers);
+	return Finish(EncodeField(Writer, Property, Value, Context), Context, Property->GetName(), OutError);
+}
+
 bool FVaRestJsonConvert::StructToUtf8(const UScriptStruct* Struct, const void* Data, TArray<uint8>& Out,
 	const FVaRestJsonConvertOptions& Options, EVaRestJsonFormat Format, FVaRestJsonError* OutError)
 {
@@ -5668,13 +5977,13 @@ FVaRestJson FVaRestJsonConvert::PropertyToJson(const FProperty* Property, const 
 - [ ] **Step 8: Run and pass**
 
 Run: `Tools/run_tests.sh VaRest.Json`
-Expected: `0 failed`, including the seven `VaRest.Json.Convert.Encode.*` tests and every parse test (the reader now uses `FDomBuilder`).
+Expected: `0 failed`, including the nine `VaRest.Json.Convert.Encode.*` tests and every parse test (the reader now uses `FDomBuilder`).
 
 - [ ] **Step 9: Commit**
 
 ```bash
 git add Source/VaRestJson
-git commit -m "json: struct encode straight to UTF-8 or a DOM through one SAX walker; members into an open writer
+git commit -m "json: struct encode straight to UTF-8 or a DOM through one SAX walker; writer entries, bytes hook
 
 Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 ```
@@ -5696,7 +6005,7 @@ Also the WebSocket spec's §19 item 10: a caller-supplied resolver for `TArray<u
 - Consumes: Task 1 node helpers, Task 6 field maps (`Match`), Task 7 encode (tests round-trip through it).
 - Produces: `using FVaRestJsonBytesResolver = TFunction<bool(const FVaRestJson& Value, const FString& Path, TArray<uint8>& OutBytes)>`; `FVaRestJsonConvertOptions::BytesResolver`; `FVaRestJsonConvert::JsonToStruct(const FVaRestJson&, const UScriptStruct*, void* Data, const FVaRestJsonConvertOptions& = {}, FVaRestJsonDecodeReport* = nullptr) -> bool`; `Utf8ToStruct(TConstArrayView<uint8>, const UScriptStruct*, void*, Options, Report) -> bool`; `JsonToProperty(const FVaRestJson&, const FProperty*, void* Value, Options, Report) -> bool` (true when the top-level value was stored).
 
-Decode rules (spec §2.4 plus decisions): keys match fields exactly, then case-insensitively (ASCII), then normalised; the best tier wins regardless of member order, the last occurrence within a tier — in lenient and strict mode alike (names are tolerant by design; strict governs values). Unknown keys are ignored. An absent field keeps its value. `null` keeps a struct (and FDateTime/FGuid/...), clears arrays/sets/maps, unsets a `TOptional`, is JSON null in an `FVaRestJson` field, and is a mismatch for a scalar. Lenient coercions: a string holding a JSON number into a number field, `0`/`1` and `"true"`/`"false"` into a bool, a number or bool into a string/name/text field, an enumerator name that differs only by case; each coercion and each mismatch is recorded (a warning; an error in strict mode, where coercions are refused). An `FVaRestJson` field receives a `Clone` (a decoded struct never shares a document with the response). Containers are replaced, not appended; a map value or set element that does not decode is skipped. A `TArray<uint8>` value is offered to `BytesResolver` first, then read as a number array or a base64 string. Without a report, one summary warning per decode is logged.
+Decode rules (spec §2.4 plus decisions): keys match fields exactly, then case-insensitively (ASCII), then normalised; the best tier wins regardless of member order, the last occurrence within a tier — in lenient and strict mode alike (names are tolerant by design; strict governs values). Unknown keys are ignored. An absent field keeps its value. `null` keeps a struct (and FDateTime/FGuid/...), clears arrays/sets/maps, unsets a `TOptional`, is JSON null in an `FVaRestJson` field, and is a mismatch for a scalar. Lenient coercions: a string holding a JSON number into a number field, `0`/`1` and `"true"`/`"false"` into a bool, a number or bool into a string/name/text field, an enumerator name that differs only by case; each coercion and each mismatch is recorded (a warning; an error in strict mode, where coercions are refused). An `FVaRestJson` field receives a `Clone` (a decoded struct never shares a document with the response). Containers are replaced, not appended; a map value or set element that does not decode is skipped; a value that does not fit leaves its field as it was (a set `TOptional` keeps its value). An integer or enum map key must be exactly a JSON integer (`5`, `-5`; not `05`, `5.0`, `1e0`, ` 5`). A string coerced to a number is at most 64 bytes. A `TArray<uint8>` value is offered to `BytesResolver` first, then read as a number array or a base64 string. Without a report, one summary warning per decode is logged.
 
 - [ ] **Step 1: Write the failing tests** — `Source/VaRestJson/Private/Tests/VaRestJsonConvertDecodeTest.cpp`
 
@@ -5706,6 +6015,7 @@ Decode rules (spec §2.4 plus decisions): keys match fields exactly, then case-i
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "Async/ParallelFor.h"
+#include "Tasks/Task.h"
 #include "Misc/AutomationTest.h"
 #include "VaRestJson.h"
 #include "VaRestJsonConvert.h"
@@ -5865,6 +6175,15 @@ bool FVaRestJsonDecodeTolerantNamesTest::RunTest(const FString& Parameters)
 	Strict.bStrict = true;
 	Decode(UTF8TEXT("{\"USERID\":2}"), Strict);
 	TestEqual(TEXT("names stay tolerant in strict mode"), Naming.UserId, 2);
+
+	// Review Focus, decode half of the field-name collision (Task 6 keeps user_id and skips UserId): the shared key
+	// fills the surviving field only. A fresh map build logs the skip once.
+	FVaRestJsonConvert::ResetCache();
+	AddExpectedMessagePlain(TEXT("is already used by another field"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
+	FVaRestJsonTestCollision Collision;
+	FVaRestJsonDecodeReport CollisionReport;
+	FVaRestJsonConvert::JsonToStruct(ParseText(UTF8TEXT("{\"userId\":5}")), FVaRestJsonTestCollision::StaticStruct(), &Collision, Defaults, &CollisionReport);
+	TestTrue(TEXT("a key two fields map to fills the first field only"), Collision.user_id == 5 && Collision.UserId == 2);
 	return true;
 }
 
@@ -5924,6 +6243,14 @@ bool FVaRestJsonDecodeNullTest::RunTest(const FString& Parameters)
 	FVaRestJsonConvert::JsonToStruct(ParseText(UTF8TEXT("{\"items\":[{\"name\":\"only\"}],\"numbers\":[9]}")), FVaRestJsonTestAll::StaticStruct(), &All, FVaRestJsonConvertOptions(), &Report);
 	TestTrue(TEXT("containers are replaced, not appended"), All.Numbers == TArray<int32>({ 9 }) && All.Items.Num() == 1);
 	TestEqual(TEXT("a new element starts from defaults"), All.Items.Num() == 1 ? All.Items[0].Id : -1, 0);
+
+	All.MaybeNumber = 5;
+	FVaRestJsonDecodeReport Mismatch;
+	FVaRestJsonConvert::JsonToStruct(ParseText(UTF8TEXT("{\"maybeNumber\":\"x\"}")), FVaRestJsonTestAll::StaticStruct(), &All, FVaRestJsonConvertOptions(), &Mismatch);
+	TestTrue(TEXT("a mismatch keeps a set optional"), All.MaybeNumber.IsSet() && *All.MaybeNumber == 5 && Mismatch.Warnings.Num() == 1);
+	All.MaybeNumber.Reset();
+	FVaRestJsonConvert::JsonToStruct(ParseText(UTF8TEXT("{\"maybeNumber\":\"x\"}")), FVaRestJsonTestAll::StaticStruct(), &All, FVaRestJsonConvertOptions(), &Mismatch);
+	TestFalse(TEXT("... and an unset one unset"), All.MaybeNumber.IsSet());
 	return true;
 }
 
@@ -6053,6 +6380,27 @@ bool FVaRestJsonDecodeDepthTest::RunTest(const FString& Parameters)
 	FVaRestJsonDecodeReport Report;
 	TestFalse(TEXT("too deep to decode, lenient or not"), FVaRestJsonConvert::JsonToStruct(Root, FVaRestJsonTestTree::StaticStruct(), &Tree, FVaRestJsonConvertOptions(), &Report));
 	TestTrue(TEXT("one error says why"), Report.Errors.Num() == 1 && Report.Errors[0].Message.Contains(TEXT("deeper than 512")));
+
+	// The limit exists to bound stack use on worker threads (spec 2.2), so run encode and decode there, at the limit
+	FVaRestJsonTestTree AtLimit;
+	FVaRestJsonTestTree* Cursor = &AtLimit;
+	for (int32 i = 0; i < 254; ++i) // 255 objects + 255 arrays = 510 containers
+	{
+		Cursor->Children.AddDefaulted();
+		Cursor = &Cursor->Children[0];
+	}
+	bool bWorkerEncoded = false;
+	bool bWorkerDecoded = false;
+	UE::Tasks::Launch(UE_SOURCE_LOCATION, [&AtLimit, &bWorkerEncoded, &bWorkerDecoded]
+	{
+		TArray<uint8> Bytes;
+		bWorkerEncoded = FVaRestJsonConvert::StructToUtf8(FVaRestJsonTestTree::StaticStruct(), &AtLimit, Bytes);
+		FVaRestJsonTestTree Decoded;
+		FVaRestJsonDecodeReport WorkerReport;
+		bWorkerDecoded = bWorkerEncoded && FVaRestJsonConvert::Utf8ToStruct(Bytes, FVaRestJsonTestTree::StaticStruct(), &Decoded, FVaRestJsonConvertOptions(), &WorkerReport);
+	}).Wait();
+	TestTrue(TEXT("510 containers encode on a worker thread"), bWorkerEncoded);
+	TestTrue(TEXT("... and decode there"), bWorkerDecoded);
 	return true;
 }
 
@@ -6100,7 +6448,8 @@ Before `struct FVaRestJsonConvertOptions` add:
 /**
  * Decode: offered every value bound for a TArray<uint8> before the built-in forms (an array of numbers, a base64
  * string). Return true after filling OutBytes; false falls back to the built-in forms. Socket.IO binary attachments
- * plug in here ({"_placeholder":true,"num":0}). Path is the value's JSON path. Runs on the decoding thread.
+ * plug in here ({"_placeholder":true,"num":0}). Path is the value's JSON path. Runs on the decoding thread. Value is
+ * read-only: other threads may be reading the same document (spec 2.2 thread contract).
  */
 using FVaRestJsonBytesResolver = TFunction<bool(const FVaRestJson& Value, const FString& Path, TArray<uint8>& OutBytes)>;
 ```
@@ -6122,8 +6471,12 @@ Inside `struct FVaRestJsonConvert`, after the encode block:
 	 * (user_id ~ UserId ~ userId), the best match winning whatever the member order; unknown keys are ignored; an absent
 	 * field keeps its value; null keeps a struct and clears a container. Lenient coercions ("42" -> 42, 1 -> true) are
 	 * refused in strict mode. Every mismatch is recorded with its JSON path in OutReport (without one: one summary
-	 * warning per call). False when Json is not an object, past VaRest::Json::MaxDepth, or in strict mode on any error;
-	 * Data may then be partly written. Any thread; Json's document must not be mutated meanwhile.
+	 * warning per call). False when Json is neither an object nor null, past VaRest::Json::MaxDepth, or in strict mode
+	 * on any error; Data may then be partly written. Any thread; Json's document must not be mutated meanwhile.
+	 * Untrusted input: [0,0,...] into a TArray of a large struct allocates Count * sizeof(element) (two input bytes per
+	 * element), and every distinct string decoded into an FName stays in the name table for the process's life (names
+	 * over 1023 characters take the engine's name error path); a string bound for a number field is coerced only up to
+	 * 64 bytes.
 	 */
 	static bool JsonToStruct(const FVaRestJson& Json, const UScriptStruct* Struct, void* Data,
 		const FVaRestJsonConvertOptions& Options = FVaRestJsonConvertOptions(), FVaRestJsonDecodeReport* OutReport = nullptr);
@@ -6296,6 +6649,10 @@ namespace VaRest::Json::Convert::DecodePrivate
 		{
 			return nullptr;
 		}
+		if (Value.Str.Len > 64)
+		{
+			return nullptr; // no number worth coercing is that long; bounds the parse on hostile input
+		}
 		TValueOrError<FVaRestJson, FVaRestJsonError> Parsed = FVaRestJson::Parse(Value.Str.View());
 		if (!Parsed.HasValue() || !Parsed.GetValue().IsNumber())
 		{
@@ -6464,6 +6821,36 @@ namespace VaRest::Json::Convert::DecodePrivate
 	}
 
 	/** A JSON object key into a map key: string, name, integer (the whole key a JSON integer), enumerator name or value */
+	/**
+	 * The whole key is a JSON integer: optional '-', digits, no leading zero, within 64 bits. Not a JSON parse: that
+	 * would allocate a document per key and accept " 5", "5.0" and "1e0", collapsing them silently with "5".
+	 */
+	bool ParseIntegerKey(FUtf8StringView Text, bool& bNegative, uint64& Magnitude)
+	{
+		bNegative = Text.Len() > 0 && Text[0] == UTF8CHAR('-');
+		int32 i = bNegative ? 1 : 0;
+		if (i >= Text.Len() || (Text[i] == UTF8CHAR('0') && Text.Len() > i + 1))
+		{
+			return false;
+		}
+		Magnitude = 0;
+		for (; i < Text.Len(); ++i)
+		{
+			const uint32 C = static_cast<uint8>(Text[i]);
+			if (C < '0' || C > '9')
+			{
+				return false;
+			}
+			const uint64 Digit = C - '0';
+			if (Magnitude > (MAX_uint64 - Digit) / 10)
+			{
+				return false;
+			}
+			Magnitude = Magnitude * 10 + Digit;
+		}
+		return !bNegative || Magnitude <= 9223372036854775808ull;
+	}
+
 	bool DecodeMapKey(FUtf8StringView Text, const FProperty* KeyProperty, void* Key, FDecodeContext& Context)
 	{
 		const FString KeyText = FString::ConstructFromPtrSize(Text.GetData(), Text.Len());
@@ -6498,21 +6885,24 @@ namespace VaRest::Json::Convert::DecodePrivate
 				Underlying->SetIntPropertyValue(Key, EnumValue);
 				return true;
 			}
-			TValueOrError<FVaRestJson, FVaRestJsonError> Parsed = FVaRestJson::Parse(Text); // "5" yes; "05", "5x" no
-			if (Parsed.HasValue())
+			bool bNegative = false;
+			uint64 Magnitude = 0;
+			if (ParseIntegerKey(Text, bNegative, Magnitude)) // "5", "-5" yes; "05", "5.0", "1e0", " 5", "5x" no
 			{
-				const FNode& Number = *Parsed.GetValue().GetNodeInternal();
-				uint64 Unsigned = 0;
-				int64 Signed = 0;
-				if (!Enum && IsUnsignedInteger(Underlying) && NodeToUInt64(Number, Unsigned) && Underlying->CanHoldValue(Unsigned))
+				if (!bNegative && !Enum && IsUnsignedInteger(Underlying) && Underlying->CanHoldValue(Magnitude))
 				{
-					Underlying->SetIntPropertyValue(Key, Unsigned);
+					Underlying->SetIntPropertyValue(Key, Magnitude);
 					return true;
 				}
-				if (NodeToInt64(Number, Signed) && (Enum ? Enum->IsValidEnumValue(Signed) : Underlying->CanHoldValue(Signed)))
+				if (bNegative || Magnitude <= static_cast<uint64>(MAX_int64))
 				{
-					Underlying->SetIntPropertyValue(Key, Signed);
-					return true;
+					const int64 Signed = !bNegative ? static_cast<int64>(Magnitude)
+						: Magnitude == 9223372036854775808ull ? MIN_int64 : -static_cast<int64>(Magnitude);
+					if (Enum ? Enum->IsValidEnumValue(Signed) : Underlying->CanHoldValue(Signed))
+					{
+						Underlying->SetIntPropertyValue(Key, Signed);
+						return true;
+					}
 				}
 			}
 		}
@@ -6879,10 +7269,16 @@ namespace VaRest::Json::Convert::DecodePrivate
 				Optional->MarkUnset(Address); // spec 2.4: null <-> unset
 				return true;
 			}
+			const bool bWasSet = Optional->IsSet(Address);
+			// The existing value when set (PropertyOptional.h:35-56), a fresh one otherwise
 			void* Inner = Optional->MarkSetAndGetInitializedValuePointerToReplace(Address);
 			if (!DecodeValue(Value, Optional->GetValueProperty(), Inner, Context))
 			{
-				Optional->MarkUnset(Address);
+				// A mismatch keeps the field as it was (spec 2.4): unset stays unset, a set value is left untouched
+				if (!bWasSet)
+				{
+					Optional->MarkUnset(Address);
+				}
 				return false;
 			}
 			return true;
@@ -7014,7 +7410,7 @@ Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 - Consumes: `FVaRestJsonConvert::JsonToStruct` (Task 8).
 - Produces: `template <typename T> TOptional<T> FVaRestJson::TryGet() const` (adds USTRUCTs and TBaseStructure core types, `TArray<E>`, `TMap<FString, V>`); `template <typename T> T FVaRestJson::As(T Default = T()) const`; `VARESTJSON_API bool VaRest::Json::DecodeStructForTryGet(const FVaRestJson&, const UScriptStruct*, void* Data)`; `template <typename T> static TValueOrError<T, FVaRestJsonError> FVaRestJsonConvert::FromJson(const FVaRestJson&, const FVaRestJsonConvertOptions& = {})`.
 
-Decisions: `TryGet<Struct>` of anything but an object (null included) is unset — the question is "is this a T"; one element or value that does not convert makes the whole `TArray`/`TMap` unset; `TMap<FString, T>` keys collapse case-insensitively (FString), the last value winning; `TryGet` decodes with default options (camelCase, lenient) and never logs.
+Decisions: `TryGet<Struct>` of anything but an object (null included) is unset — the question is "is this a T"; for a value struct (`FDateTime`, `FGuid`, `FTimespan`, soft paths) only its scalar JSON form counts, never `null` or a missing value; one element or value that does not convert makes the whole `TArray`/`TMap` unset; `TMap<FString, T>` keys collapse case-insensitively (FString), the last value winning; `TryGet` decodes with default options (camelCase, lenient) and never logs.
 
 - [ ] **Step 1: Write the failing test** — `Source/VaRestJson/Private/Tests/VaRestJsonTypedGetTest.cpp`
 
@@ -7042,6 +7438,10 @@ bool FVaRestJsonTypedGetTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("null is not a struct"), J[TEXT("n")].TryGet<FVaRestJsonTestInner>().IsSet());
 	TestFalse(TEXT("a missing value is not a struct"), J[TEXT("nope")].TryGet<FVaRestJsonTestInner>().IsSet());
 	TestFalse(TEXT("an array is not a struct"), J[TEXT("nums")].TryGet<FVaRestJsonTestInner>().IsSet());
+	// Review Focus: a value struct is not set from null (its field decode keeps the value on null)
+	TestFalse(TEXT("null is not a date"), J[TEXT("n")].TryGet<FDateTime>().IsSet());
+	TestFalse(TEXT("null is not a GUID"), J[TEXT("n")].TryGet<FGuid>().IsSet());
+	TestFalse(TEXT("a number is not a GUID"), J.Path(TEXT("inner.id")).TryGet<FGuid>().IsSet());
 
 	const TOptional<TArray<int32>> Nums = J[TEXT("nums")].TryGet<TArray<int32>>();
 	TestTrue(TEXT("TArray<int32>"), Nums.IsSet() && *Nums == TArray<int32>({ 1, 2, 3 }));
@@ -7082,7 +7482,7 @@ Expected: compile error (the old `TryGet` hits its "structs arrive with FVaRestJ
 
 - [ ] **Step 3: `VaRestJson.h`**
 
-1. Add `#include "UObject/Class.h"` after `#include "Templates/ValueOrError.h"` (TBaseStructure and UScriptStruct).
+1. Add `#include "UObject/Class.h"` after `#include "Templates/ValueOrError.h"` (TBaseStructure and UScriptStruct). It costs nothing new: `VaRestJson.generated.h` already pulls it in through `UObject/ScriptMacros.h` → `UObject/UnrealType.h`; the explicit include is for include-what-you-use. In `MakeNodeFor`'s final `else`, replace the `static_assert` message `"FVaRestJson: unsupported value type (structs arrive with FVaRestJsonConvert in M2)"` with `"FVaRestJson: unsupported value type; encode a struct with FVaRestJsonConvert::ToJson / StructToJson"`.
 2. Replace the whole in-class `TryGet` definition (from `template <typename T>` / `TOptional<T> TryGet() const` through its closing brace) with:
 
 ```cpp
@@ -7090,8 +7490,8 @@ Expected: compile error (the old `TryGet` hits its "structs arrive with FVaRestJ
 	 * The value as T, unset when it is not one: bool, every integer type (range-checked), float, double, FString, FName,
 	 * FText, FVaRestJson, any USTRUCT (and engine structs with a TBaseStructure such as FVector), TArray<T> and
 	 * TMap<FString, T>. No coercion between JSON types. A struct is decoded with default options (camelCase, lenient)
-	 * and must be an object; one element or value that does not convert makes a whole TArray/TMap unset. Defined at the
-	 * end of this header.
+	 * and must be an object (a value struct such as FDateTime or FGuid: its own JSON form; null is never a value); one
+	 * element or value that does not convert makes a whole TArray/TMap unset. Defined at the end of this header.
 	 */
 	template <typename T>
 	TOptional<T> TryGet() const;
@@ -7263,7 +7663,10 @@ TOptional<T> FVaRestJson::TryGet() const
 In `VaRestJsonConvert.h`, inside `struct FVaRestJsonConvert` after `JsonToProperty`:
 
 ```cpp
-	/** JsonToStruct into a new T (USTRUCT or TBaseStructure type); the error is the first error (or warning) reported */
+	/**
+	 * JsonToStruct into a new T (USTRUCT or TBaseStructure type); the error is the first error (or warning) reported.
+	 * JSON null gives a default T (null keeps a struct's values, spec 2.4); TryGet treats null as absent instead.
+	 */
 	template <typename T>
 	static TValueOrError<T, FVaRestJsonError> FromJson(const FVaRestJson& Json, const FVaRestJsonConvertOptions& Options = FVaRestJsonConvertOptions())
 	{
@@ -7293,7 +7696,13 @@ At the end of `VaRestJsonConvertDecode.cpp`:
 ```cpp
 bool VaRest::Json::DecodeStructForTryGet(const FVaRestJson& Json, const UScriptStruct* Struct, void* Data)
 {
-	// TryGet asks "is this a T": anything but an object (null included) is not one, unless T has a scalar form (FGuid...)
+	// TryGet asks "is this a T". A missing value or null is not one, not even for a struct with a scalar form, whose
+	// field decode keeps the value on null (spec 2.4) and would hand back a default FDateTime/FGuid as if one was sent.
+	if (!Json.IsValid() || Json.IsNull())
+	{
+		return false;
+	}
+	// Anything but an object is not an ordinary struct; a value struct (FGuid, FDateTime...) takes its scalar form
 	if (Convert::ClassifyStruct(Struct) == Convert::ESpecialStruct::None && !Json.IsObject())
 	{
 		return false;
@@ -7308,7 +7717,11 @@ bool VaRest::Json::DecodeStructForTryGet(const FVaRestJson& Json, const UScriptS
 Run: `Tools/run_tests.sh VaRest.Json`
 Expected: `0 failed`, including `VaRest.Json.Api.TryGetTyped` and the M1 `TryGetRanges`/`FloatAtFltMax` tests.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Restore-the-bug (null is not a value struct)**
+
+In `DecodeStructForTryGet` delete the `if (!Json.IsValid() || Json.IsNull())` block. Run `Tools/run_tests.sh VaRest.Json.Api.TryGetTyped`; expect `null is not a date` and `null is not a GUID` to fail (a default `FDateTime`/`FGuid` comes back set). Restore, run, expect green. Report both.
+
+- [ ] **Step 7: Commit**
 
 ```bash
 git add Source/VaRestJson
@@ -7338,8 +7751,8 @@ Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 ```csharp
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
-			// Bench.VaRest.Json.TypedConvert compares against FJsonObjectConverter. Engine already links JsonUtilities
-			// (Engine.Build.cs:79-88), so a game gains no code from it.
+			// Bench.VaRest.Json.TypedConvert compares against FJsonObjectConverter. Engine already depends on
+			// JsonUtilities publicly (Engine.Build.cs:88), so every game links it anyway and gains no code from this.
 			"JsonUtilities",
 		});
 ```
@@ -8076,7 +8489,7 @@ Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 - Consumes: `FVaRestJsonConvert::PropertyToJson`, `JsonToProperty` (Tasks 7–8), Task 11's library.
 - Produces (UFUNCTIONs, CustomThunk, wildcard pin `Value`): `GetField(const FVaRestJson& Json, const FString& Key, int32& Value) -> bool` (pure, "Found"); `SetField(const FVaRestJson& Json, const FString& Key, const int32& Value) -> FVaRestJson`; `GetPath(const FVaRestJson& Json, const FString& Path, int32& Value) -> bool` (pure); `ArrayGet(const FVaRestJson& Json, int32 Index, int32& Value) -> bool` (pure); `ArrayAdd(const FVaRestJson& Json, const int32& Value) -> FVaRestJson`; `StructToJson(const int32& Value, EVaRestJsonNaming Naming = CamelCase) -> FVaRestJson` (pure); `JsonToStruct(const FVaRestJson& Json, int32& Value, EVaRestJsonNaming Naming = CamelCase, bool bStrict = false) -> bool`; `StructToJsonString(const int32& Value, EVaRestJsonNaming Naming = CamelCase, bool bPretty = false) -> FString` (pure); internal (BlueprintInternalUseOnly, for Task 14): `MakeJsonInternalObject() -> FVaRestJson` (pure), `MakeJsonInternalSet(const FVaRestJson& Json, const FString& Key, const int32& Value) -> FVaRestJson` (pure, CustomThunk). C++ entry points: `GetFieldImpl(const FVaRestJson&, const FString& Key, const FProperty*, void* Address) -> bool`, `SetFieldImpl(const FVaRestJson&, const FString& Key, const FProperty*, const void* Address) -> FVaRestJson`, `GetPathImpl(..., const FString& Path, ...) -> bool`, `ArrayGetImpl(..., int32 Index, ...) -> bool`, `ArrayAddImpl(const FVaRestJson&, const FProperty*, const void*) -> FVaRestJson`, `StructToJsonImpl(const FProperty*, const void*, EVaRestJsonNaming) -> FVaRestJson`, `JsonToStructImpl(const FVaRestJson&, const FProperty*, void*, EVaRestJsonNaming, bool bStrict) -> bool`, `StructToJsonStringImpl(const FProperty*, const void*, EVaRestJsonNaming, bool bPretty) -> FString`.
 
-Decisions: thunks take the wildcard's property from the parameter chain when there is no bytecode, so native `ProcessEvent` callers (and the `Thunks` test, which pins every thunk's parameter order without a Blueprint) work too; every "get" resets its output to the type's default before reading (a BP temporary is reused across loop iterations); `Found` is true when the value exists and converts to the pin's type (lenient), false otherwise; a Json-typed output pin receives the handle into the same document (as `Get Object Field` does), while a Json field inside a decoded struct is cloned (Task 8); `Set Field`/`Array Add` on something that is not an object/array log a script warning and return the input unchanged — no auto-vivify, because the node holds a copy of the handle and a new object would never reach the caller's variable; a connected Json handle is set as itself (a missing one removes the key, spec §2.2); `Struct To Json`/`Json To Struct` accept any connected type, not only structs.
+Decisions: thunks take the wildcard's property from the parameter chain when there is no bytecode, so native `ProcessEvent` callers (and the `Thunks` test, which pins every thunk's parameter order without a Blueprint) work too; every "get" and `Json To Struct` reset the output to the type's default before reading (a BP temporary is reused across loop iterations and, in an event graph, kept between events in the persistent ubergraph frame; spec §2.4 "missing fields keep defaults" means the type's defaults, not the previous call's values); `Found` is true when the value exists, is not `null`, and converts to the pin's type (lenient), false otherwise (null into a typed pin is not found, as `TryGet`); a value `Set Field`/`Array Add` cannot encode leaves the object/array unchanged (the encode logs why) instead of removing the key or appending null; `Set Field`, `Array Add` and `Make Json` write struct values with camelCase field names (per-client naming arrives with the HTTP layer; `Struct To Json` has a `Naming` pin); a Json-typed output pin receives the handle into the same document (as `Get Object Field` does), while a Json field inside a decoded struct is cloned (Task 8); `Set Field`/`Array Add` on something that is not an object/array log a script warning and return the input unchanged — no auto-vivify, because the node holds a copy of the handle and a new object would never reach the caller's variable; a connected Json handle is set as itself (a missing one removes the key, spec §2.2); `Struct To Json`/`Json To Struct` accept any connected type, not only structs.
 
 - [ ] **Step 1: Write the failing tests** — `Source/VaRestJson/Private/Tests/VaRestJsonLibraryWildcardTest.cpp`
 
@@ -8147,7 +8560,7 @@ bool FVaRestJsonLibraryWildcardImplTest::RunTest(const FString& Parameters)
 	const FSlot Items = SlotOf(All, TEXT("Items"));
 	const FSlot Json = SlotOf(All, TEXT("Extra"));
 	const FSlot Inner = SlotOf(All, TEXT("Inner"));
-	const FVaRestJson Source = ParseText(UTF8TEXT("{\"n\":42,\"items\":[{\"id\":1,\"name\":\"a\"},{\"id\":2}],\"o\":{\"x\":true},\"s\":\"str\"}"));
+	const FVaRestJson Source = ParseText(UTF8TEXT("{\"n\":42,\"items\":[{\"id\":1,\"name\":\"a\"},{\"id\":2}],\"o\":{\"x\":true},\"s\":\"str\",\"z\":null}"));
 
 	TestTrue(TEXT("Get Field int"), L::GetFieldImpl(Source, TEXT("n"), Int.Property, Int.Address) && All.Int32Value == 42);
 	// Review Focus: a miss resets the output, so a BP loop never sees the previous iteration's value
@@ -8156,6 +8569,7 @@ bool FVaRestJsonLibraryWildcardImplTest::RunTest(const FString& Parameters)
 	All.Int32Value = 5;
 	TestFalse(TEXT("a value of another type is not found"), L::GetFieldImpl(Source, TEXT("s"), Int.Property, Int.Address));
 	TestEqual(TEXT("... and resets the output too"), All.Int32Value, 0);
+	TestFalse(TEXT("null into a typed pin is not found"), L::GetFieldImpl(Source, TEXT("z"), Inner.Property, Inner.Address));
 	TestTrue(TEXT("Get Field array of structs"), L::GetFieldImpl(Source, TEXT("items"), Items.Property, Items.Address) && All.Items.Num() == 2 && All.Items[1].Id == 2);
 	TestTrue(TEXT("Get Field into a Json pin"), L::GetFieldImpl(Source, TEXT("o"), Json.Property, Json.Address) && All.Extra[TEXT("x")].AsBool());
 	TestTrue(TEXT("... is a handle into the same document"), All.Extra.GetDocumentInternal() == Source.GetDocumentInternal());
@@ -8183,7 +8597,11 @@ bool FVaRestJsonLibraryWildcardImplTest::RunTest(const FString& Parameters)
 	All.Inner.Name = TEXT("x");
 	TestEqualSensitive(TEXT("Struct To Json"), L::StructToJsonImpl(Inner.Property, Inner.Address, EVaRestJsonNaming::SnakeCase).ToString(), FString(TEXT("{\"id\":3,\"name\":\"x\"}")));
 	TestEqualSensitive(TEXT("Struct To Json String"), L::StructToJsonStringImpl(Inner.Property, Inner.Address, EVaRestJsonNaming::PascalCase, false), FString(TEXT("{\"Id\":3,\"Name\":\"x\"}")));
-	TestTrue(TEXT("Json To Struct"), L::JsonToStructImpl(ParseText(UTF8TEXT("{\"id\":9}")), Inner.Property, Inner.Address, EVaRestJsonNaming::CamelCase, false) && All.Inner.Id == 9);
+	All.Inner.Id = 3;
+	All.Inner.Name = TEXT("stale");
+	TestTrue(TEXT("Json To Struct"), L::JsonToStructImpl(ParseText(UTF8TEXT("{\"id\":9}")), Inner.Property, Inner.Address, EVaRestJsonNaming::CamelCase, false));
+	// Review Focus: the Value output is a reused BP temporary; a field the JSON lacks gets the default, not the last value
+	TestTrue(TEXT("... starts from defaults, not from the previous call (a reused BP temporary)"), All.Inner.Id == 9 && All.Inner.Name.IsEmpty());
 	return true;
 }
 
@@ -8279,12 +8697,16 @@ Expected: compile errors (`GetFieldImpl` etc. not members).
 	// signature is a placeholder: CustomStructureParam makes the pin a wildcard that takes the connected type
 	// (K2Node_CallFunction.cpp:96-170), and the thunk reads the real property from the VM stack.
 
-	/** The field converted to the connected type. Found is false, and Value the type's default, when the key is missing or does not convert. */
+	/** The field converted to the connected type. Found is false, and Value the type's default, when the key is missing, null, or does not convert. */
 	UFUNCTION(BlueprintPure, CustomThunk, Category = "VaRest|Json", meta = (CustomStructureParam = "Value", DisplayName = "Get Field"))
 	static UPARAM(DisplayName = "Found") bool GetField(const FVaRestJson& Json, const FString& Key, int32& Value);
 	DECLARE_FUNCTION(execGetField);
 
-	/** Sets Key on the object Json to Value (any type) and returns Json. A connected invalid Json handle removes the key (spec 2.2). */
+	/**
+	 * Sets Key on the object Json to Value (any type) and returns Json. A connected invalid Json handle removes the key
+	 * (spec 2.2); a value that cannot be encoded leaves the key as it was. Struct values use camelCase field names
+	 * (Struct To Json has a Naming input).
+	 */
 	UFUNCTION(BlueprintCallable, CustomThunk, Category = "VaRest|Json", meta = (CustomStructureParam = "Value", AutoCreateRefTerm = "Value", DisplayName = "Set Field"))
 	static FVaRestJson SetField(const FVaRestJson& Json, const FString& Key, const int32& Value);
 	DECLARE_FUNCTION(execSetField);
@@ -8298,7 +8720,7 @@ Expected: compile errors (`GetFieldImpl` etc. not members).
 	static UPARAM(DisplayName = "Found") bool ArrayGet(const FVaRestJson& Json, int32 Index, int32& Value);
 	DECLARE_FUNCTION(execArrayGet);
 
-	/** Appends Value (any type) to the array Json and returns Json */
+	/** Appends Value (any type) to the array Json and returns Json; nothing when Value cannot be encoded. Structs use camelCase field names. */
 	UFUNCTION(BlueprintCallable, CustomThunk, Category = "VaRest|Json", meta = (CustomStructureParam = "Value", AutoCreateRefTerm = "Value", DisplayName = "Array Add"))
 	static FVaRestJson ArrayAdd(const FVaRestJson& Json, const int32& Value);
 	DECLARE_FUNCTION(execArrayAdd);
@@ -8343,11 +8765,16 @@ Expected: compile errors (`GetFieldImpl` etc. not members).
 ```cpp
 namespace VaRest::Json::LibraryPrivate
 {
+	bool IsJsonPin(const FProperty* Property)
+	{
+		const FStructProperty* StructProperty = CastField<FStructProperty>(Property);
+		return StructProperty && StructProperty->Struct == FVaRestJson::StaticStruct();
+	}
+
 	/** A connected Json handle stays itself (a missing one stays missing: spec 2.2); any other value is converted */
 	FVaRestJson ValueAsJson(const FProperty* Property, const void* Address, EVaRestJsonNaming Naming)
 	{
-		const FStructProperty* StructProperty = CastField<FStructProperty>(Property);
-		if (StructProperty && StructProperty->Struct == FVaRestJson::StaticStruct())
+		if (IsJsonPin(Property))
 		{
 			return *static_cast<const FVaRestJson*>(Address);
 		}
@@ -8368,11 +8795,14 @@ namespace VaRest::Json::LibraryPrivate
 		{
 			return false;
 		}
-		const FStructProperty* StructProperty = CastField<FStructProperty>(Property);
-		if (StructProperty && StructProperty->Struct == FVaRestJson::StaticStruct())
+		if (IsJsonPin(Property))
 		{
 			*static_cast<FVaRestJson*>(Address) = Source;
 			return true;
+		}
+		if (Source.IsNull())
+		{
+			return false; // null is no value for a typed pin (as TryGet): Found false, the output its default
 		}
 		FVaRestJsonDecodeReport Report; // Found carries the outcome; lenient warnings stay out of the log
 		return FVaRestJsonConvert::JsonToProperty(Source, Property, Address, FVaRestJsonConvertOptions(), &Report);
@@ -8431,8 +8861,13 @@ FVaRestJson UVaRestJsonLibrary::SetFieldImpl(const FVaRestJson& Json, const FStr
 		FFrame::KismetExecutionMessage(*FString::Printf(TEXT("Set Field \"%s\": Json is %s, not an object (use Make Json Object)"), *Key, *TypeOf(Json)), ELogVerbosity::Warning);
 		return Json;
 	}
+	const FVaRestJson NewValue = ValueAsJson(Property, Address, EVaRestJsonNaming::CamelCase);
+	if (!NewValue.IsValid() && !IsJsonPin(Property))
+	{
+		return Json; // the encode failed and logged why; the field keeps its value (Set would read "missing" as remove)
+	}
 	FVaRestJson Target = Json;
-	Target.Set(Key, ValueAsJson(Property, Address, EVaRestJsonNaming::CamelCase));
+	Target.Set(Key, NewValue);
 	return Target;
 }
 
@@ -8454,8 +8889,13 @@ FVaRestJson UVaRestJsonLibrary::ArrayAddImpl(const FVaRestJson& Json, const FPro
 		FFrame::KismetExecutionMessage(*FString::Printf(TEXT("Array Add: Json is %s, not an array (use Make Json Array)"), *TypeOf(Json)), ELogVerbosity::Warning);
 		return Json;
 	}
+	const FVaRestJson NewValue = ValueAsJson(Property, Address, EVaRestJsonNaming::CamelCase);
+	if (!NewValue.IsValid() && !IsJsonPin(Property))
+	{
+		return Json; // the encode failed and logged why; nothing is appended (Add would write null)
+	}
 	FVaRestJson Target = Json;
-	Target.Add(ValueAsJson(Property, Address, EVaRestJsonNaming::CamelCase));
+	Target.Add(NewValue);
 	return Target;
 }
 
@@ -8466,6 +8906,10 @@ FVaRestJson UVaRestJsonLibrary::StructToJsonImpl(const FProperty* Property, cons
 
 bool UVaRestJsonLibrary::JsonToStructImpl(const FVaRestJson& Json, const FProperty* Property, void* Address, EVaRestJsonNaming Naming, bool bStrict)
 {
+	// The output is a Blueprint temporary: reused across loop iterations, and kept between events in the ubergraph's
+	// persistent frame. Start from the type's defaults (FStructProperty: ClearScriptStruct, PropertyStruct.cpp:351-353),
+	// so "missing fields keep defaults" (spec 2.4) means the type's defaults, never the previous call's values.
+	Property->ClearValue(Address);
 	FVaRestJsonConvertOptions Options;
 	Options.Naming = Naming;
 	Options.bStrict = bStrict;
@@ -8671,7 +9115,7 @@ Expected: `0 failed`, including `VaRest.Json.Library.WildcardImpl` and `VaRest.J
 
 - [ ] **Step 6: Restore-the-bug (reset on a miss)**
 
-Delete `Property->ClearValue(Address);` from `ReadInto`. Run `Tools/run_tests.sh VaRest.Json.Library.WildcardImpl`; expect `... and resets the output` to fail. Restore, run, expect green. Report both.
+Delete `Property->ClearValue(Address);` from `ReadInto`. Run `Tools/run_tests.sh VaRest.Json.Library.WildcardImpl`; expect `... and resets the output` to fail. Restore, run, expect green. Then delete the `Property->ClearValue(Address);` at the top of `JsonToStructImpl`; expect `... starts from defaults, not from the previous call` to fail (`Name` keeps `stale`). Restore, run, expect green. Report all four outcomes.
 
 - [ ] **Step 7: Commit**
 
@@ -8690,14 +9134,15 @@ Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 
 **Files:**
 - Modify: `Source/VaRestEditor/VaRestEditor.Build.cs` (`VaRestJson`, private)
-- Create: `Source/VaRestEditor/Private/VaRestJsonStructListener.cpp`
+- Create: `Source/VaRestEditor/Private/VaRestJsonStructListener.h`, `Source/VaRestEditor/Private/VaRestJsonStructListener.cpp`
+- Modify (bodies only, controller ruling R2): `Source/VaRestEditor/Private/VaRestEditor.cpp` — one call each in `FVaRestEditorModule::StartupModule` / `ShutdownModule`; no signature, path or type changes
 - Test: `Source/VaRestEditor/Private/Tests/VaRestJsonUserStructTest.cpp`
 
 **Interfaces:**
 - Consumes: `FVaRestJsonConvert::ResetCache()`, `NumCachedFieldMapsInternal()` (Task 6); `StructToString`, `JsonToStruct` (Tasks 7–8).
-- Produces: nothing callable — a module-lifetime listener object in `VaRestEditor`.
+- Produces: `void VaRestEditor::StructListener::Start()` / `Stop()` (`VaRestJsonStructListener.h`), called from the module's `StartupModule` / `ShutdownModule`.
 
-Decisions: the listener is a namespace-scope object in a new file, because the v1 module class (`Source/VaRestEditor/Public/VaRestEditor.h`) is frozen and cannot become the listener the way engine editor modules do (`StructUtilsEditorModule.h:52`); destruction order is safe either way (see the comment in Step 3); every change of any Blueprint struct drops the whole cache (struct edits are rare, editor-only, and a struct embedding the changed one is covered without tracking dependencies).
+Decisions: the listener's lifetime belongs to the module (controller ruling R2): a raw pointer created in `StartupModule` and deleted in `ShutdownModule` through two free functions, because the v1 module class (`Source/VaRestEditor/Public/VaRestEditor.h`) keeps its type and cannot become the listener the way engine editor modules do (`StructUtilsEditorModule.h:52`). A raw pointer has no exit-time destructor: `ShutdownModule` does not run when an `Automation RunTests …; Quit` run exits (CLAUDE.md), and a static owner would then delete the listener during static destruction, possibly after the manager it unregisters from (a function-local static, `StructureEditorUtils.cpp:32-36`) if our `StartupModule` was the manager's first use. Leaking it at exit is accepted and harmless: the manager's destructor only frees its `TSet` (`ListenerManager.h:36`) and calls no listener; every change of any Blueprint struct drops the whole cache (struct edits are rare, editor-only, and a struct embedding the changed one is covered without tracking dependencies).
 
 - [ ] **Step 1: Build rule** — in `Source/VaRestEditor/VaRestEditor.Build.cs` add to `PrivateDependencyModuleNames`, after `"RenderCore"`:
 
@@ -8714,7 +9159,7 @@ Decisions: the listener is a namespace-scope object in a new file, because the v
 ```cpp
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 
-#if WITH_DEV_AUTOMATION_TESTS
+#if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
 
 #include "EdGraph/EdGraphPin.h"
 #include "EdGraphSchema_K2.h"
@@ -8760,7 +9205,7 @@ namespace VaRestJsonUserStructTest
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonUserStructNamesTest, "VaRest.Json.Convert.UserStruct.Names",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FVaRestJsonUserStructNamesTest::RunTest(const FString& Parameters)
 {
@@ -8797,7 +9242,7 @@ bool FVaRestJsonUserStructNamesTest::RunTest(const FString& Parameters)
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonUserStructCacheTest, "VaRest.Json.Convert.UserStruct.CacheInvalidation",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FVaRestJsonUserStructCacheTest::RunTest(const FString& Parameters)
 {
@@ -8845,15 +9290,34 @@ bool FVaRestJsonUserStructCacheTest::RunTest(const FString& Parameters)
 Run: `Tools/run_tests.sh VaRest.Json.Convert.UserStruct`
 Expected: `VaRest.Json.Convert.UserStruct.Names` passes (Task 6 already implements the cooked algorithm); `CacheInvalidation` FAILS at `the rename dropped the cached maps` (nothing listens yet) and returns before touching the stale map.
 
-- [ ] **Step 4: The listener** — `Source/VaRestEditor/Private/VaRestJsonStructListener.cpp`
+- [ ] **Step 4: The listener** — `Source/VaRestEditor/Private/VaRestJsonStructListener.h`
 
 ```cpp
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 
+#pragma once
+
+namespace VaRestEditor::StructListener
+{
+	/** From FVaRestEditorModule::StartupModule: drop the struct <-> JSON field-map cache whenever a Blueprint struct changes */
+	void Start();
+
+	/** From FVaRestEditorModule::ShutdownModule (which does not run when an automation run quits) */
+	void Stop();
+}
+```
+
+`Source/VaRestEditor/Private/VaRestJsonStructListener.cpp`:
+
+```cpp
+// Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
+
+#include "VaRestJsonStructListener.h"
+
 #include "Kismet2/StructureEditorUtils.h"
 #include "VaRestJsonConvert.h"
 
-namespace VaRest::Json::StructListenerPrivate
+namespace VaRestEditorStructListenerPrivate
 {
 	/**
 	 * Drops the struct <-> JSON field-map cache whenever a Blueprint struct changes. A recompiled struct keeps its
@@ -8876,15 +9340,33 @@ namespace VaRest::Json::StructListenerPrivate
 	};
 
 	/**
-	 * One listener for the module's lifetime: the base class registers in its constructor and unregisters in its
-	 * destructor (ListenerManager.h:25-32). The v1 module class is frozen, so it cannot be the listener the way engine
-	 * editor modules are (StructUtilsEditorModule.h:52). Destruction order is safe: the manager is a function-local
-	 * static (StructureEditorUtils.cpp:32-36), so it was either constructed before this object or inside this
-	 * constructor's Get() call; both complete before this object's construction does, so it is destroyed after it.
+	 * A raw pointer on purpose: it has no exit-time destructor. ShutdownModule does not run when an automation run quits,
+	 * and a static owner (TUniquePtr) would then delete the listener during static destruction, possibly after the
+	 * manager it unregisters from -- a function-local static (StructureEditorUtils.cpp:32-36) -- if our StartupModule was
+	 * its first use. Left registered at exit it is harmless: the manager's destructor frees its TSet (ListenerManager.h:36)
+	 * and calls no listener.
 	 */
-	FStructListener StructListener;
+	FStructListener* GListener = nullptr;
+}
+
+void VaRestEditor::StructListener::Start()
+{
+	using namespace VaRestEditorStructListenerPrivate;
+	if (!GListener)
+	{
+		GListener = new FStructListener(); // registers itself (ListenerManager.h:27)
+	}
+}
+
+void VaRestEditor::StructListener::Stop()
+{
+	using namespace VaRestEditorStructListenerPrivate;
+	delete GListener; // unregisters itself (ListenerManager.h:31); UnrealEd is still loaded (we depend on it)
+	GListener = nullptr;
 }
 ```
+
+`Source/VaRestEditor/Private/VaRestEditor.cpp` (bodies only): add `#include "VaRestJsonStructListener.h"` after `#include "Modules/ModuleManager.h"`; make `VaRestEditor::StructListener::Start();` the last line of `StartupModule`'s body and `VaRestEditor::StructListener::Stop();` the last line of `ShutdownModule`'s body. Keep the v1 comments; change nothing else in the file.
 
 - [ ] **Step 5: Run and pass**
 
@@ -8893,7 +9375,7 @@ Expected: `0 failed`, including both `VaRest.Json.Convert.UserStruct.*` tests.
 
 - [ ] **Step 6: Restore-the-bug (cache invalidation)**
 
-Empty both overrides' bodies (delete the two `FVaRestJsonConvert::ResetCache();` lines). Run `Tools/run_tests.sh VaRest.Json.Convert.UserStruct.CacheInvalidation`; expect `the rename dropped the cached maps` to fail (and the test to stop there). Restore, run, expect green. Report both.
+Empty both overrides' bodies (delete the two `FVaRestJsonConvert::ResetCache();` lines in `FStructListener`). Run `Tools/run_tests.sh VaRest.Json.Convert.UserStruct.CacheInvalidation`; expect `the rename dropped the cached maps` to fail (and the test to stop there). Restore, run, expect green. Report both.
 
 - [ ] **Step 7: Restore-the-bug (field-name algorithm on a real Blueprint struct)**
 
@@ -8903,7 +9385,7 @@ In `StripGuidSuffix` (`VaRestJsonConvertNames.cpp`) change `PropertyName.LeftCho
 
 ```bash
 git add Source/VaRestEditor
-git commit -m "editor: drop the struct <-> JSON cache on Blueprint struct changes; BP struct name tests
+git commit -m "editor: drop the struct <-> JSON cache on Blueprint struct changes (listener owned by the module); BP struct name tests
 
 Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 ```
@@ -8933,7 +9415,7 @@ Decisions: value pins are named `Value_<Id>` with a stable per-entry id and show
 
 #pragma once
 
-#if WITH_DEV_AUTOMATION_TESTS
+#if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
 
 #include "CoreMinimal.h"
 #include "EdGraph/EdGraph.h"
@@ -9048,7 +9530,7 @@ namespace VaRest::Json::BlueprintTest
 ```cpp
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 
-#if WITH_DEV_AUTOMATION_TESTS
+#if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
 
 #include "K2Node_VaRestMakeJson.h"
 #include "Kismet/KismetSystemLibrary.h"
@@ -9057,7 +9539,7 @@ namespace VaRest::Json::BlueprintTest
 #include "VaRestJson.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonMakeJsonNodeTest, "VaRest.Json.Blueprint.MakeJsonNode",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FVaRestJsonMakeJsonNodeTest::RunTest(const FString& Parameters)
 {
@@ -9303,7 +9785,7 @@ FText UK2Node_VaRestMakeJson::GetNodeTitle(ENodeTitleType::Type TitleType) const
 
 FText UK2Node_VaRestMakeJson::GetTooltipText() const
 {
-	return LOCTEXT("Tooltip", "VaRest 2: a JSON object from named values. Each value pin takes whatever is connected (number, string, struct, array, map, Json). Keys are case-sensitive; edit them in the Details panel.");
+	return LOCTEXT("Tooltip", "VaRest 2: a JSON object from named values. Each value pin takes whatever is connected (number, string, struct, array, map, Json); structs use camelCase field names. Keys are case-sensitive; edit them in the Details panel.\nPure, like Make Array: every node that reads the output gets its own new object. To add fields with Set Field, use Set Field's return value (or Make Json Object) - a second reader of this pin would not see them.");
 }
 
 UEdGraphPin* UK2Node_VaRestMakeJson::GetJsonPin() const
@@ -9399,6 +9881,8 @@ void UK2Node_VaRestMakeJson::ValidateNodeDuringCompilation(FCompilerResultsLog& 
 	for (int32 Index = 0; Index < Entries.Num(); ++Index)
 	{
 		const FString& Key = Entries[Index].Key;
+		// FCompilerResultsLog tokenizes "@@" in the format (CompilerResultsLog.h:160-190): a key must not supply one
+		const FString SafeKey = Key.Replace(TEXT("@@"), TEXT("@ @"));
 		if (Key.IsEmpty())
 		{
 			MessageLog.Error(*LOCTEXT("EmptyKeyError", "@@ has a value with an empty key").ToString(), this);
@@ -9408,14 +9892,14 @@ void UK2Node_VaRestMakeJson::ValidateNodeDuringCompilation(FCompilerResultsLog& 
 		{
 			if (!Key.IsEmpty() && Entries[Earlier].Key.Equals(Key, ESearchCase::CaseSensitive))
 			{
-				MessageLog.Error(*FString::Printf(TEXT("@@: the key \"%s\" appears twice"), *Key), this);
+				MessageLog.Error(*FString::Printf(TEXT("@@: the key \"%s\" appears twice"), *SafeKey), this);
 				break;
 			}
 		}
 		const UEdGraphPin* ValuePin = GetValuePin(Index);
 		if (!ValuePin || ValuePin->LinkedTo.Num() == 0 || ValuePin->PinType.PinCategory == UEdGraphSchema_K2::PC_Wildcard)
 		{
-			MessageLog.Error(*FString::Printf(TEXT("@@: connect a value for the key \"%s\""), *Key), this);
+			MessageLog.Error(*FString::Printf(TEXT("@@: connect a value for the key \"%s\""), *SafeKey), this);
 		}
 	}
 }
@@ -9538,7 +10022,7 @@ Expected: `0 failed`, including `VaRest.Json.Blueprint.MakeJsonNode`.
 
 - [ ] **Step 8: Restore-the-bug (keys that differ only by case)**
 
-In `CreateValuePin` replace `PinNameFor(Entry.Id)` with `FName(*Entry.Key)`. Run `Tools/run_tests.sh VaRest.Json.Blueprint.MakeJsonNode`; expect `"id" and "ID" are two pins` to fail (the FNames collide, `FindPin` returns one pin or none). Restore, run, expect green. Report both.
+Name pins after keys everywhere: in `CreateValuePin`, `GetValuePin` and `IndexOfValuePin` replace `PinNameFor(Entry.Id)` / `PinNameFor(Entries[Index].Id)` with `FName(*Entry.Key)` / `FName(*Entries[Index].Key)`. Run `Tools/run_tests.sh VaRest.Json.Blueprint.MakeJsonNode`; expect `"id" and "ID" are two pins` to fail for the right reason: `FindPin(FName("ID"))` returns the `id` pin (FName comparison ignores case), so `IdPin == UpperPin`. (Changing `CreateValuePin` alone would make `GetValuePin` miss every key and prove nothing about case.) Restore, run, expect green. Report both.
 
 - [ ] **Step 9: Commit**
 
@@ -9569,7 +10053,7 @@ A Blueprint is built in code, compiled, and its function executed through the Bl
 ```cpp
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 
-#if WITH_DEV_AUTOMATION_TESTS
+#if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
 
 #include "K2Node_VaRestMakeJson.h"
 #include "Kismet/KismetMathLibrary.h"
@@ -9607,7 +10091,7 @@ namespace VaRestJsonBlueprintTest
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonMakeJsonSmokeTest, "VaRest.Json.Blueprint.MakeJsonSmoke",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FVaRestJsonMakeJsonSmokeTest::RunTest(const FString& Parameters)
 {
@@ -9659,7 +10143,7 @@ bool FVaRestJsonMakeJsonSmokeTest::RunTest(const FString& Parameters)
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonWildcardSmokeTest, "VaRest.Json.Blueprint.WildcardSmoke",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FVaRestJsonWildcardSmokeTest::RunTest(const FString& Parameters)
 {
@@ -9784,8 +10268,10 @@ MSVC rejects what clang accepts in two ways this codebase has met: C4458 (a loca
 
 ```bash
 # locals/parameters named like a member of the class whose member function declares them
-grep -nE "\b(FVaRestJson|FString|int32|bool|const FVaRestJson&|FVaRestJsonError)\s+(Path|Members|Keys|Num|Get|Set|Add|At|Has|Remove|Clone|Equals|Object|Array|Null|From|Parse|Node|Doc)\b\s*[=;(,)]" \
+grep -nE "\b(FVaRestJson|FString|int32|bool|const FVaRestJson&|FVaRestJsonError|TArray<uint8>)\s+(Path|Members|Keys|Num|Get|Set|Add|At|Has|Remove|Clone|Equals|Object|Array|Null|From|Parse|Node|Doc|As|TryGet|TryToString|TryToUtf8|ToUtf8|ToString)\b\s*[=;(,)]" \
   Source/VaRestJson/Private/VaRestJson.cpp Source/VaRestJson/Private/VaRestJsonText.cpp Source/VaRestJson/Private/VaRestJsonStructOps.cpp Source/VaRestJson/Private/VaRestJsonBridge.cpp
+grep -nE "\b(FVaRestJson|FString|bool|TArray<uint8>|FVaRestJsonError)\s+(StructToUtf8|StructToString|StructToJson|PropertyToJson|JsonToStruct|Utf8ToStruct|JsonToProperty|FromJson|ToJson|ToUtf8|ResetCache)\b\s*[=;(,)]" \
+  Source/VaRestJson/Private/VaRestJsonConvert*.cpp
 grep -nE "\b(Entries|NextId|JsonPinName|Pins)\b\s*[=;]" Source/VaRestEditor/Private/K2Node_VaRestMakeJson.cpp
 grep -nE "\b(FVaRestJson|bool|FString)\s+(GetField|SetField|GetPath|ArrayGet|ArrayAdd|StructToJson|JsonToStruct|MergeJson|CloneJson)\b\s*[=;]" Source/VaRestJson/Private/VaRestJsonLibrary.cpp
 ```
@@ -9829,3 +10315,10 @@ Not in this plan, recorded so they are not lost:
 - **Test types out of the runtime module** (VaRest-rfd, M3): `VaRestJsonConvertTestTypes.h` ships in `VaRestJson`'s reflection data like M1's test types.
 - **v1 `Make Json` node:** it stays titled "Make Json" under "Utilities|VaRest" next to v2's under "VaRest|Json" until the v1 shims are deprecated (M3).
 - **Field-map cache growth:** entries for structs that are destroyed (property bags rebuilt at runtime, transient Blueprint structs) stay until the next `ResetCache`; harmless (keys are `FObjectKey`, never reused) but unbounded in a long editor session.
+
+## Deferred review minors
+
+Every Minor finding of `.superpowers/sdd/m2-plan-review.md` (7-27) is applied in its task; none is declined. Two are applied in part, on purpose:
+
+- 17 (FText) → encode writes `BuildSourceString()` (culture-invariant, as spec §2.4 says); decode already builds `FText::AsCultureInvariant` (Task 8), so the spec needs no amendment.
+- 27 (`JsonUtilities` in shipping) → kept as a private dependency with the reason in the comment (`Engine.Build.cs:88` links it publicly anyway); no `Shipping` guard, which would only add a configuration-dependent dependency list.
