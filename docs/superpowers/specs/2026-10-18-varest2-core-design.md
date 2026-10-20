@@ -211,7 +211,7 @@ FString Text = Json.ToString(EVaRestJsonFormat::Pretty);    // 2-space indent; a
 
 * Walks `FProperty` reflection with a **per-struct field map cached** by `(UScriptStruct*, naming policy)`.
   The cache is invalidated when a BP struct is recompiled or reinstanced in the editor.
-* **Field names.** C++ properties use the property name. For BP structs (`UUserDefinedStruct`) we always
+* **Field names.** C++ properties use the property name as the engine's name table spells it (the FName comparison entry, so PIE writes what a packaged game writes; a field whose name collides with an engine name, e.g. `id` -> `ID`, warns in the editor and needs a rename for exact casing — ruled 2026-10-20, M2 Task 6). For BP structs (`UUserDefinedStruct`) we always
   use the GUID-suffix-stripping algorithm the engine uses in cooked builds
   (`Runtime/CoreUObject/Private/StructUtils/UserDefinedStruct.cpp:300-306`), **never** the
   editor-only friendly name (`:289-298`). That way the same JSON comes out in PIE and in a packaged game.
