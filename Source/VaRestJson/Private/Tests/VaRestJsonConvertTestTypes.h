@@ -3,6 +3,8 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "UObject/SoftObjectPath.h"
+#include "UObject/SoftObjectPtr.h"
 #include "VaRestJson.h"
 
 #include "VaRestJsonConvertTestTypes.generated.h"
@@ -102,4 +104,181 @@ struct FVaRestJsonTestEngineName
 
 	UPROPERTY()
 	int32 id = 0;
+};
+
+UENUM()
+enum class EVaRestJsonTestColor : uint8
+{
+	Red,
+	Green,
+	Blue
+};
+
+UENUM()
+namespace EVaRestJsonTestLegacy
+{
+	enum Type : int
+	{
+		First,
+		Second
+	};
+}
+
+/** Every kind of field the converter supports */
+USTRUCT()
+struct FVaRestJsonTestAll
+{
+	GENERATED_BODY()
+
+	FVaRestJsonTestAll()
+	{
+		for (int32& Element : FixedArray)
+		{
+			Element = 0;
+		}
+	}
+
+	UPROPERTY()
+	bool bIsActive = false;
+
+	UPROPERTY()
+	int8 Int8Value = 0;
+
+	UPROPERTY()
+	int16 Int16Value = 0;
+
+	UPROPERTY()
+	int32 Int32Value = 0;
+
+	UPROPERTY()
+	int64 Int64Value = 0;
+
+	UPROPERTY()
+	uint8 ByteValue = 0;
+
+	UPROPERTY()
+	uint16 Uint16Value = 0;
+
+	UPROPERTY()
+	uint32 Uint32Value = 0;
+
+	UPROPERTY()
+	uint64 Uint64Value = 0;
+
+	UPROPERTY()
+	float FloatValue = 0.f;
+
+	UPROPERTY()
+	double DoubleValue = 0.0;
+
+	UPROPERTY()
+	FString StringValue;
+
+	UPROPERTY()
+	FName NameValue;
+
+	UPROPERTY()
+	FText TextValue;
+
+	UPROPERTY()
+	EVaRestJsonTestColor Color = EVaRestJsonTestColor::Red;
+
+	UPROPERTY()
+	TEnumAsByte<EVaRestJsonTestLegacy::Type> Legacy = EVaRestJsonTestLegacy::First;
+
+	UPROPERTY()
+	FVaRestJsonTestInner Inner;
+
+	UPROPERTY()
+	TArray<int32> Numbers;
+
+	UPROPERTY()
+	TArray<FVaRestJsonTestInner> Items;
+
+	UPROPERTY()
+	TSet<FString> Tags;
+
+	UPROPERTY()
+	TMap<FString, int32> Scores;
+
+	UPROPERTY()
+	TMap<int32, FString> ById;
+
+	UPROPERTY()
+	TMap<FName, int32> ByName;
+
+	UPROPERTY()
+	TMap<EVaRestJsonTestColor, int32> ByColor;
+
+	UPROPERTY()
+	FVaRestJson Extra;
+
+	UPROPERTY()
+	FDateTime When;
+
+	UPROPERTY()
+	FTimespan Duration;
+
+	UPROPERTY()
+	FGuid Guid;
+
+	UPROPERTY()
+	FSoftObjectPath AssetPath;
+
+	/**
+	 * Not "SoftObject": the editor registers that FName as "softobject" first (UEdGraphSchema_K2::PC_SoftObject,
+	 * EdGraphSchema_K2.cpp:616), so its spelling would depend on which editor modules are loaded
+	 */
+	UPROPERTY()
+	TSoftObjectPtr<UObject> SoftAsset;
+
+	UPROPERTY()
+	TArray<uint8> Bytes;
+
+	UPROPERTY()
+	TOptional<int32> MaybeNumber;
+
+	UPROPERTY()
+	int32 FixedArray[3];
+};
+
+/**
+ * Depth through a struct: its own object and Children array are two levels, the FVaRestJson elements add theirs. A
+ * struct cannot nest itself, so reflected fields alone never reach MaxDepth: UHT refuses a struct inside an array of
+ * itself (UhtArrayProperty.cs:216-222) and a cycle through another struct (its code generation hash is zero,
+ * UhtProperty.cs:3066-3071). FVaRestJson values and the writer entries' OpenContainers are what can.
+ */
+USTRUCT()
+struct FVaRestJsonTestTree
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	TArray<FVaRestJson> Children;
+};
+
+/** Bytes in a struct, so they can sit inside containers (UHT rejects nested containers) */
+USTRUCT()
+struct FVaRestJsonTestBlob
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	TArray<uint8> Data;
+};
+
+/** Every place a TArray<uint8> can meet the BytesWriter hook: a field, array elements, map values */
+USTRUCT()
+struct FVaRestJsonTestAttachments
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	TArray<uint8> First;
+
+	UPROPERTY()
+	TArray<FVaRestJsonTestBlob> List;
+
+	UPROPERTY()
+	TMap<FString, FVaRestJsonTestBlob> ByName;
 };

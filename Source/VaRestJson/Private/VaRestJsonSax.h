@@ -2,49 +2,11 @@
 
 #pragma once
 
-#include "RapidJsonIncludes.h"
-#include "JsonUtils/RapidJsonUtils.h"
 #include "VaRestJsonNode.h"
+#include "VaRestJsonWriterInternal.h"
 
 namespace VaRest::Json
 {
-	/** RapidJSON output stream over a TArray. Put/PutReserve/PutUnsafe are found by ADL from writer.h. */
-	struct FUtf8Sink
-	{
-		typedef char Ch;
-
-		TArray<uint8>& Out;
-
-		void Put(char C) { Out.Add(static_cast<uint8>(C)); }
-		void Flush() {}
-	};
-
-	/**
-	 * No-op on purpose. RapidJSON's escape path reserves 2 + length * 6 bytes per string
-	 * (writer.h:398), which over-reserves up to 6x and whose int32 cast can overflow. The reserve
-	 * is only a hint, so TArray's geometric growth in Put/PutUnsafe is used instead. This overload
-	 * exists so ADL picks it over rapidjson's generic template, which would call Put per character.
-	 */
-	inline void PutReserve(FUtf8Sink& Sink, size_t Count)
-	{
-		(void)Sink;
-		(void)Count;
-	}
-
-	inline void PutUnsafe(FUtf8Sink& Sink, char C)
-	{
-		Sink.Out.Add(static_cast<uint8>(C));
-	}
-
-	/**
-	 * The writers' level stack goes through FMemory via the engine's RapidJSON allocator
-	 * (JsonUtils/RapidJsonUtils.h:19-53), passed as the StackAllocator argument (writer.h:90, :103;
-	 * prettywriter.h:47, :58), instead of the default CrtAllocator's std::malloc (rapidjson.h:694-696).
-	 */
-	using FWriterAllocator = UE::Json::Private::FAllocatorImpl;
-	using FCondensedWriter = rapidjson::Writer<FUtf8Sink, rapidjson::UTF8<>, rapidjson::UTF8<>, FWriterAllocator>;
-	using FPrettyWriter = rapidjson::PrettyWriter<FUtf8Sink, rapidjson::UTF8<>, rapidjson::UTF8<>, FWriterAllocator>;
-
 	struct FEmitState
 	{
 		/** Non-finite doubles written as null (JSON has no NaN/Infinity) */

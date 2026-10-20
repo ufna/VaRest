@@ -16,12 +16,9 @@ public class VaRestJson : ModuleRules
 			// PUBLIC: VaRestJson.h exposes TSharedPtr<FJsonValue>/<FJsonObject> bridges, so a
 			// consumer calling them needs Json's include path.
 			"Json",
-		});
 
-		PrivateDependencyModuleNames.AddRange(new string[]
-		{
-			// RapidJSON headers. Json re-exports them publicly (Json.Build.cs), but the
-			// dependency is ours, so it is declared rather than inherited.
+			// PUBLIC: VaRestJsonWriterInternal.h hands the RapidJSON writer type to sibling modules
+			// (WebSocket/Socket.IO envelopes). Json re-exports it too (Json.Build.cs:9-15); declared, not inherited.
 			"RapidJSON",
 		});
 	}

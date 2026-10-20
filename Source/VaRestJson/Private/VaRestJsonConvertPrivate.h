@@ -84,4 +84,10 @@ namespace VaRest::Json::Convert
 
 	/** TArray<uint8> without an enum: the one array that may be base64 */
 	bool IsPlainByteArray(const FArrayProperty* Property);
+
+	/**
+	 * The double to write for a float: the shortest decimal (6 to 9 significant digits) that reads back as the same
+	 * float, so 0.1f is written 0.1 and not 0.10000000149011612. Falls back to the exact double outside 1e-22..1e22.
+	 */
+	double FloatToJsonDouble(float Value);
 }

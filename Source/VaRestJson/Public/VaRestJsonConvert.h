@@ -3,6 +3,8 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Containers/ArrayView.h"
+#include "Templates/Function.h"
 #include "UObject/Class.h"
 #include "VaRestJson.h"
 
@@ -31,6 +33,16 @@ enum class EVaRestJsonNaming : uint8
 	PascalCase
 };
 
+/**
+ * Encode: offered every TArray<uint8> value (a field, or bytes inside a struct in a container) before the built-in
+ * forms (an array of numbers; a base64 string with bBytesAsBase64). Return true after setting OutReplacement: the
+ * encoder writes OutReplacement in place of the bytes through the same sink (RapidJSON writer or DOM builder),
+ * counting its depth. Return false for the built-in forms. Called in walk order (field declaration order, then
+ * container order), so a caller that numbers the values gets a deterministic numbering; empty arrays are offered too.
+ * Socket.IO writes {"_placeholder":true,"num":N} and keeps a copy of Bytes (spec §18.2 J-1). Runs on the encoding thread.
+ */
+using FVaRestJsonBytesWriter = TFunction<bool(TConstArrayView<uint8> Bytes, FVaRestJson& OutReplacement)>;
+
 struct FVaRestJsonConvertOptions
 {
 	EVaRestJsonNaming Naming = EVaRestJsonNaming::CamelCase;
@@ -43,6 +55,9 @@ struct FVaRestJsonConvertOptions
 
 	/** Encode TArray<uint8> as one base64 string instead of an array of numbers (decode accepts both) */
 	bool bBytesAsBase64 = false;
+
+	/** Encode: per-value replacement for TArray<uint8> values (see FVaRestJsonBytesWriter); unset: the built-in forms */
+	FVaRestJsonBytesWriter BytesWriter;
 };
 
 /** What a decode found, each entry with the JSON path of the value ("items[3].name"). Strict mode reports Errors. */
@@ -86,6 +101,40 @@ struct VARESTJSON_API FVaRestJsonNames
  */
 struct VARESTJSON_API FVaRestJsonConvert
 {
+	// ---- encode: straight to UTF-8 bytes with the RapidJSON writer, no DOM, no FString (spec 2.4)
+
+	/**
+	 * Appends Struct's JSON to Out. False when a value nests deeper than VaRest::Json::MaxDepth: Out is left as it was
+	 * and OutError is filled (or, without OutError, an error is logged).
+	 */
+	static bool StructToUtf8(const UScriptStruct* Struct, const void* Data, TArray<uint8>& Out,
+		const FVaRestJsonConvertOptions& Options = FVaRestJsonConvertOptions(), EVaRestJsonFormat Format = EVaRestJsonFormat::Condensed,
+		FVaRestJsonError* OutError = nullptr);
+
+	/** StructToUtf8 as an FString; "" plus an error log on failure */
+	static FString StructToString(const UScriptStruct* Struct, const void* Data,
+		const FVaRestJsonConvertOptions& Options = FVaRestJsonConvertOptions(), EVaRestJsonFormat Format = EVaRestJsonFormat::Condensed);
+
+	/** Struct as a DOM (to Set into another document); an invalid handle plus an error log on failure */
+	static FVaRestJson StructToJson(const UScriptStruct* Struct, const void* Data, const FVaRestJsonConvertOptions& Options = FVaRestJsonConvertOptions());
+
+	/** One property's value as a DOM; Value points at the value, not at its container (the BP wildcard nodes' encode) */
+	static FVaRestJson PropertyToJson(const FProperty* Property, const void* Value, const FVaRestJsonConvertOptions& Options = FVaRestJsonConvertOptions());
+
+	template <typename T>
+	static TArray<uint8> ToUtf8(const T& Value, const FVaRestJsonConvertOptions& Options = FVaRestJsonConvertOptions(), EVaRestJsonFormat Format = EVaRestJsonFormat::Condensed)
+	{
+		TArray<uint8> Out;
+		StructToUtf8(TBaseStructure<T>::Get(), &Value, Out, Options, Format);
+		return Out;
+	}
+
+	template <typename T>
+	static FVaRestJson ToJson(const T& Value, const FVaRestJsonConvertOptions& Options = FVaRestJsonConvertOptions())
+	{
+		return StructToJson(TBaseStructure<T>::Get(), &Value, Options);
+	}
+
 	/** Drops every cached field map. The editor calls it when a Blueprint struct changes; FVaRestJsonNames calls it too. */
 	static void ResetCache();
 
