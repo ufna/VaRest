@@ -71,6 +71,7 @@ works because this workstation builds without UBA detours (`bAllowUBAExecutor=fa
 Tools/run_tests.sh                    # filter "VaRest"
 Tools/run_tests.sh VaRest.Json        # narrower filter
 Tools/run_tests.sh --no-build VaRest  # skip the build
+python3 -I Tools/testserver/selftest.py   # the HTTP test server's own tests (stdlib only)
 
 # Build only (editor target)
 /w/Unreal/UnrealEngine/Engine/Build/BatchFiles/Linux/Build.sh \
@@ -80,6 +81,11 @@ Tools/run_tests.sh --no-build VaRest  # skip the build
 /w/Unreal/UnrealEngine/Engine/Build/BatchFiles/Linux/Build.sh \
   VaRestHost Linux Development -project=/w/Unreal/VaRestHost/VaRestHost.uproject
 ```
+
+`Tools/run_tests.sh` starts `Tools/testserver/server.py` (python3, standard library) on a port the OS picks and passes
+`-VaRestTestServer=<url>` for the `VaRest.Integration.*` tests; it stops it on exit and the server leaves by itself if the
+runner dies. `VAREST_NO_TESTSERVER=1` runs without it (integration tests then fail, by design). Server log:
+`<Host>/Saved/Logs/VaRestTestServer.<runner pid>.log`.
 
 **Dev-loop hazards** (inherited from VaCuus, each one cost real time there):
 
@@ -101,10 +107,11 @@ VaRest 2 is being built on branch `v2`. The design is
 | Module | Type | Role |
 | --- | --- | --- |
 | `VaRestJson` | Runtime | `FVaRestJson`: own arena DOM, RapidJSON (engine copy) as SAX reader + writer; `FVaRestJsonConvert` struct <-> JSON; `UVaRestJsonLibrary` BP JSON library (CustomThunk wildcards). Has a module class (`VaRestJsonModule.cpp`). Depends on Engine (public) |
-| `VaRestHttp` | Runtime | `FVaRestClient`, request pipeline + stages, `UVaRestApi` asset, `UVaRestHub`, async BP actions |
+| `VaRestHttp` | Runtime | `FVaRestClient` and its `[[nodiscard]]` builder over a stage pipeline (log/redaction, limiter, transport; M4 adds retry, auth, cache, offline), HTTP-thread completion with zero-copy JSON decode off the game thread, the public redactor, the Inspector trace surface, `UVaRestHttpSettings`; M5 adds the `UVaRestApi` asset, `UVaRestHub` and async BP actions |
 | `VaRest` | Runtime | the **v1 API at unchanged paths**, reimplemented as deprecated shims (removed in v3) |
 | `VaRestEditor` | UncookedOnly | K2 nodes, v1 and v2 (`K2Node_VaRestMakeJson`); drops the convert cache on Blueprint struct changes |
 | `VaRestEditorTools` | Editor | asset definition, validation, menus |
+| `VaRestTests` | UncookedOnly | test-only USTRUCTs, the `VaRest.Integration.*` suite against `Tools/testserver/`, `Bench.VaRest.Http.*`; never in a game target |
 
 Tag `v1-on-5.8` is v1 with the minimal UE 5.8 port and no behaviour change. The v1 compat
 fixture is authored from it.
@@ -124,4 +131,8 @@ fixture is authored from it.
   names and *parameter names* (they are pin names in saved graphs), `MakeJsonInternal*`, `UK2Node_VaRestMakeJson`
   and every `UENUM`/`USTRUCT` name under `/Script/VaRestJson` and `/Script/VaRestEditor`. A rename needs a
   CoreRedirect in the same commit.
+- **`UVaRestHttpSettings` property names are frozen from M3**: they are persisted config keys
+  (`[/Script/VaRestHttp.VaRestHttpSettings]` in a project's ini). `FVaRestError`'s fields, `EVaRestErrorKind`,
+  `EVaRestPriority`, `EVaRestLogLevel` and `EVaRestQueryStyle` freeze with M5, when they become pin names. A rename
+  needs a CoreRedirect (or a config redirect) in the same commit.
 - **Push back with sources** when a premise is wrong.

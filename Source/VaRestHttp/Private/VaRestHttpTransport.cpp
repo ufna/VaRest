@@ -4,6 +4,7 @@
 
 #include "GenericPlatform/GenericPlatformFile.h"
 #include "HAL/FileManager.h"
+#include "HAL/IConsoleManager.h"
 #include "HAL/PlatformFileManager.h"
 #include "HAL/PlatformTime.h"
 #include "HttpModule.h"
@@ -16,6 +17,12 @@
 
 namespace VaRest::Http::HttpTransportPrivate
 {
+	TAutoConsoleVariable<bool> CVarCompleteOnGameThread(
+		TEXT("VaRest.Http.CompleteOnGameThread"),
+		false,
+		TEXT("Spec 9 fallback for an HTTP backend that cannot complete requests on its own thread: complete them on the game thread instead. Decoding still runs on UE::Tasks. Read when each request starts; see docs/dev/http-thread-completion.md."),
+		ECVF_Default);
+
 	EVaRestTransportFailure MapFailure(EHttpFailureReason Reason)
 	{
 		switch (Reason)
@@ -230,16 +237,22 @@ namespace VaRest::Http::HttpTransportPrivate
 			Http->SetActivityTimeout(Activity);
 		}
 		Http->SetPriority(MapPriority(Request.Priority));
-		// Spec 1: complete on the HTTP thread; the completion below only moves bytes and dispatches
-		Http->SetDelegateThreadPolicy(EHttpRequestDelegateThreadPolicy::CompleteOnHttpThread);
+		// Spec 1: complete on the HTTP thread; the completion below only moves bytes and dispatches. Spec 9's fallback
+		// completes on the game thread instead; the completion code is the same either way.
+		Http->SetDelegateThreadPolicy(CVarCompleteOnGameThread.GetValueOnAnyThread()
+			? EHttpRequestDelegateThreadPolicy::CompleteOnGameThread
+			: EHttpRequestDelegateThreadPolicy::CompleteOnHttpThread);
 
 		// Review M-16: the response's own headers cannot be read while it is in flight -- GetHeader logs a Warning and
 		// returns "" until OnFinishRequest sets bIsReady (HttpResponseCommon.cpp:76-92, HttpRequestCommon.cpp:870-873) --
 		// so a Content-Encoding is noted as it arrives. Under CompleteOnHttpThread curl calls this from its header callback on
 		// the HTTP thread, before that response's first body byte (CurlHttp.cpp:532-535); Apple from didReceiveResponse, on
 		// the session's serial delegate queue that later delivers the body (AppleHttp.cpp:171-187, :865-874;
-		// HttpRequestImpl.cpp:40-60; delegateQueue nil, ApplePlatformHttp.cpp:265). Not an IN-11 bind: the sink needs it
-		// whether or not anything is traced, so DelegateBinds does not count it.
+		// HttpRequestImpl.cpp:40-60; delegateQueue nil, ApplePlatformHttp.cpp:265). Under the spec 9 fallback both defer it
+		// to the game-thread tick (CurlHttp.cpp:536-539, :1212-1219; AppleHttp.cpp:875-881) while body chunks still arrive on
+		// the receiving thread, so the first chunk can come first: the reserve then follows a compressed Content-Length and
+		// DownloadTotal shows it (docs/dev/http-thread-completion.md). Not an IN-11 bind: the sink needs it whether or not
+		// anything is traced, so DelegateBinds does not count it.
 		Http->OnHeaderReceived().BindLambda([Completion](FHttpRequestPtr, const FString& HeaderName, const FString& HeaderValue)
 		{
 			if (!HeaderValue.IsEmpty() && HeaderName.Equals(TEXT("Content-Encoding"), ESearchCase::IgnoreCase))

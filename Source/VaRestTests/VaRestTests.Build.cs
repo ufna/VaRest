@@ -17,6 +17,7 @@ public class VaRestTests : ModuleRules
 			"Engine",
 			"VaRestJson",
 			"VaRestHttp",
+			"VaRest", // v1, for Bench.VaRest.Http.RequestPath (its HTTP and Json dependencies are public, VaRest.Build.cs:21-31)
 		});
 	}
 }

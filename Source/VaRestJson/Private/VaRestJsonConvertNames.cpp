@@ -7,6 +7,7 @@
 #include "StructUtils/UserDefinedStruct.h"
 #include "UObject/EnumProperty.h"
 #include "UObject/ObjectKey.h"
+#include "UObject/Package.h"
 #include "UObject/PropertyOptional.h"
 #include "UObject/SoftObjectPath.h"
 #include "UObject/TextProperty.h"

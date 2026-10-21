@@ -883,4 +883,37 @@ bool FVaRestHttpTransportTimesTest::RunTest(const FString& Parameters)
 
 #endif // PLATFORM_LINUX
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpTransportFallbackTest, "VaRest.Http.Transport.GameThreadFallback",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpTransportFallbackTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::TransportTestPrivate;
+	AddExpectedMessagePlain(TEXT("libcurl"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, -1);
+	// Spec 9's fallback for a backend that cannot complete on its own thread (docs/dev/http-thread-completion.md)
+	TGuardConsoleVariable<bool> Fallback(TEXT("VaRest.Http.CompleteOnGameThread"), true);
+	TSharedRef<FDone, ESPMode::ThreadSafe> Done = MakeShared<FDone, ESPMode::ThreadSafe>();
+	FVaRestTransportRequest Request;
+	Request.Verb = TEXT("GET");
+	Request.Url = TEXT("http://127.0.0.1:1/"); // port 1: nothing listens, the connection is refused at once
+	Request.Timeout = 10.f;
+	const TSharedRef<IVaRestTransportCall, ESPMode::ThreadSafe> Call = VaRest::Http::GetDefaultTransport()->Start(MoveTemp(Request), Into(Done));
+	// A game-thread completion comes from the HTTP manager's tick (HttpManager.cpp:536-544), so the core ticker is ticked
+	const bool bCompleted = VaRest::Http::Testing::PumpUntil([Done] { return Done->bDone.load(); }, 15.0, true);
+	if (!bCompleted)
+	{
+		// Every test drains what it sends; under this policy the cancel's completion also comes from the manager's tick
+		Call->Cancel();
+		VaRest::Http::Testing::PumpUntil([Done] { return Done->bDone.load(); }, 5.0, true);
+	}
+	if (!TestTrue(TEXT("completes"), bCompleted))
+	{
+		return false;
+	}
+	TestTrue(TEXT("the fallback completes on the game thread"), Done->bOnGameThread);
+	VaRest::Http::Testing::PumpUntil([] { return false; }, 0.2, true);
+	TestTrue(TEXT("... with the same result, exactly once"), Done->Result.Failure == EVaRestTransportFailure::Connection && Done->Calls.load() == 1);
+	return true;
+}
+
 #endif
