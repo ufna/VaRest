@@ -41,7 +41,8 @@ namespace VaRest::Http
 	/**
 	 * "/users/{id}" with each {name} replaced by PercentEncode(value): one segment, so '/' in a value is %2F. The last
 	 * value given for a name wins. Errors (decision 10): a placeholder without a value, an empty value, a value that is "." or "..", a value whose name
-	 * the template lacks, '{' without '}', a stray '}', and "{}".
+	 * the template lacks, '{' without '}', a stray '}', and "{}". An error's message never quotes the template, which may be
+	 * an absolute URL with userinfo: a caller that shows it redacts it first (final review M8).
 	 */
 	VARESTHTTP_API TValueOrError<FString, FString> ExpandPathTemplate(FStringView Template, TConstArrayView<TPair<FString, FString>> Params);
 

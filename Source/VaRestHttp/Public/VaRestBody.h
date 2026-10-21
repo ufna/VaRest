@@ -147,7 +147,7 @@ enum class EVaRestBodyKind : uint8
 struct VARESTHTTP_API FVaRestRequestBody
 {
 	EVaRestBodyKind Kind = EVaRestBodyKind::None;
-	/** The default Content-Type; a request's own Content-Type header wins (spec 3.2) */
+	/** The body's Content-Type: it wins over a client default (WithHeader), and a request's own Header() wins over it (spec 3.2, final review I2) */
 	FString ContentType;
 	/** Json, Text, Form, Binary, and Multipart without file parts */
 	TArray<uint8> Bytes;

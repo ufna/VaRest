@@ -56,6 +56,7 @@ namespace VaRest::Http
 		TOptional<int64> MaxJsonBytes;
 		EVaRestJsonNaming Naming = EVaRestJsonNaming::CamelCase;
 		bool bStrictDecode = false;
+		/** The current body is a struct, encoded with Naming: Naming() now fails. A later Body() or BodyFile() clears it. */
 		bool bStructBodySet = false;
 		TUniquePtr<IResultHandler> Handler;
 		bool bSent = false;
@@ -142,9 +143,11 @@ public:
 	}
 
 	/**
-	 * Sets a header (replacing one of that name, whatever its case); it wins over the client's and over a body's
-	 * Content-Type. A name that is not an RFC 9110 token, or a value holding a control character other than HTAB
-	 * (CR, LF, NUL among them), fails the request with Kind=Config and nothing is sent (decision 11: header injection).
+	 * Sets a header (replacing one of that name, whatever its case); it wins over the client's (WithHeader). Content-Type
+	 * has three levels (final review I2): this request's Header() wins over the body's own type (Body(), BodyFile()), which
+	 * wins over a client default, so a multipart body always names its boundary unless this request overrides it. A name
+	 * that is not an RFC 9110 token, or a value holding a control character other than HTAB (CR, LF, NUL among them), fails
+	 * the request with Kind=Config and nothing is sent (decision 11: header injection).
 	 */
 	TVaRestRequest Header(FStringView Name, FStringView Value) &&
 	{
@@ -175,6 +178,7 @@ public:
 				Spec->Fail(FString::Printf(TEXT("the JSON body cannot be written: %s"), *Written.GetError().Message));
 			}
 			Spec->Body = FVaRestRequestBody::FromBytes(MoveTemp(Bytes), EVaRestBodyKind::Json, TEXT("application/json"));
+			Spec->bStructBodySet = false; // task 9 review minor 1: a later Body() replaced the struct one
 		}
 		return MoveTemp(*this);
 	}
@@ -184,6 +188,7 @@ public:
 	{
 		FTCHARToUTF8 Utf8(Text.GetData(), Text.Len());
 		Spec->Body = FVaRestRequestBody::FromBytes(TArray<uint8>(reinterpret_cast<const uint8*>(Utf8.Get()), Utf8.Length()), EVaRestBodyKind::Text, TEXT("text/plain; charset=utf-8"));
+		Spec->bStructBodySet = false;
 		return MoveTemp(*this);
 	}
 
@@ -191,6 +196,7 @@ public:
 	TVaRestRequest Body(TArray<uint8>&& Bytes) &&
 	{
 		Spec->Body = FVaRestRequestBody::FromBytes(MoveTemp(Bytes), EVaRestBodyKind::Binary, TEXT("application/octet-stream"));
+		Spec->bStructBodySet = false;
 		return MoveTemp(*this);
 	}
 
@@ -225,6 +231,7 @@ public:
 	TVaRestRequest Body(const FVaRestForm& Form) &&
 	{
 		Spec->Body = FVaRestRequestBody::FromForm(Form);
+		Spec->bStructBodySet = false;
 		return MoveTemp(*this);
 	}
 
@@ -239,6 +246,7 @@ public:
 		else
 		{
 			Spec->Body = Built.StealValue();
+			Spec->bStructBodySet = false;
 		}
 		return MoveTemp(*this);
 	}
@@ -254,6 +262,7 @@ public:
 		else
 		{
 			Spec->Body = Built.StealValue();
+			Spec->bStructBodySet = false;
 		}
 		return MoveTemp(*this);
 	}
@@ -469,7 +478,7 @@ private:
 class VARESTHTTP_API FVaRestClient
 {
 public:
-	/** An empty handle; Make() a real one */
+	/** An empty handle; Make() a real one. A request built on it fails with Kind=Config (see Request). */
 	FVaRestClient() = default;
 
 	/** Game thread. Defaults from UVaRestHttpSettings; the FHttpModule transport; the real clock. */
@@ -491,6 +500,10 @@ public:
 	/** The name traces show (Inspector IN-8). Without one, or after WithName(""), the client is named by its base URL. */
 	FVaRestClient& WithName(FStringView DisplayName);
 	FVaRestClient& WithBaseUrl(FStringView BaseUrl);
+	/**
+	 * A default header for every request; a request's Header() of the same name wins. A default Content-Type never relabels
+	 * a body: the body's own type wins over it, and a request's Header("Content-Type", ...) over both (final review I2).
+	 */
 	FVaRestClient& WithHeader(FStringView Name, FStringView Value);
 	FVaRestClient& WithoutHeader(FStringView Name);
 	/** How struct bodies name their fields (spec 2.4); decode accepts every spelling regardless */
@@ -549,7 +562,12 @@ public:
 	template <typename T = FVaRestJson>
 	TVaRestRequest<T> Head(FStringView Path) const { return Request<T>(TEXTVIEW("HEAD"), Path); }
 
-	/** Any verb; T defaults to FVaRestJson (spec 3.2). An empty client gives a builder whose Send() logs an error and sends nothing. */
+	/**
+	 * Any verb, an RFC 9110 token taken as it is (no trimming): anything else, an empty verb included, fails the request
+	 * with Kind=Config and nothing is sent (final review I3). T defaults to FVaRestJson (spec 3.2). An empty client gives
+	 * a builder whose Send() logs an error, sends nothing and delivers Kind=Config to OnError and OnComplete from a later
+	 * game-thread tick (final review M7; decision 3).
+	 */
 	template <typename T = FVaRestJson>
 	TVaRestRequest<T> Request(FStringView Verb, FStringView Path) const
 	{

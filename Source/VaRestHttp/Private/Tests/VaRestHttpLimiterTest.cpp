@@ -601,4 +601,36 @@ bool FVaRestHttpLimiterBadPriorityTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpLimiterDoubleReleaseTest, "VaRest.Http.Limiter.DoubleReleaseEnsuresEachTime",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpLimiterDoubleReleaseTest::RunTest(const FString& Parameters)
+{
+#if DO_ENSURE
+	// Task 12 review minor 1 (P12.1): every double release reports, not only the first of the session (ensureMsgf's rule,
+	// AssertionMacros.cpp:970-975). The thread's ensure handler (AssertionMacros.h:55-61) takes this one ensure, so the run
+	// is deterministic and leaves no callstack or crash report; FDebug::EnsureFailed asks it first (AssertionMacros.cpp:499).
+	TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> Fired = MakeShared<std::atomic<int32>, ESPMode::ThreadSafe>(0);
+	const TFunction<bool(const FEnsureHandlerArgs&)> Outer = GetEnsureHandler();
+	SetEnsureHandler([Fired, Outer](const FEnsureHandlerArgs& Args)
+	{
+		if (Args.Message && FCString::Strstr(Args.Message, TEXT("FLimiter: Release() without a matching grant")))
+		{
+			++*Fired;
+			return true;
+		}
+		return Outer ? Outer(Args) : false;
+	});
+	ON_SCOPE_EXIT { SetEnsureHandler(Outer); };
+	VaRest::Http::FLimiter Limiter;
+	Limiter.Release();
+	Limiter.Release();
+	TestEqual(TEXT("each double release ensures (ensureAlways)"), Fired->load(), 2);
+	TestEqual(TEXT("... and the count never goes negative"), Limiter.NumActive(), 0);
+#else
+	AddInfo(TEXT("ensures are compiled out (DO_ENSURE 0): nothing to check"));
+#endif
+	return true;
+}
+
 #endif

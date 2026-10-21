@@ -3,6 +3,7 @@
 #include "VaRestClient.h"
 
 #include "Tasks/Task.h"
+#include "UObject/StrongObjectPtr.h"
 #include "VaRestClientState.h"
 #include "VaRestHttpLog.h"
 #include "VaRestHttpSettings.h"
@@ -19,6 +20,51 @@ namespace VaRest::Http::ClientPrivate
 			UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: the base URL \"%s\" has a fragment; a base URL may carry a query but not a fragment, so this client's requests fail with Kind=Config"),
 				*EscapeForLog(FVaRestRedactor().RedactUrl(BaseUrl)));
 		}
+	}
+
+	/**
+	 * Final review M7: a builder of a default-constructed FVaRestClient has no client state, so no exchange and no pipeline,
+	 * but a UI waiting on OnComplete must not hang. Its handler gets Kind=Config from a later game-thread task (decision 3:
+	 * never inside Send(), from whichever thread Send() ran on), with Complete's rules: nothing for an owner that is gone or
+	 * at engine exit (spec 3.2, decision 2); with OnHttpThread() the callbacks run on a worker, the owner pinned for them
+	 * (decisions 4, 28). The handler -- the user's callbacks and their captures -- dies where Complete's would.
+	 */
+	void DeliverWithoutClient(FRequestSpec& Spec)
+	{
+		if (!Spec.Handler.IsValid())
+		{
+			return;
+		}
+		FFinish Failed;
+		Failed.Error.Kind = EVaRestErrorKind::Config;
+		Failed.Error.Message = TEXT("Send() on an empty FVaRestClient: make one with FVaRestClient::Make");
+		Failed.Error.Tag = Spec.Tag;
+		// Spec 3.3: "Url (redacted)". No client, so no client keys or secrets: the built-in rules and userinfo.
+		Failed.Error.Url = FVaRestRedactor().RedactUrl(Spec.Path);
+		UE::Tasks::Launch(TEXT("VaRest.DeliverWithoutClient"),
+			[Callbacks = MoveTemp(Spec.Handler), Pending = MoveTemp(Failed), WeakOwner = Spec.Owner, bOwned = Spec.bHasOwner, bOffGameThread = Spec.bOnHttpThread]() mutable
+			{
+				if ((bOwned && !WeakOwner.IsValid()) || FClientState::IsShuttingDown())
+				{
+					return;
+				}
+				if (!bOffGameThread)
+				{
+					Callbacks->Deliver(Pending);
+					return;
+				}
+				// As Complete's OnHttpThread() branch (VaRestPipeline.cpp, decision 28): pinned here, released on the worker
+				TStrongObjectPtr<const UObject> Pin;
+				if (bOwned)
+				{
+					Pin.Reset(WeakOwner.Get());
+				}
+				UE::Tasks::Launch(TEXT("VaRest.DeliverOffGameThread"), [Delivered = MoveTemp(Callbacks), Done = MoveTemp(Pending), Kept = MoveTemp(Pin)]() mutable
+				{
+					Delivered->Deliver(Done);
+					Kept.Reset();
+				});
+			}, UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
 	}
 
 	/** Two keys the rules treat as one: equal after FVaRestRedactRules::Normalize */
@@ -94,7 +140,9 @@ FVaRestRequestHandle VaRest::Http::SendRequest(TUniquePtr<FRequestSpec>&& Spec, 
 	Spec->bSent = true;
 	if (!Spec->State.IsValid())
 	{
-		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: Send() on an empty FVaRestClient (make one with FVaRestClient::Make); the %s request is dropped"), *EscapeForLog(Spec->Verb));
+		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: Send() on an empty FVaRestClient (make one with FVaRestClient::Make); the %s request is not sent, and its callbacks get Kind=Config"),
+			*EscapeForLog(Spec->Verb));
+		ClientPrivate::DeliverWithoutClient(*Spec);
 		return FVaRestRequestHandle();
 	}
 	// A TSharedPtr, so that the worker path can move it into the Enter task (review I-1; a TSharedRef "move" copies,

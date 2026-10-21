@@ -454,6 +454,20 @@ bool FVaRestHttpLogQueueTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("the second completes"), Rig.Wait(SecondDone));
 	TestTrue(TEXT("no wait: the attempt's 2000 ms, nothing queued"), Capture.Contains(Id(First) + TEXT("GET https://api.test/first -> 200 (2000 ms, 2 B down")));
 	TestTrue(TEXT("queued: its own 500 ms, the 2000 ms queued apart"), Capture.Contains(Id(Second) + TEXT("GET https://api.test/second -> 200 (500 ms, 2000 ms queued, 2 B down")));
+
+	// Task 14 re-review N2 (P14.2): an attempt canceled while it waits in the queue shows the wait apart too, not as its own
+	Rig.Fake->Enqueue(FVaRestFakeResponse::Manual());
+	auto HolderDone = MakeOutcome<FVaRestJson>();
+	auto WaiterDone = MakeOutcome<FVaRestJson>();
+	const FVaRestRequestHandle Holder = Observe(Rig.Client.Get(TEXT("/holder")), HolderDone).Send();
+	const FVaRestRequestHandle Waiter = Observe(Rig.Client.Get(TEXT("/waiter")), WaiterDone).Send();
+	TestEqual(TEXT("the fourth request queues"), Rig.Fake->NumCalls(), 3);
+	Rig.Clock->Advance(1.5);
+	Waiter.Cancel();
+	TestTrue(TEXT("the one canceled in the queue completes"), Rig.Wait(WaiterDone));
+	TestTrue(TEXT("... its own 0 ms, the 1500 ms queued apart"), Capture.Contains(Id(Waiter) + TEXT("GET https://api.test/waiter -> canceled (0 ms, 1500 ms queued)")));
+	Holder.Cancel();
+	TestTrue(TEXT("the holder completes"), Rig.Wait(HolderDone));
 	return true;
 }
 

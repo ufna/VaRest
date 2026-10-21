@@ -8,6 +8,29 @@
 #include "VaRestHttpSettings.h"
 #include "VaRestHttpTesting.h"
 
+namespace VaRest::Http::TimeoutProgressTestPrivate
+{
+	/**
+	 * Task 13 review minor 5: a PerAttempt stage that answers its attempt itself while the transport call still runs, so the
+	 * request finishes with that call live (IVaRestStage::Process does not forbid it). It counts the late answers it swallows.
+	 */
+	class FEarlyAnswerStage final : public IVaRestStage
+	{
+	public:
+		virtual FName GetStageName() const override { return TEXT("EarlyAnswer"); }
+
+		virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) override
+		{
+			Next.Proceed(Exchange, [Swallowed = LateAnswers](FVaRestAttemptOutcome&&) { ++*Swallowed; });
+			FVaRestAttemptOutcome Early;
+			Early.Status = 204;
+			OnOutcome(MoveTemp(Early));
+		}
+
+		TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> LateAnswers = MakeShared<std::atomic<int32>, ESPMode::ThreadSafe>(0);
+	};
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpTimeoutAppliedTest, "VaRest.Http.Timeout.Applied",
 	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
 
@@ -183,6 +206,37 @@ bool FVaRestHttpProgressOwnerGoneTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("an owner gone mid-download cancels the transfer at the next tick"), Rig.Fake->NumCalls() == 4 && Rig.Fake->GetCall(3).bCanceled);
 	TestTrue(TEXT("... the request finishes"), PumpUntil([&LeftHandle] { return !LeftHandle.IsActive(); }));
 	TestEqual(TEXT("... silently, progress included"), LeftCalls->load() + Left->CompleteCalls.load(), 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpProgressAfterFinishTest, "VaRest.Http.Progress.NoTickAfterFinish",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpProgressAfterFinishTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::TimeoutProgressTestPrivate;
+	// Task 13 review minor 5 (P13.5): a request finished while its transport call is still live must not keep its progress
+	// tick re-arming until that call ends. Timers are counted against the clock's count before the Send (P13.6).
+	FTestRig Rig;
+	TSharedRef<FEarlyAnswerStage, ESPMode::ThreadSafe> Stage = MakeShared<FEarlyAnswerStage, ESPMode::ThreadSafe>();
+	Rig.Client.Use(Stage, EVaRestStageSlot::PerAttempt);
+	Rig.Fake->Enqueue(FVaRestFakeResponse::Manual()); // arms no timer of its own
+	TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> Calls = MakeShared<std::atomic<int32>, ESPMode::ThreadSafe>(0);
+	auto Outcome = MakeOutcome<FVaRestJson>();
+	const int32 TimersBefore = Rig.Clock->NumPendingTimers();
+	Observe(Rig.Client.Get(TEXT("/early")).OnProgress([Calls](const FVaRestProgress&) { ++*Calls; }), Outcome).Send();
+	TestTrue(TEXT("the stage's answer completes the request"), Rig.Wait(Outcome));
+	TestEqual(TEXT("... while the transport call still runs"), Rig.Fake->NumInFlight(), 1);
+	TestEqual(TEXT("the progress tick was armed at dispatch"), Rig.Clock->NumPendingTimers(), TimersBefore + 1);
+	Rig.Fake->ReportProgress(0, 0, 10, 100);
+	Rig.Clock->Advance(0.1);
+	TestEqual(TEXT("the tick of a finished request does not re-arm"), Rig.Clock->NumPendingTimers(), TimersBefore);
+	TestEqual(TEXT("... and delivers nothing (Complete took the handler)"), Calls->load(), 0);
+	Rig.Fake->Complete(0, FVaRestFakeResponse::Json(200, FUtf8StringView(UTF8TEXT("{}"))));
+	const TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> Late = Stage->LateAnswers;
+	TestTrue(TEXT("the transport's late answer is drained"), PumpUntil([Late] { return Late->load() == 1; }));
+	TestEqual(TEXT("... and the request was delivered once"), Outcome->CompleteCalls.load(), 1);
 	return true;
 }
 

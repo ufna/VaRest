@@ -45,9 +45,11 @@ void VaRest::Http::FLimiter::Release()
 {
 	check(IsInGameThread());
 	// Review Minor 1: a Release without a grant (a double release) over-grants from then on whatever this counter does, so
-	// it must not pass quietly. The ensure fails the test that does it; where ensures are compiled out the count still
-	// never goes negative, which would add one more slot.
-	if (ensureMsgf(Active > 0, TEXT("FLimiter: Release() without a matching grant (a double release)")))
+	// it must not pass quietly. ensureAlways (task 12 review, parked P12.1): ensureMsgf reports only the first failure of
+	// its call site per session (AssertionMacros.cpp:964-967, :970-975), and a second client's double release is
+	// as much a bug as the first. Where ensures are compiled out the count still never goes negative, which would add one
+	// more slot.
+	if (ensureAlwaysMsgf(Active > 0, TEXT("FLimiter: Release() without a matching grant (a double release)")))
 	{
 		--Active;
 	}

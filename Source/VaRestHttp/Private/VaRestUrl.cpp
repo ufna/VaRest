@@ -340,7 +340,7 @@ TValueOrError<FString, FString> VaRest::Http::ExpandPathTemplate(FStringView Tem
 		const TCHAR C = Template[i];
 		if (C == TEXT('}'))
 		{
-			return MakeError(FString::Printf(TEXT("unmatched '}' in path template \"%s\""), *FString(Template)));
+			return MakeError(FString(TEXT("unmatched '}' in the path template")));
 		}
 		if (C != TEXT('{'))
 		{
@@ -358,12 +358,12 @@ TValueOrError<FString, FString> VaRest::Http::ExpandPathTemplate(FStringView Tem
 		}
 		if (Close == INDEX_NONE)
 		{
-			return MakeError(FString::Printf(TEXT("unclosed '{' in path template \"%s\""), *FString(Template)));
+			return MakeError(FString(TEXT("unclosed '{' in the path template")));
 		}
 		const FStringView Name = Template.Mid(i + 1, Close - i - 1);
 		if (Name.IsEmpty())
 		{
-			return MakeError(FString::Printf(TEXT("empty {} in path template \"%s\""), *FString(Template)));
+			return MakeError(FString(TEXT("empty {} in the path template")));
 		}
 		int32 Found = INDEX_NONE;
 		for (int32 p = 0; p < Params.Num(); ++p)
@@ -395,7 +395,7 @@ TValueOrError<FString, FString> VaRest::Http::ExpandPathTemplate(FStringView Tem
 	{
 		if (!Used[p])
 		{
-			return MakeError(FString::Printf(TEXT("path parameter \"%s\" is not in the path template \"%s\""), *Params[p].Key, *FString(Template)));
+			return MakeError(FString::Printf(TEXT("path parameter \"%s\" is not in the path template"), *Params[p].Key));
 		}
 	}
 	return MakeValue(MoveTemp(Out));

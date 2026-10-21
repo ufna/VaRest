@@ -2,6 +2,7 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
+#include "HAL/IConsoleManager.h"
 #include "HAL/PlatformProcess.h"
 #include "HAL/PlatformTime.h"
 #include "Misc/AutomationTest.h"
@@ -683,6 +684,70 @@ bool FVaRestHttpTraceLateAttemptTest::RunTest(const FString& Parameters)
 	FVaRestTrace::RemoveSink(Sink);
 	TestEqualSensitive(TEXT("decision 24: no AttemptEnded after Completed"), KindsOf(Sink->For(Handle.GetId())), FString(TEXT("Started,Dispatched,Completed")));
 	TestEqual(TEXT("... and the success was delivered once"), Outcome->SuccessCalls.load(), 1);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpTracePathTemplateTest, "VaRest.Http.Trace.PathTemplateErrorRedacted",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpTracePathTemplateTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::TraceTestPrivate;
+	// Final review M8: a path-template error's text reaches Error.Message, the Basic Warning (escaped, not redacted) and the
+	// trace (value-scrubbed only); an absolute Path with userinfo must not carry its password into any of them
+	TGuardConsoleVariable<int32> Level(TEXT("VaRest.LogLevel"), -1);
+	FVaRestTrace::FScopedSinkIsolation Isolation;
+	const FSinkRef Sink = MakeSink(EVaRestTraceDetail::Metadata);
+	FVaRestTrace::AddSink(Sink);
+	FTestRig Rig;
+	Rig.Client.WithLogLevel(EVaRestLogLevel::Basic);
+	FLogCapture Capture;
+	AddExpectedMessagePlain(TEXT("-> Config error: unclosed '{'"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
+	AddExpectedMessagePlain(TEXT("-> Config error: unmatched '}'"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
+	AddExpectedMessagePlain(TEXT("-> Config error: empty {}"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
+	AddExpectedMessagePlain(TEXT("-> Config error: path parameter \"x\" is not in"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
+	TArray<TSharedRef<TTestOutcome<FVaRestJson>, ESPMode::ThreadSafe>> Outcomes;
+	TArray<FVaRestRequestHandle> Handles;
+	auto SendOne = [&Outcomes, &Handles](TVaRestRequest<FVaRestJson>&& Request)
+	{
+		Outcomes.Add(MakeOutcome<FVaRestJson>());
+		Handles.Add(Observe(MoveTemp(Request), Outcomes.Last()).Send());
+	};
+	SendOne(Rig.Client.Get(TEXT("https://u:canary-pw@h.test/{x")));
+	SendOne(Rig.Client.Get(TEXT("https://u:canary-pw@h.test/x}")));
+	SendOne(Rig.Client.Get(TEXT("https://u:canary-pw@h.test/{}")));
+	SendOne(Rig.Client.Get(TEXT("https://u:canary-pw@h.test/a")).Path(TEXT("x"), TEXT("1")));
+	TestTrue(TEXT("all complete"), PumpUntil([&Outcomes] { for (const auto& O : Outcomes) { if (!O->IsDone()) { return false; } } return true; }));
+	FVaRestTrace::RemoveSink(Sink);
+	for (int32 Index = 0; Index < Outcomes.Num(); ++Index)
+	{
+		const FVaRestError& Error = Outcomes[Index]->Error;
+		TestTrue(FString::Printf(TEXT("#%d: Kind Config"), Index), Error.Kind == EVaRestErrorKind::Config);
+		TestFalse(FString::Printf(TEXT("#%d: no password in Error.Message"), Index), Error.Message.Contains(TEXT("canary-pw")));
+		TestTrue(FString::Printf(TEXT("#%d: the template, redacted, in the message"), Index), Error.Message.Contains(TEXT("(path template \"https://***@h.test/")));
+		bool bCompleted = false;
+		for (const FVaRestTraceEvent& Event : Sink->For(Handles[Index].GetId()))
+		{
+			if (Event.Kind == EVaRestTraceKind::Started)
+			{
+				const FVaRestTraceStarted& Started = Event.Payload.Get<FVaRestTraceStarted>();
+				TestFalse(FString::Printf(TEXT("#%d: no password in the trace's URL or template"), Index), Started.Url.Contains(TEXT("canary-pw"))
+					|| Started.PathTemplate.Contains(TEXT("canary-pw")));
+			}
+			else if (Event.Kind == EVaRestTraceKind::Completed)
+			{
+				const FString& Traced = Event.Payload.Get<FVaRestTraceCompleted>().Error.Message;
+				bCompleted = true;
+				TestTrue(FString::Printf(TEXT("#%d: the trace's error message, without the password"), Index), Traced.Contains(TEXT("path template"))
+					&& !Traced.Contains(TEXT("canary-pw")));
+			}
+		}
+		TestTrue(FString::Printf(TEXT("#%d: Completed was traced"), Index), bCompleted);
+	}
+	TestEqual(TEXT("four Basic lines, one per request"), Capture.Count(TEXT("-> Config error: ")), 4);
+	TestFalse(TEXT("no password in any log line"), Capture.Contains(TEXT("canary-pw")));
+	TestEqual(TEXT("never sent"), Rig.Fake->NumCalls(), 0);
 	return true;
 }
 

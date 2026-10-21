@@ -201,10 +201,12 @@ namespace VaRest::Http::PipelinePrivate
 	void ScheduleProgress(const FVaRestExchangeRef& Exchange)
 	{
 		FExchangeState& Ex = Internals(*Exchange);
-		if (!Ex.TransportCall.IsValid() || Exchange->IsCancelRequested())
+		if (!Ex.TransportCall.IsValid() || Exchange->IsCancelRequested() || Ex.bFinished)
 		{
 			// Review M-3: the timer stops once the attempt is canceled -- an OnProgress that called Cancel() included; the
-			// transport's Canceled answer is on its way, and OnAttemptDone delivers nothing for it
+			// transport's Canceled answer is on its way, and OnAttemptDone delivers nothing for it. Task 13 review minor 5
+			// (P13.5): and once the request is finished -- a stage that answered while its inner transport call still runs
+			// leaves that call live, and Complete took the handler, so a tick could only re-arm itself until the call ends.
 			return;
 		}
 		const TWeakPtr<FVaRestExchange, ESPMode::ThreadSafe> Weak = Exchange;
@@ -319,9 +321,13 @@ namespace VaRest::Http::PipelinePrivate
 						(*Outcome)(MoveTemp(Result));
 					});
 				},
-				[Exchange, Outcome]()
+				[Exchange, Outcome, EnqueuedAt]()
 				{
-					Internals(*Exchange).bInLimiterQueue = false;
+					FExchangeState& Aborted = Internals(*Exchange);
+					Aborted.bInLimiterQueue = false;
+					// Task 14 re-review N2 (P14.2): the time spent queued is the queue's, as for a grant, so the log line
+					// shows "canceled (0 ms, N ms queued)" and not the wait as the attempt's own milliseconds
+					Aborted.LimiterWait = Aborted.Config->Clock->Now() - EnqueuedAt;
 					(*Outcome)(FVaRestAttemptOutcome::Canceled());
 				});
 		}
@@ -523,6 +529,22 @@ VaRest::Http::FFinish VaRest::Http::FClientState::MakeFinish(const FExchangeStat
 bool VaRest::Http::FClientState::Resolve(FExchangeState& Exchange, FString& OutError) const
 {
 	const FClientConfig& Cfg = *Exchange.Config;
+	// Final review I3: the verb is request-line text. curl sends any verb but GET, POST, PUT, HEAD and DELETE verbatim as
+	// CURLOPT_CUSTOMREQUEST (CurlHttp.cpp:990-993), so CR LF or a space in it would rewrite the request line and inject
+	// headers. The engine refuses only an empty one, as a retryable-looking EHttpFailureReason::Other
+	// (HttpRequestCommon.cpp:103-107). A method is an RFC 9110 9.1 token, IsValidHeaderName's rule; nothing is trimmed, so
+	// " GET" is refused, not repaired. Escaped: the message is text a game may log as it is.
+	if (Exchange.Verb.IsEmpty())
+	{
+		OutError = TEXT("the verb is empty; a method is an RFC 9110 token such as GET");
+		return false;
+	}
+	if (!IsValidHeaderName(Exchange.Verb))
+	{
+		OutError = FString::Printf(TEXT("the verb \"%s\" is not an RFC 9110 token (letters, digits and !#$%%&'*+-.^_`|~ only: no space or control character)"),
+			*EscapeForLog(Exchange.Verb));
+		return false;
+	}
 	if (Cfg.BaseUrl.Contains(TEXT("#")))
 	{
 		// Decision 33 (review M22): a base URL may carry a query (kept, before the request's own pairs), not a fragment
@@ -538,7 +560,10 @@ bool VaRest::Http::FClientState::Resolve(FExchangeState& Exchange, FString& OutE
 	TValueOrError<FString, FString> Expanded = ExpandPathTemplate(Exchange.PathTemplate, Exchange.PathParams);
 	if (Expanded.HasError())
 	{
-		OutError = Expanded.StealError();
+		// Final review M8: ExpandPathTemplate has no redactor, so its message names no template; an absolute Path may carry
+		// userinfo ("https://u:pw@h/{x"), and this text becomes Error.Message, the Basic Warning (LogConfigError escapes,
+		// it does not redact) and the trace (ScrubText only). The template is shown here, redacted like every URL.
+		OutError = FString::Printf(TEXT("%s (path template \"%s\")"), *Expanded.GetError(), *Cfg.Redactor->RedactUrl(Exchange.PathTemplate));
 		return false;
 	}
 	FString Resolved = JoinUrl(Cfg.BaseUrl, bHasQuery ? Expanded.GetValue() + Exchange.RawPath.Mid(QueryAt) : Expanded.GetValue());
@@ -580,8 +605,11 @@ bool VaRest::Http::FClientState::Resolve(FExchangeState& Exchange, FString& OutE
 		UE_LOG(LogVaRestHttp, Warning, TEXT("#%llu VaRest: GET %s has a body; it is dropped (spec 3.2)"), Exchange.RequestId, *EscapeForLog(Cfg.Redactor->RedactUrl(Exchange.Url)));
 		Exchange.Body = FVaRestRequestBody();
 	}
-	if (!Exchange.Body.IsEmpty() && !Exchange.RequestHeaders.Contains(TEXT("Content-Type")))
+	if (!Exchange.Body.IsEmpty() && !Exchange.OwnHeaders.Contains(TEXT("Content-Type")))
 	{
+		// Final review I2: the request's own Header() beats the body's type, which beats a client default (WithHeader):
+		// a multipart body must name its boundary, and a client-wide "application/json" must not relabel a form. Set
+		// replaces a client default of any case, in its place (FVaRestHeaders::Set, VaRestHttpTypes.cpp:8-36).
 		Exchange.RequestHeaders.Set(TEXT("Content-Type"), Exchange.Body.ContentType);
 	}
 	if (Exchange.bIdempotent && !Exchange.RequestHeaders.Contains(TEXT("Idempotency-Key")))
