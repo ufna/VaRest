@@ -10,7 +10,7 @@
 #include "VaRestHttpTesting.h"
 #include "VaRestTrace.h"
 
-namespace VaRest::Http::FakeTestPrivate
+namespace VaRest::Http::VaRestHttpFakeTransportTestPrivate
 {
 	/** Written on a worker, polled on the game thread: bDone is atomic and set last (review M17) */
 	struct FDone
@@ -51,9 +51,9 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpFakeRespondsTest, "VaRest.Http.Fake.
 
 bool FVaRestHttpFakeRespondsTest::RunTest(const FString& Parameters)
 {
-	using namespace VaRest::Http::FakeTestPrivate;
+	using namespace VaRest::Http::VaRestHttpFakeTransportTestPrivate;
 	FRig Rig;
-	Rig.Fake->Enqueue(FVaRestFakeResponse::Json(201, FUtf8StringView(UTF8TEXT(R"({"id":7})"))));
+	Rig.Fake->Enqueue(FVaRestFakeResponse::Json(201, FUtf8StringView(UTF8TEXT(R"({"id":700000000})"))));
 	Rig.Fake->SetResponder([](const FVaRestTransportRequest& Request) { return FVaRestFakeResponse::Text(404, Request.Url); });
 
 	FDoneRef First = MakeShared<FDone, ESPMode::ThreadSafe>();
@@ -64,6 +64,13 @@ bool FVaRestHttpFakeRespondsTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("off the game thread, as the HTTP thread completes"), First->bOnGameThread);
 	TestEqual(TEXT("the enqueued response first"), First->Result.Status, 201);
 	TestEqualSensitive(TEXT("content type from the headers"), First->Result.ContentType, FString(TEXT("application/json")));
+	// Review I-2: a body whose size is already an allocation step, so the slack can only come from the fake's own Reserve
+	TArray<uint8> Unslacked;
+	Unslacked.Append(First->Result.Body.GetData(), First->Result.Body.Num());
+	if (!TestEqual(TEXT("precondition: appending 16 bytes to an empty array allocates exactly 16"), Unslacked.Max(), Unslacked.Num()))
+	{
+		return false;
+	}
 	TestTrue(TEXT("the body has one byte of slack for ParseOwned (spec 2.1)"), First->Result.Body.Max() > First->Result.Body.Num());
 	TestTrue(TEXT("... and the fake remembers its buffer"), Rig.Fake->GetCall(0).BodyData == First->Result.Body.GetData());
 	TestEqualSensitive(TEXT("the effective URL defaults to the request URL"), First->Result.EffectiveUrl, FString(TEXT("https://api.test/a")));
@@ -87,7 +94,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpFakeTimingTest, "VaRest.Http.Fake.Vi
 
 bool FVaRestHttpFakeTimingTest::RunTest(const FString& Parameters)
 {
-	using namespace VaRest::Http::FakeTestPrivate;
+	using namespace VaRest::Http::VaRestHttpFakeTransportTestPrivate;
 	FRig Rig;
 	Rig.Fake->bCompleteOnWorker = false;
 
@@ -142,7 +149,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpFakeCancelTest, "VaRest.Http.Fake.Ca
 
 bool FVaRestHttpFakeCancelTest::RunTest(const FString& Parameters)
 {
-	using namespace VaRest::Http::FakeTestPrivate;
+	using namespace VaRest::Http::VaRestHttpFakeTransportTestPrivate;
 	FRig Rig;
 	Rig.Fake->bCompleteOnWorker = false;
 
@@ -202,6 +209,7 @@ bool FVaRestHttpFakeCancelTest::RunTest(const FString& Parameters)
 	Rig.Fake->Start(Get(TEXT("https://api.test/lost")), Into(Lost));
 	Rig.Fake->Drop(5);
 	TestFalse(TEXT("Drop never calls the completion"), Lost->bDone.load());
+	TestEqual(TEXT("... and destroys it (the test holds the only reference left)"), Lost.GetSharedReferenceCount(), 1);
 	TestEqual(TEXT("... and the call is no longer in flight"), Rig.Fake->NumInFlight(), 0);
 	return true;
 }

@@ -25,8 +25,10 @@ VaRest::Http::Testing::FTestCounters& VaRest::Http::Testing::Counters()
 bool VaRest::Http::Testing::PumpUntil(TFunctionRef<bool()> Done, double TimeoutSeconds, bool bTickCoreTicker)
 {
 	check(IsInGameThread());
-	// Review M-17: from inside a task, a ticker or a callback that PumpUntil itself runs, the nested Tick would trip
-	// Ticker.cpp:102 ("Invalid state") or recurse into the task graph: name the misuse instead
+	// Review M-17, M-9: from inside a game-thread task the engine's own guard is a bare verify (TaskGraph.cpp:705); name the misuse instead
+	checkf(!FTaskGraphInterface::Get().IsThreadProcessingTasks(ENamedThreads::GameThread),
+		TEXT("Testing::PumpUntil called from inside a game-thread task: call it from a test body"));
+	// Nested in itself (from a callback it runs): a second Tick would see slots the outer Tick moved out (Ticker.cpp:117, :128)
 	static bool bPumping = false;
 	checkf(!bPumping, TEXT("Testing::PumpUntil is not re-entrant: call it from a test body, never from a callback, a task or a ticker it runs"));
 	TGuardValue<bool> Pumping(bPumping, true);

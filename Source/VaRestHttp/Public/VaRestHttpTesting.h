@@ -34,8 +34,9 @@ namespace VaRest::Http::Testing
 	 * Game thread, from a test body. Runs game-thread tasks until Done() is true or TimeoutSeconds of real time pass;
 	 * true when Done() became true. Automation runs tests from FEngineLoop::Tick outside any task
 	 * (LaunchEngineLoop.cpp:6036-6045), so ProcessThreadUntilIdle's recursion guard holds (TaskGraph.cpp:700-708); never
-	 * call this from inside a game-thread task or a ticker: it checks, because a nested core-ticker Tick trips
-	 * Ticker.cpp:102 with a message that does not name the cause (review M-17). bTickCoreTicker also ticks
+	 * call this from inside a game-thread task or from a callback it runs: it checks both. It cannot see that it is inside
+	 * a core-ticker callback the engine ticked; there a nested Tick dereferences slots the outer Tick moved out
+	 * (Ticker.cpp:117, :128), so do not (review M-17, M-9). bTickCoreTicker also ticks
 	 * FTSTicker::GetCoreTicker() (real clock timers, the engine's HTTP manager).
 	 */
 	VARESTHTTP_API bool PumpUntil(TFunctionRef<bool()> Done, double TimeoutSeconds = 5.0, bool bTickCoreTicker = false);
@@ -54,7 +55,7 @@ namespace VaRest::Http::Testing
 		virtual ~FLogCapture() override;
 
 		virtual void Serialize(const TCHAR* V, ELogVerbosity::Type Verbosity, const FName& Category) override;
-		// Without these the redirector buffers other threads' lines until the game thread flushes them (OutputDevice.h:201-212)
+		// Without CanBeUsedOnMultipleThreads the redirector buffers other threads' lines until the game thread flushes them (OutputDeviceRedirector.cpp:440)
 		virtual bool CanBeUsedOnAnyThread() const override { return true; }
 		virtual bool CanBeUsedOnMultipleThreads() const override { return true; }
 

@@ -13,8 +13,9 @@ uint64 VaRest::Http::NewTimerId()
 
 TSharedRef<FVaRestRealClock, ESPMode::ThreadSafe> FVaRestRealClock::Get()
 {
-	static TSharedRef<FVaRestRealClock, ESPMode::ThreadSafe> Instance = MakeShared<FVaRestRealClock, ESPMode::ThreadSafe>();
-	return Instance;
+	// Leaked: its destructor must not run at static destruction (review I-4, M-4)
+	static TSharedRef<FVaRestRealClock, ESPMode::ThreadSafe>* Instance = new TSharedRef<FVaRestRealClock, ESPMode::ThreadSafe>(MakeShared<FVaRestRealClock, ESPMode::ThreadSafe>());
+	return *Instance;
 }
 
 double FVaRestRealClock::Now() const
@@ -27,7 +28,7 @@ FVaRestTimerHandle FVaRestRealClock::SetTimer(double DelaySeconds, TUniqueFuncti
 	check(IsInGameThread());
 	const uint64 Id = VaRest::Http::NewTimerId();
 	TWeakPtr<FVaRestRealClock, ESPMode::ThreadSafe> Weak = AsShared();
-	Pending.Add(Id, FTSTicker::GetCoreTicker().AddTicker(TEXT("VaRest.Timer"), static_cast<float>(FMath::Max(DelaySeconds, 0.0)),
+	Pending.Add(Id, FTSTicker::GetCoreTicker().AddTicker(TEXT("VaRest.Timer"), static_cast<float>(FMath::Clamp(DelaySeconds, 0.0, FVaRestVirtualClock::MaxSeconds)),
 		[Weak, Id, Fn = MoveTemp(Callback)](float) mutable
 		{
 			if (TSharedPtr<FVaRestRealClock, ESPMode::ThreadSafe> Clock = Weak.Pin())
@@ -56,7 +57,7 @@ FVaRestTimerHandle FVaRestVirtualClock::SetTimer(double DelaySeconds, TUniqueFun
 	check(IsInGameThread());
 	FTimer& Timer = Timers.AddDefaulted_GetRef();
 	Timer.Id = VaRest::Http::NewTimerId();
-	Timer.Due = Nanos.load(std::memory_order_acquire) + ToNanos(DelaySeconds);
+	Timer.Due = SaturatedAdd(Nanos.load(std::memory_order_acquire), ToNanos(DelaySeconds));
 	Timer.Callback = MoveTemp(Callback);
 	return FVaRestTimerHandle{ Timer.Id };
 }
@@ -71,7 +72,10 @@ void FVaRestVirtualClock::ClearTimer(FVaRestTimerHandle& Handle)
 void FVaRestVirtualClock::Advance(double DeltaSeconds)
 {
 	check(IsInGameThread());
-	const int64 Target = Nanos.load(std::memory_order_acquire) + ToNanos(DeltaSeconds);
+	checkf(!bAdvancing, TEXT("FVaRestVirtualClock::Advance is not re-entrant: a timer callback called Advance, which would move Now() backwards"));
+	TGuardValue<bool> Advancing(bAdvancing, true);
+	const int64 Target = SaturatedAdd(Nanos.load(std::memory_order_acquire), ToNanos(DeltaSeconds));
+	int32 FiredInAdvance = 0;
 	// Review N-2: a timer that re-arms itself at a zero delay fires forever at one instant. A few at one instant are
 	// normal (Advance(0), a timer set while firing); MaxFiredAtOneInstant is that bug, so fail with a name, not a hang.
 	int64 Instant = -1;
@@ -91,6 +95,7 @@ void FVaRestVirtualClock::Advance(double DeltaSeconds)
 		{
 			break;
 		}
+		checkf(++FiredInAdvance <= MaxFiredPerAdvance, TEXT("FVaRestVirtualClock::Advance: more than %d timers fired in one Advance: a timer re-arms itself at a small period over a huge advance"), MaxFiredPerAdvance);
 		FTimer Fired = MoveTemp(Timers[Next]);
 		Timers.RemoveAt(Next);
 		const int64 FireAt = FMath::Max(Nanos.load(std::memory_order_acquire), Fired.Due);

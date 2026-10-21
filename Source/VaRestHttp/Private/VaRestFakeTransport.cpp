@@ -5,6 +5,7 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "Misc/FileHelper.h"
+#include "Tasks/Pipe.h"
 #include "Tasks/Task.h"
 #include "VaRestTrace.h"
 
@@ -256,6 +257,7 @@ void FVaRestFakeTransport::ArmActivity(int32 Index)
 
 void FVaRestFakeTransport::CancelCall(int32 Index)
 {
+	check(IsInGameThread()); // IVaRestTransportCall::Cancel is game thread (review M-8)
 	FEntry& Entry = *Entries[Index];
 	if (Entry.Call.bCompleted)
 	{
@@ -293,9 +295,14 @@ void FVaRestFakeTransport::Finish(int32 Index, FVaRestFakeResponse&& Response)
 			// As the HTTP transport's file sink: the file exists only once a byte arrived
 			if (Response.Body.Num() > 0)
 			{
-				FFileHelper::SaveArrayToFile(Response.Body, *Req.ResponseFile);
+				if (!FFileHelper::SaveArrayToFile(Response.Body, *Req.ResponseFile))
+				{
+					// As the HTTP transport's file sink (review M-7)
+					Result.Failure = EVaRestTransportFailure::Other;
+					Result.FailureDetail = TEXT("ResponseFileWriteFailed");
+				}
 			}
-			Result.bBodyInFile = true;
+			Result.bBodyInFile = Result.Failure == EVaRestTransportFailure::None;
 			Result.BytesDown = Response.Body.Num();
 		}
 		else if (Req.MaxBodyBytes > 0 && Response.Body.Num() > Req.MaxBodyBytes)
@@ -314,12 +321,20 @@ void FVaRestFakeTransport::Finish(int32 Index, FVaRestFakeResponse&& Response)
 			Entry.Call.BodyNum = Result.Body.Num();
 			Result.BytesDown = Result.Body.Num();
 		}
+		// The response's Content-Length is known once it arrived (probe contract)
+		int64 UnknownTotal = -1;
+		Req.Probe->DownloadTotal.compare_exchange_strong(UnknownTotal, Response.Body.Num());
 		if (Req.bReportStatusTime)
 		{
+			// The fake's own clock, not Req.Clock: its delays and timeouts run on this one, and the core hands it the same instance
 			Req.Probe->StatusAt = Clock->Now();
 		}
 	}
-	Req.Probe->BytesReceived = Result.BytesDown;
+	// Never lower what ReportProgress already reported: a timeout or cancel after partial progress keeps it (review M-7)
+	int64 Reported = Req.Probe->BytesReceived.load();
+	while (Reported < Result.BytesDown && !Req.Probe->BytesReceived.compare_exchange_weak(Reported, Result.BytesDown))
+	{
+	}
 	if (Req.bReportStatusTime)
 	{
 		Result.TransportDoneAt = Clock->Now();
@@ -328,7 +343,10 @@ void FVaRestFakeTransport::Finish(int32 Index, FVaRestFakeResponse&& Response)
 	FVaRestTransportComplete Callback = MoveTemp(Entry.OnComplete);
 	if (bCompleteOnWorker)
 	{
-		UE::Tasks::Launch(TEXT("VaRest.FakeTransport.Complete"), [Deliver = MoveTemp(Callback), Moved = MoveTemp(Result)]() mutable
+		// One leaked pipe: completions run FIFO, one at a time, off the game thread, as the engine's single HTTP thread
+		// runs them (review M-5). Leaked because ~FPipe checks it is idle (Pipe.h:40-43) and tests may end with work queued.
+		static UE::Tasks::FPipe* const CompletionPipe = new UE::Tasks::FPipe(TEXT("VaRest.FakeTransport"));
+		CompletionPipe->Launch(TEXT("VaRest.FakeTransport.Complete"), [Deliver = MoveTemp(Callback), Moved = MoveTemp(Result)]() mutable
 		{
 			Deliver(MoveTemp(Moved));
 		});
