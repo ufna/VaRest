@@ -58,9 +58,18 @@ namespace VaRest::Http::RedactorTestPrivate
 			{
 				const FString Decoded = VaRest::Http::PercentDecode(Piece.RightChop(FirstEquals + 1), true);
 				int32 Question = INDEX_NONE;
-				if (Decoded.FindChar(TEXT('?'), Question) && ReferenceScan(Rules, FStringView(Decoded).RightChop(Question + 1), EVaRestRedactKeyKind::Query) != INDEX_NONE)
+				if (Decoded.FindChar(TEXT('?'), Question))
 				{
-					Equals = FirstEquals;
+					// The decoded tail is a query: every '&'-pair of it is scanned (review round 4)
+					TArray<FString> TailPairs;
+					FString(FStringView(Decoded).RightChop(Question + 1)).ParseIntoArray(TailPairs, TEXT("&"), /*InCullEmpty*/ false);
+					for (const FString& TailPair : TailPairs)
+					{
+						if (ReferenceScan(Rules, TailPair, EVaRestRedactKeyKind::Query) != INDEX_NONE)
+						{
+							Equals = FirstEquals;
+						}
+					}
 				}
 			}
 			if (Equals != INDEX_NONE)
@@ -369,6 +378,10 @@ bool FVaRestHttpRedactScanTest::RunTest(const FString& Parameters)
 	TestEqualSensitive(TEXT("an encoded nested access_token"), Redactor.RedactUrl(TEXT("https://h/x?next=%2Fx%3Faccess_token%3DX")), FString(TEXT("https://h/x?next=***")));
 	TestEqualSensitive(TEXT("an encoded value without a secret is kept"), Redactor.RedactUrl(TEXT("https://h/x?next=%2Fhome")), FString(TEXT("https://h/x?next=%2Fhome")));
 	TestEqualSensitive(TEXT("an encoded nested query without a secret is kept"), Redactor.RedactUrl(TEXT("https://h/x?next=%2Fx%3Fpage%3D2")), FString(TEXT("https://h/x?next=%2Fx%3Fpage%3D2")));
+	// Review round 4: Query() encodes '&' as %26, so an OAuth callback's second pair hides behind its first
+	TestEqualSensitive(TEXT("an encoded nested code after another pair"), Redactor.RedactUrl(TEXT("https://h/x?next=%2Fcb%3Fstate%3Dabc%26code%3DX")), FString(TEXT("https://h/x?next=***")));
+	TestEqualSensitive(TEXT("an encoded nested access_token after another pair"), Redactor.RedactUrl(TEXT("https://h/x?next=%2Fx%3Fa%3D1%26access_token%3DX")), FString(TEXT("https://h/x?next=***")));
+	TestEqualSensitive(TEXT("encoded nested pairs without a secret are kept"), Redactor.RedactUrl(TEXT("https://h/x?next=%2Fcb%3Fstate%3Dabc%26x%3D1")), FString(TEXT("https://h/x?next=%2Fcb%3Fstate%3Dabc%26x%3D1")));
 	const FVaRestTraceExcerpt Nested = Redactor.RedactBody(TEXT("application/x-www-form-urlencoded"), Bytes("next=/x?code=X"), 14, 4096);
 	TestEqualSensitive(TEXT("a '?code=' in a form value is a query key"), Nested.ToText(), FString(TEXT("next=/x?code=***")));
 	TestEqualSensitive(TEXT("a second '#' in a fragment starts a key"), Redactor.RedactUrl(TEXT("https://h/x#/cb#code=X")), FString(TEXT("https://h/x#/cb#code=***")));
@@ -448,6 +461,14 @@ bool FVaRestHttpRedactBoundTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("... of '#' in a fragment"), Seconds([&] { (void)Redactor.RedactUrl(FString(TEXT("https://h/x#")) + Hashes + TEXT("=")); }) < Bound);
 	TestTrue(TEXT("... of '%3F' in an encoded value"), Seconds([&] { (void)Redactor.RedactUrl(FString(TEXT("https://h/x?next=")) + Encoded); }) < Bound);
 	TestTrue(TEXT("... of '%3F' then '=' in an encoded value"), Seconds([&] { (void)Redactor.RedactUrl(FString(TEXT("https://h/x?next=")) + Encoded + TEXT("%3D")); }) < Bound);
+	// A value that decodes to '?' then 64 KiB of "a=1&" (16 K nested pairs): the decoded tail is split once, not rescanned per pair
+	FString NestedPairs(TEXT("%3F"));
+	NestedPairs.Reserve(2 * Size + 3);
+	while (NestedPairs.Len() < 2 * Size + 3)
+	{
+		NestedPairs += TEXT("a%3D1%26");
+	}
+	TestTrue(TEXT("... of encoded '&'-pairs in a nested query"), Seconds([&] { (void)Redactor.RedactUrl(FString(TEXT("https://h/x?next=")) + NestedPairs); }) < Bound);
 	const FTCHARToUTF8 FormUtf8(*(Semicolons + TEXT("=")));
 	const TConstArrayView<uint8> FormBody(reinterpret_cast<const uint8*>(FormUtf8.Get()), FormUtf8.Length());
 	TestTrue(TEXT("... in a form body"), Seconds([&] { (void)Redactor.RedactBody(TEXT("application/x-www-form-urlencoded"), FormBody, FormBody.Num(), 1 << 20); }) < Bound);

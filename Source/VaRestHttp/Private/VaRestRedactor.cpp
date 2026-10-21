@@ -415,12 +415,31 @@ void FVaRestRedactor::AppendRedactedPairs(FStringView Pairs, EVaRestRedactKeyKin
 		{
 			// An encoded nested query ("next=%2Fx%3Fcode%3DX"): to the server it is the value "/x?code=X". VaRest's own
 			// Query() encodes everything but the unreserved set, so a URL built through it always looks like this. The value
-			// is decoded once; a '?' in it starts the candidates of the tail, judged as query keys, and a hit hides the value.
+			// is decoded once; the text after its first '?' is a query of its own, judged with query keys, and a hit hides the
+			// value.
 			const FString Decoded = VaRest::Http::PercentDecode(Piece.RightChop(FirstEquals + 1), true);
 			int32 Question = INDEX_NONE;
-			if (Decoded.FindChar(TEXT('?'), Question) && SecretValueStart(FStringView(Decoded).RightChop(Question + 1), EVaRestRedactKeyKind::Query) != INDEX_NONE)
+			if (Decoded.FindChar(TEXT('?'), Question))
 			{
-				Equals = FirstEquals;
+				// Review round 4: Query() encodes '&' as %26 too, so the decoded tail has pairs of its own, and the server
+				// splits them as the outer loop splits the raw query. SecretValueStart starts no candidate after '&', so the
+				// tail is cut at every '&' and each pair scanned: "state=abc&code=X" otherwise hid the code behind state.
+				// One walk over the tail; the pairs do not overlap and each scan is linear in its pair, so this stays linear.
+				const FStringView Tail = FStringView(Decoded).RightChop(Question + 1);
+				int32 TailStart = 0;
+				while (Equals == INDEX_NONE && TailStart <= Tail.Len())
+				{
+					int32 TailEnd = TailStart;
+					while (TailEnd < Tail.Len() && Tail[TailEnd] != TEXT('&'))
+					{
+						++TailEnd;
+					}
+					if (SecretValueStart(Tail.Mid(TailStart, TailEnd - TailStart), EVaRestRedactKeyKind::Query) != INDEX_NONE)
+					{
+						Equals = FirstEquals;
+					}
+					TailStart = TailEnd + 1;
+				}
 			}
 		}
 		if (Equals != INDEX_NONE)
