@@ -341,7 +341,11 @@ public:
 		return MoveTemp(*this);
 	}
 
-	/** The limiter's queue order (spec 4.6) */
+	/**
+	 * The limiter's queue order (spec 4.6): Highest first, first come, first served within a priority. Strict: under a
+	 * steady stream of higher-priority requests a Low one can wait indefinitely, and a timeout does not cover time spent
+	 * queued (see FVaRestClient::WithMaxConcurrent).
+	 */
 	TVaRestRequest Priority(EVaRestPriority InPriority) &&
 	{
 		Spec->Priority = InPriority;
@@ -437,7 +441,7 @@ public:
 	bool IsValid() const { return State.IsValid(); }
 	uint64 GetId() const;
 	FString GetBaseUrl() const;
-	/** Game thread */
+	/** Game thread: requests sent and not yet finished, those waiting in the limiter's queue included (spec 4.6) */
 	int32 GetInFlightCount() const;
 	/**
 	 * Game thread: cancels every in-flight request with this tag (all of them for NAME_None), like Cancel() on each. It sees
@@ -457,7 +461,17 @@ public:
 	FVaRestClient& WithClock(TSharedRef<IVaRestClock, ESPMode::ThreadSafe> Clock);
 	/** The largest response body parsed as JSON (decision 20); 0 = none. Default: UVaRestHttpSettings::MaxJsonResponseBytes (32 MiB). */
 	FVaRestClient& WithMaxJsonBytes(int64 Bytes);
-	/** Spec 4.6: requests at once (at least 1); the rest queue by priority. Default: UVaRestHttpSettings::MaxConcurrent (16). */
+	/**
+	 * Spec 4.6: requests at once (at least 1); the rest wait in a queue, Highest first and first come, first served within a
+	 * priority. Default: UVaRestHttpSettings::MaxConcurrent (16). Lowering it cancels nothing: the requests in flight
+	 * finish, and the queue moves again once fewer than the new limit remain.
+	 * The waits this adds:
+	 * - The queue is strict: while higher-priority requests keep arriving, a Low one can wait indefinitely (review M-19).
+	 * - A timeout does not cover the wait: it is per attempt and starts at the transport (spec 4.7), and a retry queues again.
+	 * - A queued request whose Owner() is gone leaves the queue only when a slot reaches it, and then ends silently; until
+	 *   then it keeps its callbacks, everything they capture and this client alive. Cancel() takes a request out of the
+	 *   queue at once.
+	 */
 	FVaRestClient& WithMaxConcurrent(int32 MaxConcurrent);
 	/** A custom stage (spec 4): Outer sees each logical request once, PerAttempt every attempt with its final headers */
 	FVaRestClient& Use(FVaRestStageRef Stage, EVaRestStageSlot Slot);

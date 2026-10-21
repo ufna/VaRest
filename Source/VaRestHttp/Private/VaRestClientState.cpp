@@ -128,7 +128,7 @@ void VaRest::Http::FClientState::Publish(const TSharedRef<FClientConfig, ESPMode
 		{
 			if (const TSharedPtr<FClientState, ESPMode::ThreadSafe> Pinned = Weak.Pin())
 			{
-				Pinned->Limiter.Pump(Pinned->GetConfig()->Clock->Now());
+				Pinned->Limiter.Pump();
 			}
 		}, UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
 	}

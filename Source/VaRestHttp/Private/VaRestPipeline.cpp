@@ -241,16 +241,19 @@ namespace VaRest::Http::PipelinePrivate
 			FVaRestExchange& Ex = *Exchange;
 			// One of the two closures below runs, exactly once: the grant or the abort
 			TSharedRef<FVaRestOutcomeCallback, ESPMode::ThreadSafe> Outcome = MakeShared<FVaRestOutcomeCallback, ESPMode::ThreadSafe>(MoveTemp(OnOutcome));
+			// Inspector IN-2: both ends of the wait on this exchange's own clock (review Minor 3). The grant comes from
+			// another exchange's Release, or from the client's pump task, and either may hold another clock (WithClock()).
+			const double EnqueuedAt = Ex.Config->Clock->Now();
 			Ex.bInLimiterQueue = true;
-			Ex.State->GetLimiter().Acquire(Ex.RequestId, Ex.Priority, Ex.Config->Clock->Now(),
-				[Exchange, Next, Outcome](double Waited)
+			Ex.State->GetLimiter().Acquire(Ex.RequestId, Ex.Priority,
+				[Exchange, Next, Outcome, EnqueuedAt]()
 				{
 					Exchange->bInLimiterQueue = false;
-					Exchange->LimiterWait = Waited; // Inspector IN-2
+					Exchange->LimiterWait = Exchange->Config->Clock->Now() - EnqueuedAt;
 					Next.Proceed(Exchange, [Exchange, Outcome](FVaRestAttemptOutcome&& Result)
 					{
 						// The slot is freed before the outcome goes further up: a stage that re-issues queues again
-						Exchange->State->GetLimiter().Release(Exchange->Config->Clock->Now());
+						Exchange->State->GetLimiter().Release();
 						(*Outcome)(MoveTemp(Result));
 					});
 				},

@@ -7,7 +7,7 @@
 
 #include "VaRestHttpTypes.generated.h"
 
-/** Limiter queue order (spec 4.6): Highest first, FIFO within one priority */
+/** Limiter queue order (spec 4.6): Highest first, FIFO within one priority. Strict: under steady higher-priority load a Low request can wait indefinitely. */
 UENUM(BlueprintType)
 enum class EVaRestPriority : uint8
 {
