@@ -351,13 +351,19 @@ middleware: it may pass the exchange on, observe or alter the outcome, short-cir
 queued), or re-issue (retry, auth replay).
 
 ```
-Trace tap → Offline queue → Cache → Retry ┐→ Auth → [custom per-attempt] → Log/redact → Limiter → Transport
-                                          └────────────── once per attempt ─────────────────────┘
+Trace tap → Offline queue → Cache → Retry → Auth gate ┐→ Limiter → Auth apply → [custom per-attempt] → Log/redact → Transport
+                                                      └───────────────────────── once per attempt ──────────────────────────┘
 ```
 
+*Amended 2026-10-21 (M4a plan, ruling I-3).* Auth is two stages: the **gate**, before the attempt
+boundary, parks a request behind a refresh and replays it as a new attempt; **apply** writes the
+credentials into each attempt. The **limiter opens every attempt**, so credentials, a signer's
+signature and the request's log lines are written when a request leaves the queue, not when it joins
+it (a request queued behind others goes out with the token current then; a logout stops it).
+
 Slots for custom stages: `Outer` (sees each logical request once) and `PerAttempt` (sees final
-headers including auth — for request signing). Transport is `IVaRestTransport` (default:
-`FHttpModule`); tests inject a fake (§7.1).
+headers including auth — for request signing — after the limiter's grant). Transport is
+`IVaRestTransport` (default: `FHttpModule`); tests inject a fake (§7.1).
 
 ### 4.1 Retry
 
@@ -375,16 +381,23 @@ subclasses in the asset):
 
 * `Bearer` — token set at runtime (`SetBearerToken`).
 * `BearerRefresh` — refresh endpoint (endpoint name or path), JSON paths for `access_token`,
-  `refresh_token`, `expires_in`. Refreshes **proactively** 30 s before a known expiry, and **reactively**
-  on 401 (statuses configurable).
+  `refresh_token`, `expires_in`. Refreshes **proactively** 30 s before a known expiry (at most half the
+  token's lifetime, so a short-lived token is not refreshed before every request; amended 2026-10-21,
+  M4a review M-7), and **reactively** on 401 (statuses configurable).
 * `ApiKey` (header or query), `Basic`.
 * `Custom` — C++ `IVaRestAuth`, or BP subclass with native events `Apply` and `Refresh`
   (finished by calling `Finish Refresh(bSuccess)`).
 
 **Single-flight refresh**: the first 401 starts one refresh. Concurrent requests that hit 401 (or
-start while it runs) park behind it, then replay once each. If the refresh fails, all parked requests
-fail with `Kind=Auth` and the client fires `OnSessionExpired`. The refresh request and `.NoAuth()`
-requests bypass the auth stage.
+start while it runs) park behind it, then replay once each. If the refresh endpoint rejects it — a
+4xx other than 408 or 429, or a success that is not JSON or has no usable access token — the session
+is dropped, all parked requests fail with `Kind=Auth` and the client fires `OnSessionExpired` (once).
+Any other refresh failure (no connection, a timeout, 408, 429, 5xx, a canceled refresh request, a
+refusal by the configuration such as HTTP disabled) keeps the session: the parked requests fail with
+that failure's kind — `Connection` and `Timeout` retryable, so retry and the offline queue can act on
+them — and a Wi-Fi blip does not log the player out. *(Amended 2026-10-21: M4a plan rulings Q1, I-7.)*
+The refresh request and `.NoAuth()` requests bypass the auth stages; the refresh request also skips
+the limiter's queue (§4.6).
 
 Session state per client: tokens, expiry, session headers (dawg's `X-Session-ID` pattern);
 `OnSessionChanged`, `ClearSession()` (logout), `ExportSession()`/`ImportSession()` (JSON, for games
@@ -449,7 +462,11 @@ Logged bodies are truncated to 4 KiB. (v1 logged every response body on desktop 
 ### 4.6 Concurrency limiter
 
 Per-client `MaxConcurrent` (default 16) with a priority queue (Highest → Low, FIFO within a
-priority). It sits next to the transport, so queued retries wait their turn too.
+priority). It is the first stage of every attempt, right after the attempt boundary, so queued
+retries wait their turn too, and credentials, signatures and log lines are written when a request
+leaves the queue, not when it joins it. The auth-refresh request skips the queue: single flight makes
+it at most one more connection per client, and a client whose slots all hold long polls must still
+refresh. *(Amended 2026-10-21: M4a plan rulings I-3, M-8.)*
 
 ### 4.7 Timeouts
 

@@ -385,18 +385,23 @@ A socket shares an HTTP client's session with `WithApi(GameApi)` (resolved throu
 `WithClient(FVaRestClient)`, or automatically for asset sockets.
 
 * **Per attempt**, `IVaRestAuth::Apply` writes into the handshake (§19 item 2); a token
-  expiring within 30 s is refreshed first (single-flight, shared with HTTP, core §4.2;
-  `WaitReason = Auth`).
+  expiring within the auth's lead time (30 s, at most half the token's lifetime: core §4.2) is
+  refreshed first (single-flight, shared with HTTP; `WaitReason = Auth`).
 * **Placement** `EVaRestSocketAuthPlacement`: `Header` (default, `Authorization: Bearer …`),
   `Query(name = "token")` (browsers cannot set WebSocket headers, so many servers read the query;
   dawg's `/ws/connect?token=`), or `FirstMessage(route = "auth", field = "token")` — sent in the
   handshake lane at open (§6.2), usually with `ReadyWhen`. Cookie-authenticated servers (Django
   Channels, ActionCable) take a `Cookie` session header from the client's session headers.
-* **401 on upgrade, or close 4401**: one reactive refresh (single-flight), then an immediate retry
-  that is not a backoff step. Refresh failure, or 401 again → terminal `Auth`; the socket raises the
-  client's `OnSessionExpired` (§19 item 2).
-* **Logout** (`OnSessionCleared`, §19 item 2): close 1000 "logout", no reconnect. A token
-  refresh does nothing to an open socket.
+* **401 on upgrade, or close 4401**: one reactive refresh (single-flight, the client's
+  `RefreshAuth`), then an immediate retry that is not a backoff step. A refresh `Rejected` → terminal
+  `Auth`: the client has already expired the session and fired `OnSessionExpired`, so the socket does
+  not call `NotifySessionExpired()`. A 401 again after a refresh → terminal `Auth`; the socket raises
+  the client's `OnSessionExpired` with `NotifySessionExpired()` (§19 item 2). A refresh `Failed` keeps
+  the session: with `Connection` or `Timeout` the socket backs off and reconnects as after a drop
+  (a Wi-Fi blip is no logout); with `Config` it fails `Config`. *(Amended 2026-10-21: M4a plan rulings
+  Q1, Q6, I-5.)*
+* **Logout** (`OnSessionChanged(Cleared)`, §19 item 2): close 1000 "logout", no reconnect. A token
+  refresh (`OnSessionChanged(Refreshed)`) does nothing to an open socket.
 * **Session replaced** (rev 2, §22 A1: `OnSessionChanged(Replaced)` — another identity's token via
   `SetBearerToken`/`ImportSession`, or a login while logged in): `Restart` with the stages' closing
   hook (SW-7), so a connection authenticated as the old user does not stay open. A `WithBearer` lambda
@@ -1130,11 +1135,19 @@ For the core plans (one list; nothing else in core changes):
 
 1. **Clock and backoff (M4):** `IVaRestClock` with timers, the backoff formula and an injectable
    `FRandomStream`, public in `VaRestHttp`.
-2. **Auth and session (M4):** `IVaRestAuth::Apply(FVaRestAuthTarget&)` (headers + query) and a public
-   single-flight `Refresh()`; client events `OnSessionCleared` (logout, distinct from a refresh) and
-   a callable `NotifySessionExpired()`. Rev 2 (§22 A1): `OnSessionChanged(EVaRestSessionChange)` with
-   `Refreshed` (same identity, new token), `Replaced` (another identity: `SetBearerToken`/`ImportSession`
-   with a different subject, or a login while logged in) and `Cleared` (logout).
+2. **Auth and session (M4):** `IVaRestAuth::Apply(FVaRestAuthTarget&)` (headers + query), applied to a
+   handshake by `FVaRestClient::ApplyAuth(Headers, Query, OutConfigError)` (false with a reason for a
+   misconfigured built-in auth: the socket fails `Config`, not `Auth`); the client's public
+   single-flight refresh `FVaRestClient::RefreshAuth(OnDone(EVaRestAuthRefreshOutcome Outcome,
+   EVaRestErrorKind FailedKind))`, shared with HTTP — `Refreshed`; `Rejected` (the session is gone:
+   the client has already expired it and fired `OnSessionExpired`); `Failed` (the session stays;
+   `FailedKind` `Connection` or `Timeout`: try later; `Config`: not) — and `NeedsAuthRefresh()`; a
+   callable `NotifySessionExpired()` (one `OnSessionExpired` per expiry). One session event,
+   `OnSessionChanged(EVaRestSessionChange)` (rev 2, §22 A1): `Refreshed` (same identity, new token),
+   `Replaced` (another identity: `SetBearerToken`/`ImportSession` with a different subject, or a login
+   while logged in) and `Cleared` (logout); the events of one change reach every listener in order,
+   after the change. *(Amended 2026-10-21: M4a plan rulings Q6 and I-5 name `RefreshAuth` and drop the
+   separate `OnSessionCleared`.)*
 3. **Redactor (M3):** public URL, header and JSON-excerpt redaction.
 4. **Trace (M4):** `FVaRestTraceEvent` carries `Source` (`Http`, `Socket`) and connection/attempt ids;
    sinks ignore types they do not know.

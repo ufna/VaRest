@@ -4,7 +4,7 @@
 
 **Goal:** Add the attempt-shaping stages of spec §4 to `VaRestHttp` — retry with backoff and `Retry-After` (§4.1), auth with a single-flight session refresh (§4.2), the response envelope (§3.4) — plus the public pieces the WebSocket spec needs from M4 (§19 items 1, 2, 4, 6), the M4 half of the Inspector trace contract (IN-2 gap fields, IN-4 `Note`, IN-5 `Envelope`, IN-6 `Excerpt`, IN-9 `Marker`, IN-14, the IN-17 goldens that do not need a cache or a queue), `stat VaRest`, and the M3 carries.
 
-**Architecture:** Two new built-in `Outer` stages sit between the custom `Outer` stages and the attempt boundary — `Retry`, then `AuthGate`, which parks a request behind one shared refresh and replays it as a new attempt — and one new built-in `PerAttempt` stage, `AuthApply`, writes credentials into each attempt before the custom `PerAttempt` stages. A stage that holds an exchange waiting (a backoff timer, a park) registers an interrupt that `Cancel`, owner-gone and shutdown call, so every hold ends in exactly one outcome. The envelope is applied on the decode task, next to the JSON parse. Session state (tokens, expiry, session headers) is live per client, on the game thread; its secrets feed the redactor, and its changes are trace markers and client events.
+**Architecture:** Two new built-in `Outer` stages sit between the custom `Outer` stages and the attempt boundary — `Retry`, then `AuthGate`, which parks a request behind one shared refresh and replays it as a new attempt. The limiter moves to the front of the attempt (ruling I-3), and one new built-in `PerAttempt` stage, `AuthApply`, writes credentials into each attempt right after it, before the custom `PerAttempt` stages: custom `Outer` → `Retry` → `AuthGate` → boundary → limiter → `AuthApply` → custom `PerAttempt` → log → transport. A stage that holds an exchange waiting (a backoff timer, a park) registers an interrupt that `Cancel`, owner-gone, shutdown and `Complete` call, so every hold ends in exactly one outcome. The envelope is applied on the decode task, next to the JSON parse. Session state (tokens, expiry, session headers) is live per client, on the game thread; every change goes through one door that keeps the client alive and delivers its events in order; its secrets feed the redactor, and its changes are trace markers and client events.
 
 **Tech Stack:** UE 5.8.1 (`/w/Unreal/UnrealEngine`), C++20, `UE::Tasks`, engine HTTP module, UE Automation tests on the fake transport and virtual clock, Python 3 standard library (test server).
 
@@ -12,39 +12,43 @@
 
 ## Why M4 is two plans
 
-Spec §8 row M4 holds seven features. Written to M3's standard they are about 31 tasks, past the ~20 a plan can carry. The seam: **M4a** is everything that shapes an attempt or a session and everything the WebSocket milestones need from M4 (W2 needs the clock, backoff and random stream; W5 the auth, session and trace contract). **M4b** is the two stages that answer a request without the network or hold it for later — cache and offline queue — and connectivity, which they share. M4b adds two stages in front of `Retry` (spec §4 order: offline queue → cache → retry) and touches nothing M4a builds except to read its auth identity (the cache key) and to replay through its stages. The Inspector's I1 needs both halves.
+Spec §8 row M4 holds seven features. Written to M3's standard they are about 31 tasks, past the ~20 a plan can carry. The seam: **M4a** is everything that shapes an attempt or a session and everything the WebSocket milestones need from M4 (W2 needs the clock, backoff and random stream; W5 the auth, session and trace contract). **M4b** is the two stages that answer a request without the network or hold it for later — cache and offline queue — and connectivity, which they share. M4b adds two stages in front of `Retry` (spec §4 order: offline queue → cache → retry) and touches nothing M4a builds except to replay through its stages and to derive its own auth identity for the cache key from the session (ruling Q5: not from an applied header). The Inspector's I1 needs both halves. The revision after the two pre-execution reviews (`.superpowers/sdd/m4-plan-rulings.md`) split three tasks that grew past ~900 lines and added one; M4a has 24 tasks.
 
 ## Design decisions this plan makes (the specs are silent or say otherwise)
 
 M3's decisions 1-34 (`docs/superpowers/plans/2026-10-21-varest2-m3-http-core.md`) stand. New ones:
 
-1. **A client does not retry until it is given a policy** (`WithRetry`, or a request's `Retry()`). Spec §4.1 gives `FVaRestRetryPolicy`'s defaults, and §3.1 shows `.WithRetry(...)` written out; §5.5's settings ("default ... retry") are M5's, so M5 decides the project default. It also keeps every M3 test valid: a retried 503 or timeout on the virtual clock would wait for an `Advance` no M3 test makes. Cost if wrong: one default flips in M5.
-2. **Stage order** (spec §4's diagram, made concrete): custom `Outer` → **`Retry`** → **`AuthGate`** → attempt boundary → **`AuthApply`** → custom `PerAttempt` → log → limiter → transport. M4b inserts offline queue and cache before `Retry`. A session replay goes back through the attempt boundary, so it is a new attempt (Inspector IN-2 `GapBefore = SessionRefresh`), and it is not a retry: `MaxRetries` counts only `Retry`'s re-issues.
-3. **A refresh that fails on the network keeps the session.** Spec §4.2 says "If the refresh fails, all parked requests fail with `Kind=Auth` and the client fires `OnSessionExpired`." Pushed back: a dropped Wi-Fi during a refresh would log the player out. Rule: a **rejected** refresh (a 4xx other than 408/429, or a 2xx without an access token) expires the session — tokens dropped, `OnSessionExpired`, parked requests `Kind=Auth`. An **unreachable** one (connection error, timeout, 408, 429, 5xx) changes nothing; parked requests fail with that kind (`Connection` or `Timeout`, retryable), so `Retry` (outside `AuthGate`) and M4b's offline queue can act on them. Cost if wrong: one more outcome to explain in the docs.
+1. **A client does not retry until it is given a policy** (`WithRetry`, or a request's `Retry()`; ruling Q2). Spec §4.1 gives `FVaRestRetryPolicy`'s defaults, and §3.1 shows `.WithRetry(...)` written out. M5's `UVaRestApi` asset defaults its retry field to `Exponential(3)`, visible in the Details panel; code-first clients stay explicit (spec review I-6: no client-wide settings default). It also keeps every M3 test valid: a retried 503 or timeout on the virtual clock would wait for an `Advance` no M3 test makes. Cost if wrong: one default flips in M5.
+2. **Stage order** (spec §4's diagram, made concrete and amended): custom `Outer` → **`Retry`** → **`AuthGate`** → attempt boundary → **limiter** → **`AuthApply`** → custom `PerAttempt` → log → transport. The limiter opens every attempt (ruling I-3, Task 4): credentials, a signer's signature and the request's log lines are written when a request leaves the queue, so none goes stale while it waits, and a queued retry still waits its turn (spec §4.6's reason). M4b inserts offline queue and cache before `Retry`. A session replay goes back through the attempt boundary, so it is a new attempt (Inspector IN-2 `GapBefore = SessionRefresh`), and it is not a retry: `MaxRetries` counts only `Retry`'s re-issues.
+3. **Only the refresh endpoint's own "no" expires the session** (rulings Q1, I-7; spec §4.2 amended in the plan revision). A dropped Wi-Fi during a refresh must not log the player out. A **rejected** refresh — the endpoint's 4xx other than 408/429, or a 2xx that is not JSON or has no usable access token — expires the session: tokens dropped, `OnSessionExpired`, parked requests `Kind=Auth`. Every other failure is **failed** with its kind (`FVaRestAuthRefreshResult::Failed`): a connection error, a timeout, 408, 429, 5xx, a canceled refresh request, a refusal by the configuration (HTTP disabled, a domain not allowed). The session stays; parked requests fail with that kind — `Connection` and `Timeout` retryable, so `Retry` (outside `AuthGate`) and M4b's offline queue can act on them; `Config` not. Cost if wrong: one more outcome to explain in the docs.
 4. **`EVaRestAuthMode {Required, IfAvailable, None}` per request** (OpenAPI N15's mode, spec §3.3's "`Auth` (… no credentials)"). `Required` (default): when the client has an auth and it has no credentials (and cannot refresh), the request fails `Kind=Auth` without being sent. `IfAvailable`: sent without. `None` (`NoAuth()`): no credentials, no session headers, no park, no replay. A client with no auth configured sends as it did in M3. Cost if wrong: a game that relied on "send anyway and get a 401" sets `IfAvailable`.
-5. **`OnSessionChanged(EVaRestSessionChange)` is the one session event** besides `OnSessionExpired`: WebSocket §19 item 2's `OnSessionCleared` is `OnSessionChanged(Cleared)` (its rev 2, §22 A1, replaced the separate event). A token the game sets (`SetBearerToken`, `SetSession`, `ImportSession`) is `Replaced` unless the caller passes `bSameIdentity = true` (then `Refreshed`); the auth's own refresh is `Refreshed`; `ClearSession` is `Cleared`. VaRest cannot tell identities apart in opaque tokens. Cost if wrong: a code-first game that rotates its own tokens without `bSameIdentity` restarts its sockets (WS D36) on each rotation.
-6. **Session state is live, not part of the `Send()` snapshot** (M3 decision 27 covers configuration): an attempt carries the token current when it is dispatched, so a refreshed token reaches a replay and a request queued in the limiter. The auth object itself (`WithAuth`) is configuration and is snapshotted.
-7. **Interrupt hook.** A stage that holds an exchange while waiting (a backoff timer, a park behind a refresh) stores `FExchangeState::Interrupt`. `FClientState::Cancel` — used by `Cancel()`, `CancelAll`, owner-gone and shutdown — calls it instead of finishing the request itself, so the waiting stage answers `Canceled` through the chain and every `Outer` stage still gets its one outcome (`IVaRestStage::Process`'s contract). The stage holds itself weakly from the hook (no cycle through the exchange).
+5. **`OnSessionChanged(EVaRestSessionChange)` is the one session event** besides `OnSessionExpired`: a logout is `OnSessionChanged(Cleared)`, which WebSocket §19 item 2 and §3.3 now name (ruling Q6: amended in this plan's revision, dropping the separate `OnSessionCleared` its rev 2, §22 A1, had already replaced), with `RefreshAuth` and its `EVaRestAuthRefreshOutcome` (spec review I-5). A token the game sets (`SetBearerToken`, `SetSession`, `ImportSession`) is `Replaced` unless the caller passes `bSameIdentity = true` (then `Refreshed`); the auth's own refresh is `Refreshed`; `ClearSession` is `Cleared`. VaRest cannot tell identities apart in opaque tokens. Cost if wrong: a code-first game that rotates its own tokens without `bSameIdentity` restarts its sockets (WS D36) on each rotation.
+6. **Session state is live, not part of the `Send()` snapshot** (M3 decision 27 covers configuration): an attempt carries the token current when it leaves the limiter's queue — `AuthApply` runs right after the limiter (decision 2) — so a refreshed token reaches a replay and a request queued in the limiter, and a logout stops a queued request before the network (ruling I-3; Task 14's `QueuedGetsNewToken`). The auth object itself (`WithAuth`) is configuration and is snapshotted. The session JSON of `ExportSession`/`ImportSession` is the one body VaRest parses on the game thread: a few hundred bytes, a synchronous call, refused past 64 Ki characters (spec review M-12).
+7. **Interrupt hook.** A stage that holds an exchange while waiting (a backoff timer, a park behind a refresh) stores `FExchangeState::Interrupt`. `FClientState::Cancel` — used by `Cancel()`, `CancelAll`, owner-gone and shutdown — calls it instead of finishing the request itself, so the waiting stage answers `Canceled` through the chain and every `Outer` stage still gets its one outcome (`IVaRestStage::Process`'s contract). The hook returns whether it answered; when it did not (its stage state is gone), `Cancel` finishes the request itself (concurrency review M-4). `Complete` calls a waiting stage's hook too, so a request something else finished takes its timer or park with it (review M-3); the stage installs the hook before it runs any code that is not VaRest's (a log line, a trace note; review M-5). The stage holds itself weakly from the hook (no cycle through the exchange).
 8. **Bodies are copied for a re-issue only when one can happen** (M3 decision 12, per exchange): `bMayReissue` = a custom stage that may re-issue, or retry-eligible, or an auth that can refresh. A non-idempotent POST on a client with retry and plain bearer still moves its body into the engine.
-9. **The envelope applies to `FVaRestJson`, struct and `void` results** (`void`: the success predicate only), not to raw results (`FString`, `TArray<uint8>`, `FVaRestResponse`) nor to a body in a `SaveTo` file. A missing `DataPath` value is an invalid handle and a success for `FVaRestJson` (spec §2.2: missing is `undefined`), and a `Decode` error naming the path for a struct (a silent default would hide a wrong path). Cost if wrong: a struct endpoint that sometimes omits its data needs `FVaRestJson`.
-10. **The retry `Deadline` is an absolute time** (`StartedAt + Deadline`, request start = pipeline entry): no retry starts past it, every attempt's total timeout is cut to the time left, and an attempt dispatched after it (a long limiter wait) fails `Kind=Timeout` (detail `Deadline`, not retryable) without connecting. Spec §4.7: "plus the retry Deadline across attempts". It applies whenever the resolved policy has one, retry-eligible or not.
+9. **The envelope applies to `FVaRestJson`, struct and `void` results** (`void`: the success predicate only), not to raw results (`FString`, `TArray<uint8>`, `FVaRestResponse`) nor to a body in a `SaveTo` file. A missing `DataPath` value is an invalid handle and a success for `FVaRestJson` (spec §2.2: missing is `undefined`), and a `Decode` error naming the path for a struct (a silent default would hide a wrong path). `SuccessValues` compare case-sensitively with ruling Q3's rendering (`FVaRestEnvelope::MatchText`): a string as itself, `true`/`false`, an integral number with no fraction or exponent (`200`, `200.0` and `2e2` are all `"200"`), any other number as its shortest round-trip text; null, objects and arrays never match. A `void` predicate that cannot be checked (a body over `MaxJsonBytes` or not JSON) says so in one Basic-level Warning (spec review M-13). Cost if wrong: a struct endpoint that sometimes omits its data needs `FVaRestJson`.
+10. **The retry `Deadline` is an absolute time** (`StartedAt + Deadline`, request start = pipeline entry): no retry starts past it, every attempt's total timeout is cut to the time left, and an attempt that would start past it fails `Kind=Timeout` (detail `Deadline`, not retryable) without connecting. It is armed, not only checked (concurrency review M-1): a wait in the limiter's queue (Task 9) or a park behind a refresh (Task 17) ends at it. Spec §4.7: "plus the retry Deadline across attempts". It applies whenever the resolved policy has one, retry-eligible or not.
 11. **`Retry-After` replaces the backoff for that step**, capped at `MaxRetryAfter` (60 s, spec §4.1), and only on a status the policy retries. A delay that would end past the deadline means no retry.
-12. **Stage-made failures carry a message and a detail the core classifies** (`FVaRestAttemptOutcome::FailureMessage`, public). New details: `AuthRejected`, `NoCredentials`, `SessionCleared` → `Auth`; `HttpDisabled`, `DomainNotAllowed`, `BodyNotSent` → `Config`; `Deadline` → `Timeout`, not retryable; `AuthRefreshUnreachable` keeps the refresh's own failure kind. `ClassifyAttempt` is the one place that maps an outcome to `Kind` and `bRetryable` (the pipeline's error and the retry stage read the same answer).
+12. **Stage-made failures carry a message and a detail the core classifies** (`FVaRestAttemptOutcome::FailureMessage`, public). New details: `AuthRejected`, `NoCredentials`, `SessionCleared` → `Auth`; `HttpDisabled`, `DomainNotAllowed`, `AuthInvalid` (ruling Q7), `AuthRefreshConfig` (a refresh refused by the configuration, ruling I-7) → `Config`; `Deadline` → `Timeout`, not retryable; `AuthRefreshFailed` keeps its failure's kind (`Connection` or `Timeout`, retryable). `ClassifyAttempt` is the one place that maps an outcome to `Kind` and `bRetryable` (the pipeline's error and the retry stage read the same answer). (No `BodyNotSent`: the body-on-verb refusal is `Resolve`'s, not an attempt's; spec review M-7.)
 13. **A body on a verb the transport does not upload is refused, `Kind=Config`** (carry (f), final review M1). `IVaRestTransport::SendsBodyFor(Verb)` (default true) lets the transport say; the `FHttpModule` transport answers POST, PUT, PATCH and DELETE (curl attaches its read function only for those, `CurlHttp.cpp:941-993`; HEAD sets `CURLOPT_NOBODY`, `:975-978`). GET keeps spec §3.2's drop with a Warning. The fake transport mirrors the HTTP one. Refused rather than dropped: `Request("QUERY", ...).Body(...)` without its body is a different request.
 14. **Response headers are collected one by one from `OnHeaderReceived`** (carry (f), final review M2): curl folds repeats into one comma-joined value in `GetAllHeaders` (`CurlHttp.cpp:519-530`) but calls the delegate once per header line of the final response (`:509-535`; `bRedirected` skips a followed redirect's headers, `:556-560`). Apple's delegate replays its dictionary (`HttpRequestImpl.cpp:40-60`), already folded by NSURLSession, so there nothing changes.
 15. **The engine's `PreCheck` refusals are found before `ProcessRequest`** (carry (f), final review M9): the HTTP transport checks `FHttpModule::IsHttpEnabled()` and `FHttpManager::IsDomainAllowed(Url)` (`HttpRequestCommon.cpp:83-113` refuses on those as `EHttpFailureReason::Other`) and fails the attempt with `HttpDisabled` / `DomainNotAllowed`, `Kind=Config`. The engine's other `Other` stays a retryable `Connection`: curl reports a reset connection or an empty reply that way (only five `CURLcode`s become `ConnectionError`, `CurlHttp.cpp:1318-1330`; the rest fall to `HandleRequestFailed`'s `Other`, `HttpRequestCommon.cpp:291-310`).
-16. **`LaunchRedaction(Name, Body)` replaces `GetRedactionPipe()`** (carry (a), review M-10): callers never hold the pipe, so a decode task (IN-14) may launch from any thread. An atomic pipe pointer, an in-use counter and a stop flag; `StopRedactionPipe` raises the flag, waits for launches in progress, empties and deletes the pipe. `FPipe::Launch` itself is thread-safe (`Pipe.h:63-77`, atomics only).
+16. **`LaunchRedaction(Name, Body)` replaces `GetRedactionPipe()`** (carry (a), review M-10): callers never hold the pipe, so none can race its delete, and any thread may launch. M4a's own launches stay on the game thread — Task 21 redacts a decode-task excerpt inline on that task (concurrency review M-14) — so the any-thread contract is the shape, held by its test. An atomic pipe pointer, an in-use counter and a stop flag; `StopRedactionPipe` raises the flag, waits for launches in progress, empties and deletes the pipe. `FPipe::Launch` itself is thread-safe (`Pipe.h:63-77`, atomics only).
 17. **Logs, traces and `FVaRestError::Url` use the client's current redactor** (carry (b), task 14 review M10): a token the auth refreshes while a request is in flight is scrubbed from that request's later lines. The current redactor knows the old token too (the secret set keeps rotated values 10 minutes, Inspector D21). `ClearSession` forgets them (Inspector §12 "cleared on logout").
 18. **`FRequestSpec`'s fields are private** (bead VaRest-uq3): friends `TVaRestRequest`, `FVaRestClient` and `FRequestSpecAccess` (defined in a Private header), so no module can hand-build a spec; `SendRequest` stays exported (the inline builder calls it) and forwards to `FRequestSpecAccess::Send`. Chosen over "move every builder check into `Resolve`" because some checks cannot move (a struct body's encode error exists only at `Body()`), and the project prefers enforcement by shape.
 19. **Stages still cannot replace a body in 2.0** (carry (g)). M4's built-in stages edit the exchange through `Internals()`; signing stages read `GetBody()` and the new `GetAttemptUrl()`. Compression or encryption would need the length and `Content-Type` reset in one place; no M4 feature needs it.
 20. **Request excerpts are copied at `Started`** (after `Resolve`, before the transport stage can move the bytes; IN-14 says "at Send", and for a request sent from a worker `Started` is its first game-thread moment). A 2xx response a decoder will parse is redacted on the decode task from the body itself; every other response body is copied at the game-thread hop and redacted on the pipe. Binary bodies stay descriptors: hex capture (`BinaryCap > 0`, Inspector §2.2 layer 4) is not in M4a (the M3 redactor has no hex mode).
 21. **Stats are VaRest's own atomic counters, mirrored to `stat VaRest`.** Engine stats are compiled out in Shipping and cannot be read back by a test; the counters can.
 22. **Auth adds the last segment of each token path to the client's redaction keys** (carry (d), M3 review M19): `data.auth.refresh_token` adds `refresh_token`; normalised keys match whole keys (M3 decision 18), so a whole path never would.
-23. **`FVaRestAuthRefreshContext::Request<T>()` is how a refresh request is sent**: it bypasses `AuthGate`/`AuthApply`, the envelope and retry, goes `Highest` in the limiter and carries trace flag `AuthRefresh`. A refresh request sent through the client itself would park behind its own refresh. The refresh response is read raw: token paths are against the whole body (`data.accessToken` for a wrapped API).
+23. **`FVaRestAuthRefreshContext::Request<T>()` is how a refresh request is sent** (Task 15): it bypasses `AuthGate`/`AuthApply`, the envelope, retry and the limiter's queue (ruling M-8: single flight makes it at most one more connection per client, and a client whose slots all hold long polls must still refresh), and carries trace flag `AuthRefresh`. The first request a context builds carries the refresh's id as its own request id (spec review I-2: the refresh id is `FVaRestTrace::NewRequestId()`, so IN-2's `AuthRefreshId` names a record). The context holds its client weakly (concurrency review M-10). A refresh request sent through the client itself would park behind its own refresh. The refresh response is read raw: token paths are against the whole body (`data.accessToken` for a wrapped API).
 24. **Replays re-create stream bodies** (carry (e)): every attempt — retry or session replay — is a new engine request with a new `FVaRestSegmentStream`; nothing asks NSURLSession to resend a stream in place, which it cannot (`AppleHttp.cpp:627-634`, `:751-753`, no `needNewBodyStream`).
 25. **Trace payloads `Note`, `Excerpt` and `Marker` join `FVaRestTracePayload` in M4**; the socket payloads are W5's. WebSocket §19 item 4 is met by `FVaRestTraceEvent::Source` (M3) plus the request and attempt ids every HTTP payload carries; sinks switch on `Kind` and ignore kinds they do not know (documented on `IVaRestTraceSink::OnEvent`).
 26. **Retry jitter draws from one `FRandomStream` per client**, seeded from the client id and `FPlatformTime::Cycles()`; `WithRandomSeed(int32)` makes a test exact. The formula takes the stream as a parameter, so a socket passes its own (WebSocket §3.4).
-27. **Names that freeze with M5** (they become asset properties and pins): `EVaRestJitter`, `FVaRestBackoff`, `FVaRestRetryPolicy`, `FVaRestEnvelope`, `EVaRestAuthMode`, `EVaRestApiKeyPlacement`, `EVaRestRefreshStyle`, `EVaRestSessionChange`, `FVaRestBearerRefreshConfig`, and their `UPROPERTY` field names. Task 20 adds them to CLAUDE.md's freeze line.
+27. **Names that freeze with M5** (they become asset properties and pins): `EVaRestJitter`, `FVaRestBackoff`, `FVaRestRetryPolicy`, `FVaRestEnvelope`, `EVaRestAuthMode`, `EVaRestApiKeyPlacement`, `EVaRestRefreshStyle`, `EVaRestSessionChange`, `FVaRestBearerRefreshConfig`, and their `UPROPERTY` field names. Task 24 adds them to CLAUDE.md's freeze line. `EVaRestAuthRefreshOutcome` (`RefreshAuth`'s answer, ruling I-5) is a plain C++ enum and freezes only if M5 makes it a `UENUM`.
+28. **Session changes go through one door** (concurrency reviews C-1, I-1, I-2, ruled by shape; Task 12). Every change runs inside `FClientState::RunSessionChange`, which keeps the client state alive while the change and its listeners run — a listener may drop the last `FVaRestClient`, as "a fresh client on logout" does — and delivers the change's events after it is done, in order, each to every listener before the next. An expired session expires once. The requests a change ends or resumes (a refresh's waiters) continue from one later game-thread task (ruling I-1), so no request callback and no limiter dispatch runs inside `SetBearerToken`, `ClearSession` or `NotifySessionExpired` — M3 decision 3's rule for configuration calls. `CredentialGeneration` moves with tokens only, so a session header does not spend a 401's one replay (review M-6).
+29. **A built-in auth whose configuration cannot work fails each request `Kind=Config`** (ruling Q7; Task 14): an ApiKey header name that is not an RFC 9110 token, an empty query key, a key with a control character, a Basic user holding `:`. The factory logs an Error once; every `Required` or `IfAvailable` request fails detail `AuthInvalid`, not retryable, unsent; `NoAuth()` still goes out; `ApplyAuth` hands a socket the reason (`OutConfigError`). A Custom `IVaRestAuth` whose `Apply` fails stays `Kind=Auth`: a game that shows a login screen on `Kind=Auth` must not show one for a typo.
+30. **A refresh can always end, and nothing waits on it unbounded** (concurrency review I-4, ruling I-4; Task 16): the auth's `Done` owns a guard, so a `Done` dropped uncalled ends the refresh as `Failed(Connection)`, the session kept. No watchdog: a Custom or Blueprint auth may hold its refresh open on purpose (a re-login screen); each parked request is bounded by its own retry deadline (decision 10), `Cancel()` and its owner. A token's proactive refresh comes at most half its lifetime early (concurrency review M-7).
+31. **A park's time is placed where Inspector §3.3 puts it** (spec review I-1; Task 17): a park before the first attempt is inside that attempt — the attempt starts when it parks and the park is its `Auth` phase — and a replay's park is the `SessionRefresh` gap before its attempt, never `AuthWait` as well. Every IN-17 golden checks that `Prepare` (dispatch − attempt start − `Auth` − `Queued`) is not negative (Task 22). A backoff gap is the time that passed, not the delay asked for (spec review M-10).
 
 ## Global Constraints
 
@@ -57,7 +61,7 @@ M3's decisions 1-34 (`docs/superpowers/plans/2026-10-21-varest2-m3-http-core.md`
 - Public types: `FVaRest*`, `EVaRest*`, `IVaRest*`, `TVaRest*`, `UVaRest*`. Internals: namespace `VaRest::Http`; file-local helpers in `namespace VaRest::Http::<FileStem>Private`. Never reuse a v1 header name (`VaRest.h`, `VaRestDefines.h`, `VaRestJsonObject.h`, `VaRestJsonValue.h`, `VaRestLibrary.h`, `VaRestRequestJSON.h`, `VaRestSettings.h`, `VaRestSubsystem.h`, `VaRestTypes.h`, `VaRestJsonParser.h`).
 - JSON keys are case-sensitive (`ESearchCase::CaseSensitive`, `TestEqualSensitive`); HTTP header names are not (`ESearchCase::IgnoreCase`, explicitly).
 - Unity builds: no file-scope `using namespace`, no anonymous namespaces in `.cpp` files; block-scope `using namespace` inside a function body is fine.
-- MSVC-clean by construction: no local or parameter named like a member (data or function) of the enclosing class (C4458). `TVaRestRequest` gains the methods `Retry`, `NoRetry`, `Envelope`, `NoEnvelope`, `AuthMode`, `NoAuth`, `MarkAuthRefresh`: no parameter or local in that class may use those names (write `InPolicy`, `InEnvelope`, `InMode`). `FVaRestClient` gains `WithRetry`, `WithRandomSeed`, `WithEnvelope`, `WithoutEnvelope`, `WithAuth`, `WithoutAuth`, `WithBearer`, `SetBearerToken`, `SetSession`, `SetSessionHeader`, `RemoveSessionHeader`, `ClearSession`, `GetSession`, `ExportSession`, `ImportSession`, `NeedsAuthRefresh`, `RefreshAuth`, `ApplyAuth`, `NotifySessionExpired`, `OnSessionChanged`, `OnSessionExpired`. Lambda init-captures never reuse an enclosing name, and a local inside a lambda body never takes the name of a local of the function around it (C4456; Task 20's sweep).
+- MSVC-clean by construction: no local or parameter named like a member (data or function) of the enclosing class (C4458). `TVaRestRequest` gains the methods `Retry`, `NoRetry`, `Envelope`, `NoEnvelope`, `AuthMode`, `NoAuth`, `MarkAuthRefresh`: no parameter or local in that class may use those names (write `InPolicy`, `InEnvelope`, `InMode`). `FVaRestClient` gains `WithRetry`, `WithRandomSeed`, `WithEnvelope`, `WithoutEnvelope`, `WithAuth`, `WithoutAuth`, `WithBearer`, `SetBearerToken`, `SetSession`, `SetSessionHeader`, `RemoveSessionHeader`, `ClearSession`, `GetSession`, `ExportSession`, `ImportSession`, `NeedsAuthRefresh`, `RefreshAuth`, `ApplyAuth`, `NotifySessionExpired`, `OnSessionChanged`, `OnSessionExpired`. Lambda init-captures never reuse an enclosing name, and a local inside a lambda body never takes the name of a local of the function around it (C4456; Task 24's sweep).
 - `UE_LOG` format arguments are string literals. Every core log line about a request includes `#<RequestId>` (IN-16). Values in log lines are redacted, then escaped (`EscapeForLog`).
 - Tests: `IMPLEMENT_SIMPLE_AUTOMATION_TEST`, inside `#if WITH_DEV_AUTOMATION_TESTS`, flags `EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter`; unit tests in `Source/VaRestHttp/Private/Tests/`, names `VaRest.Http.*`; integration tests in `Source/VaRestTests/Private/VaRestIntegrationTest.cpp`, names `VaRest.Integration.*`.
 - **Test hygiene (each cost an M3 fix round):** every test drains what it sends (pump until done, or cancel and pump until done); a test asserting "nothing happened" first asserts the request finished, and drains with `FTestRig::Drain()` or counters, never with a fixed short wait; never dereference, `GetValue()` or index after a non-fatal check — write `if (!TestTrue(...)) { return false; }` first; callbacks never capture stack locals by reference (capture `TSharedRef` state, `MakeOutcome<T>()`); expected-log patterns are unique per line (the engine counts only the first matching pattern, `AutomationTest.cpp:2692-2714`), with `AddExpectedErrorPlain` / `AddExpectedMessagePlain` and exact counts; a restore-the-bug step breaks the named behaviour, shows the named test failing, restores it, and the task report gives both outcomes; a test must be able to fail (no assertion the code cannot violate).
@@ -70,11 +74,13 @@ M3's decisions 1-34 (`docs/superpowers/plans/2026-10-21-varest2-m3-http-core.md`
 
 ## Review Focus
 
-- **A POST without `.Idempotent()` on a client with retry, against a 503 or a dropped connection**: sent exactly once; a reasonable person expects no duplicate order. Test owner: Task 7 (`VaRest.Http.Retry.NonIdempotentSentOnce`, restore-the-bug: drop the verb check).
-- **Twenty requests hitting 401 together while the refresh endpoint is slow, and then the refresh failing on the network**: one refresh request; each parked request replays once or fails once; the network failure does not log the player out. Test owner: Task 13 (`VaRest.Http.Auth.SingleFlight`, `VaRest.Http.Auth.RefreshUnreachableKeepsSession`).
-- **`Cancel()`, the owner's destruction or engine shutdown while a request backs off on a timer or waits behind a refresh**: exactly one `Canceled` (or silence for owner/shutdown), no further attempt, the timer cleared, the request out of `GetInFlightCount()`. Test owners: Task 8 (`VaRest.Http.Retry.StopWhileBackingOff`), Task 13 (`VaRest.Http.Auth.StopWhileParked`).
-- **A token refreshed while a request is in flight, echoed back by the server in a header, a body and the URL**: no log line or trace event carries the new or the old token. Test owner: Task 14 (`VaRest.Http.Auth.RefreshedTokenRedacted`).
-- **An envelope whose paths miss — no `data`, no `ok`, a body that is an array, an `ok` of `0` or `"false"`**: `Kind=Server` only when the predicate fails (values compare as text, so `true` and `"true"` both pass, documented on `FVaRestEnvelope`), a struct result names the missing path, nothing crashes. Test owner: Task 9 (`VaRest.Http.Envelope.Evaluate`), Task 10 (`VaRest.Http.Envelope.MissingPaths`).
+- **A POST without `.Idempotent()` on a client with retry, against a 503 or a dropped connection**: sent exactly once; a reasonable person expects no duplicate order. Test owner: Task 8 (`VaRest.Http.Retry.NonIdempotentSentOnce`, restore-the-bug: drop the verb check).
+- **Twenty requests hitting 401 together while the refresh endpoint is slow, and then the refresh failing on the network**: one refresh request; each parked request fails once, none replays; the network failure does not log the player out. Test owners: Task 17 (`VaRest.Http.Auth.RefreshFailedKeepsSession`: twenty parked plus two late, `Failed(Connection)`), Task 18 (`VaRest.Http.Auth.BearerRefreshFailsOnce`: the real refresh request, one call to the endpoint) — spec review I-3; restore-the-bug: treat `Failed` like `Rejected`.
+- **`Cancel()`, the owner's destruction or engine shutdown while a request backs off on a timer or waits behind a refresh**: exactly one `Canceled` (or silence for owner/shutdown), no further attempt, the timer cleared or the waiter gone, every `Outer` stage given its one outcome, the request out of `GetInFlightCount()`. Test owners: Task 9 (`VaRest.Http.Retry.StopWhileBackingOff`), Task 17 (`VaRest.Http.Auth.StopWhileParked`), both with an `Outer` probe (concurrency review I-5).
+- **A token refreshed while a request is in flight, echoed back by the server in a header, a body and the URL**: no log line or trace event carries the new or the old token — including the request that went out before the new token existed. Test owner: Task 18 (`VaRest.Http.Auth.RefreshedTokenRedacted`, its `/b` in flight across the refresh; spec review M-11).
+- **An envelope whose paths miss — no `data`, no `ok`, a body that is an array, an `ok` of `0` or `"false"`**: `Kind=Server` only when the predicate fails; values compare by ruling Q3's rendering (`true`/`"true"`, `200`/`200.0`/`2e2`/`"200"` pass; null, objects and arrays never match); a struct result names the missing path; nothing crashes. Test owners: Task 10 (`VaRest.Http.Envelope.Evaluate`), Task 11 (`VaRest.Http.Envelope.MissingPaths`).
+- **A typo in a built-in auth — an ApiKey header name with a space, an empty query key, a Basic user with `:`** — is `Kind=Config`, not retryable, never sent, never a login screen; a Custom auth with no credentials is still `Kind=Auth` (ruling Q7). Test owner: Task 14 (`VaRest.Http.Auth.InvalidBuiltinAuth`).
+- **Requests parked behind a refresh, in the trace**: a first attempt's park is its `Auth` phase (the attempt starts when it parks), a replay's park is its `SessionRefresh` gap, and every attempt's `Prepare` is non-negative — the numbers the Inspector's I1 starts from (spec review I-1, Inspector IN-2). Test owner: Task 22 (`VaRest.Http.Trace.Golden.RefreshParked`).
 
 ---
 
@@ -82,65 +88,75 @@ M3's decisions 1-34 (`docs/superpowers/plans/2026-10-21-varest2-m3-http-core.md`
 
 ```
 Source/VaRestHttp/
-  Public/VaRestClient.h            FRequestSpec private (T1); retry/envelope/auth builder methods (T7, T10, T12); client
-                                   retry, envelope, auth and session API (T7, T10, T11, T12, T13); GetAttemptUrl (T12)
-  Public/VaRestStage.h             FVaRestAttemptOutcome::FailureMessage (T2); FVaRestExchange::GetAttemptUrl (T12)
+  Public/VaRestClient.h            FRequestSpec private (T1); WithMaxConcurrent/Use docs (T4); retry/envelope/auth builder methods
+                                   (T8, T11, T14); MarkAuthRefresh, PresetRequestId (T15); client retry, envelope, auth and
+                                   session API (T8, T11, T12, T13, T14, T16); GetAttemptUrl (T14)
+  Public/VaRestStage.h             FVaRestAttemptOutcome::FailureMessage (T2); FVaRestExchange::GetAttemptUrl (T14)
   Public/VaRestTransport.h         IVaRestTransport::SendsBodyFor (T2)
   Public/VaRestFakeTransport.h     SendsBodyFor mirror and override (T2)
-  Public/VaRestTrace.h             Note / Excerpt / Marker payloads, MaxPendingExcerptBytes, VAREST_WITH_TRACE_EXCERPTS (T4)
-  Public/VaRestHttpTesting.h       FTraceRecorder, FScopedTraceRecorder (T4)
-  Public/VaRestResultHandler.h     FFinish envelope + excerpt fields, IResultHandler::AppliesEnvelope, CheckEnvelopePredicate (T10, T17)
-  Public/VaRestRedactor.h          FVaRestSecretSet::ClearSlots; previous values remember their slot (T11)
-  Public/VaRestBackoff.h           NEW (T5): EVaRestJitter, FVaRestBackoff, ParseRetryAfter (WS §19 item 1)
-  Public/VaRestRetry.h             NEW (T6): FVaRestRetryPolicy, IsIdempotentVerb
-  Public/VaRestEnvelope.h          NEW (T9): FVaRestEnvelope, FVaRestEnvelopeResult (WS §19 item 6)
-  Public/VaRestAuthTypes.h         NEW (T11): EVaRestAuthMode, EVaRestApiKeyPlacement, EVaRestRefreshStyle,
+  Public/VaRestHttpTypes.h         FVaRestHeaders, FVaRestError::bRetryable docs (T2); EVaRestStageSlot doc (T4)
+  Public/VaRestTrace.h             Note / Excerpt / Marker payloads, MaxPendingExcerptBytes, VAREST_WITH_TRACE_EXCERPTS, OnEvent doc (T5)
+  Public/VaRestHttpTesting.h       FTraceRecorder, FScopedTraceRecorder (T5); FOutcomeProbe (T9); EnvelopeParsesOnGameThread
+                                   (T11); PhasesHold (T22)
+  Public/VaRestResultHandler.h     FFinish envelope + log level + excerpt fields, IResultHandler::AppliesEnvelope, CheckEnvelopePredicate (T11, T21)
+  Public/VaRestRedactor.h          a comment names LaunchRedaction (T3); FVaRestSecretSet::ClearSlots, previous values remember their slot (T12)
+  Public/VaRestBackoff.h           NEW (T6): EVaRestJitter, FVaRestBackoff, ParseRetryAfter (WS §19 item 1)
+  Public/VaRestRetry.h             NEW (T7): FVaRestRetryPolicy, IsIdempotentVerb
+  Public/VaRestEnvelope.h          NEW (T10): FVaRestEnvelope (MatchText, ValueText), FVaRestEnvelopeResult (WS §19 item 6)
+  Public/VaRestAuthTypes.h         NEW (T12): EVaRestAuthMode, EVaRestApiKeyPlacement, EVaRestRefreshStyle,
                                    EVaRestSessionChange, FVaRestBearerRefreshConfig, FVaRestSessionData
-  Public/VaRestAuth.h              NEW (T12): IVaRestAuth, FVaRestAuthTarget, FVaRestAuthRefreshResult,
-                                   FVaRestAuthRefreshContext (T13), FVaRestAuth factories (T12, T14) (WS §19 item 2)
-  Public/VaRestHttpStats.h         NEW (T16): LLM tags VaRest, VaRest_Trace
-  Private/VaRestClientState.h/.cpp FClientConfig fields; Publish's chain; session, random, redactor accessors (T3-T13)
-  Private/VaRestExchangeState.h    retry, auth, envelope, excerpt state on the exchange (T7-T16)
+  Public/VaRestAuth.h              NEW (T14): IVaRestAuth (GetConfigError), FVaRestAuthTarget, FVaRestAuth factories (T14, T18);
+                                   (T15) EVaRestAuthRefreshOutcome, FVaRestAuthRefreshResult, FVaRestAuthRefreshContext, the
+                                   refresh functions of IVaRestAuth (WS §19 item 2)
+  Public/VaRestHttpStats.h         NEW (T20): LLM tags VaRest, VaRest_Trace
+  Private/VaRestClientState.h/.cpp FClientConfig fields; Publish's chain (T4, T8, T14, T17); LogEndedInQueue (T4); session,
+                                   random, redactor accessors; RunSessionChange, ~FClientState's session (T12); the
+                                   coordinator (T16); FClientAccess::Wrap (T15); per-client counters (T20) (T3-T20)
+  Private/VaRestExchangeState.h    retry, deadline, auth, envelope, excerpt state on the exchange (T8-T21)
   Private/VaRestRequestSpec.h      NEW (T1): FRequestSpecAccess
-  Private/VaRestPipeline.cpp       Cancel's interrupt, ClassifyAttempt use, deadline clamp, AttemptUrl (T2, T7, T8, T12)
+  Private/VaRestPipeline.cpp       Cancel's and Complete's interrupt, ClassifyAttempt use, the limiter first and its deadline,
+                                   deadline clamp, AttemptUrl, attempt start (T2, T4, T8, T9, T14, T15, T17)
   Private/VaRestClassify.h/.cpp    NEW (T2): ClassifyAttempt, KindFor moved here
   Private/VaRestHttpTransport.cpp  PreCheck mirror, per-header collection, SendsBodyFor (T2)
   Private/VaRestHttpTransportInternal.h  FHttpTransportCompletion collects headers (T2)
   Private/VaRestRedactionPipe.h, VaRestRedactor.cpp   LaunchRedaction (T3)
-  Private/VaRestLogStage.cpp       EscapeControlsForLog (T1), current redactor, AttemptUrl, retry line (T3, T7, T12)
-  Private/VaRestTracePoints.h/.cpp current redactor (T3), Note/Marker, gap fields, envelope, flags (T4, T7, T10, T13)
-  Private/VaRestBackoff.cpp        NEW (T5)
-  Private/VaRestRetry.cpp          NEW (T6): policy, DecideRetry; (T7) the retry stage
-  Private/VaRestRetryInternal.h    NEW (T6): FRetryDecision, DecideRetry, MakeRetryStage
-  Private/VaRestEnvelope.cpp       NEW (T9): the evaluator
-  Private/VaRestSession.h/.cpp     NEW (T11): FSessionState and the session functions of FClientState; (T13) the single-flight refresh
-  Private/VaRestAuthInternal.h     NEW (T12): ApplyCredentials, MakeAuthApplyStage; (T13) MakeAuthGateStage
-  Private/VaRestAuth.cpp           NEW (T12): Bearer, ApiKey, Basic, the AuthApply stage, the refresh result and context
-  Private/VaRestAuthGate.cpp       NEW (T13): the AuthGate stage
-  Private/VaRestBearerRefresh.cpp  NEW (T14)
-  Private/VaRestHttpStatsInternal.h, VaRestHttpStats.cpp  NEW (T16): FHttpStats, stat VaRest, the LLM tag definitions
-  Private/VaRestTraceExcerpts.h/.cpp NEW (T17): IN-14
-  Private/VaRestDecode.h/.cpp      ApplyEnvelope; envelope in DecodeJson, DecodeStruct, ProcessErrorBody; CheckEnvelopePredicate (T10)
+  Private/VaRestLogStage.cpp       EscapeControlsForLog (T1), current redactor (T3), queue-time lines (T4), AttemptUrl (T14)
+  Private/VaRestTracePoints.h/.cpp current redactor (T3), Note/Marker, gap fields, envelope, flags (T5, T8, T11, T14, T15, T17)
+  Private/VaRestBackoff.cpp        NEW (T6)
+  Private/VaRestRetry.cpp          NEW (T7): policy, DecideRetry; (T8) the retry stage; (T9) MakeDeadlineOutcome
+  Private/VaRestRetryInternal.h    NEW (T7): FRetryDecision, DecideRetry, MakeRetryStage; (T9) MakeDeadlineOutcome
+  Private/VaRestEnvelope.cpp       NEW (T10): the evaluator
+  Private/VaRestSession.h/.cpp     NEW (T12): FSessionState, the event queue and the session functions of FClientState;
+                                   (T13) export and import; (T16) the single-flight refresh
+  Private/VaRestAuthInternal.h     NEW (T14): ApplyCredentials, MakeAuthApplyStage; (T17) MakeAuthGateStage
+  Private/VaRestAuth.cpp           NEW (T14): Bearer, ApiKey, Basic, the AuthApply stage; (T15) the refresh result and context
+  Private/VaRestAuthGate.cpp       NEW (T17): the AuthGate stage
+  Private/VaRestBearerRefresh.cpp  NEW (T18)
+  Private/VaRestHttpStatsInternal.h, VaRestHttpStats.cpp  NEW (T20): FHttpCounters, FHttpStats, stat VaRest, the LLM tag definitions
+  Private/VaRestTraceExcerpts.h/.cpp NEW (T21): IN-14, FAdmission
+  Private/VaRestDecode.h/.cpp      ApplyEnvelope; envelope in DecodeJson, DecodeStruct, ProcessErrorBody; CheckEnvelopePredicate (T11)
   Private/Tests/VaRestHttpFidelityTest.cpp   NEW (T2)
-  Private/Tests/VaRestHttpTraceM4Test.cpp    NEW (T4)
-  Private/Tests/VaRestHttpBackoffTest.cpp    NEW (T5)
-  Private/Tests/VaRestHttpRetryTest.cpp      NEW (T6-T8)
-  Private/Tests/VaRestHttpEnvelopeTest.cpp   NEW (T9-T10)
-  Private/Tests/VaRestHttpSessionTest.cpp    NEW (T11)
-  Private/Tests/VaRestHttpAuthTest.cpp       NEW (T12-T15)
-  Private/Tests/VaRestHttpStatsTest.cpp      NEW (T16)
-  Private/Tests/VaRestHttpExcerptTest.cpp    NEW (T17)
-  Private/Tests/VaRestHttpTraceGoldenTest.cpp NEW (T18)
-  Private/Tests/VaRestHttpRedactorTest.cpp, VaRestHttpLogTest.cpp   LaunchFromAnyThread, CurrentRedactor (T3); ConfigErrorEscapedOnce (T1)
+  Private/Tests/VaRestHttpTraceM4Test.cpp    NEW (T5)
+  Private/Tests/VaRestHttpBackoffTest.cpp    NEW (T6)
+  Private/Tests/VaRestHttpRetryTest.cpp      NEW (T7-T9)
+  Private/Tests/VaRestHttpEnvelopeTest.cpp   NEW (T10-T11)
+  Private/Tests/VaRestHttpSessionTest.cpp    NEW (T12-T13)
+  Private/Tests/VaRestHttpAuthTest.cpp       NEW (T14-T19, the auth goldens of T22)
+  Private/Tests/VaRestHttpStatsTest.cpp      NEW (T20)
+  Private/Tests/VaRestHttpExcerptTest.cpp    NEW (T21)
+  Private/Tests/VaRestHttpTraceGoldenTest.cpp NEW (T22)
+  Private/Tests/VaRestHttpRedactorTest.cpp, VaRestHttpLogTest.cpp   LaunchFromAnyThread, CurrentRedactor, the M3 pipe call (T3); ConfigErrorEscapedOnce (T1)
+  Private/Tests/VaRestHttpLimiterTest.cpp    the probe moves to Outer; FirstInTheAttempt (T4)
   Private/Tests/*.cpp (M3)          T1's residual fixes; T3's redaction-pipe callers
 Source/VaRestTests/Private/VaRestHttpSurfaceShapeTest.cpp   FRequestSpec shape (T1)
-Source/VaRestTests/Private/VaRestIntegrationTest.cpp        Apple gate (T1); RepeatedHeaders (T2); Retry, AuthRefresh, Envelope (T19)
-Source/VaRestTests/Private/VaRestHttpStructDecodeTest.cpp   Envelope.Struct (T10); Trace.Golden.DecodeWarnings (T18)
-Tools/testserver/server.py, selftest.py                     POST /expire, GET /envelope/gone (T19)
-docs/dev/http-thread-completion.md                          Apple progress note (T1); M4 checks (T20)
-CLAUDE.md                                                   freeze line (T20)
+Source/VaRestTests/Private/VaRestIntegrationTest.cpp        Apple gate (T1); RepeatedHeaders (T2); Retry, AuthRefresh, Envelope (T23)
+Source/VaRestTests/Private/VaRestHttpStructDecodeTest.cpp   Envelope.Struct (T11); Trace.Golden.DecodeWarnings (T22)
+Tools/testserver/server.py, selftest.py                     POST /expire, GET /envelope/gone (T23)
+docs/dev/http-thread-completion.md                          Apple progress note (T1); the duplicated-:// Warning (T2); M4 checks (T24)
+CLAUDE.md                                                   module row, freeze line (T24)
+docs/superpowers/specs/2026-10-18-varest2-core-design.md   §4 diagram, §4.2, §4.6 amended with this plan's revision (not a task)
+docs/superpowers/specs/2026-10-20-varest2-websocket-design.md  §3.3 logout line, §19 item 2 amended likewise
 ```
-
 ---
 ### Task 1: M3 residuals (VaRest-3dj) and the closed request spec (VaRest-uq3)
 
@@ -554,12 +570,13 @@ Three things the engine does that M3 documented but did not act on (final review
 - Modify: `Source/VaRestHttp/Public/VaRestFakeTransport.h`, `Source/VaRestHttp/Private/VaRestFakeTransport.cpp` (mirror)
 - Modify: `Source/VaRestHttp/Private/VaRestHttpTransportInternal.h`, `Source/VaRestHttp/Private/VaRestHttpTransport.cpp`
 - Modify: `Source/VaRestHttp/Private/VaRestPipeline.cpp` (`KindFor` moves out; `OnChainDone` uses `ClassifyAttempt`; `Resolve` asks the transport)
-- Modify: `Source/VaRestHttp/Public/VaRestClient.h` (`Request()` doc), `Source/VaRestHttp/Public/VaRestHttpTypes.h` (`FVaRestHeaders` doc)
+- Modify: `Source/VaRestHttp/Public/VaRestClient.h` (`Request()` doc), `Source/VaRestHttp/Public/VaRestHttpTypes.h` (`FVaRestHeaders`, `FVaRestError::bRetryable` docs)
+- Modify: `docs/dev/http-thread-completion.md` (the duplicated-`://` Warning, concurrency review M-15)
 - Test: `Source/VaRestHttp/Private/Tests/VaRestHttpFidelityTest.cpp`, `Source/VaRestTests/Private/VaRestIntegrationTest.cpp`
 
 **Interfaces:**
 - Consumes: Task 1.
-- Produces: `FString FVaRestAttemptOutcome::FailureMessage` (a stage's human-readable reason; the error's `Message` when set); `virtual bool IVaRestTransport::SendsBodyFor(FStringView Verb) const` (default true); `VARESTHTTP_API bool VaRest::Http::IsBodyVerb(FStringView Verb)` (POST, PUT, PATCH, DELETE, any case); `bool FVaRestFakeTransport::bSendsBodyForAnyVerb = false`; private `struct VaRest::Http::FAttemptClass { EVaRestErrorKind Kind; bool bRetryable; bool IsError() const; }`, `EVaRestErrorKind VaRest::Http::KindFor(EVaRestTransportFailure, FName)`, `FAttemptClass VaRest::Http::ClassifyAttempt(const FVaRestAttemptOutcome&)`; `void FHttpTransportCompletion::AddHeader(const FString&, const FString&)`, `FVaRestHeaders FHttpTransportCompletion::TakeHeaders()`. Failure details recognised from now on (plan decision 12): `AuthRejected`, `NoCredentials`, `SessionCleared` (→ `Auth`); `HttpDisabled`, `DomainNotAllowed`, `BodyNotSent` (→ `Config`); `Deadline` (→ `Timeout`, not retryable).
+- Produces: `FString FVaRestAttemptOutcome::FailureMessage` (a stage's human-readable reason; the error's `Message` when set); `virtual bool IVaRestTransport::SendsBodyFor(FStringView Verb) const` (default true); `VARESTHTTP_API bool VaRest::Http::IsBodyVerb(FStringView Verb)` (POST, PUT, PATCH, DELETE, any case); `bool FVaRestFakeTransport::bSendsBodyForAnyVerb = false`; private `struct VaRest::Http::FAttemptClass { EVaRestErrorKind Kind; bool bRetryable; bool IsError() const; }`, `EVaRestErrorKind VaRest::Http::KindFor(EVaRestTransportFailure, FName)`, `FAttemptClass VaRest::Http::ClassifyAttempt(const FVaRestAttemptOutcome&)`; `void FHttpTransportCompletion::AddHeader(const FString&, const FString&)`, `FVaRestHeaders FHttpTransportCompletion::TakeHeaders()`. Failure details recognised from now on (plan decision 12): `AuthRejected`, `NoCredentials`, `SessionCleared` (→ `Auth`); `HttpDisabled`, `DomainNotAllowed`, `AuthInvalid`, `AuthRefreshConfig` (→ `Config`; `AuthInvalid` is produced by Task 14's `AuthApply`, ruling Q7, and `AuthRefreshConfig` by Task 17's gate for a refresh that failed `Kind=Config`, ruling I-7); `Deadline` (→ `Timeout`, not retryable); `AuthRefreshFailed` keeps its transport failure's kind (`Connection` or `Timeout`, retryable). No `BodyNotSent`: the body-on-verb refusal is a `Resolve` error, not an attempt outcome (spec review M-7).
 
 - [ ] **Step 1: Write the failing tests** — create `Source/VaRestHttp/Private/Tests/VaRestHttpFidelityTest.cpp`:
 
@@ -568,10 +585,12 @@ Three things the engine does that M3 documented but did not act on (final review
 
 #if WITH_DEV_AUTOMATION_TESTS
 
+#include "HttpManager.h"
 #include "HttpModule.h"
 #include "Misc/AutomationTest.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/ScopeExit.h"
+#include "Misc/URLRequestFilter.h"
 #include "VaRestClassify.h"
 #include "VaRestClient.h"
 #include "VaRestHttpTesting.h"
@@ -629,7 +648,12 @@ bool FVaRestHttpFidelityClassifyTest::RunTest(const FString& Parameters)
 		{ Failed(EVaRestTransportFailure::Other, TEXT("InvalidHeader")), TEXT("Config") },
 		{ Failed(EVaRestTransportFailure::Other, TEXT("HttpDisabled")), TEXT("Config") },
 		{ Failed(EVaRestTransportFailure::Other, TEXT("DomainNotAllowed")), TEXT("Config") },
-		{ Failed(EVaRestTransportFailure::Other, TEXT("BodyNotSent")), TEXT("Config") },
+		// Ruling Q7: a built-in auth whose configuration cannot work is the request's fault, like an invalid header
+		{ Failed(EVaRestTransportFailure::Other, TEXT("AuthInvalid")), TEXT("Config") },
+		// Ruling I-7: a parked request fails as its refresh did -- Config is not retried, a network failure is
+		{ Failed(EVaRestTransportFailure::Other, TEXT("AuthRefreshConfig")), TEXT("Config") },
+		{ Failed(EVaRestTransportFailure::Connection, TEXT("AuthRefreshFailed")), TEXT("Connection+retry") },
+		{ Failed(EVaRestTransportFailure::Timeout, TEXT("AuthRefreshFailed")), TEXT("Timeout+retry") },
 		{ Failed(EVaRestTransportFailure::Other, TEXT("ResponseTooLarge")), TEXT("Decode") },
 		{ LargeError, TEXT("Http+retry") },
 		{ Failed(EVaRestTransportFailure::Other, TEXT("AuthRejected")), TEXT("Auth") },
@@ -712,28 +736,49 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpFidelityPreCheckTest, "VaRest.Http.F
 bool FVaRestHttpFidelityPreCheckTest::RunTest(const FString& Parameters)
 {
 	using namespace VaRest::Http::Testing;
-	// Plan decision 15 (final review M9): with [HTTP] bEnableHttp false the engine's PreCheck refuses the request
-	// (HttpRequestCommon.cpp:83-87) and reports EHttpFailureReason::Other, which VaRest read as a retryable Connection
-	// error. UpdateConfigs re-reads the switch (HttpModule.cpp:58-68); the real transport, no server needed.
-	bool bWasEnabled = true;
-	GConfig->GetBool(TEXT("HTTP"), TEXT("bEnableHttp"), bWasEnabled, GEngineIni);
-	GConfig->SetBool(TEXT("HTTP"), TEXT("bEnableHttp"), false, GEngineIni);
-	FHttpModule::Get().UpdateConfigs();
-	ON_SCOPE_EXIT
-	{
-		GConfig->SetBool(TEXT("HTTP"), TEXT("bEnableHttp"), bWasEnabled, GEngineIni);
-		FHttpModule::Get().UpdateConfigs();
-	};
 	FVaRestClient Client = FVaRestClient::Make(TEXT("http://127.0.0.1:1"));
 	Client.WithLogLevel(EVaRestLogLevel::None);
-	auto Outcome = MakeOutcome<FVaRestJson>();
-	Observe(Client.Get(TEXT("/x")), Outcome).Send();
-	if (!TestTrue(TEXT("completes"), PumpUntil([Outcome] { return Outcome->IsDone(); }, 10.0, true)))
 	{
-		return false;
+		// Plan decision 15 (final review M9): with [HTTP] bEnableHttp false the engine's PreCheck refuses the request
+		// (HttpRequestCommon.cpp:83-87) and reports EHttpFailureReason::Other, which VaRest read as a retryable Connection
+		// error. UpdateConfigs re-reads the switch (HttpModule.cpp:58-68); the real transport, no server needed.
+		bool bWasEnabled = true;
+		GConfig->GetBool(TEXT("HTTP"), TEXT("bEnableHttp"), bWasEnabled, GEngineIni);
+		GConfig->SetBool(TEXT("HTTP"), TEXT("bEnableHttp"), false, GEngineIni);
+		FHttpModule::Get().UpdateConfigs();
+		// At the end of this block: the domain check below needs HTTP on
+		ON_SCOPE_EXIT
+		{
+			GConfig->SetBool(TEXT("HTTP"), TEXT("bEnableHttp"), bWasEnabled, GEngineIni);
+			FHttpModule::Get().UpdateConfigs();
+		};
+		auto Outcome = MakeOutcome<FVaRestJson>();
+		Observe(Client.Get(TEXT("/x")), Outcome).Send();
+		if (!TestTrue(TEXT("completes"), PumpUntil([Outcome] { return Outcome->IsDone(); }, 10.0, true)))
+		{
+			return false;
+		}
+		TestTrue(TEXT("HTTP disabled: Kind Config, not retryable"), Outcome->Error.Kind == EVaRestErrorKind::Config && !Outcome->Error.bRetryable);
+		TestTrue(TEXT("... naming why"), Outcome->Error.Message.Contains(TEXT("HttpDisabled")));
 	}
-	TestTrue(TEXT("HTTP disabled: Kind Config, not retryable"), Outcome->Error.Kind == EVaRestErrorKind::Config && !Outcome->Error.bRetryable);
-	TestTrue(TEXT("... naming why"), Outcome->Error.Message.Contains(TEXT("HttpDisabled")));
+	{
+		// Spec review M-8: the domain filter IsDomainAllowed reads is the HTTP manager's own, loaded from
+		// [Online.HttpManager http] / [Online.HttpManager https] AllowedDomains (HttpManager.cpp:324-326,
+		// URLRequestFilter.h:36-46), not [HTTP]. The test sets one in code (HttpManager.h:314); UpdateConfigs on the manager
+		// re-reads the project's own after. The engine refuses at PreCheck as Other too (HttpRequestCommon.cpp:109-113).
+		UE::Core::FURLRequestFilter::FRequestMap Allowed;
+		Allowed.Add(TEXT("http"), TArray<FString>{ TEXT("example.invalid") });
+		FHttpModule::Get().GetHttpManager().SetURLRequestFilter(UE::Core::FURLRequestFilter(MoveTemp(Allowed)));
+		ON_SCOPE_EXIT { FHttpModule::Get().GetHttpManager().UpdateConfigs(); };
+		auto Outcome = MakeOutcome<FVaRestJson>();
+		Observe(Client.Get(TEXT("/y")), Outcome).Send();
+		if (!TestTrue(TEXT("completes"), PumpUntil([Outcome] { return Outcome->IsDone(); }, 10.0, true)))
+		{
+			return false;
+		}
+		TestTrue(TEXT("a domain the filter does not allow: Kind Config, not retryable"), Outcome->Error.Kind == EVaRestErrorKind::Config && !Outcome->Error.bRetryable);
+		TestTrue(TEXT("... naming why"), Outcome->Error.Message.Contains(TEXT("DomainNotAllowed")));
+	}
 	return true;
 }
 
@@ -877,9 +922,10 @@ namespace VaRest::Http::ClassifyPrivate
 EVaRestErrorKind VaRest::Http::KindFor(EVaRestTransportFailure Failure, FName Detail)
 {
 	using namespace ClassifyPrivate;
-	// The request itself (M3 reviews M14, N-4, task 7 M-1, I3; plan decisions 13 and 15): sending it again fails again
+	// The request itself (M3 reviews M14, N-4, task 7 M-1, I3; plan decision 15; ruling Q7's misconfigured built-in auth;
+	// ruling I-7's refresh refused by the configuration): sending it again fails again
 	if (IsOneOf(Detail, { TEXT("BodyRejected"), TEXT("InvalidHeader"), TEXT("UploadReadFailed"), TEXT("BodyFileMissing"),
-		TEXT("HttpDisabled"), TEXT("DomainNotAllowed"), TEXT("BodyNotSent") }))
+		TEXT("HttpDisabled"), TEXT("DomainNotAllowed"), TEXT("AuthInvalid"), TEXT("AuthRefreshConfig") }))
 	{
 		return EVaRestErrorKind::Config;
 	}
@@ -888,7 +934,7 @@ EVaRestErrorKind VaRest::Http::KindFor(EVaRestTransportFailure Failure, FName De
 	{
 		return EVaRestErrorKind::Decode;
 	}
-	// The auth stages' own failures (Tasks 12-13): a rejected refresh, no credentials, a logout while parked
+	// The auth stages' own failures (Tasks 14-17): a rejected refresh, no credentials, a logout while parked
 	if (IsOneOf(Detail, { TEXT("AuthRejected"), TEXT("NoCredentials"), TEXT("SessionCleared") }))
 	{
 		return EVaRestErrorKind::Auth;
@@ -1064,7 +1110,7 @@ In `Source/VaRestHttp/Private/VaRestHttpTransport.cpp`, `FHttpModuleTransport::S
 
 ```cpp
 	static const FName TooLarge(TEXT("ResponseTooLarge"));
-	// Plan decision 12: one classification for this error and for the retry stage (Task 7)
+	// Plan decision 12: one classification for this error and for the retry stage (Task 8)
 	const FAttemptClass Class = ClassifyAttempt(Outcome);
 	if (Outcome.IsTransportFailure() && Outcome.FailureDetail == TooLarge && Class.Kind == EVaRestErrorKind::Http)
 	{
@@ -1132,13 +1178,36 @@ In `Source/VaRestHttp/Public/VaRestHttpTypes.h`, the `FVaRestHeaders` paragraph 
 ```
 
 and `FVaRestResponse::Headers`'s comment becomes `/** One entry per response header line (see FVaRestHeaders; Apple folds repeats) */`.
+`FVaRestError::bRetryable`'s comment (spec review M-9: after this task a dropped completion and a past-deadline timeout are not
+retryable; the field name is frozen, its meaning is only stated) becomes:
+
+```cpp
+	/**
+	 * Spec 4.1's rule, as ClassifyAttempt reports it (plan decision 12): a connection error, a timeout, or status
+	 * 408/425/429/500/502/503/504 -- except a completion the transport dropped (TransportDropped) and a request past its
+	 * retry Deadline, which would only fail again
+	 */
+```
+
+In `docs/dev/http-thread-completion.md`, after the **Android** line, add (concurrency review M-15):
+
+```markdown
+**Every platform**
+
+1. **A URL with `://` twice warns twice, unredacted.** In non-Shipping builds `FHttpManager::IsDomainAllowed` runs
+   `CheckNoDuplicatedProtocol` (`HttpManager.cpp:279-297`), which logs the whole URL as a `LogHttp` Warning when `://`
+   appears twice (an absolute URL in a query parameter, `:286`). VaRest's PreCheck mirror calls `IsDomainAllowed` before
+   the engine's own `PreCheck` does (`HttpRequestCommon.cpp:109`), so such a request logs that Warning twice, with the raw
+   URL -- an ApiKey in the query included. It is the engine's line: the redactor never sees it. A test that sends such a
+   URL and counts expected messages counts 2.
+```
 
 - [ ] **Step 8: Run the tests**
 
 Run: `Tools/run_tests.sh VaRest.Http.Fidelity` then `Tools/run_tests.sh --no-build VaRest.Integration.Http.RepeatedHeaders`
 Expected: `0 failed` both.
 
-- [ ] **Step 9: Restore-the-bug** — (a) delete the `IsHttpEnabled` check in `Start`: `VaRest.Http.Fidelity.PreCheckRefusal` FAILS (the engine's refusal arrives as a retryable `Connection`); restore, PASS. (b) Make `FVaRestFakeTransport::SendsBodyFor` return true: `VaRest.Http.Fidelity.BodyOnVerbNotSent` FAILS; restore, PASS. (c) Revert step 5.3 (always `FromLines`): `VaRest.Integration.Http.RepeatedHeaders` FAILS (one joined value); restore, PASS. Record all three.
+- [ ] **Step 9: Restore-the-bug** — (a) delete the `IsHttpEnabled` check in `Start`: `VaRest.Http.Fidelity.PreCheckRefusal` FAILS (the engine's refusal arrives as a retryable `Connection`); restore, PASS. Delete the `IsDomainAllowed` check instead: the same test FAILS on "a domain the filter does not allow" (spec review M-8); restore, PASS. (b) Make `FVaRestFakeTransport::SendsBodyFor` return true: `VaRest.Http.Fidelity.BodyOnVerbNotSent` FAILS; restore, PASS. (c) Revert step 5.3 (always `FromLines`): `VaRest.Integration.Http.RepeatedHeaders` FAILS (one joined value); restore, PASS. Record all three.
 
 - [ ] **Step 10: Full suite, commit**
 
@@ -1149,7 +1218,8 @@ Expected: `0 failed`.
 git add Source/VaRestHttp/Private/VaRestClassify.h Source/VaRestHttp/Private/VaRestClassify.cpp Source/VaRestHttp/Public/VaRestStage.h \
   Source/VaRestHttp/Public/VaRestTransport.h Source/VaRestHttp/Public/VaRestFakeTransport.h Source/VaRestHttp/Private/VaRestHttpTransportInternal.h \
   Source/VaRestHttp/Private/VaRestHttpTransport.cpp Source/VaRestHttp/Private/VaRestPipeline.cpp Source/VaRestHttp/Public/VaRestClient.h \
-  Source/VaRestHttp/Public/VaRestHttpTypes.h Source/VaRestHttp/Private/Tests/VaRestHttpFidelityTest.cpp Source/VaRestTests/Private/VaRestIntegrationTest.cpp
+  Source/VaRestHttp/Public/VaRestHttpTypes.h Source/VaRestHttp/Private/Tests/VaRestHttpFidelityTest.cpp Source/VaRestTests/Private/VaRestIntegrationTest.cpp \
+  docs/dev/http-thread-completion.md
 git commit -m "http: M4 task 2 -- engine-transport fidelity: bodies the transport would not send, repeated headers, PreCheck refusals, one classification
 
 Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
@@ -1158,13 +1228,14 @@ Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 ---
 ### Task 3: The redaction pipe by shape, and the current redactor (carries (a), (b))
 
-Plan decisions 16 and 17. IN-14's decode-task excerpts (Task 16) launch on the redaction pipe from worker threads, which `GetRedactionPipe()`'s game-thread `check` forbids; and an auth refresh (Task 13) sets a new token while requests are in flight, which the `Send()`-time redactor of those requests does not know.
+Plan decisions 16 and 17. `GetRedactionPipe()` hands the pipe out, so a caller can hold it across `StopRedactionPipe`'s delete (M3 review M-10), and its game-thread `check` rules out any caller off the game thread. M4a's own launches stay on the game thread — Task 21 redacts a decode-task excerpt inline on that task and launches the pipe only from the game thread (`Excerpts::FJob::Launch`) — so the any-thread contract is the shape, held by its own test (concurrency review M-14). And an auth refresh (Task 16) sets a new token while requests are in flight, which the `Send()`-time redactor of those requests does not know.
 
 **Files:**
 - Modify: `Source/VaRestHttp/Private/VaRestRedactionPipe.h`, `Source/VaRestHttp/Private/VaRestRedactor.cpp` (`LaunchRedaction`, `WaitForRedactionPipe`)
 - Modify: `Source/VaRestHttp/Private/VaRestLogStage.cpp`, `Source/VaRestHttp/Private/VaRestHttpTesting.cpp` (callers)
 - Modify: `Source/VaRestHttp/Private/VaRestClientState.h` (`GetRedactor()`), `Source/VaRestHttp/Private/VaRestPipeline.cpp`, `Source/VaRestHttp/Private/VaRestTracePoints.cpp` (current redactor)
-- Test: `Source/VaRestHttp/Private/Tests/VaRestHttpRedactorTest.cpp`, `Source/VaRestHttp/Private/Tests/VaRestHttpLogTest.cpp`
+- Modify: `Source/VaRestHttp/Public/VaRestRedactor.h` (a comment names `LaunchRedaction`)
+- Test: `Source/VaRestHttp/Private/Tests/VaRestHttpRedactorTest.cpp` (new test; the M3 `GetRedactionPipe()` call at :396-399), `Source/VaRestHttp/Private/Tests/VaRestHttpLogTest.cpp`
 
 **Interfaces:**
 - Consumes: Task 1 (`EscapeControlsForLog`).
@@ -1384,6 +1455,10 @@ bool VaRest::Http::WaitForRedactionPipe()
 ```
 
 In `Source/VaRestHttp/Private/VaRestHttpTesting.cpp`, `FlushRedactionPipe`'s body becomes `VaRest::Http::WaitForRedactionPipe();`.
+In `Source/VaRestHttp/Private/Tests/VaRestHttpRedactorTest.cpp`, the M3 lines 396-399 (`if (UE::Tasks::FPipe* Pipe =
+VaRest::Http::GetRedactionPipe()) { Pipe->WaitUntilEmpty(); }`, before `const uint64 Before = ...RedactorCalls;`) become
+`VaRest::Http::WaitForRedactionPipe();` (spec review M-1: the only caller outside the files above). In
+`Source/VaRestHttp/Public/VaRestRedactor.h:63`, "(VaRest::Http::GetRedactionPipe)" becomes "(VaRest::Http::LaunchRedaction)".
 
 - [ ] **Step 4: The log stage's launches** — in `Source/VaRestHttp/Private/VaRestLogStage.cpp`:
 
@@ -1460,7 +1535,8 @@ Expected: `0 failed`.
 ```bash
 git add Source/VaRestHttp/Private/VaRestRedactionPipe.h Source/VaRestHttp/Private/VaRestRedactor.cpp Source/VaRestHttp/Private/VaRestLogStage.cpp \
   Source/VaRestHttp/Private/VaRestHttpTesting.cpp Source/VaRestHttp/Private/VaRestClientState.h Source/VaRestHttp/Private/VaRestPipeline.cpp \
-  Source/VaRestHttp/Private/VaRestTracePoints.cpp Source/VaRestHttp/Private/Tests/VaRestHttpRedactorTest.cpp Source/VaRestHttp/Private/Tests/VaRestHttpLogTest.cpp
+  Source/VaRestHttp/Private/VaRestTracePoints.cpp Source/VaRestHttp/Private/Tests/VaRestHttpRedactorTest.cpp Source/VaRestHttp/Private/Tests/VaRestHttpLogTest.cpp \
+  Source/VaRestHttp/Public/VaRestRedactor.h
 git commit -m "http: M4 task 3 -- redaction launches from any thread by shape; logs, traces and errors use the current redactor
 
 Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
@@ -1468,7 +1544,269 @@ Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 
 ---
 
-### Task 4: The M4 trace payloads — `Note`, `Excerpt`, `Marker`; the excerpt switch; a recording sink for tests (Inspector IN-4, IN-6, IN-9; WebSocket §19 item 4)
+### Task 4: The limiter opens the attempt (ruling I-3; spec §4 and §4.6 as amended)
+
+Ruling I-3 (concurrency review): with the limiter next to the transport, a request queued behind sixteen others went out with the credentials `AuthApply` (Task 14) wrote when it joined the queue, so a refresh while it waited cost one 401 per queued request and a logout did not stop them. The limiter moves to the front of the attempt — custom `Outer` → attempt boundary → **limiter** → custom `PerAttempt` → log → transport (M4a then adds `Retry` and `AuthGate` before the boundary and `AuthApply` right after the limiter) — so credentials, signatures and the request's log lines are written when the request leaves the queue. Every attempt still passes the limiter, so queued retries wait their turn (spec §4.6's reason). Spec §4's diagram and §4.6's sentence are amended in the plan revision's commit.
+
+What moves with the order, and the M3 test each one touches:
+
+| Behaviour | M3 test | In this task |
+| --- | --- | --- |
+| The request line `> VERB url (attempt N)`, its headers and its body are logged when the request leaves the queue, not when it joins it | none (no M3 test logs a queued request above Basic) | `VaRest.Http.Limiter.FirstInTheAttempt` (new) pins it |
+| The Basic line's milliseconds: the log stage's `StartedAt` is now after the grant, so `LogOutcome` must stop subtracting `LimiterWait` (else a queued request reads `0 ms`) | `VaRest.Http.Log.QueueWait` ("500 ms, 2000 ms queued") | text unchanged; Step 4 keeps it true |
+| An attempt that ends in the queue (`Cancel()`, `CancelAll`, engine exit; Task 9's deadline) never reaches the log stage | `VaRest.Http.Log.QueueWait` ("canceled (0 ms, 1500 ms queued)") | text unchanged; `LogEndedInQueue` (Step 4) writes the line |
+| A custom `PerAttempt` stage runs after the grant: a queued request has not passed it | `VaRest.Http.Limiter.EveryExitFreesSlot`, `VaRest.Http.Limiter.WaitOnOwnClock` (both found a queued exchange through a `PerAttempt` probe) | the probe that finds exchanges becomes an `Outer` stage; the bad-header half stays `PerAttempt` (Step 1) |
+| `LimiterWait` (IN-2) | `VaRest.Http.Limiter.WaitOnOwnClock` (0 s and 3 s), `VaRestHttpTraceTest.cpp:204` (`LimiterWait == 0.0`) | unchanged: measured by the same stage on the same clock; IN-2's Prepare (dispatch − attempt start − Auth − Queued) now covers the `PerAttempt` stages and the log stage |
+| Trace order | every `VaRest.Http.Trace.*` and `TraceSurface.*` test | unchanged: no trace point is in the log or limiter stage (`AttemptDispatched` is the transport stage's, `AttemptEnded` is `OnAttemptDone`'s) |
+| A queued cancel: out of the queue at once, never dispatched | `VaRest.Http.Limiter.CancelQueued`, `OwnerGoneWhileQueued`, `ShutdownDrainsQueue` | unchanged: the same queue and the same abort |
+| A `PerAttempt` stage that answers its attempt while the transport call still runs gives the slot back with its answer (M3: when the call ended); the call it left runs on, uncounted, until the engine ends it | `VaRest.Http.Progress.NoTickAfterFinish`, the early-answer test in `VaRestHttpTraceTest.cpp:664-688` (one request each, no `WithMaxConcurrent`) | unchanged; documented on `WithMaxConcurrent` (Step 5) |
+| Stage order | `VaRest.Http.Pipeline.Stages` (`outer>0,sign>1,sign<200,outer<200`) | unchanged: the limiter records nothing and grants at once |
+| Concurrency at the server | `VaRest.Http.Limiter.MaxConcurrent`, `PriorityOrder`, `CapacityChange`, `DroppedCompletionFreesSlot`, `ReleaseInsideGrant`, `OutOfRangePriority`, `DoubleReleaseEnsuresEachTime`; `VaRestIntegrationTest.cpp:593-616` | unchanged: they count transport calls, which do not move |
+
+**Files:**
+- Modify: `Source/VaRestHttp/Private/VaRestClientState.cpp` (`Publish`'s chain), `Source/VaRestHttp/Private/VaRestClientState.h` (`LogEndedInQueue`)
+- Modify: `Source/VaRestHttp/Private/VaRestPipeline.cpp` (`FLimiterStage`'s abort), `Source/VaRestHttp/Private/VaRestLogStage.cpp` (`LogOutcome`'s milliseconds, `LogEndedInQueue`, a comment)
+- Modify: `Source/VaRestHttp/Public/VaRestClient.h` (`WithMaxConcurrent`, `Use` docs), `Source/VaRestHttp/Public/VaRestHttpTypes.h` (`EVaRestStageSlot` doc)
+- Test: `Source/VaRestHttp/Private/Tests/VaRestHttpLimiterTest.cpp` (the probe; `FirstInTheAttempt`)
+
+**Interfaces:**
+- Consumes: Task 3 (`LogOutcome(Ex, Level, StartedAt, Outcome)` reads the current redactor).
+- Produces: the chain custom `Outer` → boundary → limiter → custom `PerAttempt` → log → transport; private `void VaRest::Http::LogEndedInQueue(const FExchangeState& Ex, const FVaRestAttemptOutcome& Outcome)` (the Basic line of an attempt that ended in the queue; Task 9's deadline uses it too).
+
+- [ ] **Step 1: Write the failing test, move the probe** — in `Source/VaRestHttp/Private/Tests/VaRestHttpLimiterTest.cpp` (Task 1 added `HAL/IConsoleManager.h` for `TGuardConsoleVariable`) replace `FProbeStage` with:
+
+```cpp
+	/**
+	 * Records every exchange it sees, weakly, for the test to read or flag. As an Outer stage it sees a request before the
+	 * limiter (ruling I-3: the limiter opens the attempt), so a queued request is found too. As a PerAttempt stage it runs
+	 * after the grant and gives a request to .../bad a header value with CR LF, which the transport stage refuses (review I3).
+	 */
+	class FProbeStage final : public IVaRestStage
+	{
+	public:
+		explicit FProbeStage(EVaRestStageSlot InSlot)
+			: Slot(InSlot)
+		{
+		}
+
+		virtual FName GetStageName() const override { return Slot == EVaRestStageSlot::Outer ? TEXT("Probe") : TEXT("ProbeAttempt"); }
+		virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) override
+		{
+			if (Slot == EVaRestStageSlot::PerAttempt && Exchange->GetUrl().EndsWith(TEXT("/bad")))
+			{
+				Exchange->GetAttemptHeaders().Set(TEXT("X-Limiter-Bad"), TEXT("a\r\nb"));
+			}
+			Seen.Add(Exchange);
+			Next.Proceed(Exchange, MoveTemp(OnOutcome));
+		}
+
+		/** The exchange whose URL ends in Path, while it lives */
+		TSharedPtr<FVaRestExchange, ESPMode::ThreadSafe> Find(const TCHAR* Path) const
+		{
+			for (const TWeakPtr<FVaRestExchange, ESPMode::ThreadSafe>& Weak : Seen)
+			{
+				const TSharedPtr<FVaRestExchange, ESPMode::ThreadSafe> Pinned = Weak.Pin();
+				if (Pinned.IsValid() && Pinned->GetUrl().EndsWith(Path))
+				{
+					return Pinned;
+				}
+			}
+			return nullptr;
+		}
+
+		TArray<TWeakPtr<FVaRestExchange, ESPMode::ThreadSafe>> Seen;
+		const EVaRestStageSlot Slot;
+	};
+```
+
+In `VaRest.Http.Limiter.EveryExitFreesSlot` the two lines
+
+```cpp
+	TSharedRef<FProbeStage, ESPMode::ThreadSafe> Probe = MakeShared<FProbeStage, ESPMode::ThreadSafe>();
+	Rig.Client.Use(Probe, EVaRestStageSlot::PerAttempt);
+```
+
+become
+
+```cpp
+	// Ruling I-3: the probe that finds a queued exchange is an Outer stage; the one that sets the bad header runs after the grant
+	TSharedRef<FProbeStage, ESPMode::ThreadSafe> Probe = MakeShared<FProbeStage, ESPMode::ThreadSafe>(EVaRestStageSlot::Outer);
+	Rig.Client.Use(Probe, EVaRestStageSlot::Outer);
+	Rig.Client.Use(MakeShared<FProbeStage, ESPMode::ThreadSafe>(EVaRestStageSlot::PerAttempt), EVaRestStageSlot::PerAttempt);
+```
+
+and in `VaRest.Http.Limiter.WaitOnOwnClock` they become
+
+```cpp
+	// Ruling I-3: an Outer stage, so it holds B while B waits in the queue
+	TSharedRef<FProbeStage, ESPMode::ThreadSafe> Probe = MakeShared<FProbeStage, ESPMode::ThreadSafe>(EVaRestStageSlot::Outer);
+	Rig.Client.Use(Probe, EVaRestStageSlot::Outer);
+```
+
+Append (before the closing `#endif`):
+
+```cpp
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpLimiterFirstTest, "VaRest.Http.Limiter.FirstInTheAttempt",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpLimiterFirstTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::LimiterTestPrivate;
+	// Ruling I-3 (spec 4 and 4.6 as amended): the limiter opens every attempt, so what comes after it -- a PerAttempt stage
+	// (a signer; M4a's AuthApply) and the log stage -- meets a queued request only when it leaves the queue
+	TGuardConsoleVariable<int32> Level(TEXT("VaRest.LogLevel"), -1);
+	FTestRig Rig;
+	Rig.Client.WithMaxConcurrent(1).WithLogLevel(EVaRestLogLevel::Headers);
+	const TSharedRef<FProbeStage, ESPMode::ThreadSafe> Signer = MakeShared<FProbeStage, ESPMode::ThreadSafe>(EVaRestStageSlot::PerAttempt);
+	Rig.Client.Use(Signer, EVaRestStageSlot::PerAttempt);
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest&) { return FVaRestFakeResponse::Manual(); });
+	const VaRest::Http::FLimiter& Slots = VaRest::Http::FClientAccess::State(Rig.Client)->GetLimiter();
+	FLogCapture Capture;
+	auto First = MakeOutcome<FVaRestJson>();
+	auto Second = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/first")), First).Send();
+	const FVaRestRequestHandle SecondHandle = Observe(Rig.Client.Get(TEXT("/second")), Second).Send();
+	if (!TestTrue(TEXT("the first holds the slot, the second queues"), PumpUntil([&Rig, &Slots] { return Rig.Fake->NumCalls() == 1 && Slots.NumQueued() == 1; })))
+	{
+		Rig.Client.CancelAll();
+		PumpUntil([&Rig] { return Rig.Client.GetInFlightCount() == 0; });
+		return false;
+	}
+	const FString SecondLine = FString::Printf(TEXT("#%llu > GET https://api.test/second (attempt 1)"), SecondHandle.GetId());
+	TestFalse(TEXT("a PerAttempt stage has not met the queued request"), Signer->Find(TEXT("/second")).IsValid());
+	TestFalse(TEXT("... nor has the log stage written its request line"), Capture.Contains(SecondLine));
+	CompleteOldest(Rig);
+	TestTrue(TEXT("the second is granted"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 2; }));
+	TestTrue(TEXT("... and only now meets the PerAttempt stage"), Signer->Find(TEXT("/second")).IsValid());
+	TestTrue(TEXT("... and the log stage"), Capture.Contains(SecondLine));
+	CompleteOldest(Rig);
+	TestTrue(TEXT("both finish"), Rig.Wait(First) && Rig.Wait(Second));
+	return true;
+}
+```
+
+- [ ] **Step 2: Build to see it fail**
+
+Run: `Tools/run_tests.sh VaRest.Http.Limiter`
+Expected: `VaRest.Http.Limiter.FirstInTheAttempt` FAILS ("a PerAttempt stage has not met the queued request": M3's chain runs it before the limiter); every other `VaRest.Http.Limiter.*` test passes (the moved probe finds what it found before).
+
+- [ ] **Step 3: Move the stage** — in `Source/VaRestHttp/Private/VaRestClientState.cpp`, `Publish`: the comment at the top of the function becomes
+
+```cpp
+	// Spec 4's chain. Custom Outer stages first: they see every logical request once (decision 13); M4's built-in Outer
+	// stages (offline queue, cache, retry, the auth gate) go between them and the attempt boundary. The limiter opens each
+	// attempt (ruling I-3), so what follows it runs when the request leaves the queue; custom PerAttempt stages see the
+	// final headers; the log stage sits next to the transport.
+```
+
+and the stages after the boundary become:
+
+```cpp
+	NewChain->Add(MakeAttemptBoundaryStage());
+	// Ruling I-3 (spec 4.6 as amended): the first stage of every attempt. Credentials (Task 14), a custom PerAttempt stage's
+	// signature and the log lines are written when the request leaves the queue, so none of them goes stale while it
+	// waits; a queued retry still waits its turn.
+	NewChain->Add(MakeLimiterStage());
+	for (const TPair<FVaRestStageRef, EVaRestStageSlot>& Entry : Next->CustomStages)
+	{
+		if (Entry.Value == EVaRestStageSlot::PerAttempt)
+		{
+			NewChain->Add(Entry.Key);
+			bReissue |= Entry.Key->MayReissue();
+		}
+	}
+	NewChain->Add(MakeLogStage()); // after custom PerAttempt stages: it logs the final headers
+	NewChain->Add(MakeTransportStage());
+```
+
+Run: `Tools/run_tests.sh VaRest.Http.Limiter` then `Tools/run_tests.sh --no-build VaRest.Http.Log.QueueWait`
+Expected: `Limiter` `0 failed`; `Log.QueueWait` FAILS twice: "queued: its own 500 ms" (the line reads `0 ms`: the wait is subtracted from a time that no longer holds it) and "... its own 0 ms, the 1500 ms queued apart" (no line: the canceled one never reached the log stage). Step 4 fixes both.
+
+- [ ] **Step 4: The log lines** — in `Source/VaRestHttp/Private/VaRestLogStage.cpp`, `LogOutcome`: the first lines of its body after the redactor become
+
+```cpp
+		// Review M5: the attempt's own time. StartedAt is taken after the limiter's grant (ruling I-3: the limiter opens the
+		// attempt), so the wait in the queue (IN-2's LimiterWait, on this exchange's clock) is not in it; it is shown apart,
+		// only when it rounds to a millisecond or more
+		const double QueuedMs = Ex.LimiterWait * 1000.0;
+		const double Ms = FMath::Max(0.0, (Ex.Config->Clock->Now() - StartedAt) * 1000.0);
+```
+
+`FLogStage`'s doc becomes `/** Spec 4.5, per attempt: after the custom PerAttempt stages, right before the transport */`. After `LogConfigError` add:
+
+```cpp
+void VaRest::Http::LogEndedInQueue(const FExchangeState& Ex, const FVaRestAttemptOutcome& Outcome)
+{
+	// Ruling I-3: an attempt the limiter ends (a cancel, engine exit, the retry deadline) never reaches the log stage. Its
+	// Basic line is written as that stage would have: the attempt's own 0 ms, the wait apart. The same gate as FLogStage.
+	if (Ex.LogLevel == EVaRestLogLevel::None || !UE_LOG_ACTIVE(LogVaRestHttp, Warning))
+	{
+		return;
+	}
+	LogStagePrivate::LogOutcome(Ex, Ex.LogLevel, Ex.Config->Clock->Now(), Outcome);
+}
+```
+
+In `Source/VaRestHttp/Private/VaRestClientState.h`, after `LogConfigError`'s declaration:
+
+```cpp
+	/** The Basic line of an attempt that ended in the limiter's queue (ruling I-3: it never reaches the log stage) */
+	void LogEndedInQueue(const FExchangeState& Ex, const FVaRestAttemptOutcome& Outcome);
+```
+
+In `Source/VaRestHttp/Private/VaRestPipeline.cpp`, `FLimiterStage`'s doc becomes `/** Spec 4.6 as amended (ruling I-3): the first stage of every attempt, right after the attempt boundary */` and its abort closure becomes:
+
+```cpp
+				[Exchange, Outcome, EnqueuedAt]()
+				{
+					FExchangeState& Aborted = Internals(*Exchange);
+					Aborted.bInLimiterQueue = false;
+					// Task 14 re-review N2 (P14.2): the time spent queued is the queue's, as for a grant, so the log line
+					// shows "canceled (0 ms, N ms queued)" and not the wait as the attempt's own milliseconds
+					Aborted.LimiterWait = Aborted.Config->Clock->Now() - EnqueuedAt;
+					FVaRestAttemptOutcome Ended = FVaRestAttemptOutcome::Canceled();
+					// Ruling I-3: nothing after the limiter ran, the log stage included
+					LogEndedInQueue(Aborted, Ended);
+					(*Outcome)(MoveTemp(Ended));
+				});
+```
+
+- [ ] **Step 5: The docs** — in `Source/VaRestHttp/Public/VaRestClient.h`, `WithMaxConcurrent`'s list of waits gains, after the `Owner()` bullet:
+
+```cpp
+	 * - The queue opens each attempt (ruling I-3): credentials, a PerAttempt stage's signature and the request's log lines
+	 *   are written when it leaves the queue. A PerAttempt stage holds the slot while it works; one that answers its
+	 *   attempt itself while the transport call still runs gives the slot back with its answer, and the call it left runs
+	 *   on, uncounted, until the engine ends it.
+```
+
+`Use`'s comment becomes `/** A custom stage (spec 4): Outer sees each logical request once; PerAttempt every attempt, after the limiter's grant, with its final headers */`. In `Source/VaRestHttp/Public/VaRestHttpTypes.h`, `EVaRestStageSlot::PerAttempt`'s comment becomes `/** Sees every attempt and its final headers (request signing), when the attempt leaves the limiter's queue */`.
+
+- [ ] **Step 6: Run them**
+
+Run: `Tools/run_tests.sh VaRest.Http.Limiter` then `Tools/run_tests.sh --no-build VaRest.Http.Log` then `Tools/run_tests.sh --no-build VaRest.Http.Trace`
+Expected: `0 failed` each.
+
+- [ ] **Step 7: Restore-the-bug** — (a) in `Publish`, put `NewChain->Add(MakeLimiterStage());` back between the log stage and the transport stage: `VaRest.Http.Limiter.FirstInTheAttempt` FAILS ("a PerAttempt stage has not met the queued request", and the request line is written while it queues); restore; PASS. (b) Drop the `LogEndedInQueue` call in the abort closure: `VaRest.Http.Log.QueueWait` FAILS ("... its own 0 ms, the 1500 ms queued apart"); restore; PASS. (c) Subtract `QueuedMs` in `LogOutcome` again: `VaRest.Http.Log.QueueWait` FAILS ("queued: its own 500 ms, the 2000 ms queued apart" reads `0 ms`); restore; PASS. Record all three.
+
+- [ ] **Step 8: Full suite, commit**
+
+Run: `Tools/run_tests.sh VaRest`
+Expected: `0 failed`.
+
+```bash
+git add Source/VaRestHttp/Private/VaRestClientState.cpp Source/VaRestHttp/Private/VaRestClientState.h Source/VaRestHttp/Private/VaRestPipeline.cpp \
+  Source/VaRestHttp/Private/VaRestLogStage.cpp Source/VaRestHttp/Public/VaRestClient.h Source/VaRestHttp/Public/VaRestHttpTypes.h \
+  Source/VaRestHttp/Private/Tests/VaRestHttpLimiterTest.cpp
+git commit -m "http: M4 task 4 -- the limiter opens the attempt: credentials, signatures and log lines are written when a request leaves the queue (ruling I-3)
+
+Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
+```
+
+---
+
+### Task 5: The M4 trace payloads — `Note`, `Excerpt`, `Marker`; the excerpt switch; a recording sink for tests (Inspector IN-4, IN-6, IN-9; WebSocket §19 item 4)
 
 The payload types every later task emits. Nothing emits them yet except the test.
 
@@ -1533,9 +1871,12 @@ bool FVaRestHttpTraceM4PayloadsTest::RunTest(const FString& Parameters)
 		&& Markers[0].CauseRequestId == Handle.GetId());
 	TestTrue(TEXT("... its text scrubbed"), !Markers[0].Text.Contains(TEXT("marker-secret-12345")) && Markers[0].Text.Contains(TEXT("***")));
 
-	// IN-6: an excerpt may come from a background thread; it is recorded and counted as such
+	// IN-6: an excerpt may come from a background thread; it is recorded and counted as such. Waited for with a flag, not
+	// Wait(): Wait() retracts an unstarted task and runs it here (Task.h:65-80, TaskPrivate.cpp:246-251), and the excerpt
+	// would then come from the game thread (concurrency review M-11). PumpUntil runs game-thread tasks only.
 	const uint64 Id = Handle.GetId();
-	UE::Tasks::Launch(TEXT("VaRest.Test.Excerpt"), [Id]
+	TSharedRef<std::atomic<bool>, ESPMode::ThreadSafe> bEmitted = MakeShared<std::atomic<bool>, ESPMode::ThreadSafe>(false);
+	UE::Tasks::Launch(TEXT("VaRest.Test.Excerpt"), [Id, bEmitted]
 	{
 		FVaRestTraceExcerptEvent Payload;
 		Payload.Owner = EVaRestTraceExcerptOwner::Response;
@@ -1544,7 +1885,12 @@ bool FVaRestHttpTraceM4PayloadsTest::RunTest(const FString& Parameters)
 		Payload.Excerpt.Kind = EVaRestExcerptKind::Skipped;
 		Payload.Excerpt.SkipReason = EVaRestExcerptSkip::Backlog;
 		FVaRestTrace::Emit(EVaRestTraceKind::Excerpt, 0.0, FVaRestTracePayload(TInPlaceType<FVaRestTraceExcerptEvent>(), MoveTemp(Payload)));
-	}).Wait();
+		bEmitted->store(true);
+	});
+	if (!TestTrue(TEXT("the excerpt task ran"), PumpUntil([bEmitted] { return bEmitted->load(); })))
+	{
+		return false;
+	}
 	const TArray<FVaRestTraceExcerptEvent> Excerpts = Recorder.ExcerptsOf(Id);
 	TestTrue(TEXT("the excerpt arrives, keyed by request"), Excerpts.Num() == 1 && Excerpts[0].Excerpt.SkipReason == EVaRestExcerptSkip::Backlog);
 	TestTrue(TEXT("only excerpts came from another thread"), Recorder.OnlyExcerptsOffGameThread());
@@ -1700,7 +2046,7 @@ using FVaRestTracePayload = TVariant<FVaRestTraceStarted, FVaRestTraceAttemptDis
 	FVaRestTraceExcerptEvent, FVaRestTraceScope, FVaRestTraceClient, FVaRestTraceMarker>;
 ```
 
-`IVaRestTraceSink::OnEvent`'s comment gains a last sentence: `Switch on Event.Kind and ignore kinds you do not know: W5 adds the socket kinds and a later version may add more (WebSocket spec 19 item 4).`
+`IVaRestTraceSink::OnEvent`'s comment gains its last sentences (the first: plan decision 25; the rest: concurrency review M-12, for the off-thread `Excerpt` events Task 21 emits): `Switch on Event.Kind and ignore kinds you do not know: W5 adds the socket kinds and a later version may add more (WebSocket spec 19 item 4). An Excerpt event arrives on a worker, maybe after RemoveSink returned, and the worker's list may hold the sink's last reference, so the sink can be destroyed there. Never wait for the game thread in OnEvent: the game thread may itself be waiting for the redaction pipe that emits it (StopRedactionPipe at module shutdown).`
 
 In `Source/VaRestHttp/Private/VaRestTrace.cpp`, `PayloadMatchesKind` gains
 
@@ -1932,13 +2278,13 @@ Expected: `0 failed` both.
 git add Source/VaRestHttp/Public/VaRestTrace.h Source/VaRestHttp/Private/VaRestTrace.cpp Source/VaRestHttp/Private/VaRestTracePoints.h \
   Source/VaRestHttp/Private/VaRestTracePoints.cpp Source/VaRestHttp/Public/VaRestHttpTesting.h Source/VaRestHttp/Private/VaRestHttpTesting.cpp \
   Source/VaRestHttp/Private/Tests/VaRestHttpTraceM4Test.cpp
-git commit -m "http: M4 task 4 -- trace payloads Note, Excerpt and Marker (IN-4, IN-6, IN-9), the excerpt switch, a recording sink for tests
+git commit -m "http: M4 task 5 -- trace payloads Note, Excerpt and Marker (IN-4, IN-6, IN-9), the excerpt switch, a recording sink for tests
 
 Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 ```
 
 ---
-### Task 5: The backoff formula, the random stream, `Retry-After` (spec §4.1; WebSocket §19 item 1)
+### Task 6: The backoff formula, the random stream, `Retry-After` (spec §4.1; WebSocket §19 item 1)
 
 The public pieces a socket's reconnect policy shares with HTTP retry: one formula, a jitter that takes the caller's `FRandomStream` (plan decision 26), and the `Retry-After` parser. `IVaRestClock` with timers is M3's (M3 decision 1).
 
@@ -1992,8 +2338,10 @@ bool FVaRestHttpBackoffFormulaTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("a negative cap counts as 0"), Odd.GetCeiling(3), 0.0);
 	Odd = FVaRestBackoff();
 	Odd.BaseDelay = 0.f;
-	Odd.Multiplier = std::numeric_limits<float>::infinity();
-	TestEqual(TEXT("a zero base with an infinite multiplier is 0, not the cap"), Odd.GetCeiling(4), 0.0);
+	Odd.Multiplier = 1e30f;
+	// Spec review M-2: a finite multiplier whose power overflows -- 0 x 1e30^39 is 0 x inf = NaN, which the overflow guard
+	// would turn into the cap; only the zero-base early return keeps it 0
+	TestEqual(TEXT("a zero base with a huge multiplier is 0, not the cap"), Odd.GetCeiling(40), 0.0);
 	return true;
 }
 
@@ -2292,7 +2640,7 @@ FVaRestClient& FVaRestClient::WithRandomSeed(int32 Seed)
 Run: `Tools/run_tests.sh VaRest.Http.Backoff`
 Expected: `0 failed`.
 
-- [ ] **Step 7: Restore-the-bug** — drop `FMath::Min(..., Cap)` in `GetCeiling` (return `Grown`): `VaRest.Http.Backoff.Formula` FAILS at step 7; restore; PASS. Drop the `Base <= 0.0` early return: FAILS on "a zero base with an infinite multiplier"; restore; PASS.
+- [ ] **Step 7: Restore-the-bug** — drop `FMath::Min(..., Cap)` in `GetCeiling` (return `Grown`): `VaRest.Http.Backoff.Formula` FAILS at step 7; restore; PASS. Drop the `Base <= 0.0` early return: FAILS on "a zero base with a huge multiplier" (`0 × 1e30^39` is NaN, which `GetCeiling`'s overflow guard turns into the 30 s cap); restore; PASS.
 
 - [ ] **Step 8: Commit**
 
@@ -2300,23 +2648,23 @@ Expected: `0 failed`.
 git add Source/VaRestHttp/Public/VaRestBackoff.h Source/VaRestHttp/Private/VaRestBackoff.cpp Source/VaRestHttp/Private/VaRestClientState.h \
   Source/VaRestHttp/Private/VaRestClientState.cpp Source/VaRestHttp/Public/VaRestClient.h Source/VaRestHttp/Private/VaRestClient.cpp \
   Source/VaRestHttp/Private/Tests/VaRestHttpBackoffTest.cpp
-git commit -m "http: M4 task 5 -- the backoff formula with caller-supplied jitter, Retry-After, a seeded stream per client (WS 19 item 1)
+git commit -m "http: M4 task 6 -- the backoff formula with caller-supplied jitter, Retry-After, a seeded stream per client (WS 19 item 1)
 
 Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 ```
 
 ---
 
-### Task 6: The retry policy and the retry decision (spec §4.1)
+### Task 7: The retry policy and the retry decision (spec §4.1)
 
-The policy struct and a pure function that decides, for one outcome, whether to retry and after how long. Task 7 puts it in a stage.
+The policy struct and a pure function that decides, for one outcome, whether to retry and after how long. Task 8 puts it in a stage.
 
 **Files:**
 - Create: `Source/VaRestHttp/Public/VaRestRetry.h`, `Source/VaRestHttp/Private/VaRestRetryInternal.h`, `Source/VaRestHttp/Private/VaRestRetry.cpp`
 - Test: `Source/VaRestHttp/Private/Tests/VaRestHttpRetryTest.cpp`
 
 **Interfaces:**
-- Consumes: Task 2 (`ClassifyAttempt`), Task 5 (`FVaRestBackoff`, `ParseRetryAfter`).
+- Consumes: Task 2 (`ClassifyAttempt`), Task 6 (`FVaRestBackoff`, `ParseRetryAfter`).
 - Produces: `USTRUCT(BlueprintType) struct FVaRestRetryPolicy { int32 MaxRetries = 3; FVaRestBackoff Backoff; TArray<int32> RetryStatuses = {408, 425, 429, 500, 502, 503, 504}; bool bRetryConnectionErrors = true; bool bRetryTimeouts = true; bool bRespectRetryAfter = true; float MaxRetryAfter = 60.f; float Deadline = 0.f; static FVaRestRetryPolicy Disabled(); static FVaRestRetryPolicy Exponential(int32 InMaxRetries = 3); FVaRestRetryPolicy WithDeadline(float Seconds) const; FVaRestRetryPolicy WithBackoff(const FVaRestBackoff&) const; bool IsEnabled() const; }`; `VARESTHTTP_API bool VaRest::Http::IsIdempotentVerb(FStringView Verb)`; private `struct VaRest::Http::FRetryDecision { bool bRetry; double Delay; double RetryAfter; FName Reason; }`, `FRetryDecision VaRest::Http::DecideRetry(const FVaRestRetryPolicy& Policy, const FVaRestAttemptOutcome& Outcome, int32 RetriesDone, double Now, double DeadlineAt, const FDateTime& NowUtc, FRandomStream& Random)`.
 
 - [ ] **Step 1: Write the failing test** — create `Source/VaRestHttp/Private/Tests/VaRestHttpRetryTest.cpp`:
@@ -2326,6 +2674,7 @@ The policy struct and a pure function that decides, for one outcome, whether to 
 
 #if WITH_DEV_AUTOMATION_TESTS
 
+#include "HAL/IConsoleManager.h"
 #include "Misc/AutomationTest.h"
 #include "UObject/Package.h"
 #include "VaRestClient.h"
@@ -2403,7 +2752,10 @@ bool FVaRestHttpRetryDecideTest::RunTest(const FString& Parameters)
 	FVaRestRetryPolicy NoTimeout = Policy;
 	NoTimeout.bRetryTimeouts = false;
 	TestFalse(TEXT("... unless the policy says no"), Decide(NoTimeout, Failed(EVaRestTransportFailure::Timeout, TEXT("TimedOut"))).bRetry);
-	const TCHAR* Never[] = { TEXT("Cancelled"), TEXT("InvalidHeader"), TEXT("TransportDropped"), TEXT("AuthRejected"), TEXT("HttpDisabled"), TEXT("ResponseTooLarge") };
+	// Rulings Q7 and I-7: AuthInvalid (a misconfigured built-in auth, Task 14) and AuthRefreshConfig (a refresh the
+	// configuration refused, Task 17) are Kind=Config and never retried
+	const TCHAR* Never[] = { TEXT("Cancelled"), TEXT("InvalidHeader"), TEXT("TransportDropped"), TEXT("AuthRejected"), TEXT("HttpDisabled"), TEXT("ResponseTooLarge"),
+		TEXT("AuthInvalid"), TEXT("AuthRefreshConfig") };
 	for (const TCHAR* Detail : Never)
 	{
 		const EVaRestTransportFailure Failure = FCString::Strcmp(Detail, TEXT("Cancelled")) == 0 ? EVaRestTransportFailure::Canceled : EVaRestTransportFailure::Other;
@@ -2558,7 +2910,7 @@ namespace VaRest::Http
 	FRetryDecision DecideRetry(const FVaRestRetryPolicy& Policy, const FVaRestAttemptOutcome& Outcome, int32 RetriesDone, double Now, double DeadlineAt,
 		const FDateTime& NowUtc, FRandomStream& Random);
 
-	/** Spec 4's retry stage (Task 7): the first built-in Outer stage */
+	/** Spec 4's retry stage (Task 8): the first built-in Outer stage */
 	FVaRestStageRef MakeRetryStage();
 }
 ```
@@ -2674,7 +3026,7 @@ VaRest::Http::FRetryDecision VaRest::Http::DecideRetry(const FVaRestRetryPolicy&
 }
 ```
 
-(`MakeRetryStage` is declared now and defined in Task 7; nothing calls it yet, so the link is fine.)
+(`MakeRetryStage` is declared now and defined in Task 8; nothing calls it yet, so the link is fine.)
 
 - [ ] **Step 5: Run it**
 
@@ -2688,15 +3040,15 @@ Expected: `0 failed`.
 ```bash
 git add Source/VaRestHttp/Public/VaRestRetry.h Source/VaRestHttp/Private/VaRestRetryInternal.h Source/VaRestHttp/Private/VaRestRetry.cpp \
   Source/VaRestHttp/Private/Tests/VaRestHttpRetryTest.cpp
-git commit -m "http: M4 task 6 -- the retry policy and its decision: statuses, connection errors, timeouts, Retry-After, deadline (spec 4.1)
+git commit -m "http: M4 task 7 -- the retry policy and its decision: statuses, connection errors, timeouts, Retry-After, deadline (spec 4.1)
 
 Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 ```
 
 ---
-### Task 7: The retry stage — the built-in `Outer` stage, the interrupt hook, the builder and client API, the trace and the log (spec §4.1; IN-2, IN-4)
+### Task 8: The retry stage — the built-in `Outer` stage, the interrupt hook, the builder and client API, the trace and the log (spec §4.1; IN-2, IN-4)
 
-Plan decisions 1, 2, 7, 8. The stage re-issues an eligible request after the decided delay on the request's clock; the attempt boundary behind it makes each re-issue a new attempt. While it waits it holds the exchange through `FExchangeState::Interrupt`, which `FClientState::Cancel` calls, so `Cancel()`, `CancelAll`, owner-gone and shutdown all reach it. The re-issue goes through the limiter again, behind whoever waits there (spec §4.6; Task 8 tests that).
+Plan decisions 1, 2, 7, 8. The stage re-issues an eligible request after the decided delay on the request's clock; the attempt boundary behind it makes each re-issue a new attempt. While it waits it holds the exchange through `FExchangeState::Interrupt`, which `FClientState::Cancel` calls, so `Cancel()`, `CancelAll`, owner-gone and shutdown all reach it. The re-issue goes through the limiter again, behind whoever waits there (spec §4.6; Task 9 tests that).
 
 **Files:**
 - Modify: `Source/VaRestHttp/Private/VaRestExchangeState.h` (retry state, `Interrupt`, gap fields; `IsOwnerGone`/`MarkOwnerGone` move here)
@@ -2708,8 +3060,8 @@ Plan decisions 1, 2, 7, 8. The stage re-issues an eligible request after the dec
 - Test: `Source/VaRestHttp/Private/Tests/VaRestHttpRetryTest.cpp`
 
 **Interfaces:**
-- Consumes: Tasks 2, 4, 5, 6.
-- Produces: `TVaRestRequest<T>::Retry(const FVaRestRetryPolicy& InPolicy) &&`, `TVaRestRequest<T>::NoRetry() &&`; `FVaRestClient& FVaRestClient::WithRetry(const FVaRestRetryPolicy& Policy)`; `FClientConfig::Retry` (default `Disabled()`); on `FExchangeState`: `FVaRestRetryPolicy RetryPolicy`, `TOptional<FVaRestRetryPolicy> RetryOverride`, `bool bRetryEligible`, `bool bMayReissue`, `double DeadlineAt` (0 until Task 8), `int32 RetriesDone`, `TUniqueFunction<void()> Interrupt`, `EVaRestTraceGap NextGap`, `double NextGapSeconds`; `inline bool VaRest::Http::IsOwnerGone(const FExchangeState&)`, `inline void VaRest::Http::MarkOwnerGone(FExchangeState&)` (moved from `PipelinePrivate`). The chain is now: custom Outer → `Retry` → attempt boundary → custom PerAttempt → log → limiter → transport (Tasks 12-13 add the auth stages).
+- Consumes: Tasks 2, 5, 6, 7.
+- Produces: `TVaRestRequest<T>::Retry(const FVaRestRetryPolicy& InPolicy) &&`, `TVaRestRequest<T>::NoRetry() &&`; `FVaRestClient& FVaRestClient::WithRetry(const FVaRestRetryPolicy& Policy)`; `FClientConfig::Retry` (default `Disabled()`); on `FExchangeState`: `FVaRestRetryPolicy RetryPolicy`, `TOptional<FVaRestRetryPolicy> RetryOverride`, `bool bRetryEligible`, `bool bMayReissue`, `double DeadlineAt` (0 until Task 9), `int32 RetriesDone`, `TUniqueFunction<bool()> Interrupt` (true = it answered; concurrency review M-4), `EVaRestTraceGap NextGap`, `double NextGapSeconds`, `double LastAttemptEndedAt` (spec review M-10); `inline bool VaRest::Http::IsOwnerGone(const FExchangeState&)`, `inline void VaRest::Http::MarkOwnerGone(FExchangeState&)` (moved from `PipelinePrivate`). `Complete` runs a waiting stage's interrupt too (concurrency review M-3). The chain is now: custom Outer → `Retry` → attempt boundary → limiter → custom PerAttempt → log → transport (Tasks 14-17 add the auth stages).
 
 - [ ] **Step 1: Write the failing tests** — append to `Source/VaRestHttp/Private/Tests/VaRestHttpRetryTest.cpp` (before `#endif`); add to its `RetryTestPrivate` namespace:
 
@@ -2730,6 +3082,72 @@ Plan decisions 1, 2, 7, 8. The stage re-issues an eligible request after the dec
 		Rig.Client.CancelAll();
 		VaRest::Http::Testing::PumpUntil([&Rig] { return Rig.Client.GetInFlightCount() == 0; });
 	}
+
+	/** Virtual time whose timers fire Lateness seconds after they are due: a real-clock ticker a frame late (spec review M-10) */
+	class FLateClock final : public IVaRestClock
+	{
+	public:
+		FLateClock(TSharedRef<FVaRestVirtualClock, ESPMode::ThreadSafe> InTime, double InLateness)
+			: Time(MoveTemp(InTime))
+			, Lateness(InLateness)
+		{
+		}
+
+		virtual double Now() const override { return Time->Now(); }
+		virtual FVaRestTimerHandle SetTimer(double DelaySeconds, TUniqueFunction<void()>&& Callback) override
+		{
+			return Time->SetTimer(DelaySeconds + Lateness, MoveTemp(Callback));
+		}
+		virtual void ClearTimer(FVaRestTimerHandle& Handle) override { Time->ClearTimer(Handle); }
+
+	private:
+		TSharedRef<FVaRestVirtualClock, ESPMode::ThreadSafe> Time;
+		double Lateness = 0.0;
+	};
+
+	/**
+	 * An Outer stage (so in front of Retry) that keeps its request's answer: it proceeds or not, and AnswerNow() answers
+	 * the request itself while what is behind it may still wait -- a user's own timeout stage (concurrency review M-3, M-4).
+	 * The exchange is kept weakly; Held captures it, so a test that never calls AnswerNow() resets Held at its end.
+	 */
+	class FHoldingOuter final : public IVaRestStage
+	{
+	public:
+		explicit FHoldingOuter(bool bInProceed)
+			: bProceed(bInProceed)
+		{
+		}
+
+		virtual FName GetStageName() const override { return TEXT("HoldingOuter"); }
+		virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) override
+		{
+			Held = MoveTemp(OnOutcome);
+			Kept = Exchange;
+			if (bProceed)
+			{
+				Next.Proceed(Exchange, [Late = LateAnswers](FVaRestAttemptOutcome&&) { ++*Late; });
+			}
+		}
+
+		void AnswerNow(int32 Status)
+		{
+			if (!Held)
+			{
+				return;
+			}
+			FVaRestAttemptOutcome Early;
+			Early.Status = Status;
+			FVaRestOutcomeCallback Answer = MoveTemp(Held);
+			Held.Reset();
+			Answer(MoveTemp(Early));
+		}
+
+		const bool bProceed;
+		FVaRestOutcomeCallback Held;
+		TWeakPtr<FVaRestExchange, ESPMode::ThreadSafe> Kept;
+		/** What reached this stage from behind it after it had answered */
+		TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> LateAnswers = MakeShared<std::atomic<int32>, ESPMode::ThreadSafe>(0);
+	};
 ```
 
 and the tests:
@@ -2995,6 +3413,11 @@ bool FVaRestHttpRetryNotRetriedTest::RunTest(const FString& Parameters)
 		{
 			return FVaRestFakeResponse::Manual();
 		}
+		if (Request.Url.EndsWith(TEXT("/opted")))
+		{
+			// Spec review M-4 (I-4): a status the policy retries, so NoRetry() is what stops it
+			return Json(503);
+		}
 		return Json(404);
 	});
 	auto Missing = MakeOutcome<FVaRestJson>();
@@ -3016,7 +3439,125 @@ bool FVaRestHttpRetryNotRetriedTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("404, a decode error, a cancel and a NoRetry() request: one call each"), Rig.Fake->NumCalls(), 4);
 	TestEqual(TEXT("... and no backoff armed"), Rig.Clock->NumPendingTimers(), 0);
 	TestTrue(TEXT("the kinds are the attempts' own"), Missing->Error.Kind == EVaRestErrorKind::Http && NotJson->Error.Kind == EVaRestErrorKind::Decode
-		&& Canceled->Error.Kind == EVaRestErrorKind::Canceled && Opted->Error.HttpStatus == 404);
+		&& Canceled->Error.Kind == EVaRestErrorKind::Canceled);
+	TestTrue(TEXT("NoRetry(): a retryable 503, after one attempt"), Opted->Error.HttpStatus == 503 && Opted->Error.Attempts == 1 && Opted->Error.bRetryable);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpRetryGapTest, "VaRest.Http.Retry.GapIsMeasured",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpRetryGapTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::RetryTestPrivate;
+	// Spec review M-10 (Inspector 3.3: a gap runs from the previous attempt's end to this attempt's start): IN-2 reports the
+	// time that passed, not the delay that was asked for. Timers 0.25 s late stand for a real-clock ticker a frame late.
+	FTestRig Rig;
+	Rig.Client.WithRetry(Exact(1)).WithClock(MakeShared<FLateClock, ESPMode::ThreadSafe>(Rig.Clock, 0.25));
+	FScopedTraceRecorder Scoped(EVaRestTraceDetail::Metadata);
+	Rig.Fake->Enqueue(Json(503));
+	Rig.Fake->Enqueue(Json(200));
+	auto Outcome = MakeOutcome<FVaRestJson>();
+	const FVaRestRequestHandle Handle = Observe(Rig.Client.Get(TEXT("/late")), Outcome).Send();
+	if (!TestTrue(TEXT("the first attempt, then a backoff timer"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 1 && Rig.Clock->NumPendingTimers() == 1; })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Clock->Advance(2.0);
+	if (!TestTrue(TEXT("completes after one retry"), Rig.Wait(Outcome)) || !TestEqual(TEXT("two calls"), Rig.Fake->NumCalls(), 2))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	TArray<FVaRestTraceAttemptDispatched> Dispatched;
+	double AskedDelay = -1.0;
+	for (const FVaRestTraceEvent& Event : Scoped.Recorder->For(Handle.GetId()))
+	{
+		if (Event.Kind == EVaRestTraceKind::AttemptDispatched)
+		{
+			Dispatched.Add(Event.Payload.Get<FVaRestTraceAttemptDispatched>());
+		}
+		else if (Event.Kind == EVaRestTraceKind::Note)
+		{
+			AskedDelay = Event.Payload.Get<FVaRestTraceNote>().Delay;
+		}
+	}
+	if (!TestEqual(TEXT("two dispatches"), Dispatched.Num(), 2))
+	{
+		return false;
+	}
+	TestEqual(TEXT("the note says what was asked: 0.5 s"), AskedDelay, 0.5);
+	TestTrue(TEXT("IN-2: the gap is what passed: 0.75 s"), Dispatched[1].GapKind == EVaRestTraceGap::Backoff && FMath::IsNearlyEqual(Dispatched[1].GapSeconds, 0.75, 1e-9));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpRetryFinishedWaitingTest, "VaRest.Http.Retry.FinishedWhileBackingOff",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpRetryFinishedWaitingTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::RetryTestPrivate;
+	// Concurrency review M-3: a custom Outer stage answers its request while Retry backs off. Complete runs Retry's
+	// interrupt, so the backoff timer goes with the request instead of holding it for the whole delay.
+	FTestRig Rig;
+	const TSharedRef<FHoldingOuter, ESPMode::ThreadSafe> Outer = MakeShared<FHoldingOuter, ESPMode::ThreadSafe>(true);
+	Rig.Client.Use(Outer, EVaRestStageSlot::Outer).WithRetry(Exact(3));
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest&) { return Json(503); });
+	auto Outcome = MakeOutcome<void>();
+	Observe(Rig.Client.Get<void>(TEXT("/held")), Outcome).Send();
+	if (!TestTrue(TEXT("Retry backs off"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 1 && Rig.Clock->NumPendingTimers() == 1; })))
+	{
+		Outer->Held.Reset();
+		Abandon(Rig);
+		return false;
+	}
+	Outer->AnswerNow(204);
+	if (!TestTrue(TEXT("the stage's answer completes the request"), Rig.Wait(Outcome)))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Drain();
+	TestTrue(TEXT("... as the stage's success"), Outcome->SuccessCalls.load() == 1 && Outcome->ErrorCalls.load() == 0);
+	TestEqual(TEXT("the backoff timer went with it"), Rig.Clock->NumPendingTimers(), 0);
+	TestEqual(TEXT("... and Retry answered Canceled behind the stage, once"), Outer->LateAnswers->load(), 1);
+	Rig.Clock->Advance(5.0);
+	Rig.Drain();
+	TestEqual(TEXT("no attempt after it"), Rig.Fake->NumCalls(), 1);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpRetryDeadHookTest, "VaRest.Http.Retry.InterruptThatCannotAnswer",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpRetryDeadHookTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::RetryTestPrivate;
+	// Concurrency review M-4: an interrupt whose stage state is gone answers nothing; Cancel() then finishes the request
+	// itself. The stage holds the request without proceeding, and the hook is set by hand: no M4a path frees a waiting
+	// stage's state, which is why the fallback exists.
+	FTestRig Rig;
+	const TSharedRef<FHoldingOuter, ESPMode::ThreadSafe> Outer = MakeShared<FHoldingOuter, ESPMode::ThreadSafe>(false);
+	Rig.Client.Use(Outer, EVaRestStageSlot::Outer);
+	auto Outcome = MakeOutcome<FVaRestJson>();
+	const FVaRestRequestHandle Handle = Observe(Rig.Client.Get(TEXT("/stuck")), Outcome).Send();
+	const TSharedPtr<FVaRestExchange, ESPMode::ThreadSafe> Held = Outer->Kept.Pin();
+	if (!TestTrue(TEXT("the stage holds it"), Held.IsValid()))
+	{
+		Outer->Held.Reset();
+		Abandon(Rig);
+		return false;
+	}
+	VaRest::Http::Internals(*Held).Interrupt = [] { return false; };
+	Handle.Cancel();
+	TestTrue(TEXT("Cancel() still finishes it"), Rig.Wait(Outcome) && Outcome->Error.Kind == EVaRestErrorKind::Canceled && Outcome->ErrorCalls.load() == 1);
+	TestEqual(TEXT("... and nothing was sent"), Rig.Fake->NumCalls(), 0);
+	// The held answer captures the exchange, whose configuration holds this stage: break the cycle
+	Outer->Held.Reset();
 	return true;
 }
 ```
@@ -3029,7 +3570,7 @@ Expected: FAIL to compile (`WithRetry`, `NoRetry` unknown).
 - [ ] **Step 3: The exchange's retry state** — in `Source/VaRestHttp/Private/VaRestExchangeState.h` add `#include "VaRestRetry.h"`, and in `FExchangeState` after `bool bInLimiterQueue = false;`:
 
 ```cpp
-		// Retry (Tasks 7-8), set by Resolve:
+		// Retry (Tasks 8-9), set by Resolve:
 		/** The request's Retry()/NoRetry(), from Send */
 		TOptional<FVaRestRetryPolicy> RetryOverride;
 		/** That, else the client's (WithRetry) */
@@ -3038,20 +3579,28 @@ Expected: FAIL to compile (`WithRetry`, `NoRetry` unknown).
 		bool bRetryEligible = false;
 		/** Plan decision 8: a later attempt can need the body again, so the transport stage copies it */
 		bool bMayReissue = false;
-		/** Plan decision 10 (Task 8): clock seconds; 0 = none */
+		/** Plan decision 10 (Task 9): clock seconds; 0 = none */
 		double DeadlineAt = 0.0;
 		int32 RetriesDone = 0;
 
 		/**
 		 * Plan decision 7. Game thread. Set by a stage while it holds this exchange waiting (a backoff, a park behind a
-		 * refresh); FClientState::Cancel takes it and calls it, and the stage answers Canceled through the chain. The stage
-		 * clears it when the wait ends. It holds the stage's state weakly, so it makes no cycle through this exchange.
+		 * refresh); FClientState::Cancel takes it and calls it, and the stage answers Canceled through the chain. Complete
+		 * calls it too when something else finished the request while it waited (concurrency review M-3), so the wait's
+		 * timer or park goes with it. It returns true when it answered; false (the stage's state is already gone) lets
+		 * Cancel finish the request itself (review M-4). The stage clears it when the wait ends. It holds the stage's state
+		 * weakly, so it makes no cycle through this exchange.
 		 */
-		TUniqueFunction<void()> Interrupt;
+		TUniqueFunction<bool()> Interrupt;
 
-		/** IN-2: what the next AttemptDispatched reports; the transport stage resets both after the dispatch */
+		/**
+		 * IN-2: what the next AttemptDispatched reports; the transport stage resets both after the dispatch. For a Backoff
+		 * gap the attempt boundary measures NextGapSeconds from LastAttemptEndedAt (spec review M-10).
+		 */
 		EVaRestTraceGap NextGap = EVaRestTraceGap::None;
 		double NextGapSeconds = 0.0;
+		/** Clock seconds: when the last attempt's outcome reached the retry stage (the same game-thread call as its end) */
+		double LastAttemptEndedAt = 0.0;
 ```
 
 and after `FExchangeAccess`/`Internals` add the owner helpers, moved from `PipelinePrivate` in `VaRestPipeline.cpp` (delete them there; the pipeline's calls resolve to these):
@@ -3102,6 +3651,17 @@ in `TVaRestRequest`, after `Priority(...)`:
 		Spec->Retry = FVaRestRetryPolicy::Disabled();
 		return MoveTemp(*this);
 	}
+```
+
+and `Owner()`'s comment becomes (concurrency review M-2, ruled: documented only):
+
+```cpp
+	/**
+	 * Spec 3.2: weak. Once the owner is gone there are no callbacks and no further attempts. An owner that goes while the
+	 * request waits -- backing off before a retry, or parked behind a session refresh (Task 17) -- is noticed when that
+	 * wait ends (the timer fires, the refresh finishes); until then the request keeps its callbacks, what they capture and
+	 * the client alive, and counts in GetInFlightCount(). Cancel() ends a wait at once.
+	 */
 ```
 
 and in `FVaRestClient`'s configuration section:
@@ -3166,14 +3726,40 @@ In `FClientState::Cancel`, between the `if (Ex.TransportCall.IsValid()) { ... re
 	{
 		// Plan decision 7: a stage holds it waiting (a backoff, a park behind a refresh); it answers Canceled through the
 		// chain, so every Outer stage gets its one outcome. Taken first: answering may let a stage set another.
-		TUniqueFunction<void()> Wake = MoveTemp(Ex.Interrupt);
+		TUniqueFunction<bool()> Wake = MoveTemp(Ex.Interrupt);
 		Ex.Interrupt.Reset();
-		Wake();
-		return;
+		if (Wake())
+		{
+			return;
+		}
+		// Concurrency review M-4: nothing answered (the stage's state is gone); finish it below, as for any other holder
 	}
 ```
 
-In `FClientState::Complete`, right after `Ex.Phase = EVaRestExchangePhase::Done;`: `Ex.Interrupt.Reset(); // nothing waits for a finished request`.
+In `FClientState::Complete`, right after `Ex.Phase = EVaRestExchangePhase::Done;`:
+
+```cpp
+	if (Ex.Interrupt)
+	{
+		// Concurrency review M-3: something other than Cancel finished a request a stage holds waiting (a custom Outer stage
+		// in front of Retry answering by itself): the hook clears that stage's timer or park, and its Canceled lands on a
+		// finished request, which OnChainDone ignores
+		TUniqueFunction<bool()> Wake = MoveTemp(Ex.Interrupt);
+		Ex.Interrupt.Reset();
+		Wake();
+	}
+```
+
+In `FAttemptBoundaryStage::Process`, after `Ex.AttemptStartedAt = Ex.Config->Clock->Now();`:
+
+```cpp
+			if (Ex.NextGap == EVaRestTraceGap::Backoff)
+			{
+				// Spec review M-10 (Inspector 3.3: from the previous attempt's end to this attempt's start): what passed,
+				// not the delay asked for -- a real-clock ticker fires up to a frame late
+				Ex.NextGapSeconds = FMath::Max(0.0, Ex.AttemptStartedAt - Ex.LastAttemptEndedAt);
+			}
+```
 
 In `Source/VaRestHttp/Private/VaRestTracePoints.cpp`, `AttemptDispatched`, after `Payload.LimiterWait = Ex.LimiterWait;`:
 
@@ -3233,6 +3819,8 @@ namespace VaRest::Http::RetryPrivate
 	void OnAttempt(const FRunRef& Run, FVaRestAttemptOutcome&& Outcome)
 	{
 		FExchangeState& Ex = Internals(*Run->Exchange);
+		// The attempt's end for the next gap (spec review M-10): its outcome reaches this stage in the call that ended it
+		Ex.LastAttemptEndedAt = Ex.Config->Clock->Now();
 		// Spec 3.2: "owner gone -> no callbacks, no further retries"; a canceled or finished request is not retried either
 		if (Ex.bFinished || Run->Exchange->IsCancelRequested() || IsOwnerGone(Ex))
 		{
@@ -3247,25 +3835,23 @@ namespace VaRest::Http::RetryPrivate
 			return;
 		}
 		++Ex.RetriesDone;
+		// The boundary measures the seconds when the next attempt starts (spec review M-10)
 		Ex.NextGap = EVaRestTraceGap::Backoff;
-		Ex.NextGapSeconds = Decision.Delay;
-		LogRetry(Ex, Decision);
-		FVaRestTraceNote Note;
-		Note.Kind = EVaRestTraceNoteKind::RetryScheduled;
-		Note.Reason = Decision.Reason;
-		Note.Delay = Decision.Delay;
-		Note.RetryAfter = Decision.RetryAfter;
-		TracePoints::Note(Ex, MoveTemp(Note));
 		// This attempt's outcome ends here: its body is freed with it; a SaveTo temp file of it is removed by the next
-		// transport start (FTransportStage), or by the decode task when the wait is canceled
+		// transport start (FTransportStage), or by the decode task when the wait is canceled.
+		// Concurrency review M-5: the hook and the timer before the log line and the note -- both run code that is not
+		// VaRest's (a log device, a trace sink), which may cancel this request, and that cancel must find the wait.
 		const TWeakPtr<FRun, ESPMode::ThreadSafe> Weak = Run;
-		Ex.Interrupt = [Weak]
+		Ex.Interrupt = [Weak]() -> bool
 		{
-			if (const TSharedPtr<FRun, ESPMode::ThreadSafe> Pinned = Weak.Pin())
+			const TSharedPtr<FRun, ESPMode::ThreadSafe> Pinned = Weak.Pin();
+			if (!Pinned.IsValid())
 			{
-				Internals(*Pinned->Exchange).Config->Clock->ClearTimer(Pinned->Timer);
-				Pinned->Answer(FVaRestAttemptOutcome::Canceled());
+				return false;
 			}
+			Internals(*Pinned->Exchange).Config->Clock->ClearTimer(Pinned->Timer);
+			Pinned->Answer(FVaRestAttemptOutcome::Canceled());
+			return true;
 		};
 		Run->Timer = Ex.Config->Clock->SetTimer(Decision.Delay, [Run]
 		{
@@ -3279,6 +3865,13 @@ namespace VaRest::Http::RetryPrivate
 			}
 			StartAttempt(Run);
 		});
+		LogRetry(Ex, Decision);
+		FVaRestTraceNote Note;
+		Note.Kind = EVaRestTraceNoteKind::RetryScheduled;
+		Note.Reason = Decision.Reason;
+		Note.Delay = Decision.Delay;
+		Note.RetryAfter = Decision.RetryAfter;
+		TracePoints::Note(Ex, MoveTemp(Note));
 	}
 
 	void StartAttempt(const FRunRef& Run)
@@ -3318,7 +3911,7 @@ FVaRestStageRef VaRest::Http::MakeRetryStage()
 Run: `Tools/run_tests.sh VaRest.Http.Retry` then `Tools/run_tests.sh --no-build VaRest.Http.Pipeline` then `Tools/run_tests.sh --no-build VaRest.Http.Cancel` then `Tools/run_tests.sh --no-build VaRest.Http.Limiter`
 Expected: `0 failed` each.
 
-- [ ] **Step 8: Restore-the-bug** — in `Resolve` set `bRetryEligible = Exchange.RetryPolicy.IsEnabled()` (no verb check): `VaRest.Http.Retry.NonIdempotentSentOnce` FAILS ("POST 503: sent once"); restore; PASS. Drop the `Ex.NextGap = EVaRestTraceGap::Backoff;` line: `RetryAfterTraceAndLog` FAILS ("the second a 2 s backoff"); restore; PASS.
+- [ ] **Step 8: Restore-the-bug** — in `Resolve` set `bRetryEligible = Exchange.RetryPolicy.IsEnabled()` (no verb check): `VaRest.Http.Retry.NonIdempotentSentOnce` FAILS ("POST 503: sent once"); restore; PASS. Drop the `Ex.NextGap = EVaRestTraceGap::Backoff;` line: `RetryAfterTraceAndLog` FAILS ("the second a 2 s backoff"); restore; PASS. Make `NoRetry()` a no-op (`return MoveTemp(*this);` only): `VaRest.Http.Retry.NotRetried` FAILS ("... and no backoff armed": a 0.5 s timer is pending; spec review I-4); restore; PASS. In the boundary set `NextGapSeconds` from the decision instead (`Ex.NextGapSeconds = Decision.Delay;` back in `OnAttempt`, the boundary's measurement dropped): `VaRest.Http.Retry.GapIsMeasured` FAILS ("the gap is what passed: 0.75 s" reads 0.5; spec review M-10); restore; PASS. Drop `Complete`'s interrupt call: `VaRest.Http.Retry.FinishedWhileBackingOff` FAILS ("the backoff timer went with it"; concurrency review M-3); restore; PASS. In `Cancel` return after `Wake()` whatever it answered: `VaRest.Http.Retry.InterruptThatCannotAnswer` FAILS ("Cancel() still finishes it" times out; review M-4); restore; PASS. Moving the hook and the timer back after `TracePoints::Note` (review M-5) has no test: a sink that cancels inline then reaches `Cancel` with no hook, `Complete` finishes the request, and `Complete`'s own interrupt call (M-3) clears the timer armed after it, so nothing a test can see changes; the order stays as a second guard, and the review checks it against the comment.
 
 - [ ] **Step 9: Full suite, commit**
 
@@ -3329,25 +3922,73 @@ Expected: `0 failed`.
 git add Source/VaRestHttp/Private/VaRestExchangeState.h Source/VaRestHttp/Public/VaRestClient.h Source/VaRestHttp/Private/VaRestClient.cpp \
   Source/VaRestHttp/Private/VaRestClientState.h Source/VaRestHttp/Private/VaRestClientState.cpp Source/VaRestHttp/Private/VaRestPipeline.cpp \
   Source/VaRestHttp/Private/VaRestRetry.cpp Source/VaRestHttp/Private/VaRestTracePoints.cpp Source/VaRestHttp/Private/Tests/VaRestHttpRetryTest.cpp
-git commit -m "http: M4 task 7 -- the retry stage: eligible requests re-issued after backoff or Retry-After, interruptible waits, trace notes and gaps
+git commit -m "http: M4 task 8 -- the retry stage: eligible requests re-issued after backoff or Retry-After, interruptible waits, trace notes and gaps
 
 Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 ```
 
 ---
-### Task 8: Retry against the rest of the pipeline — the deadline, the limiter queue, timeouts, stops while waiting, bodies sent again (spec §4.1, §4.6, §4.7; carries (c), (e))
+### Task 9: Retry against the rest of the pipeline — the deadline, the limiter queue, timeouts, stops while waiting, bodies sent again (spec §4.1, §4.6, §4.7; carries (c), (e))
 
-Plan decision 10 (the deadline) is implemented here; the rest is the interplay M3's lessons list, each with a test that fails when the interplay breaks.
+Plan decision 10 (the deadline) is implemented here — checked at dispatch and armed while the request waits in the limiter's queue (concurrency review M-1; Task 17 arms it in a park) — and the rest is the interplay M3's lessons list, each with a test that fails when the interplay breaks.
 
 **Files:**
-- Modify: `Source/VaRestHttp/Private/VaRestPipeline.cpp` (`Resolve` sets `DeadlineAt`; the transport stage cuts the timeout and refuses a late attempt)
+- Modify: `Source/VaRestHttp/Private/VaRestPipeline.cpp` (`Resolve` sets `DeadlineAt`; the limiter stage arms it; the transport stage cuts the timeout and refuses a late attempt)
+- Modify: `Source/VaRestHttp/Private/VaRestExchangeState.h` (`QueueDeadline`, `bQueueDeadlinePassed`), `Source/VaRestHttp/Private/VaRestRetryInternal.h`, `Source/VaRestHttp/Private/VaRestRetry.cpp` (`MakeDeadlineOutcome`)
+- Modify: `Source/VaRestHttp/Public/VaRestHttpTesting.h` (`FOutcomeProbe`)
 - Test: `Source/VaRestHttp/Private/Tests/VaRestHttpRetryTest.cpp`
 
 **Interfaces:**
-- Consumes: Task 7 (`FExchangeState::DeadlineAt`, `Interrupt`, the stage).
-- Produces: failure detail `Deadline` (`Kind=Timeout`, not retryable) from the transport stage.
+- Consumes: Task 4 (the limiter stage after the boundary, `LogEndedInQueue`), Task 8 (`FExchangeState::DeadlineAt`, `Interrupt`, the stage).
+- Produces: failure detail `Deadline` (`Kind=Timeout`, not retryable) from the transport stage and from the limiter's queue; private `FVaRestAttemptOutcome VaRest::Http::MakeDeadlineOutcome()` (`VaRestRetryInternal.h`; Task 17's park answers it too); on `FExchangeState`: `FVaRestTimerHandle QueueDeadline`, `bool bQueueDeadlinePassed`; test helper `class VaRest::Http::Testing::FOutcomeProbe : IVaRestStage { int32 Count(uint64 RequestId, EVaRestTransportFailure) const; int32 Total(uint64 RequestId) const; }` (an `Outer` stage that records each outcome it is given; Task 17 uses it too).
 
-- [ ] **Step 1: Write the failing tests** — append to `Source/VaRestHttp/Private/Tests/VaRestHttpRetryTest.cpp` (add `#include "HAL/FileManager.h"`, `#include "Misc/FileHelper.h"`, `#include "Misc/Guid.h"`, `#include "Misc/Paths.h"`, `#include "Misc/ScopeExit.h"`):
+- [ ] **Step 1: Write the failing tests** — first the test helper the stop tests use. In `Source/VaRestHttp/Public/VaRestHttpTesting.h`, inside the `WITH_DEV_AUTOMATION_TESTS` namespace, after `FTestRig`:
+
+```cpp
+	/**
+	 * An Outer stage that records every outcome it is given, per request: plan decision 7 says every Outer stage gets one
+	 * outcome per request, its wait interrupted or not (concurrency review I-5). Game thread.
+	 */
+	class FOutcomeProbe final : public IVaRestStage
+	{
+	public:
+		virtual FName GetStageName() const override { return TEXT("OutcomeProbe"); }
+
+		virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) override
+		{
+			Next.Proceed(Exchange, [Into = Seen, Id = Exchange->GetRequestId(), Done = MoveTemp(OnOutcome)](FVaRestAttemptOutcome&& Outcome) mutable
+			{
+				Into->FindOrAdd(Id).Add(Outcome.Failure);
+				Done(MoveTemp(Outcome));
+			});
+		}
+
+		/** The outcomes RequestId got that carried Failure */
+		int32 Count(uint64 RequestId, EVaRestTransportFailure Failure) const
+		{
+			int32 Matching = 0;
+			if (const TArray<EVaRestTransportFailure>* Found = Seen->Find(RequestId))
+			{
+				for (const EVaRestTransportFailure One : *Found)
+				{
+					Matching += One == Failure ? 1 : 0;
+				}
+			}
+			return Matching;
+		}
+
+		/** Every outcome RequestId got */
+		int32 Total(uint64 RequestId) const
+		{
+			const TArray<EVaRestTransportFailure>* Found = Seen->Find(RequestId);
+			return Found ? Found->Num() : 0;
+		}
+
+		TSharedRef<TMap<uint64, TArray<EVaRestTransportFailure>>, ESPMode::ThreadSafe> Seen = MakeShared<TMap<uint64, TArray<EVaRestTransportFailure>>, ESPMode::ThreadSafe>();
+	};
+```
+
+Then append to `Source/VaRestHttp/Private/Tests/VaRestHttpRetryTest.cpp` (add `#include "HAL/FileManager.h"`, `#include "Misc/FileHelper.h"`, `#include "Misc/Guid.h"`, `#include "Misc/Paths.h"`, `#include "Misc/ScopeExit.h"`):
 
 ```cpp
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpRetryDeadlineTest, "VaRest.Http.Retry.Deadline",
@@ -3394,6 +4035,12 @@ bool FVaRestHttpRetryDeadlineTest::RunTest(const FString& Parameters)
 		return false;
 	}
 	Queue.Clock->Advance(1.5);
+	// Concurrency review M-1: armed in the queue, not only checked at the grant -- it ends at 1 s while the slot is held
+	if (!TestTrue(TEXT("the late one ends at its deadline, while the slot is still held"), PumpUntil([Late] { return Late->IsDone(); })))
+	{
+		Abandon(Queue);
+		return false;
+	}
 	Queue.Fake->Complete(0, Json(200));
 	if (!TestTrue(TEXT("both complete"), PumpUntil([Hold, Late] { return Hold->IsDone() && Late->IsDone(); })))
 	{
@@ -3402,6 +4049,7 @@ bool FVaRestHttpRetryDeadlineTest::RunTest(const FString& Parameters)
 	}
 	Queue.Drain();
 	TestEqual(TEXT("the late one never reached the transport"), Queue.Fake->NumCalls(), 1);
+	TestEqual(TEXT("... and its deadline timer is gone"), Queue.Clock->NumPendingTimers(), 0);
 	TestTrue(TEXT("... it is a Timeout, not retryable, saying why"), Late->Error.Kind == EVaRestErrorKind::Timeout && !Late->Error.bRetryable
 		&& Late->Error.Message.Contains(TEXT("Deadline")));
 	return true;
@@ -3520,17 +4168,19 @@ bool FVaRestHttpRetryStopTest::RunTest(const FString& Parameters)
 {
 	using namespace VaRest::Http::Testing;
 	using namespace VaRest::Http::RetryTestPrivate;
-	// Plan decision 7: Cancel(), shutdown and the owner's destruction reach a request that waits on a backoff timer
+	// Plan decision 7: Cancel(), shutdown and the owner's destruction reach a request that waits on a backoff timer, and
+	// an Outer stage in front of Retry gets exactly one outcome for each (concurrency review I-5: the probe)
 	FTestRig Rig;
-	Rig.Client.WithRetry(Exact(3));
+	const TSharedRef<FOutcomeProbe, ESPMode::ThreadSafe> Probe = MakeShared<FOutcomeProbe, ESPMode::ThreadSafe>();
+	Rig.Client.Use(Probe, EVaRestStageSlot::Outer).WithRetry(Exact(3));
 	Rig.Fake->SetResponder([](const FVaRestTransportRequest&) { return Json(503); });
 	UObject* Owner = NewObject<UVaRestHttpSettings>(GetTransientPackage(), NAME_None, RF_Transient);
 	auto Canceled = MakeOutcome<FVaRestJson>();
 	auto Owned = MakeOutcome<FVaRestJson>();
 	auto ShutDown = MakeOutcome<FVaRestJson>();
 	const FVaRestRequestHandle Handle = Observe(Rig.Client.Get(TEXT("/c")), Canceled).Send();
-	Observe(Rig.Client.Get(TEXT("/o")).Owner(Owner), Owned).Send();
-	Observe(Rig.Client.Get(TEXT("/s")).Tag(TEXT("Exit")), ShutDown).Send();
+	const FVaRestRequestHandle OwnedHandle = Observe(Rig.Client.Get(TEXT("/o")).Owner(Owner), Owned).Send();
+	const FVaRestRequestHandle ShutDownHandle = Observe(Rig.Client.Get(TEXT("/s")).Tag(TEXT("Exit")), ShutDown).Send();
 	if (!TestTrue(TEXT("all three back off"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 3 && Rig.Clock->NumPendingTimers() == 3; })))
 	{
 		Abandon(Rig);
@@ -3538,6 +4188,9 @@ bool FVaRestHttpRetryStopTest::RunTest(const FString& Parameters)
 	}
 
 	Handle.Cancel();
+	// Inside Cancel(), before any pump: the interrupt answered through the chain and cleared the timer (plan decision 7)
+	TestEqual(TEXT("Cancel() clears the timer at once"), Rig.Clock->NumPendingTimers(), 2);
+	TestEqual(TEXT("... and the Outer stage got its one Canceled inside Cancel()"), Probe->Count(Handle.GetId(), EVaRestTransportFailure::Canceled), 1);
 	if (!TestTrue(TEXT("Cancel() ends the wait"), PumpUntil([Canceled] { return Canceled->IsDone(); })))
 	{
 		Abandon(Rig);
@@ -3545,7 +4198,6 @@ bool FVaRestHttpRetryStopTest::RunTest(const FString& Parameters)
 	}
 	TestTrue(TEXT("... one OnError(Canceled), one OnComplete"), Canceled->ErrorCalls.load() == 1 && Canceled->CompleteCalls.load() == 1
 		&& Canceled->Error.Kind == EVaRestErrorKind::Canceled);
-	TestEqual(TEXT("... its timer is gone"), Rig.Clock->NumPendingTimers(), 2);
 
 	VaRest::Http::FClientAccess::State(Rig.Client)->CancelAll(TEXT("Exit"), EVaRestCancelReason::Shutdown);
 	Rig.Drain();
@@ -3563,6 +4215,9 @@ bool FVaRestHttpRetryStopTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("shutdown and owner gone: no callbacks (spec 3.2, decision 2)"), ShutDown->CompleteCalls.load() + ShutDown->ErrorCalls.load()
 		+ Owned->CompleteCalls.load() + Owned->ErrorCalls.load(), 0);
 	TestEqual(TEXT("nothing left armed"), Rig.Clock->NumPendingTimers(), 0);
+	TestTrue(TEXT("each stop: one outcome for the Outer stage, a Canceled"), Probe->Total(Handle.GetId()) == 1 && Probe->Total(OwnedHandle.GetId()) == 1
+		&& Probe->Total(ShutDownHandle.GetId()) == 1 && Probe->Count(OwnedHandle.GetId(), EVaRestTransportFailure::Canceled) == 1
+		&& Probe->Count(ShutDownHandle.GetId(), EVaRestTransportFailure::Canceled) == 1);
 	return true;
 }
 
@@ -3645,11 +4300,12 @@ bool FVaRestHttpRetryBodiesTest::RunTest(const FString& Parameters)
 	TArray<uint8> Downloaded;
 	TestTrue(TEXT("SaveTo: the final attempt's body"), Saved->SuccessCalls.load() == 1 && FFileHelper::LoadFileToArray(Downloaded, *Destination)
 		&& Downloaded == TArray<uint8>{ 'o', 'k' });
+	// Spec review I-7: the lambda's local is not "Parts" (the test's own Parts above; MSVC C4456)
 	const auto Leftovers = [&Dir]
 	{
-		TArray<FString> Parts;
-		IFileManager::Get().FindFiles(Parts, *(Dir / TEXT("*.part")), true, false);
-		return Parts.Num();
+		TArray<FString> Found;
+		IFileManager::Get().FindFiles(Found, *(Dir / TEXT("*.part")), true, false);
+		return Found.Num();
 	};
 	// The first attempt's temp file is deleted by a UE::Tasks task (FTransportStage): give it the time it needs
 	TestTrue(TEXT("... and no attempt's temp file is left"), PumpUntil([&Leftovers] { return Leftovers() == 0; }));
@@ -3660,9 +4316,9 @@ bool FVaRestHttpRetryBodiesTest::RunTest(const FString& Parameters)
 - [ ] **Step 2: Run them to see them fail**
 
 Run: `Tools/run_tests.sh VaRest.Http.Retry`
-Expected: `VaRest.Http.Retry.Deadline` FAILS (with no deadline the second 503 arms another backoff, so "completes" times out); the others PASS already (Task 7 built the behaviour; Step 5 shows each of them failing with it broken).
+Expected: `VaRest.Http.Retry.Deadline` FAILS (with no deadline the second 503 arms another backoff, so "completes" times out); the others PASS already (Task 8 built the behaviour; Step 5 shows each of them failing with it broken).
 
-- [ ] **Step 3: The deadline** — in `Source/VaRestHttp/Private/VaRestPipeline.cpp`, `Resolve`, after the three retry lines Task 7 added:
+- [ ] **Step 3: The deadline** — in `Source/VaRestHttp/Private/VaRestPipeline.cpp`, `Resolve`, after the three retry lines Task 8 added:
 
 ```cpp
 	// Plan decision 10: an absolute time on the request's clock; Enter stamped StartedAt before Resolve
@@ -3681,25 +4337,85 @@ In `FTransportStage::Process`, after the `FindBadHeader` block and before `if (!
 				const double Left = Ex.DeadlineAt - Cfg.Clock->Now();
 				if (Left <= 0.0)
 				{
-					FVaRestAttemptOutcome Late;
-					Late.Failure = EVaRestTransportFailure::Timeout;
-					Late.FailureDetail = TEXT("Deadline");
-					Late.FailureMessage = TEXT("the retry deadline passed before this attempt could start");
-					OnOutcome(MoveTemp(Late));
+					OnOutcome(MakeDeadlineOutcome());
 					return;
 				}
 				AttemptTimeout = AttemptTimeout > 0.0 ? FMath::Min(AttemptTimeout, Left) : Left;
 			}
 ```
 
-and `Request.Timeout = Ex.Timeout;` becomes `Request.Timeout = static_cast<float>(AttemptTimeout);`.
+and `Request.Timeout = Ex.Timeout;` becomes `Request.Timeout = static_cast<float>(AttemptTimeout);`. `MakeDeadlineOutcome` is declared in `Source/VaRestHttp/Private/VaRestRetryInternal.h`:
+
+```cpp
+	/** Plan decision 10: what an attempt that would start past the retry deadline answers -- Kind=Timeout, not retryable */
+	FVaRestAttemptOutcome MakeDeadlineOutcome();
+```
+
+and defined in `Source/VaRestHttp/Private/VaRestRetry.cpp`:
+
+```cpp
+FVaRestAttemptOutcome VaRest::Http::MakeDeadlineOutcome()
+{
+	FVaRestAttemptOutcome Late;
+	Late.Failure = EVaRestTransportFailure::Timeout;
+	Late.FailureDetail = TEXT("Deadline");
+	Late.FailureMessage = TEXT("the retry deadline passed before this attempt could start");
+	return Late;
+}
+```
+
+The deadline in the queue (concurrency review M-1). In `Source/VaRestHttp/Private/VaRestExchangeState.h`, after `DeadlineAt`:
+
+```cpp
+		/** Concurrency review M-1: the deadline's timer while an attempt waits in the limiter's queue */
+		FVaRestTimerHandle QueueDeadline;
+		/** Set by that timer before it takes the entry out of the queue: the abort answers Deadline, not Canceled */
+		bool bQueueDeadlinePassed = false;
+```
+
+In `Source/VaRestHttp/Private/VaRestPipeline.cpp`, `FLimiterStage::Process` (Task 4's): the grant closure clears the timer first (after `Granted.bInLimiterQueue = false;`: `Granted.Config->Clock->ClearTimer(Granted.QueueDeadline);`); in the abort closure `Aborted.Config->Clock->ClearTimer(Aborted.QueueDeadline);` goes after `Aborted.bInLimiterQueue = false;` and `FVaRestAttemptOutcome Ended = FVaRestAttemptOutcome::Canceled();` becomes
+
+```cpp
+					// Concurrency review M-1: the deadline's timer took it out -- the refusal the transport stage makes for an
+					// attempt that would start past the deadline
+					FVaRestAttemptOutcome Ended = Aborted.bQueueDeadlinePassed ? MakeDeadlineOutcome() : FVaRestAttemptOutcome::Canceled();
+```
+
+and after the `Acquire(...)` call:
+
+```cpp
+			if (Ex.bInLimiterQueue && Ex.DeadlineAt > 0.0)
+			{
+				// Concurrency review M-1: armed, not only checked at the grant, so a wait behind long requests ends at the
+				// deadline. The timer takes the entry out of the queue; the abort above answers Deadline. Weak: the queue
+				// entry holds the exchange already.
+				Ex.QueueDeadline = Ex.Config->Clock->SetTimer(FMath::Max(0.0, Ex.DeadlineAt - EnqueuedAt),
+					[Weak = TWeakPtr<FVaRestExchange, ESPMode::ThreadSafe>(Exchange)]
+				{
+					const TSharedPtr<FVaRestExchange, ESPMode::ThreadSafe> Pinned = Weak.Pin();
+					if (!Pinned.IsValid())
+					{
+						return;
+					}
+					FExchangeState& Late = Internals(*Pinned);
+					Late.QueueDeadline.Invalidate();
+					if (Late.bInLimiterQueue)
+					{
+						Late.bQueueDeadlinePassed = true;
+						Late.State->GetLimiter().Abort(Late.RequestId);
+					}
+				});
+			}
+```
+
+(An entry granted inside `Acquire` has `bInLimiterQueue` false again by then, so no timer is armed for it.)
 
 - [ ] **Step 4: Run them**
 
 Run: `Tools/run_tests.sh VaRest.Http.Retry`
 Expected: `0 failed`.
 
-- [ ] **Step 5: Restore-the-bug** — (a) delete Task 7's `if (Ex.Interrupt) { ... }` block in `FClientState::Cancel`: `StopWhileBackingOff` FAILS ("its timer is gone": the cancel finishes the request but leaves the backoff armed); restore; PASS. (b) In `FLimiter::Acquire` queue at the front (`Queues[Level].Insert(MoveTemp(Entry), 0)` with the entry built first): `QueuesBehindWaiting` FAILS (order `a,c,b,a` or `a,b,a,c`); restore; PASS. (c) In the transport stage copy only when `Cfg.bMayReissue` (Task 7's per-exchange flag reverted): `BodiesResent` FAILS (the retry sends an empty body); restore; PASS. (d) Remove the `Left <= 0.0` refusal: `Deadline` FAILS ("the late one never reached the transport"); restore; PASS. Record all four.
+- [ ] **Step 5: Restore-the-bug** — (a) delete Task 8's `if (Ex.Interrupt) { ... }` block in `FClientState::Cancel`: `StopWhileBackingOff` FAILS ("Cancel() clears the timer at once" and "... the Outer stage got its one Canceled inside Cancel()": the request is finished by a later task, and only that task's `Complete` runs the interrupt, M-3); restore; PASS. (b) In `FLimiter::Acquire` queue at the front (`Queues[Level].Insert(MoveTemp(Entry), 0)` with the entry built first): `QueuesBehindWaiting` FAILS (order `a,c,b,a` or `a,b,a,c`); restore; PASS. (c) In the transport stage copy only when `Cfg.bMayReissue` (Task 8's per-exchange flag reverted): `BodiesResent` FAILS (the retry sends an empty body); restore; PASS. (d) Remove the `Left <= 0.0` refusal and the queue's deadline timer: `Deadline` FAILS ("the late one never reached the transport"); restore; PASS. (e) Remove only the queue's deadline timer: `Deadline` FAILS ("the late one ends at its deadline, while the slot is still held": it waits for the grant, concurrency review M-1); restore; PASS. Record all five.
 
 - [ ] **Step 6: Full suite, commit**
 
@@ -3707,14 +4423,15 @@ Run: `Tools/run_tests.sh VaRest`
 Expected: `0 failed`.
 
 ```bash
-git add Source/VaRestHttp/Private/VaRestPipeline.cpp Source/VaRestHttp/Private/Tests/VaRestHttpRetryTest.cpp
-git commit -m "http: M4 task 8 -- the retry deadline; retry against the limiter queue, per-attempt timeouts, stops while waiting, bodies sent again
+git add Source/VaRestHttp/Private/VaRestPipeline.cpp Source/VaRestHttp/Private/VaRestExchangeState.h Source/VaRestHttp/Private/VaRestRetryInternal.h \
+  Source/VaRestHttp/Private/VaRestRetry.cpp Source/VaRestHttp/Public/VaRestHttpTesting.h Source/VaRestHttp/Private/Tests/VaRestHttpRetryTest.cpp
+git commit -m "http: M4 task 9 -- the retry deadline; retry against the limiter queue, per-attempt timeouts, stops while waiting, bodies sent again
 
 Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 ```
 
 ---
-### Task 9: The envelope and its public evaluator (spec §3.4; WebSocket §19 item 6)
+### Task 10: The envelope and its public evaluator (spec §3.4; WebSocket §19 item 6)
 
 `FVaRestEnvelope` is configuration (M5's asset holds one per API and per endpoint) and a pure function from a parsed body to data or a `Kind=Server` error, which the socket codec also calls on its messages.
 
@@ -3723,8 +4440,8 @@ Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 - Test: `Source/VaRestHttp/Private/Tests/VaRestHttpEnvelopeTest.cpp`
 
 **Interfaces:**
-- Consumes: VaRestJson's `FVaRestJson::Path`, `IsString`, `AsString`, `ToString`.
-- Produces: `USTRUCT(BlueprintType) struct FVaRestEnvelope { FString DataPath; FString SuccessPath; TArray<FString> SuccessValues; FString ErrorMessagePath; FString ErrorCodePath; bool bParseErrorBodies = false; static FVaRestEnvelope DataAt(FStringView Path); FVaRestEnvelope SuccessWhen(FStringView Path, TArray<FString> Values) const; FVaRestEnvelope ErrorMessageAt(FStringView Path) const; FVaRestEnvelope ErrorCodeAt(FStringView Path) const; FVaRestEnvelope ParseErrorBodies(bool bParse = true) const; bool HasPredicate() const; FVaRestEnvelopeResult Evaluate(const FVaRestJson& Body) const; void ReadErrorFields(const FVaRestJson& Body, FString& OutCode, FString& OutMessage) const; static FString ValueText(const FVaRestJson& Value); }`; `struct FVaRestEnvelopeResult { bool bSuccess = true; FVaRestJson Data; bool bDataFound = true; FString Code, Message, FailedPath, Expected, Actual; FVaRestError ToError(const FVaRestJson& Body, int32 HttpStatus) const; }`.
+- Consumes: VaRestJson's `FVaRestJson::Path`, `GetType`, `AsString`, `AsBool`, `TryGet<int64>`, `TryGet<uint64>`, `AsDouble`, `ToString`.
+- Produces: `USTRUCT(BlueprintType) struct FVaRestEnvelope { FString DataPath; FString SuccessPath; TArray<FString> SuccessValues; FString ErrorMessagePath; FString ErrorCodePath; bool bParseErrorBodies = false; static FVaRestEnvelope DataAt(FStringView Path); FVaRestEnvelope SuccessWhen(FStringView Path, TArray<FString> Values) const; FVaRestEnvelope ErrorMessageAt(FStringView Path) const; FVaRestEnvelope ErrorCodeAt(FStringView Path) const; FVaRestEnvelope ParseErrorBodies(bool bParse = true) const; bool HasPredicate() const; FVaRestEnvelopeResult Evaluate(const FVaRestJson& Body) const; void ReadErrorFields(const FVaRestJson& Body, FString& OutCode, FString& OutMessage) const; static TOptional<FString> MatchText(const FVaRestJson& Value); static FString ValueText(const FVaRestJson& Value); }` (`MatchText`: ruling Q3's rendering, what `SuccessValues` are compared with; `ValueText`: the display text, spec review C-2); `struct FVaRestEnvelopeResult { bool bSuccess = true; FVaRestJson Data; bool bDataFound = true; FString Code, Message, FailedPath, Expected, Actual; FVaRestError ToError(const FVaRestJson& Body, int32 HttpStatus) const; }`.
 
 - [ ] **Step 1: Write the failing test** — create `Source/VaRestHttp/Private/Tests/VaRestHttpEnvelopeTest.cpp`:
 
@@ -3788,6 +4505,26 @@ bool FVaRestHttpEnvelopeEvaluateTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Code \"200\""), Dawg.Evaluate(Parse(TEXT(R"({"Code":"200","Data":1})"))).bSuccess);
 	TestFalse(TEXT("Code 500"), Dawg.Evaluate(Parse(TEXT(R"({"Code":500})"))).bSuccess);
 
+	// Ruling Q3, one row per rendering rule (spec review C-2): string -> its text; bool -> true/false; an integral number ->
+	// its decimal, no fraction, no exponent; any other number -> shortest round-trip text; null, object, array never match;
+	// case-sensitive
+	const FVaRestEnvelope Flag = FVaRestEnvelope().SuccessWhen(TEXT("ok"), { TEXT("true") });
+	TestTrue(TEXT("Q3: bool true renders \"true\""), Flag.Evaluate(Parse(TEXT(R"({"ok":true})"))).bSuccess);
+	TestTrue(TEXT("Q3: the string \"true\" is its text"), Flag.Evaluate(Parse(TEXT(R"({"ok":"true"})"))).bSuccess);
+	TestFalse(TEXT("Q3: case-sensitive -- \"True\" is not \"true\""), Flag.Evaluate(Parse(TEXT(R"({"ok":"True"})"))).bSuccess);
+	TestTrue(TEXT("Q3: 200.0 is integral: \"200\""), Dawg.Evaluate(Parse(TEXT(R"({"Code":200.0})"))).bSuccess);
+	TestTrue(TEXT("Q3: 2e2 is integral: \"200\""), Dawg.Evaluate(Parse(TEXT(R"({"Code":2e2})"))).bSuccess);
+	TestTrue(TEXT("Q3: a non-integral number is its shortest text"),
+		FVaRestEnvelope().SuccessWhen(TEXT("v"), { TEXT("1.5") }).Evaluate(Parse(TEXT(R"({"v":1.5})"))).bSuccess);
+	TestFalse(TEXT("Q3: null never matches, not even \"null\""),
+		FVaRestEnvelope().SuccessWhen(TEXT("ok"), { TEXT("null") }).Evaluate(Parse(TEXT(R"({"ok":null})"))).bSuccess);
+	TestFalse(TEXT("Q3: an object never matches, not even \"{}\""),
+		FVaRestEnvelope().SuccessWhen(TEXT("ok"), { TEXT("{}") }).Evaluate(Parse(TEXT(R"({"ok":{}})"))).bSuccess);
+	TestFalse(TEXT("Q3: an array never matches, not even \"[]\""),
+		FVaRestEnvelope().SuccessWhen(TEXT("ok"), { TEXT("[]") }).Evaluate(Parse(TEXT(R"({"ok":[]})"))).bSuccess);
+	TestEqualSensitive(TEXT("the shown value is the body's own (IN-5 Actual)"),
+		Dawg.Evaluate(Parse(TEXT(R"({"Code":5e2})"))).Actual, FString(TEXT("500.0")));
+
 	// Review Focus: paths that miss
 	const FVaRestEnvelopeResult NoData = Envelope.Evaluate(Parse(TEXT(R"({"ok":true})")));
 	TestTrue(TEXT("no data: still a success, the data missing"), NoData.bSuccess && !NoData.bDataFound && !NoData.Data.IsValid());
@@ -3810,6 +4547,8 @@ bool FVaRestHttpEnvelopeEvaluateTest::RunTest(const FString& Parameters)
 		Parse(TEXT(R"({"error":{"code":42,"message":"gone"}})")), Code, Message);
 	TestEqualSensitive(TEXT("ReadErrorFields: a numeric code as text"), Code, FString(TEXT("42")));
 	TestEqualSensitive(TEXT("... the message"), Message, FString(TEXT("gone")));
+	FVaRestEnvelope::DataAt(TEXT("")).ErrorCodeAt(TEXT("code")).ReadErrorFields(Parse(TEXT(R"({"code":42.0})")), Code, Message);
+	TestEqualSensitive(TEXT("... an integral double code reads as Q3 renders it"), Code, FString(TEXT("42")));
 	return true;
 }
 
@@ -3859,9 +4598,11 @@ struct VARESTHTTP_API FVaRestEnvelopeResult
  * Spec 3.4: where a response's data and its success flag are. Per client (WithEnvelope), replaced per request (Envelope(),
  * NoEnvelope()); M5's asset holds one per API and per endpoint, so it is BlueprintType and its field names freeze then
  * (plan decision 27). Applied to FVaRestJson, struct and void results (plan decision 9); raw results get the body as it came.
- * Paths are FVaRestJson::Path's: "data", "result.items[0]", or a JSON pointer ("/a.b/c"). Values compare as text: a
- * string by its content, anything else by its condensed JSON, so SuccessValues {"200"} accepts 200 and "200", and {"true"}
- * accepts true and "true".
+ * Paths are FVaRestJson::Path's: "data", "result.items[0]", or a JSON pointer ("/a.b/c"). SuccessValues compare as text,
+ * case-sensitive (ruling Q3; MatchText): a string by its content; true and false as "true" and "false"; an integral number
+ * as its decimal with no fraction and no exponent (200, 200.0 and 2e2 are all "200"); any other number as its shortest
+ * round-trip text ("1.5"); null, an object or an array never match. So {"200"} accepts 200 and "200", and {"true"}
+ * accepts true and "true": one envelope works for servers that send the same flag as a string or as a number.
  */
 USTRUCT(BlueprintType)
 struct VARESTHTTP_API FVaRestEnvelope
@@ -3876,7 +4617,7 @@ struct VARESTHTTP_API FVaRestEnvelope
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VaRest|Http")
 	FString SuccessPath;
 
-	/** SuccessPath's value must be one of these (as text: "true", "200", "OK"); a 2xx whose value is not is Kind=Server */
+	/** SuccessPath's value must be one of these, as MatchText renders it ("true", "200", "OK"); a 2xx whose value is not is Kind=Server */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VaRest|Http")
 	TArray<FString> SuccessValues;
 
@@ -3906,7 +4647,13 @@ struct VARESTHTTP_API FVaRestEnvelope
 	/** ErrorCodePath's and ErrorMessagePath's values in Body, as text; empty when absent */
 	void ReadErrorFields(const FVaRestJson& Body, FString& OutCode, FString& OutMessage) const;
 
-	/** A value as the envelope compares it: a string as itself, anything else as condensed JSON; "" for an invalid handle */
+	/**
+	 * Ruling Q3: the text SuccessValues are compared with, case-sensitive. Unset never matches: an invalid handle, null, an
+	 * object, an array.
+	 */
+	static TOptional<FString> MatchText(const FVaRestJson& Value);
+
+	/** A value as a message or the trace shows it (IN-5 Actual): a string as itself, anything else as condensed JSON; "" for an invalid handle */
 	static FString ValueText(const FVaRestJson& Value);
 };
 ```
@@ -3926,6 +4673,13 @@ namespace VaRest::Http::EnvelopePrivate
 	FString Shown(FString Text)
 	{
 		return Text.Len() > MaxShownChars ? Text.Left(MaxShownChars) + TEXT("...") : MoveTemp(Text);
+	}
+
+	/** An error field as text: MatchText's rendering, so a numeric code 42.0 reads "42"; else condensed JSON */
+	FString FieldText(const FVaRestJson& Value)
+	{
+		TOptional<FString> Text = FVaRestEnvelope::MatchText(Value);
+		return Text.IsSet() ? MoveTemp(Text.GetValue()) : FVaRestEnvelope::ValueText(Value);
 	}
 }
 
@@ -3978,6 +4732,40 @@ FVaRestEnvelope FVaRestEnvelope::ParseErrorBodies(bool bParse) const
 	return Copy;
 }
 
+TOptional<FString> FVaRestEnvelope::MatchText(const FVaRestJson& Value)
+{
+	switch (Value.GetType())
+	{
+	case EVaRestJsonType::String:
+		return Value.AsString();
+	case EVaRestJsonType::Bool:
+		return FString(Value.AsBool() ? TEXT("true") : TEXT("false"));
+	case EVaRestJsonType::Number:
+	{
+		// Integral doubles convert too (VaRestJsonNode.h:108-132): 200, 200.0 and 2e2 all render "200"
+		if (const TOptional<int64> Signed = Value.TryGet<int64>())
+		{
+			return LexToString(Signed.GetValue());
+		}
+		if (const TOptional<uint64> Unsigned = Value.TryGet<uint64>())
+		{
+			return LexToString(Unsigned.GetValue());
+		}
+		const double Number = Value.AsDouble();
+		if (FMath::IsFinite(Number) && FMath::TruncToDouble(Number) == Number)
+		{
+			// Integral past 64 bits: still no fraction and no exponent
+			return FString::Printf(TEXT("%.0f"), Number);
+		}
+		// Shortest round-trip text: the writer's (RapidJSON's Writer::Double, VaRestJsonSax.h:49)
+		return Value.ToString(EVaRestJsonFormat::Condensed);
+	}
+	default:
+		// Ruling Q3: null, an object and an array never match, nor does an invalid handle
+		return TOptional<FString>();
+	}
+}
+
 FString FVaRestEnvelope::ValueText(const FVaRestJson& Value)
 {
 	if (!Value.IsValid())
@@ -3990,8 +4778,8 @@ FString FVaRestEnvelope::ValueText(const FVaRestJson& Value)
 void FVaRestEnvelope::ReadErrorFields(const FVaRestJson& Body, FString& OutCode, FString& OutMessage) const
 {
 	using namespace VaRest::Http::EnvelopePrivate;
-	OutCode = ErrorCodePath.IsEmpty() ? FString() : Shown(ValueText(Body.Path(ErrorCodePath)));
-	OutMessage = ErrorMessagePath.IsEmpty() ? FString() : ValueText(Body.Path(ErrorMessagePath));
+	OutCode = ErrorCodePath.IsEmpty() ? FString() : Shown(FieldText(Body.Path(ErrorCodePath)));
+	OutMessage = ErrorMessagePath.IsEmpty() ? FString() : FieldText(Body.Path(ErrorMessagePath));
 }
 
 FVaRestEnvelopeResult FVaRestEnvelope::Evaluate(const FVaRestJson& Body) const
@@ -4001,15 +4789,17 @@ FVaRestEnvelopeResult FVaRestEnvelope::Evaluate(const FVaRestJson& Body) const
 	if (HasPredicate())
 	{
 		const FVaRestJson Found = Body.Path(SuccessPath);
-		const FString Actual = ValueText(Found);
-		const bool bPass = Found.IsValid() && SuccessValues.ContainsByPredicate([&Actual](const FString& Value) { return Value.Equals(Actual, ESearchCase::CaseSensitive); });
+		// Ruling Q3: compared as MatchText renders it, case-sensitive; null, objects and arrays never match
+		const TOptional<FString> Text = MatchText(Found);
+		const bool bPass = Text.IsSet() && SuccessValues.ContainsByPredicate([&Text](const FString& Value) { return Value.Equals(Text.GetValue(), ESearchCase::CaseSensitive); });
 		if (!bPass)
 		{
 			Out.bSuccess = false;
 			Out.bDataFound = false;
 			Out.FailedPath = SuccessPath;
 			Out.Expected = FString::Join(SuccessValues, TEXT("|"));
-			Out.Actual = Found.IsValid() ? Shown(Actual) : FString(TEXT("(missing)"));
+			// The body's own text for display (IN-5): what the server sent, not what was compared
+			Out.Actual = Found.IsValid() ? Shown(ValueText(Found)) : FString(TEXT("(missing)"));
 			ReadErrorFields(Body, Out.Code, Out.Message);
 			return Out;
 		}
@@ -4031,20 +4821,20 @@ FVaRestEnvelopeResult FVaRestEnvelope::Evaluate(const FVaRestJson& Body) const
 Run: `Tools/run_tests.sh VaRest.Http.Envelope`
 Expected: `0 failed`.
 
-- [ ] **Step 6: Restore-the-bug** — compare `Found.ToString()` instead of `ValueText(Found)` (a string keeps its quotes): `VaRest.Http.Envelope.Evaluate` FAILS on `Code "200"`; restore; PASS. Drop `Out.bDataFound = Out.Data.IsValid();`: FAILS on "no data: still a success, the data missing"; restore; PASS.
+- [ ] **Step 6: Restore-the-bug** — compare `Found.ToString()` instead of `MatchText(Found)` (a string keeps its quotes): `VaRest.Http.Envelope.Evaluate` FAILS on `Code "200"` and on "the string \"true\" is its text"; restore; PASS. Render every number with `Value.ToString(EVaRestJsonFormat::Condensed)` in `MatchText`: FAILS on "200.0 is integral" and "2e2 is integral" (the writer prints `200.0`); restore; PASS. Return `ValueText(Value)` from `MatchText`'s `default` case: FAILS on the null, object and array rows; restore; PASS. Drop `Out.bDataFound = Out.Data.IsValid();`: FAILS on "no data: still a success, the data missing"; restore; PASS.
 
 - [ ] **Step 7: Commit**
 
 ```bash
 git add Source/VaRestHttp/Public/VaRestEnvelope.h Source/VaRestHttp/Private/VaRestEnvelope.cpp Source/VaRestHttp/Private/Tests/VaRestHttpEnvelopeTest.cpp
-git commit -m "http: M4 task 9 -- FVaRestEnvelope and its public evaluator: data path, success predicate, error fields (spec 3.4, WS 19 item 6)
+git commit -m "http: M4 task 10 -- FVaRestEnvelope and its public evaluator: data path, success predicate, error fields (spec 3.4, WS 19 item 6)
 
 Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 ```
 
 ---
 
-### Task 10: The envelope in the pipeline — client and request options, decode, `Kind=Server`, error bodies, the trace (spec §3.4; IN-5)
+### Task 11: The envelope in the pipeline — client and request options, decode, `Kind=Server`, error bodies, the trace (spec §3.4; IN-5)
 
 Plan decision 9. The envelope runs on the decode task, right after the JSON parse, so it costs no extra parse for `FVaRestJson` and struct results. A `void` result with a predicate gets one copying parse on that task. The outcome goes to `Completed.Envelope`.
 
@@ -4054,13 +4844,32 @@ Plan decision 9. The envelope runs on the decode task, right after the JSON pars
 - Modify: `Source/VaRestHttp/Public/VaRestResultHandler.h` (`FFinish` envelope fields, `AppliesEnvelope()`, `CheckEnvelopePredicate`)
 - Modify: `Source/VaRestHttp/Private/VaRestDecode.h`, `Source/VaRestHttp/Private/VaRestDecode.cpp` (`ApplyEnvelope`, `DecodeJson`, `DecodeStruct`, `ProcessErrorBody`, `CheckEnvelopePredicate`)
 - Modify: `Source/VaRestHttp/Private/VaRestPipeline.cpp` (`Resolve`, `MakeFinish`, `OnChainDone`), `Source/VaRestHttp/Private/VaRestTracePoints.cpp` (`Completed`)
+- Modify: `Source/VaRestHttp/Public/VaRestHttpTesting.h` (`FTestCounters::EnvelopeParsesOnGameThread`, concurrency review I-6)
 - Test: `Source/VaRestHttp/Private/Tests/VaRestHttpEnvelopeTest.cpp`, `Source/VaRestTests/Private/VaRestHttpStructDecodeTest.cpp`
 
 **Interfaces:**
-- Consumes: Task 9.
-- Produces: `TVaRestRequest<T>::Envelope(const FVaRestEnvelope& InEnvelope) &&`, `TVaRestRequest<T>::NoEnvelope() &&`; `FVaRestClient& WithEnvelope(const FVaRestEnvelope& InEnvelope)`, `FVaRestClient& WithoutEnvelope()`; `TSharedPtr<const FVaRestEnvelope, ESPMode::ThreadSafe> FClientConfig::Envelope`; on `FExchangeState`: `TOptional<FVaRestEnvelope> EnvelopeOverride`, `bool bNoEnvelope`, `TSharedPtr<const FVaRestEnvelope, ESPMode::ThreadSafe> Envelope`; on `FFinish`: `Envelope` (same type), `FVaRestTraceEnvelope EnvelopeTrace`, `bool bEnvelopeDataMissing`, `FVaRestJson EnvelopeBody`; `virtual bool IResultHandler::AppliesEnvelope() const`; `VARESTHTTP_API void VaRest::Http::CheckEnvelopePredicate(FFinish&)`; private `bool VaRest::Http::ApplyEnvelope(FFinish&, FVaRestJson& InOut)`.
+- Consumes: Task 10.
+- Produces: `TVaRestRequest<T>::Envelope(const FVaRestEnvelope& InEnvelope) &&`, `TVaRestRequest<T>::NoEnvelope() &&`; `FVaRestClient& WithEnvelope(const FVaRestEnvelope& InEnvelope)`, `FVaRestClient& WithoutEnvelope()`; `TSharedPtr<const FVaRestEnvelope, ESPMode::ThreadSafe> FClientConfig::Envelope`; on `FExchangeState`: `TOptional<FVaRestEnvelope> EnvelopeOverride`, `bool bNoEnvelope`, `TSharedPtr<const FVaRestEnvelope, ESPMode::ThreadSafe> Envelope`; on `FFinish`: `Envelope` (same type), `FVaRestTraceEnvelope EnvelopeTrace` (filled only when `bTimeDecode`, spec review M-14), `bool bEnvelopeDataMissing`, `FVaRestJson EnvelopeBody`, `EVaRestLogLevel LogLevel` (the request's, for the decode task's one Warning, spec review M-13); `std::atomic<int32> Testing::FTestCounters::EnvelopeParsesOnGameThread` (non-Shipping); `virtual bool IResultHandler::AppliesEnvelope() const`; `VARESTHTTP_API void VaRest::Http::CheckEnvelopePredicate(FFinish&)`; private `bool VaRest::Http::ApplyEnvelope(FFinish&, FVaRestJson& InOut)`.
 
-- [ ] **Step 1: Write the failing tests** — append to `Source/VaRestHttp/Private/Tests/VaRestHttpEnvelopeTest.cpp` (before `#endif`):
+- [ ] **Step 1: Write the failing tests** — in `Source/VaRestHttp/Public/VaRestHttpTesting.h`, `FTestCounters`, after `DecodesOffGameThread` (concurrency review I-6: the threading rule for a `void` predicate needs its own count, `DecodesOnGameThread` is counted only in `RunDecode`):
+
+```cpp
+		/** CheckEnvelopePredicate's parses that ran on the game thread: a void result's predicate must parse on its task (plan decision 9) */
+		std::atomic<int32> EnvelopeParsesOnGameThread{ 0 };
+```
+
+In `Source/VaRestHttp/Private/Tests/VaRestHttpEnvelopeTest.cpp` add `#include "HAL/IConsoleManager.h"` and `#include "VaRestResultHandler.h"`, and to `EnvelopeTestPrivate`:
+
+```cpp
+	/** Cancels what the rig has in flight and pumps until it is done: the drain of a test that stops early (spec review M-5) */
+	void Abandon(VaRest::Http::Testing::FTestRig& Rig)
+	{
+		Rig.Client.CancelAll();
+		VaRest::Http::Testing::PumpUntil([&Rig] { return Rig.Client.GetInFlightCount() == 0; });
+	}
+```
+
+Append (before `#endif`):
 
 ```cpp
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpEnvelopePipelineTest, "VaRest.Http.Envelope.Pipeline",
@@ -4111,7 +4920,7 @@ bool FVaRestHttpEnvelopePipelineTest::RunTest(const FString& Parameters)
 	Observe(Rig.Client.Get(TEXT("/gone")), Gone).Send();
 	Observe(Rig.Client.Get(TEXT("/raw")).NoEnvelope(), Raw).Send();
 	Observe(Rig.Client.Get(TEXT("/narrow")).Envelope(FVaRestEnvelope::DataAt(TEXT("data.id"))), Narrow).Send();
-	const int32 OnBefore = Counters().DecodesOnGameThread.load();
+	const int32 EnvelopeParsesBefore = Counters().EnvelopeParsesOnGameThread.load();
 	Observe(Rig.Client.Post<void>(TEXT("/void-no")), VoidNo).Send();
 	Observe(Rig.Client.Post<void>(TEXT("/void-ok")), VoidOk).Send();
 	Observe(Rig.Client.Post<void>(TEXT("/text")), VoidText).Send();
@@ -4120,8 +4929,7 @@ bool FVaRestHttpEnvelopePipelineTest::RunTest(const FString& Parameters)
 	if (!TestTrue(TEXT("all complete"), PumpUntil([&] { return Ok->IsDone() && No->IsDone() && Gone->IsDone() && Raw->IsDone() && Narrow->IsDone() && VoidNo->IsDone()
 		&& VoidOk->IsDone() && VoidText->IsDone() && Text->IsDone() && Empty->IsDone(); })))
 	{
-		Rig.Client.CancelAll();
-		PumpUntil([&Rig] { return Rig.Client.GetInFlightCount() == 0; });
+		Abandon(Rig);
 		return false;
 	}
 	TestTrue(TEXT("unwrapped: the data object"), Ok->SuccessCalls.load() == 1 && Ok->Value.IsSet() && Ok->Value->Get(TEXT("id")).AsInt() == 7);
@@ -4136,7 +4944,8 @@ bool FVaRestHttpEnvelopePipelineTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("void with a predicate: a failure is Kind Server"), VoidNo->Error.Kind == EVaRestErrorKind::Server && VoidNo->Error.Code == TEXT("E42"));
 	TestTrue(TEXT("... a success is a success"), VoidOk->SuccessCalls.load() == 1);
 	TestTrue(TEXT("... a body that is not JSON is nothing to judge"), VoidText->SuccessCalls.load() == 1);
-	TestEqual(TEXT("... and its parse ran off the game thread"), Counters().DecodesOnGameThread.load() - OnBefore, 0);
+	// Concurrency review I-6: counted where the parse happens, so a game-thread parse cannot hide behind RunDecode's counter
+	TestEqual(TEXT("... and its parse ran off the game thread"), Counters().EnvelopeParsesOnGameThread.load() - EnvelopeParsesBefore, 0);
 	TestTrue(TEXT("an FString result is the body as it came"), Text->Value.IsSet() && Text->Value->Contains(TEXT("\"ok\":true")));
 	TestTrue(TEXT("204: a success with no value to unwrap"), Empty->SuccessCalls.load() == 1 && Empty->Value.IsSet() && !Empty->Value->IsValid());
 
@@ -4172,10 +4981,76 @@ bool FVaRestHttpEnvelopeMissingTest::RunTest(const FString& Parameters)
 	Observe(Rig.Client.Get(TEXT("/b")), Array).Send();
 	if (!TestTrue(TEXT("both complete"), PumpUntil([NoData, Array] { return NoData->IsDone() && Array->IsDone(); })))
 	{
+		Abandon(Rig);
 		return false;
 	}
 	TestTrue(TEXT("no data: a success with an invalid handle"), NoData->SuccessCalls.load() == 1 && NoData->Value.IsSet() && !NoData->Value->IsValid());
 	TestTrue(TEXT("an array body: the same"), Array->SuccessCalls.load() == 1 && Array->Value.IsSet() && !Array->Value->IsValid());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpEnvelopeUncheckedTest, "VaRest.Http.Envelope.VoidPredicateUnchecked",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpEnvelopeUncheckedTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::EnvelopeTestPrivate;
+	// Spec review M-13: a void result whose JSON body cannot be parsed (broken, or over MaxJsonBytes) still succeeds --
+	// void decodes nothing -- but says at Basic that its envelope's predicate never ran
+	TGuardConsoleVariable<int32> Level(TEXT("VaRest.LogLevel"), -1);
+	FTestRig Rig;
+	Rig.Client.WithEnvelope(OkData()).WithLogLevel(EVaRestLogLevel::Basic).WithMaxJsonBytes(64);
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest& Request)
+	{
+		if (Request.Url.EndsWith(TEXT("/broken")))
+		{
+			return Json(200, R"({"ok":)");
+		}
+		return Json(200, R"({"ok":false,"data":"0123456789012345678901234567890123456789012345678901234567890123456789"})");
+	});
+	FLogCapture Capture;
+	AddExpectedMessagePlain(TEXT("VaRest: the envelope's predicate could not be checked"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 2);
+	auto Broken = MakeOutcome<void>();
+	auto Large = MakeOutcome<void>();
+	const FVaRestRequestHandle BrokenHandle = Observe(Rig.Client.Post<void>(TEXT("/broken")), Broken).Send();
+	const FVaRestRequestHandle LargeHandle = Observe(Rig.Client.Post<void>(TEXT("/large")), Large).Send();
+	if (!TestTrue(TEXT("both complete"), PumpUntil([Broken, Large] { return Broken->IsDone() && Large->IsDone(); })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	TestTrue(TEXT("void decodes nothing: both succeed (the large one's ok:false was never read)"), Broken->SuccessCalls.load() == 1 && Large->SuccessCalls.load() == 1);
+	TestTrue(TEXT("... and each says its predicate never ran, with its id (IN-16)"),
+		Capture.Contains(FString::Printf(TEXT("#%llu VaRest: the envelope's predicate could not be checked"), BrokenHandle.GetId()))
+		&& Capture.Contains(FString::Printf(TEXT("#%llu VaRest: the envelope's predicate could not be checked"), LargeHandle.GetId())));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpEnvelopeUntracedTest, "VaRest.Http.Envelope.TraceFieldsOnlyWithSink",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpEnvelopeUntracedTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::EnvelopeTestPrivate;
+	// Spec review M-14 (IN-11: nothing is built for the trace without a sink): the envelope fills FFinish::EnvelopeTrace
+	// only when the mask was set at the finish (bTimeDecode); the request's own result is the same either way
+	for (const bool bTraced : { false, true })
+	{
+		VaRest::Http::FFinish Finish;
+		Finish.Envelope = MakeShared<const FVaRestEnvelope, ESPMode::ThreadSafe>(OkData());
+		Finish.Response.Status = 200;
+		Finish.Response.ContentType = TEXT("application/json");
+		Finish.bTimeDecode = bTraced;
+		const FUtf8StringView Text(UTF8TEXT(R"({"ok":false,"code":"E1","message":"no"})"));
+		Finish.Body.Append(reinterpret_cast<const uint8*>(Text.GetData()), Text.Len());
+		FVaRestJson Value;
+		const bool bDecoded = VaRest::Http::DecodeJson(Finish, Value);
+		const FString Label = bTraced ? TEXT("with a sink") : TEXT("without one");
+		TestTrue(Label + TEXT(": a failed predicate is Kind Server with its code"), !bDecoded && Finish.Error.Kind == EVaRestErrorKind::Server && Finish.Error.Code == TEXT("E1"));
+		TestEqual(Label + TEXT(": the trace's copy is built only with a sink"), Finish.EnvelopeTrace.bApplied, bTraced);
+		TestEqual(Label + TEXT(": ... its strings too"), Finish.EnvelopeTrace.Code.IsEmpty(), !bTraced);
+	}
 	return true;
 }
 ```
@@ -4200,6 +5075,9 @@ bool FVaRestHttpEnvelopeStructTest::RunTest(const FString& Parameters)
 	Observe(Rig.Client.Get<FVaRestHttpTestProfile>(TEXT("/b")), Missing).Send();
 	if (!TestTrue(TEXT("both complete"), PumpUntil([Wrapped, Missing] { return Wrapped->IsDone() && Missing->IsDone(); })))
 	{
+		// Spec review M-5: drained before the early return
+		Rig.Client.CancelAll();
+		PumpUntil([&Rig] { return Rig.Client.GetInFlightCount() == 0; });
 		return false;
 	}
 	const FVaRestHttpTestProfile Unset;
@@ -4282,7 +5160,7 @@ and in `FRequestSpecAccess::Send`, after the retry line: `Ex.EnvelopeOverride = 
 `Source/VaRestHttp/Private/VaRestClientState.h`, `FClientConfig`: `TSharedPtr<const FVaRestEnvelope, ESPMode::ThreadSafe> Envelope;` (`#include "VaRestEnvelope.h"`). `Source/VaRestHttp/Private/VaRestExchangeState.h`, after the retry block:
 
 ```cpp
-		// Envelope (Task 10), set by Resolve:
+		// Envelope (Task 11), set by Resolve:
 		TOptional<FVaRestEnvelope> EnvelopeOverride;
 		bool bNoEnvelope = false;
 		/** Spec 3.4: the request's, else the client's; null with NoEnvelope() or none configured */
@@ -4299,6 +5177,8 @@ and in `FRequestSpecAccess::Send`, after the retry line: `Ex.EnvelopeOverride = 
 		/** The envelope's DataPath named nothing: a struct result fails (plan decision 9) and keeps EnvelopeBody as its error body */
 		bool bEnvelopeDataMissing = false;
 		FVaRestJson EnvelopeBody;
+		/** The request's effective log level: the decode task's one line (a void predicate it could not check, spec review M-13) */
+		EVaRestLogLevel LogLevel = EVaRestLogLevel::None;
 ```
 
 `IResultHandler` gains after `DecodesJson()`:
@@ -4349,7 +5229,7 @@ and `TResultHandler<void>` gains `virtual bool AppliesEnvelope() const override 
 	bool ApplyEnvelope(FFinish& Finish, FVaRestJson& InOut);
 ```
 
-In `Source/VaRestHttp/Private/VaRestDecode.cpp`:
+In `Source/VaRestHttp/Private/VaRestDecode.cpp` (add `#include "VaRestHttpLog.h"` for `LogVaRestHttp` and `EscapeForLog`, and `#include "VaRestHttpTesting.h"` for the counter):
 
 ```cpp
 bool VaRest::Http::ApplyEnvelope(FFinish& Finish, FVaRestJson& InOut)
@@ -4360,16 +5240,23 @@ bool VaRest::Http::ApplyEnvelope(FFinish& Finish, FVaRestJson& InOut)
 	}
 	const FVaRestEnvelope& Envelope = *Finish.Envelope;
 	const FVaRestEnvelopeResult Result = Envelope.Evaluate(InOut);
-	FVaRestTraceEnvelope& Trace = Finish.EnvelopeTrace;
-	Trace.bApplied = true;
-	Trace.DataPath = Envelope.DataPath;
+	// IN-11 (spec review M-14): the trace's strings are built only when the mask was set at the finish
+	if (Finish.bTimeDecode)
+	{
+		FVaRestTraceEnvelope& Trace = Finish.EnvelopeTrace;
+		Trace.bApplied = true;
+		Trace.DataPath = Envelope.DataPath;
+		if (!Result.bSuccess)
+		{
+			Trace.PredicatePath = Result.FailedPath;
+			Trace.Expected = Result.Expected;
+			Trace.Actual = Result.Actual;
+			Trace.Code = Result.Code;
+			Trace.Message = Result.Message;
+		}
+	}
 	if (!Result.bSuccess)
 	{
-		Trace.PredicatePath = Result.FailedPath;
-		Trace.Expected = Result.Expected;
-		Trace.Actual = Result.Actual;
-		Trace.Code = Result.Code;
-		Trace.Message = Result.Message;
 		// Spec 3.4: "A 2xx response whose predicate fails becomes Kind=Server"
 		Finish.Error = Result.ToError(InOut, Finish.Response.Status);
 		InOut = FVaRestJson();
@@ -4395,14 +5282,37 @@ void VaRest::Http::CheckEnvelopePredicate(FFinish& Finish)
 	{
 		return;
 	}
-	TValueOrError<FVaRestJson, FVaRestJsonError> Parsed = FVaRestJson::Parse(TConstArrayView<uint8>(Finish.Body), Finish.ParseOptions);
-	if (Parsed.HasError())
+	// A void result decodes nothing: a broken body, or one over MaxJsonBytes (refused before parsing, as DecodeJson does), is
+	// no envelope failure -- but the predicate never ran, which the request's Basic line says (spec review M-13)
+	FString Unchecked;
+	const int64 Cap = Finish.ParseOptions.MaxInputBytes;
+	if (Cap > 0 && Finish.Body.Num() > Cap)
 	{
-		// A void result decodes nothing: a broken body is no envelope failure
-		return;
+		Unchecked = FString::Printf(TEXT("the body is %d bytes, over the MaxJsonBytes limit of %lld"), Finish.Body.Num(), Cap);
 	}
-	FVaRestJson Body = Parsed.StealValue();
-	ApplyEnvelope(Finish, Body);
+	else
+	{
+#if !UE_BUILD_SHIPPING
+		// Concurrency review I-6: counted where the parse happens -- OnChainDone sends a void result with a predicate to a task
+		if (IsInGameThread())
+		{
+			++Testing::Counters().EnvelopeParsesOnGameThread;
+		}
+#endif
+		TValueOrError<FVaRestJson, FVaRestJsonError> Parsed = FVaRestJson::Parse(TConstArrayView<uint8>(Finish.Body), Finish.ParseOptions);
+		if (Parsed.HasValue())
+		{
+			FVaRestJson Body = Parsed.StealValue();
+			ApplyEnvelope(Finish, Body);
+			return;
+		}
+		// The parser's own text: a position and a reason, never the body's bytes
+		Unchecked = Parsed.GetError().Message;
+	}
+	if (Finish.LogLevel != EVaRestLogLevel::None && UE_LOG_ACTIVE(LogVaRestHttp, Warning))
+	{
+		UE_LOG(LogVaRestHttp, Warning, TEXT("#%llu VaRest: the envelope's predicate could not be checked (%s)"), Finish.Response.RequestId, *EscapeForLog(Unchecked));
+	}
 }
 ```
 
@@ -4449,10 +5359,14 @@ In `DecodeStruct`, the `if (!Json.IsValid()) { return true; }` block becomes:
 		{
 			Finish.Error.Message = Message;
 		}
-		Finish.EnvelopeTrace.bApplied = true;
-		Finish.EnvelopeTrace.DataPath = Finish.Envelope->DataPath;
-		Finish.EnvelopeTrace.Code = Code;
-		Finish.EnvelopeTrace.Message = Message;
+		// IN-11 (spec review M-14): only when the trace mask was set at the finish
+		if (Finish.bTimeDecode)
+		{
+			Finish.EnvelopeTrace.bApplied = true;
+			Finish.EnvelopeTrace.DataPath = Finish.Envelope->DataPath;
+			Finish.EnvelopeTrace.Code = Code;
+			Finish.EnvelopeTrace.Message = Message;
+		}
 	}
 ```
 
@@ -4476,7 +5390,7 @@ In `DecodeStruct`, the `if (!Json.IsValid()) { return true; }` block becomes:
 	}
 ```
 
-`MakeFinish` gains `Finish.Envelope = Exchange.Envelope;`. In `OnChainDone`, the `bTask` computation becomes:
+`MakeFinish` gains `Finish.Envelope = Exchange.Envelope;` and `Finish.LogLevel = Exchange.LogLevel;`. In `OnChainDone`, the `bTask` computation becomes:
 
 ```cpp
 	// Plan decision 9: a void result with a predicate is parsed too, on the task, never here
@@ -4500,7 +5414,7 @@ In `Source/VaRestHttp/Private/VaRestTracePoints.cpp`, `Completed`, before the `E
 Run: `Tools/run_tests.sh VaRest.Http.Envelope` then `Tools/run_tests.sh --no-build VaRest.Http.Decode` then `Tools/run_tests.sh --no-build VaRest.Http.Pipeline`
 Expected: `0 failed` each.
 
-- [ ] **Step 8: Restore-the-bug** — drop `|| bEnvelopeCheck` from `bTask`: `VaRest.Http.Envelope.Pipeline` FAILS ("void with a predicate", the predicate is never checked, or "its parse ran off the game thread"); restore; PASS. Drop the `bEnvelopeDataMissing` branch in `DecodeStruct`: `VaRest.Http.Envelope.Struct` FAILS; restore; PASS.
+- [ ] **Step 8: Restore-the-bug** — drop `|| bEnvelopeCheck` from `bTask`: `VaRest.Http.Envelope.Pipeline` FAILS on "... and its parse ran off the game thread" (the two JSON `void` bodies are parsed by `Decode` on the game thread: `EnvelopeParsesOnGameThread` grows by 2, while every Kind check still passes — concurrency review I-6); restore; PASS. Drop the `bEnvelopeDataMissing` branch in `DecodeStruct`: `VaRest.Http.Envelope.Struct` FAILS; restore; PASS. Drop the Warning in `CheckEnvelopePredicate`: `VaRest.Http.Envelope.VoidPredicateUnchecked` FAILS ("... and each says its predicate never ran"; spec review M-13); restore; PASS. Fill `EnvelopeTrace` in `ApplyEnvelope` without the `bTimeDecode` test: `VaRest.Http.Envelope.TraceFieldsOnlyWithSink` FAILS ("without one: the trace's copy is built only with a sink"; spec review M-14); restore; PASS.
 
 - [ ] **Step 9: Full suite, commit**
 
@@ -4511,27 +5425,27 @@ Expected: `0 failed`.
 git add Source/VaRestHttp/Public/VaRestClient.h Source/VaRestHttp/Private/VaRestClient.cpp Source/VaRestHttp/Private/VaRestClientState.h \
   Source/VaRestHttp/Private/VaRestExchangeState.h Source/VaRestHttp/Public/VaRestResultHandler.h Source/VaRestHttp/Private/VaRestDecode.h \
   Source/VaRestHttp/Private/VaRestDecode.cpp Source/VaRestHttp/Private/VaRestPipeline.cpp Source/VaRestHttp/Private/VaRestTracePoints.cpp \
-  Source/VaRestHttp/Private/Tests/VaRestHttpEnvelopeTest.cpp Source/VaRestTests/Private/VaRestHttpStructDecodeTest.cpp
-git commit -m "http: M4 task 10 -- the envelope in the pipeline: unwrap on the decode task, Kind=Server, error bodies, void predicates, IN-5
+  Source/VaRestHttp/Private/Tests/VaRestHttpEnvelopeTest.cpp Source/VaRestTests/Private/VaRestHttpStructDecodeTest.cpp Source/VaRestHttp/Public/VaRestHttpTesting.h
+git commit -m "http: M4 task 11 -- the envelope in the pipeline: unwrap on the decode task, Kind=Server, error bodies, void predicates, IN-5
 
 Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 ```
 
 ---
-### Task 11: The session — tokens, expiry, session headers, events, export and import, secrets (spec §4.2; WebSocket §19 item 2, §22 A1)
+### Task 12: The session — tokens, expiry, session headers, change and expiry events, secrets (spec §4.2; WebSocket §19 item 2, §22 A1)
 
-Plan decisions 5, 6, 17. A client's session is live state on its `FClientState`, game thread only. Its values are secret slots of the client's redactor (Inspector IN-13 layer 3) and its header names are redaction keys (layer 2); `ClearSession` forgets exactly the session's slots (Inspector §12: "cleared on logout"). No request uses the session yet: Task 12's `AuthApply` stage does.
+Plan decisions 5, 6, 17. A client's session is live state on its `FClientState`, game thread only. Its values are secret slots of the client's redactor (Inspector IN-13 layer 3) and its header names are redaction keys (layer 2); `ClearSession` forgets exactly the session's slots (Inspector §12: "cleared on logout"). Every change goes through one door, `FClientState::RunSessionChange` (concurrency review C-1 and I-2, ruled by shape): it keeps the client state alive while the change and its listeners run — a listener may drop the last `FVaRestClient`, as "a fresh client on logout" does — and it delivers the change's events after the change is done, in order, each to every listener before the next. An expired session expires once. No request uses the session yet: Task 14's `AuthApply` stage does. Export and import are Task 13.
 
 **Files:**
 - Create: `Source/VaRestHttp/Public/VaRestAuthTypes.h`, `Source/VaRestHttp/Private/VaRestSession.h`, `Source/VaRestHttp/Private/VaRestSession.cpp`
 - Modify: `Source/VaRestHttp/Public/VaRestRedactor.h`, `Source/VaRestHttp/Private/VaRestRedactor.cpp` (`FVaRestSecretSet::ClearSlots`; a previous value remembers its slot)
-- Modify: `Source/VaRestHttp/Private/VaRestClientState.h`, `Source/VaRestHttp/Private/VaRestClientState.cpp` (the session members; `SetSecrets`)
+- Modify: `Source/VaRestHttp/Private/VaRestClientState.h`, `Source/VaRestHttp/Private/VaRestClientState.cpp` (the session members; `SetSecrets`; `~FClientState` sends the session to the game thread with the configuration, concurrency review M-9)
 - Modify: `Source/VaRestHttp/Public/VaRestClient.h`, `Source/VaRestHttp/Private/VaRestClient.cpp` (the public session API; `AppendRedactKeys` moves to `VaRest::Http`)
 - Test: `Source/VaRestHttp/Private/Tests/VaRestHttpSessionTest.cpp`
 
 **Interfaces:**
-- Consumes: Task 4 (`TracePoints::Marker`).
-- Produces (public, `VaRestAuthTypes.h`): `UENUM(BlueprintType) enum class EVaRestAuthMode : uint8 { Required, IfAvailable, None }`; `UENUM(BlueprintType) enum class EVaRestApiKeyPlacement : uint8 { Header, Query }`; `UENUM(BlueprintType) enum class EVaRestRefreshStyle : uint8 { Json, OAuth2Form }`; `UENUM(BlueprintType) enum class EVaRestSessionChange : uint8 { Refreshed, Replaced, Cleared }`; `USTRUCT(BlueprintType) struct FVaRestBearerRefreshConfig` (fields in Step 3; Task 14 uses it); `struct FVaRestSessionData { FString AccessToken; FString RefreshToken; double ExpiresAt; FVaRestHeaders Headers; uint32 Generation; bool HasAccessToken() const; bool HasRefreshToken() const; }`; `using FVaRestSessionChangedEvent = TMulticastDelegate<void(EVaRestSessionChange)>`; `using FVaRestSessionExpiredEvent = TMulticastDelegate<void()>`. On `FVaRestClient`: `void SetBearerToken(FStringView AccessToken, bool bSameIdentity = false)`, `void SetSession(FStringView AccessToken, FStringView RefreshToken, double ExpiresInSeconds = 0.0, bool bSameIdentity = false)`, `void SetSessionHeader(FStringView Name, FStringView Value)`, `void RemoveSessionHeader(FStringView Name)`, `void ClearSession()`, `FVaRestSessionData GetSession() const`, `FString ExportSession() const`, `bool ImportSession(FStringView Json, bool bSameIdentity = false)`, `void NotifySessionExpired()`, `FVaRestSessionChangedEvent& OnSessionChanged()`, `FVaRestSessionExpiredEvent& OnSessionExpired()`. Private on `FClientState`: `const FVaRestSessionData& GetSessionData() const`, `bool UpdateTokens(const FString& AccessToken, const FString* RefreshToken, double ExpiresInSeconds)`, `void AnnounceSession(EVaRestSessionChange, uint64 CauseRequestId, const TCHAR* Text)`, `void SetTokensByGame(const FString& AccessToken, const FString* RefreshToken, double ExpiresInSeconds, bool bSameIdentity)`, `void SetSessionHeader(FStringView, FStringView)`, `void RemoveSessionHeader(FStringView)`, `void ClearSession()`, `void ExpireSession(uint64 CauseRequestId, FStringView Why)`, `FString ExportSession() const`, `bool ImportSession(FStringView Json, bool bSameIdentity)`, `void SetSecrets(TConstArrayView<TPair<FName, FString>>)`; `struct VaRest::Http::FSessionState { FVaRestSessionData Data; FVaRestSessionChangedEvent Changed; FVaRestSessionExpiredEvent Expired; }`; `void VaRest::Http::AppendRedactKeys(TArray<FString>& Into, TConstArrayView<FString> Keys)`; `void FVaRestSecretSet::ClearSlots(TFunctionRef<bool(FName Slot)> Matches)`.
+- Consumes: Task 5 (`TracePoints::Marker`).
+- Produces (public, `VaRestAuthTypes.h`): `UENUM(BlueprintType) enum class EVaRestAuthMode : uint8 { Required, IfAvailable, None }`; `UENUM(BlueprintType) enum class EVaRestApiKeyPlacement : uint8 { Header, Query }`; `UENUM(BlueprintType) enum class EVaRestRefreshStyle : uint8 { Json, OAuth2Form }`; `UENUM(BlueprintType) enum class EVaRestSessionChange : uint8 { Refreshed, Replaced, Cleared }`; `USTRUCT(BlueprintType) struct FVaRestBearerRefreshConfig` (fields in Step 3; Task 18 uses it); `struct FVaRestSessionData { FString AccessToken; FString RefreshToken; double ExpiresAt; double Lifetime; FVaRestHeaders Headers; uint32 Generation; uint32 CredentialGeneration; bool HasAccessToken() const; bool HasRefreshToken() const; }` (`Lifetime`: the seconds the token was given, concurrency review M-7; `CredentialGeneration`: bumped by token changes and clears only, review M-6); `using FVaRestSessionChangedEvent = TMulticastDelegate<void(EVaRestSessionChange)>`; `using FVaRestSessionExpiredEvent = TMulticastDelegate<void()>`. On `FVaRestClient`: `void SetBearerToken(FStringView AccessToken, bool bSameIdentity = false)`, `void SetSession(FStringView AccessToken, FStringView RefreshToken, double ExpiresInSeconds = 0.0, bool bSameIdentity = false)`, `void SetSessionHeader(FStringView Name, FStringView Value)`, `void RemoveSessionHeader(FStringView Name)`, `void ClearSession()`, `FVaRestSessionData GetSession() const`, `void NotifySessionExpired()`, `FVaRestSessionChangedEvent& OnSessionChanged()`, `FVaRestSessionExpiredEvent& OnSessionExpired()`; every one that changes the session calls only `RunSessionChange`. Private on `FClientState`: `void RunSessionChange(TFunctionRef<void(FClientState&)> Change)`; inside a change only (each checks it): `bool UpdateTokens(const FString& AccessToken, const FString* RefreshToken, double ExpiresInSeconds)`, `void AnnounceSession(EVaRestSessionChange, uint64 CauseRequestId, const TCHAR* Text)` (queues), `void SetTokensByGame(const FString& AccessToken, const FString* RefreshToken, double ExpiresInSeconds, bool bSameIdentity)`, `void SetSessionHeader(FStringView, FStringView)`, `void RemoveSessionHeader(FStringView)`, `void ClearSession()`, `void ExpireSession(uint64 CauseRequestId, FStringView Why)` (queues; nothing for a session already expired); `const FVaRestSessionData& GetSessionData() const`, `void SetSecrets(TConstArrayView<TPair<FName, FString>>)`; `struct VaRest::Http::FSessionEvent { bool bExpired; EVaRestSessionChange Change; uint64 CauseRequestId; FString Text; }`; `struct VaRest::Http::FSessionState { FVaRestSessionData Data; FVaRestSessionChangedEvent Changed; FVaRestSessionExpiredEvent Expired; TArray<FSessionEvent> Pending; int32 ChangeDepth; bool bDelivering; }`; `void VaRest::Http::AppendRedactKeys(TArray<FString>& Into, TConstArrayView<FString> Keys)`; `void FVaRestSecretSet::ClearSlots(TFunctionRef<bool(FName Slot)> Matches)`.
 
 - [ ] **Step 1: Write the failing tests** — create `Source/VaRestHttp/Private/Tests/VaRestHttpSessionTest.cpp`:
 
@@ -4540,7 +5454,9 @@ Plan decisions 5, 6, 17. A client's session is live state on its `FClientState`,
 
 #if WITH_DEV_AUTOMATION_TESTS
 
+#include "HAL/PlatformProcess.h"
 #include "Misc/AutomationTest.h"
+#include "Tasks/Task.h"
 #include "VaRestClient.h"
 #include "VaRestClientState.h"
 #include "VaRestHttpTesting.h"
@@ -4605,6 +5521,8 @@ bool FVaRestHttpSessionLifecycleTest::RunTest(const FString& Parameters)
 	Rig.Client.NotifySessionExpired();
 	Data = Rig.Client.GetSession();
 	TestTrue(TEXT("WS 19 item 2 NotifySessionExpired: tokens dropped, OnSessionExpired once"), *Expired == 1 && !Data.HasAccessToken() && !Data.HasRefreshToken());
+	Rig.Client.NotifySessionExpired();
+	TestEqual(TEXT("an expired session expires once (concurrency review I-2)"), *Expired, 1);
 
 	const TArray<FVaRestTraceMarker> Markers = Scoped.Recorder->MarkersOf(Rig.Client.GetId());
 	TArray<EVaRestTraceMarkerKind> Kinds;
@@ -4641,41 +5559,6 @@ bool FVaRestHttpSessionSecretsTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpSessionExportTest, "VaRest.Http.Session.ExportImport",
-	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
-
-bool FVaRestHttpSessionExportTest::RunTest(const FString& Parameters)
-{
-	using namespace VaRest::Http::Testing;
-	using namespace VaRest::Http::SessionTestPrivate;
-	FTestRig From;
-	From.Client.SetSession(TEXT("access-export-12345"), TEXT("refresh-export-1234"), 120.0);
-	From.Client.SetSessionHeader(TEXT("X-Session-ID"), TEXT("session-export-123"));
-	const FString Exported = From.Client.ExportSession();
-	TestTrue(TEXT("an export holds the tokens (the docs carry the caveat)"), Exported.Contains(TEXT("access-export-12345")) && Exported.Contains(TEXT("\"version\":1")));
-
-	FTestRig To;
-	const FChanges Seen = Watch(To.Client);
-	if (!TestTrue(TEXT("imported"), To.Client.ImportSession(Exported)))
-	{
-		return false;
-	}
-	const FVaRestSessionData Data = To.Client.GetSession();
-	TestTrue(TEXT("the same tokens and header"), Data.AccessToken == TEXT("access-export-12345") && Data.RefreshToken == TEXT("refresh-export-1234")
-		&& Data.Headers.Get(TEXT("X-Session-ID")) == TEXT("session-export-123"));
-	TestTrue(TEXT("the expiry carried through UTC, within a second"), FMath::Abs(Data.ExpiresAt - 120.0) < 1.0);
-	TestTrue(TEXT("an import is Replaced"), Seen->Num() == 1 && (*Seen)[0] == EVaRestSessionChange::Replaced);
-	TestEqualSensitive(TEXT("... and its values are secrets"), Scrub(To.Client, TEXT("session-export-123")), FString(TEXT("***")));
-
-	FTestRig Bad;
-	TestFalse(TEXT("not JSON"), Bad.Client.ImportSession(TEXT("{nope")));
-	TestFalse(TEXT("another version"), Bad.Client.ImportSession(TEXT(R"({"version":2,"accessToken":"a"})")));
-	TestFalse(TEXT("a token with CR LF"), Bad.Client.ImportSession(TEXT(R"({"version":1,"accessToken":"a\r\nX-Evil: 1"})")));
-	TestFalse(TEXT("a bad date"), Bad.Client.ImportSession(TEXT(R"({"version":1,"accessToken":"a","expiresAt":"tomorrow"})")));
-	TestFalse(TEXT("nothing changed"), Bad.Client.GetSession().HasAccessToken());
-	return true;
-}
-
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpSessionRefusesTest, "VaRest.Http.Session.RefusesControlCharacters",
 	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
 
@@ -4690,6 +5573,139 @@ bool FVaRestHttpSessionRefusesTest::RunTest(const FString& Parameters)
 	Rig.Client.SetSessionHeader(TEXT("Bad Name"), TEXT("v"));
 	TestFalse(TEXT("no token set"), Rig.Client.GetSession().HasAccessToken());
 	TestTrue(TEXT("no header set"), Rig.Client.GetSession().Headers.IsEmpty());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpSessionDropsClientTest, "VaRest.Http.Session.HandlerDropsClient",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpSessionDropsClientTest::RunTest(const FString& Parameters)
+{
+	// Concurrency review C-1: "a fresh client on logout" -- a listener reassigns the only FVaRestClient while the client
+	// state is delivering to it. RunSessionChange keeps the state alive until the change returns; a weak probe shows it
+	// alive inside each listener and gone after. Task 17 adds the parked-request half (HandlerDropsClientWhileParked).
+	using FClientHolder = TSharedRef<FVaRestClient, ESPMode::ThreadSafe>;
+	using FStateWeak = TWeakPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe>;
+	using FAlive = TSharedRef<TArray<bool>, ESPMode::ThreadSafe>;
+	for (int32 Case = 0; Case < 3; ++Case)
+	{
+		const FClientHolder Holder = MakeShared<FVaRestClient, ESPMode::ThreadSafe>(FVaRestClient::Make(TEXT("https://api.test")));
+		if (Case > 0)
+		{
+			// A session to clear or to expire, set before the listener is bound
+			Holder->SetSession(TEXT("token-dropped-123456"), TEXT("refresh-dropped-12345"));
+		}
+		const FStateWeak Weak = VaRest::Http::FClientAccess::State(*Holder);
+		const FAlive Alive = MakeShared<TArray<bool>, ESPMode::ThreadSafe>();
+		// Copied out first: without the keep-alive, the assignment frees this lambda with the delegate that holds it
+		auto Drop = [Holder, Weak, Alive]
+		{
+			const FClientHolder Owner = Holder;
+			const FStateWeak Watched = Weak;
+			const FAlive Into = Alive;
+			*Owner = FVaRestClient();
+			Into->Add(Watched.IsValid());
+		};
+		const TCHAR* Name = Case == 0 ? TEXT("SetBearerToken (Replaced)") : Case == 1 ? TEXT("ClearSession (Cleared)") : TEXT("NotifySessionExpired (OnSessionExpired)");
+		if (Case < 2)
+		{
+			Holder->OnSessionChanged().AddLambda([Drop](EVaRestSessionChange) { Drop(); });
+		}
+		else
+		{
+			Holder->OnSessionExpired().AddLambda([Drop] { Drop(); });
+		}
+		FVaRestClient& Client = *Holder;
+		if (Case == 0)
+		{
+			Client.SetBearerToken(TEXT("token-replaced-123456"));
+		}
+		else if (Case == 1)
+		{
+			Client.ClearSession();
+		}
+		else
+		{
+			Client.NotifySessionExpired();
+		}
+		TestTrue(FString::Printf(TEXT("%s: the listener ran once and saw the state alive"), Name), Alive->Num() == 1 && (*Alive)[0]);
+		TestFalse(FString::Printf(TEXT("%s: ... and the state went when the call returned"), Name), Weak.IsValid());
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpSessionNestedTest, "VaRest.Http.Session.NestedChangeOrder",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpSessionNestedTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	// Concurrency review I-2: a listener that changes the session inside an event (a game rejecting a token) must not make
+	// a later listener see the events out of order -- W5's socket manager restarts sockets on Replaced and closes them on
+	// Cleared. UE broadcasts in reverse binding order (MulticastDelegateBase.h:299-300): L2 is bound first to run second.
+	const TSharedRef<FVaRestClient, ESPMode::ThreadSafe> Holder = MakeShared<FVaRestClient, ESPMode::ThreadSafe>(FVaRestClient::Make(TEXT("https://api.test")));
+	const TSharedRef<TArray<EVaRestSessionChange>, ESPMode::ThreadSafe> SeenByL2 = MakeShared<TArray<EVaRestSessionChange>, ESPMode::ThreadSafe>();
+	Holder->OnSessionChanged().AddLambda([SeenByL2](EVaRestSessionChange Change) { SeenByL2->Add(Change); });
+	const TWeakPtr<FVaRestClient, ESPMode::ThreadSafe> WeakClient = Holder;
+	Holder->OnSessionChanged().AddLambda([WeakClient](EVaRestSessionChange Change)
+	{
+		const TSharedPtr<FVaRestClient, ESPMode::ThreadSafe> Pinned = WeakClient.Pin();
+		if (Pinned.IsValid() && Change == EVaRestSessionChange::Replaced)
+		{
+			Pinned->ClearSession();
+		}
+	});
+	FScopedTraceRecorder Scoped(EVaRestTraceDetail::Metadata);
+	Holder->SetBearerToken(TEXT("token-rejected-123456"));
+	TestTrue(TEXT("every listener sees Replaced, then Cleared"), SeenByL2->Num() == 2 && (*SeenByL2)[0] == EVaRestSessionChange::Replaced
+		&& (*SeenByL2)[1] == EVaRestSessionChange::Cleared);
+	TestFalse(TEXT("... and the session is the last change's: empty"), Holder->GetSession().HasAccessToken());
+	TArray<EVaRestTraceMarkerKind> Kinds;
+	for (const FVaRestTraceMarker& Marker : Scoped.Recorder->MarkersOf(Holder->GetId()))
+	{
+		Kinds.Add(Marker.Kind);
+	}
+	TestTrue(TEXT("IN-9: the markers in the same order"), Kinds == TArray<EVaRestTraceMarkerKind>{ EVaRestTraceMarkerKind::SessionReplaced, EVaRestTraceMarkerKind::SessionCleared });
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpSessionListenersTest, "VaRest.Http.Session.ListenersDieOnGameThread",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpSessionListenersTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	// Concurrency review M-9: a client whose last handle a game's worker drops dies there; the I-1 backstop sends its
+	// configuration to the game thread, and the session's listeners -- game code and what it captures -- go with it
+	struct FWhereDestroyed
+	{
+		explicit FWhereDestroyed(TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> InInto)
+			: Into(MoveTemp(InInto))
+		{
+		}
+		~FWhereDestroyed() { Into->store(IsInGameThread() ? 1 : 0); }
+		TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> Into;
+	};
+	const TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> Where = MakeShared<std::atomic<int32>, ESPMode::ThreadSafe>(-1);
+	FVaRestClient Doomed = FVaRestClient::Make(TEXT("https://worker.test"));
+	// The listener holds the probe's only reference
+	Doomed.OnSessionChanged().AddLambda([Probe = MakeShared<FWhereDestroyed, ESPMode::ThreadSafe>(Where)](EVaRestSessionChange) {});
+	const UE::Tasks::FTask Dropping = UE::Tasks::Launch(TEXT("VaRest.Test.DropClient"), [Last = MoveTemp(Doomed)]() mutable
+	{
+		Last = FVaRestClient();
+	});
+	// Not Wait(): it may run the task here, on the game thread (Task.h:65-80); as VaRest.Http.Trace.ClientDestroyedOffGameThread
+	const double Deadline = FPlatformTime::Seconds() + 5.0;
+	while (!Dropping.IsCompleted() && FPlatformTime::Seconds() < Deadline)
+	{
+		FPlatformProcess::Sleep(0.001f);
+	}
+	if (!TestTrue(TEXT("the worker dropped the last handle"), Dropping.IsCompleted()))
+	{
+		return false;
+	}
+	TestTrue(TEXT("the listener is released"), PumpUntil([Where] { return Where->load() != -1; }));
+	TestEqual(TEXT("... on the game thread"), Where->load(), 1);
 	return true;
 }
 
@@ -4809,10 +5825,17 @@ struct FVaRestSessionData
 	FString RefreshToken;
 	/** Client-clock seconds (IVaRestClock) when the access token expires; 0 = unknown */
 	double ExpiresAt = 0.0;
+	/** The seconds the access token was given when it was set; 0 = unknown. BearerRefresh refreshes at most half of it early (concurrency review M-7). */
+	double Lifetime = 0.0;
 	/** dawg's X-Session-ID pattern: sent with every request whose auth mode is not None */
 	FVaRestHeaders Headers;
-	/** Bumped by every change of credentials: an attempt that applied an older one replays without a refresh (Task 13) */
+	/** Bumped by every change of the session: tokens, a clear, an expiry, a session header */
 	uint32 Generation = 0;
+	/**
+	 * Bumped by token changes, clears and expiries only, not by a session header (concurrency review M-6): an attempt that
+	 * applied an older one replays without a refresh (Task 17), and a header change must not use up that one replay
+	 */
+	uint32 CredentialGeneration = 0;
 
 	bool HasAccessToken() const { return !AccessToken.IsEmpty(); }
 	bool HasRefreshToken() const { return !RefreshToken.IsEmpty(); }
@@ -4836,15 +5859,34 @@ Create `Source/VaRestHttp/Private/VaRestSession.h`:
 
 namespace VaRest::Http
 {
+	/** One session event waiting for its listeners (concurrency review I-2) */
+	struct FSessionEvent
+	{
+		/** OnSessionExpired; else OnSessionChanged(Change) */
+		bool bExpired = false;
+		EVaRestSessionChange Change = EVaRestSessionChange::Replaced;
+		/** IN-9 CauseRequestId; 0 = the game */
+		uint64 CauseRequestId = 0;
+		/** IN-9 Text (the trace point scrubs it) */
+		FString Text;
+	};
+
 	/**
 	 * Spec 4.2: one client's session, live (plan decision 6). Game thread. FClientState owns it; its session functions
-	 * (VaRestSession.cpp) change it, publish its secrets and fire its events. Task 13 adds the refresh in flight.
+	 * (VaRestSession.cpp) change it inside RunSessionChange, publish its secrets and queue its events. Task 16 adds the
+	 * refresh in flight.
 	 */
 	struct FSessionState
 	{
 		FVaRestSessionData Data;
 		FVaRestSessionChangedEvent Changed;
 		FVaRestSessionExpiredEvent Expired;
+		/** Concurrency review I-2: queued by a change, delivered in order by the outermost RunSessionChange */
+		TArray<FSessionEvent> Pending;
+		/** RunSessionChange calls in progress; every session function checks for one (concurrency review C-1) */
+		int32 ChangeDepth = 0;
+		/** The outermost RunSessionChange is delivering Pending: a nested change only queues */
+		bool bDelivering = false;
 	};
 
 	/** Every secret slot the session takes starts with this, so ClearSession forgets exactly them (plan decision 17) */
@@ -4885,9 +5927,16 @@ void FVaRestSecretSet::ClearSlots(TFunctionRef<bool(FName Slot)> Matches)
 		const FVaRestSessionData& GetSessionData() const { return Session.Data; }
 		FVaRestSessionChangedEvent& OnSessionChanged() { return Session.Changed; }
 		FVaRestSessionExpiredEvent& OnSessionExpired() { return Session.Expired; }
+		/**
+		 * Concurrency review C-1, I-2: the one way into a session change. Keeps this state alive while Change and the events
+		 * it queued run -- a listener may drop the last FVaRestClient -- then delivers the queued events in order, each to
+		 * every listener before the next. Inside a listener it only queues; the outer call delivers. The functions below
+		 * check that they run inside one.
+		 */
+		void RunSessionChange(TFunctionRef<void(FClientState&)> Change);
 		/** Data and secrets only, no event; RefreshToken null keeps the current one; ExpiresInSeconds 0 = unknown. True when anything changed. */
 		bool UpdateTokens(const FString& AccessToken, const FString* RefreshToken, double ExpiresInSeconds);
-		/** IN-9 marker and OnSessionChanged, after a change */
+		/** Queues an IN-9 marker and OnSessionChanged(Change) for RunSessionChange to deliver */
 		void AnnounceSession(EVaRestSessionChange Change, uint64 CauseRequestId, const TCHAR* Text);
 		/** SetBearerToken, SetSession, ImportSession: Replaced, or Refreshed with bSameIdentity (plan decision 5); no event when nothing changed */
 		void SetTokensByGame(const FString& AccessToken, const FString* RefreshToken, double ExpiresInSeconds, bool bSameIdentity);
@@ -4895,13 +5944,24 @@ void FVaRestSecretSet::ClearSlots(TFunctionRef<bool(FName Slot)> Matches)
 		void RemoveSessionHeader(FStringView Name);
 		/** Logout: tokens, headers and the session's secret slots; OnSessionChanged(Cleared). Nothing happens to an empty session. */
 		void ClearSession();
-		/** A rejected refresh (Task 13) or NotifySessionExpired: the tokens go, the headers stay; OnSessionExpired */
+		/**
+		 * A rejected refresh (Task 16) or NotifySessionExpired: the tokens go, the headers stay; OnSessionExpired queued.
+		 * Once: a session with no token left queues nothing (concurrency review I-2).
+		 */
 		void ExpireSession(uint64 CauseRequestId, FStringView Why);
-		FString ExportSession() const;
-		bool ImportSession(FStringView Json, bool bSameIdentity);
 ```
 
-private: `FSessionState Session;` and `void PublishSessionSecrets();`. In `namespace VaRest::Http` beside `LogConfigError`:
+private: `FSessionState Session;`, `void PublishSessionSecrets();` and `void CheckInSessionChange() const;`. In `~FClientState`, the I-1 backstop's task takes the session too (concurrency review M-9: its listeners are game code, and Task 16's waiters hold `RefreshAuth` callbacks):
+
+```cpp
+		// Review I-1 backstop: the configuration (custom stages, transport, clock) and the session (its listeners, its
+		// refresh waiters: game code and its captures, concurrency review M-9) die on the game thread. Moved, not copied
+		// (review N-3), so this thread keeps no reference; the task body dies on the game thread right after it runs
+		// (TaskPrivate.h:871-877).
+		UE::Tasks::Launch(TEXT("VaRest.ReleaseConfig"), [Doomed = MoveTemp(Config), DoomedSession = MoveTemp(Session)] {}, UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
+```
+
+(replacing the M3 comment and launch in that `if (!IsInGameThread())` block). In `namespace VaRest::Http` beside `LogConfigError`:
 
 ```cpp
 	/** Checks and de-duplicates redaction keys where they enter (task 14 review M4); VaRestClient.cpp */
@@ -4951,6 +6011,44 @@ namespace VaRest::Http::SessionPrivate
 	}
 }
 
+void VaRest::Http::FClientState::CheckInSessionChange() const
+{
+	checkf(IsInGameThread() && Session.ChangeDepth > 0, TEXT("VaRest: a session change outside FClientState::RunSessionChange (concurrency review C-1)"));
+}
+
+void VaRest::Http::FClientState::RunSessionChange(TFunctionRef<void(FClientState&)> Change)
+{
+	check(IsInGameThread());
+	// Concurrency review C-1: the caller's FVaRestClient may hold the only reference, and a listener may drop it
+	const TSharedRef<FClientState, ESPMode::ThreadSafe> Keep = AsShared();
+	++Session.ChangeDepth;
+	Change(*this);
+	--Session.ChangeDepth;
+	if (Session.ChangeDepth > 0 || Session.bDelivering)
+	{
+		// Nested -- a listener's change, or a change inside a change: the outer call delivers what this one queued
+		return;
+	}
+	TGuardValue<bool> Delivering(Session.bDelivering, true);
+	// Concurrency review I-2: by index, since listeners queue more while this runs; each event reaches every listener
+	// before the next one goes out
+	for (int32 Index = 0; Index < Session.Pending.Num(); ++Index)
+	{
+		const FSessionEvent Event = Session.Pending[Index]; // a copy: the array may grow under it
+		if (Event.bExpired)
+		{
+			TracePoints::Marker(*this, EVaRestTraceMarkerKind::SessionExpired, Event.CauseRequestId, Event.Text);
+			Session.Expired.Broadcast();
+			continue;
+		}
+		const EVaRestTraceMarkerKind Kind = Event.Change == EVaRestSessionChange::Refreshed ? EVaRestTraceMarkerKind::SessionRefreshed
+			: Event.Change == EVaRestSessionChange::Replaced ? EVaRestTraceMarkerKind::SessionReplaced : EVaRestTraceMarkerKind::SessionCleared;
+		TracePoints::Marker(*this, Kind, Event.CauseRequestId, Event.Text);
+		Session.Changed.Broadcast(Event.Change);
+	}
+	Session.Pending.Reset();
+}
+
 void VaRest::Http::FClientState::PublishSessionSecrets()
 {
 	using namespace SessionPrivate;
@@ -4967,9 +6065,10 @@ void VaRest::Http::FClientState::PublishSessionSecrets()
 
 bool VaRest::Http::FClientState::UpdateTokens(const FString& AccessToken, const FString* RefreshToken, double ExpiresInSeconds)
 {
-	check(IsInGameThread());
+	CheckInSessionChange();
 	FVaRestSessionData& Data = Session.Data;
-	const double ExpiresAt = FMath::IsFinite(ExpiresInSeconds) && ExpiresInSeconds > 0.0 ? GetConfig()->Clock->Now() + ExpiresInSeconds : 0.0;
+	const double Lifetime = FMath::IsFinite(ExpiresInSeconds) && ExpiresInSeconds > 0.0 ? ExpiresInSeconds : 0.0;
+	const double ExpiresAt = Lifetime > 0.0 ? GetConfig()->Clock->Now() + Lifetime : 0.0;
 	const bool bSame = Data.AccessToken.Equals(AccessToken, ESearchCase::CaseSensitive)
 		&& (!RefreshToken || Data.RefreshToken.Equals(*RefreshToken, ESearchCase::CaseSensitive)) && Data.ExpiresAt == ExpiresAt;
 	if (bSame)
@@ -4982,18 +6081,24 @@ bool VaRest::Http::FClientState::UpdateTokens(const FString& AccessToken, const 
 		Data.RefreshToken = *RefreshToken;
 	}
 	Data.ExpiresAt = ExpiresAt;
+	// Concurrency review M-7: the lifetime it was given; BearerRefresh refreshes at most half of it early
+	Data.Lifetime = Lifetime;
 	++Data.Generation;
+	// Concurrency review M-6: a token change -- what the auth gate's "newer credentials" replay compares
+	++Data.CredentialGeneration;
 	PublishSessionSecrets();
 	return true;
 }
 
 void VaRest::Http::FClientState::AnnounceSession(EVaRestSessionChange Change, uint64 CauseRequestId, const TCHAR* Text)
 {
-	const EVaRestTraceMarkerKind Kind = Change == EVaRestSessionChange::Refreshed ? EVaRestTraceMarkerKind::SessionRefreshed
-		: Change == EVaRestSessionChange::Replaced ? EVaRestTraceMarkerKind::SessionReplaced : EVaRestTraceMarkerKind::SessionCleared;
-	TracePoints::Marker(*this, Kind, CauseRequestId, Text);
-	// Last: a handler may change the session again (log in again from OnSessionChanged(Cleared))
-	Session.Changed.Broadcast(Change);
+	CheckInSessionChange();
+	// Concurrency review I-2: queued; the outermost RunSessionChange delivers it once the change is done, after every
+	// listener got the event before it (a listener may change the session again: log in again from OnSessionChanged(Cleared))
+	FSessionEvent& Event = Session.Pending.AddDefaulted_GetRef();
+	Event.Change = Change;
+	Event.CauseRequestId = CauseRequestId;
+	Event.Text = Text;
 }
 
 void VaRest::Http::FClientState::SetTokensByGame(const FString& AccessToken, const FString* RefreshToken, double ExpiresInSeconds, bool bSameIdentity)
@@ -5006,8 +6111,9 @@ void VaRest::Http::FClientState::SetTokensByGame(const FString& AccessToken, con
 
 void VaRest::Http::FClientState::SetSessionHeader(FStringView Name, FStringView Value)
 {
-	check(IsInGameThread());
+	CheckInSessionChange();
 	Session.Data.Headers.Set(Name, Value);
+	// Not CredentialGeneration: a header change must not use up a 401's one replay (concurrency review M-6)
 	++Session.Data.Generation;
 	// IN-13 layer 2: the name is a key wherever it appears (a header, a query, a JSON body that echoes it)
 	EditConfig([Name](FClientConfig& Edited) { AppendRedactKeys(Edited.RedactedKeys, TArray<FString>{ FString(Name) }); });
@@ -5016,7 +6122,7 @@ void VaRest::Http::FClientState::SetSessionHeader(FStringView Name, FStringView 
 
 void VaRest::Http::FClientState::RemoveSessionHeader(FStringView Name)
 {
-	check(IsInGameThread());
+	CheckInSessionChange();
 	if (!Session.Data.Headers.Remove(Name))
 	{
 		return;
@@ -5028,15 +6134,17 @@ void VaRest::Http::FClientState::RemoveSessionHeader(FStringView Name)
 
 void VaRest::Http::FClientState::ClearSession()
 {
-	check(IsInGameThread());
+	CheckInSessionChange();
 	FVaRestSessionData& Data = Session.Data;
 	if (!Data.HasAccessToken() && !Data.HasRefreshToken() && Data.Headers.IsEmpty())
 	{
 		return;
 	}
 	const uint32 Generation = Data.Generation + 1;
+	const uint32 CredentialGeneration = Data.CredentialGeneration + 1;
 	Data = FVaRestSessionData();
 	Data.Generation = Generation;
+	Data.CredentialGeneration = CredentialGeneration;
 	// Inspector 12, "cleared on logout": the session's values go now, previous ones included; the game's own slots stay
 	const FString Prefix = SessionSecretPrefix();
 	// FName text keeps the casing it was first made with, so the prefix compares ignoring case
@@ -5048,17 +6156,278 @@ void VaRest::Http::FClientState::ClearSession()
 
 void VaRest::Http::FClientState::ExpireSession(uint64 CauseRequestId, FStringView Why)
 {
-	check(IsInGameThread());
+	CheckInSessionChange();
 	FVaRestSessionData& Data = Session.Data;
+	if (!Data.HasAccessToken() && !Data.HasRefreshToken())
+	{
+		// Concurrency review I-2: expired already -- a parked request's OnError calling NotifySessionExpired after a
+		// rejected refresh, a listener of OnSessionExpired calling it again: one expiry, one event (Task 16 adds "and no
+		// refresh in flight")
+		return;
+	}
 	Data.AccessToken.Reset();
 	Data.RefreshToken.Reset();
 	Data.ExpiresAt = 0.0;
+	Data.Lifetime = 0.0;
 	++Data.Generation;
+	++Data.CredentialGeneration;
 	PublishSessionSecrets();
-	TracePoints::Marker(*this, EVaRestTraceMarkerKind::SessionExpired, CauseRequestId, Why);
-	Session.Expired.Broadcast();
+	FSessionEvent& Event = Session.Pending.AddDefaulted_GetRef();
+	Event.bExpired = true;
+	Event.CauseRequestId = CauseRequestId;
+	Event.Text = FString(Why);
+}
+```
+
+- [ ] **Step 6: The public API** — in `Source/VaRestHttp/Public/VaRestClient.h` add `#include "VaRestAuthTypes.h"` and, after the configuration section:
+
+```cpp
+	// ---- session (spec 4.2; game thread). Live state: every attempt uses the session as it is when it starts (plan decision 6).
+	// A listener of OnSessionChanged or OnSessionExpired may change the session again or drop this client: the events of one
+	// change reach every listener in order, after the change is done (concurrency review C-1, I-2).
+	/**
+	 * The access token (a login, a token from elsewhere). Replaced, or Refreshed with bSameIdentity (plan decision 5); the
+	 * refresh token stays, the expiry becomes unknown. An empty token is ClearSession(). A token holding a control character
+	 * is refused with an Error log (it would go into a header line).
+	 */
+	void SetBearerToken(FStringView AccessToken, bool bSameIdentity = false);
+	/** A login's result: both tokens and the access token's lifetime in seconds (0 = unknown) */
+	void SetSession(FStringView AccessToken, FStringView RefreshToken, double ExpiresInSeconds = 0.0, bool bSameIdentity = false);
+	/** dawg's X-Session-ID pattern: sent with every request whose auth mode is not None; its value is a secret, its name a key */
+	void SetSessionHeader(FStringView Name, FStringView Value);
+	void RemoveSessionHeader(FStringView Name);
+	/** Logout: tokens, session headers and their secret values; OnSessionChanged(Cleared) */
+	void ClearSession();
+	FVaRestSessionData GetSession() const;
+	/** WebSocket spec 19 item 2: a socket's terminal auth failure. The tokens go; OnSessionExpired fires, once per expiry. */
+	void NotifySessionExpired();
+	/** Game thread. An empty client returns a delegate that never fires. */
+	FVaRestSessionChangedEvent& OnSessionChanged();
+	FVaRestSessionExpiredEvent& OnSessionExpired();
+```
+
+In `Source/VaRestHttp/Private/VaRestClient.cpp`:
+
+```cpp
+void FVaRestClient::SetBearerToken(FStringView AccessToken, bool bSameIdentity)
+{
+	check(IsInGameThread());
+	if (!State.IsValid())
+	{
+		return;
+	}
+	if (AccessToken.IsEmpty())
+	{
+		ClearSession();
+		return;
+	}
+	if (!VaRest::Http::IsValidHeaderValue(AccessToken))
+	{
+		// The token is not in the line: it is a secret, and the reason is enough
+		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: SetBearerToken: the token holds CR, LF, NUL or another control character; not set"));
+		return;
+	}
+	// Concurrency review C-1: every session change goes through RunSessionChange, which keeps the state alive past a
+	// listener that drops this client; nothing below touches this object after it returns
+	const FString Token(AccessToken);
+	State->RunSessionChange([&Token, bSameIdentity](VaRest::Http::FClientState& Target) { Target.SetTokensByGame(Token, nullptr, 0.0, bSameIdentity); });
 }
 
+void FVaRestClient::SetSession(FStringView AccessToken, FStringView RefreshToken, double ExpiresInSeconds, bool bSameIdentity)
+{
+	check(IsInGameThread());
+	if (!State.IsValid())
+	{
+		return;
+	}
+	if (!VaRest::Http::IsValidHeaderValue(AccessToken) || !VaRest::Http::IsValidHeaderValue(RefreshToken))
+	{
+		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: SetSession: a token holds CR, LF, NUL or another control character; not set"));
+		return;
+	}
+	const FString Access(AccessToken);
+	const FString Refresh(RefreshToken);
+	State->RunSessionChange([&Access, &Refresh, ExpiresInSeconds, bSameIdentity](VaRest::Http::FClientState& Target)
+	{
+		Target.SetTokensByGame(Access, &Refresh, ExpiresInSeconds, bSameIdentity);
+	});
+}
+
+void FVaRestClient::SetSessionHeader(FStringView Name, FStringView Value)
+{
+	check(IsInGameThread());
+	if (!VaRest::Http::IsValidHeaderName(Name))
+	{
+		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: SetSessionHeader: the name is not a token (\"%s\"); not set"), *VaRest::Http::EscapeForLog(Name));
+		return;
+	}
+	if (!VaRest::Http::IsValidHeaderValue(Value))
+	{
+		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: SetSessionHeader: the value of \"%s\" holds a control character; not set"), *VaRest::Http::EscapeForLog(Name));
+		return;
+	}
+	if (State.IsValid())
+	{
+		State->RunSessionChange([Name, Value](VaRest::Http::FClientState& Target) { Target.SetSessionHeader(Name, Value); });
+	}
+}
+
+void FVaRestClient::RemoveSessionHeader(FStringView Name)
+{
+	check(IsInGameThread());
+	if (State.IsValid())
+	{
+		State->RunSessionChange([Name](VaRest::Http::FClientState& Target) { Target.RemoveSessionHeader(Name); });
+	}
+}
+
+void FVaRestClient::ClearSession()
+{
+	check(IsInGameThread());
+	if (State.IsValid())
+	{
+		State->RunSessionChange([](VaRest::Http::FClientState& Target) { Target.ClearSession(); });
+	}
+}
+
+FVaRestSessionData FVaRestClient::GetSession() const
+{
+	check(IsInGameThread());
+	return State.IsValid() ? State->GetSessionData() : FVaRestSessionData();
+}
+
+void FVaRestClient::NotifySessionExpired()
+{
+	check(IsInGameThread());
+	if (State.IsValid())
+	{
+		State->RunSessionChange([](VaRest::Http::FClientState& Target) { Target.ExpireSession(0, TEXT("NotifySessionExpired")); });
+	}
+}
+
+FVaRestSessionChangedEvent& FVaRestClient::OnSessionChanged()
+{
+	check(IsInGameThread());
+	if (!State.IsValid())
+	{
+		// Leaked, like every singleton here (review I-4)
+		static FVaRestSessionChangedEvent* const Never = new FVaRestSessionChangedEvent();
+		return *Never;
+	}
+	return State->OnSessionChanged();
+}
+
+FVaRestSessionExpiredEvent& FVaRestClient::OnSessionExpired()
+{
+	check(IsInGameThread());
+	if (!State.IsValid())
+	{
+		static FVaRestSessionExpiredEvent* const Never = new FVaRestSessionExpiredEvent();
+		return *Never;
+	}
+	return State->OnSessionExpired();
+}
+```
+
+- [ ] **Step 7: Run them, and the redactor and log suites**
+
+Run: `Tools/run_tests.sh VaRest.Http.Session` then `Tools/run_tests.sh --no-build VaRest.Http.Redactor` then `Tools/run_tests.sh --no-build VaRest.Http.Log`
+Expected: `0 failed` each.
+
+- [ ] **Step 8: Restore-the-bug** — (a) in `ClearSession` call `Secrets.ClearAll()` instead of `ClearSlots`: `VaRest.Http.Session.Secrets` FAILS ("... and keeps the game's own"); restore; PASS. (b) In `UpdateTokens` skip `PublishSessionSecrets()`: `Secrets` FAILS on "a rotated token stays known" — not on the first scrub check, since the `SetSessionHeader` right after `SetSession` publishes every slot, the tokens included (spec review M-3); restore; PASS. (c) Drop `Keep` in `RunSessionChange`: `VaRest.Http.Session.HandlerDropsClient` FAILS ("the listener ran once and saw the state alive" records false: the state was freed inside its own broadcast) or the run crashes in the engine's broadcast loop, which is the bug too; restore; PASS. (d) In `AnnounceSession` emit the marker and broadcast at once instead of queueing: `VaRest.Http.Session.NestedChangeOrder` FAILS (L2 sees `Cleared, Replaced`); restore; PASS. (e) Drop `ExpireSession`'s already-expired return: `VaRest.Http.Session.Lifecycle` FAILS ("an expired session expires once"); restore; PASS. (f) Drop `DoomedSession` from `~FClientState`'s release task: `VaRest.Http.Session.ListenersDieOnGameThread` FAILS ("... on the game thread" reads 0); restore; PASS. Record all six.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add Source/VaRestHttp/Public/VaRestAuthTypes.h Source/VaRestHttp/Private/VaRestSession.h Source/VaRestHttp/Private/VaRestSession.cpp \
+  Source/VaRestHttp/Public/VaRestRedactor.h Source/VaRestHttp/Private/VaRestRedactor.cpp Source/VaRestHttp/Private/VaRestClientState.h \
+  Source/VaRestHttp/Private/VaRestClientState.cpp Source/VaRestHttp/Public/VaRestClient.h Source/VaRestHttp/Private/VaRestClient.cpp \
+  Source/VaRestHttp/Private/Tests/VaRestHttpSessionTest.cpp
+git commit -m "http: M4 task 12 -- the session: tokens, expiry, session headers, change and expiry events through one door, its secrets
+
+Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
+```
+
+---
+### Task 13: Session export and import (spec §4.2; WebSocket §19 item 2)
+
+Spec §4.2's `ExportSession()`/`ImportSession()` ("JSON, for games that persist sessions themselves"), split from Task 12. An import is a session change like any other: it runs inside `RunSessionChange`, so its `Replaced` (or `Refreshed`) reaches every listener after the import is done. The session JSON is parsed and written on the game thread — the one exception to "the game thread never parses a body" (spec §1, Inspector §7), bounded: inputs over 64 Ki characters are refused unparsed (spec review M-12).
+
+**Files:**
+- Modify: `Source/VaRestHttp/Private/VaRestSession.h` (`MaxSessionJsonChars`), `Source/VaRestHttp/Private/VaRestSession.cpp`, `Source/VaRestHttp/Private/VaRestClientState.h`
+- Modify: `Source/VaRestHttp/Public/VaRestClient.h`, `Source/VaRestHttp/Private/VaRestClient.cpp`
+- Test: `Source/VaRestHttp/Private/Tests/VaRestHttpSessionTest.cpp`
+
+**Interfaces:**
+- Consumes: Task 12 (`RunSessionChange`, `SetTokensByGame`, `PublishSessionSecrets`, `AppendRedactKeys`).
+- Produces: `FString FVaRestClient::ExportSession() const`, `bool FVaRestClient::ImportSession(FStringView Json, bool bSameIdentity = false)`; private `FString FClientState::ExportSession() const`, `bool FClientState::ImportSession(FStringView Json, bool bSameIdentity)` (inside a change only), `inline constexpr int32 VaRest::Http::MaxSessionJsonChars = 64 * 1024`. The format: `{"version":1,"accessToken","refreshToken","expiresAt" (ISO 8601 UTC, optional),"headers":[{"name","value"}]}`; unknown fields are ignored, so M4b may add one (ruling Q5's cache identity).
+
+- [ ] **Step 1: Write the failing test** — append to `Source/VaRestHttp/Private/Tests/VaRestHttpSessionTest.cpp` (before `#endif`):
+
+```cpp
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpSessionExportTest, "VaRest.Http.Session.ExportImport",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpSessionExportTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::SessionTestPrivate;
+	FTestRig From;
+	From.Client.SetSession(TEXT("access-export-12345"), TEXT("refresh-export-1234"), 120.0);
+	From.Client.SetSessionHeader(TEXT("X-Session-ID"), TEXT("session-export-123"));
+	const FString Exported = From.Client.ExportSession();
+	TestTrue(TEXT("an export holds the tokens (the docs carry the caveat)"), Exported.Contains(TEXT("access-export-12345")) && Exported.Contains(TEXT("\"version\":1")));
+
+	FTestRig To;
+	const FChanges Seen = Watch(To.Client);
+	if (!TestTrue(TEXT("imported"), To.Client.ImportSession(Exported)))
+	{
+		return false;
+	}
+	const FVaRestSessionData Data = To.Client.GetSession();
+	TestTrue(TEXT("the same tokens and header"), Data.AccessToken == TEXT("access-export-12345") && Data.RefreshToken == TEXT("refresh-export-1234")
+		&& Data.Headers.Get(TEXT("X-Session-ID")) == TEXT("session-export-123"));
+	TestTrue(TEXT("the expiry carried through UTC, within a second"), FMath::Abs(Data.ExpiresAt - 120.0) < 1.0);
+	TestTrue(TEXT("an import is Replaced"), Seen->Num() == 1 && (*Seen)[0] == EVaRestSessionChange::Replaced);
+	TestEqualSensitive(TEXT("... and its values are secrets"), Scrub(To.Client, TEXT("session-export-123")), FString(TEXT("***")));
+
+	FTestRig Bad;
+	TestFalse(TEXT("not JSON"), Bad.Client.ImportSession(TEXT("{nope")));
+	TestFalse(TEXT("another version"), Bad.Client.ImportSession(TEXT(R"({"version":2,"accessToken":"a"})")));
+	TestFalse(TEXT("a token with CR LF"), Bad.Client.ImportSession(TEXT(R"({"version":1,"accessToken":"a\r\nX-Evil: 1"})")));
+	TestFalse(TEXT("a bad date"), Bad.Client.ImportSession(TEXT(R"({"version":1,"accessToken":"a","expiresAt":"tomorrow"})")));
+	// Spec review M-12: the one game-thread parse is bounded -- valid JSON padded past 64 Ki characters is refused unparsed
+	const FString Padded = FString(TEXT(R"({"version":1,"accessToken":"padded-token-123456"})")) + FString::ChrN(65 * 1024, TEXT(' '));
+	TestFalse(TEXT("over 64 KiB"), Bad.Client.ImportSession(Padded));
+	TestFalse(TEXT("nothing changed"), Bad.Client.GetSession().HasAccessToken());
+	return true;
+}
+```
+
+- [ ] **Step 2: Build to see it fail**
+
+Run: `Tools/run_tests.sh VaRest.Http.Session.ExportImport`
+Expected: FAIL to compile (`ExportSession`, `ImportSession` unknown).
+
+- [ ] **Step 3: The state** — in `Source/VaRestHttp/Private/VaRestSession.h`, after `SessionSecretPrefix()`:
+
+```cpp
+	/** Spec review M-12: ImportSession parses on the game thread, so its input is bounded (a session is a few hundred bytes) */
+	inline constexpr int32 MaxSessionJsonChars = 64 * 1024;
+```
+
+In `Source/VaRestHttp/Private/VaRestClientState.h`, `FClientState`, after `ExpireSession`:
+
+```cpp
+		/** Spec 4.2: the session as JSON (Task 13). Game thread; not a change. */
+		FString ExportSession() const;
+		/** Inside a change only: false, and nothing changes, for anything but an ExportSession() result of at most MaxSessionJsonChars */
+		bool ImportSession(FStringView Json, bool bSameIdentity);
+```
+
+Append to `Source/VaRestHttp/Private/VaRestSession.cpp` (add `#include "Misc/DateTime.h"` and `#include "Misc/Timespan.h"`):
+
+```cpp
 FString VaRest::Http::FClientState::ExportSession() const
 {
 	check(IsInGameThread());
@@ -5084,7 +6453,13 @@ FString VaRest::Http::FClientState::ExportSession() const
 
 bool VaRest::Http::FClientState::ImportSession(FStringView Json, bool bSameIdentity)
 {
-	check(IsInGameThread());
+	CheckInSessionChange();
+	// Spec review M-12: the game thread never parses a body (spec 1, Inspector 7) -- this is the one bounded exception: a
+	// session is a few hundred bytes and the call is synchronous; anything past MaxSessionJsonChars is refused unparsed
+	if (Json.Len() > MaxSessionJsonChars)
+	{
+		return false;
+	}
 	TValueOrError<FVaRestJson, FVaRestJsonError> Parsed = FVaRestJson::Parse(Json);
 	if (Parsed.HasError())
 	{
@@ -5138,201 +6513,81 @@ bool VaRest::Http::FClientState::ImportSession(FStringView Json, bool bSameIdent
 }
 ```
 
-(add `#include "Misc/DateTime.h"` and `#include "Misc/Timespan.h"`.)
-
-- [ ] **Step 6: The public API** — in `Source/VaRestHttp/Public/VaRestClient.h` add `#include "VaRestAuthTypes.h"` and, after the configuration section:
+- [ ] **Step 4: The public API** — in `Source/VaRestHttp/Public/VaRestClient.h`, after `GetSession()`:
 
 ```cpp
-	// ---- session (spec 4.2; game thread). Live state: every attempt uses the session as it is when it starts (plan decision 6).
-	/**
-	 * The access token (a login, a token from elsewhere). Replaced, or Refreshed with bSameIdentity (plan decision 5); the
-	 * refresh token stays, the expiry becomes unknown. An empty token is ClearSession(). A token holding a control character
-	 * is refused with an Error log (it would go into a header line).
-	 */
-	void SetBearerToken(FStringView AccessToken, bool bSameIdentity = false);
-	/** A login's result: both tokens and the access token's lifetime in seconds (0 = unknown) */
-	void SetSession(FStringView AccessToken, FStringView RefreshToken, double ExpiresInSeconds = 0.0, bool bSameIdentity = false);
-	/** dawg's X-Session-ID pattern: sent with every request whose auth mode is not None; its value is a secret, its name a key */
-	void SetSessionHeader(FStringView Name, FStringView Value);
-	void RemoveSessionHeader(FStringView Name);
-	/** Logout: tokens, session headers and their secret values; OnSessionChanged(Cleared) */
-	void ClearSession();
-	FVaRestSessionData GetSession() const;
 	/**
 	 * Spec 4.2: the session as JSON, for a game that persists it itself. It holds the tokens in clear: store it like a
-	 * password (the platform's keychain), never in a save file others can read.
+	 * password (the platform's keychain), never in a save file others can read. Written on the game thread (spec review
+	 * M-12: the session JSON is the one game-thread parse, bounded).
 	 */
 	FString ExportSession() const;
-	/** False, and nothing changes, when Json is not an ExportSession() result (or holds a control character in a token or a header) */
+	/**
+	 * False, and nothing changes, when Json is not an ExportSession() result: not JSON, another version, a control character
+	 * in a token or a header, a bad date, or more than 64 Ki characters (parsed on the game thread, so bounded; spec review
+	 * M-12). An import is Replaced, or Refreshed with bSameIdentity. Unknown fields are ignored.
+	 */
 	bool ImportSession(FStringView Json, bool bSameIdentity = false);
-	/** WebSocket spec 19 item 2: a socket's terminal auth failure. The tokens go; OnSessionExpired fires. */
-	void NotifySessionExpired();
-	/** Game thread. An empty client returns a delegate that never fires. */
-	FVaRestSessionChangedEvent& OnSessionChanged();
-	FVaRestSessionExpiredEvent& OnSessionExpired();
 ```
 
 In `Source/VaRestHttp/Private/VaRestClient.cpp`:
 
 ```cpp
-void FVaRestClient::SetBearerToken(FStringView AccessToken, bool bSameIdentity)
-{
-	check(IsInGameThread());
-	if (!State.IsValid())
-	{
-		return;
-	}
-	if (AccessToken.IsEmpty())
-	{
-		State->ClearSession();
-		return;
-	}
-	if (!VaRest::Http::IsValidHeaderValue(AccessToken))
-	{
-		// The token is not in the line: it is a secret, and the reason is enough
-		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: SetBearerToken: the token holds CR, LF, NUL or another control character; not set"));
-		return;
-	}
-	State->SetTokensByGame(FString(AccessToken), nullptr, 0.0, bSameIdentity);
-}
-
-void FVaRestClient::SetSession(FStringView AccessToken, FStringView RefreshToken, double ExpiresInSeconds, bool bSameIdentity)
-{
-	check(IsInGameThread());
-	if (!State.IsValid())
-	{
-		return;
-	}
-	if (!VaRest::Http::IsValidHeaderValue(AccessToken) || !VaRest::Http::IsValidHeaderValue(RefreshToken))
-	{
-		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: SetSession: a token holds CR, LF, NUL or another control character; not set"));
-		return;
-	}
-	const FString Refresh(RefreshToken);
-	State->SetTokensByGame(FString(AccessToken), &Refresh, ExpiresInSeconds, bSameIdentity);
-}
-
-void FVaRestClient::SetSessionHeader(FStringView Name, FStringView Value)
-{
-	check(IsInGameThread());
-	if (!VaRest::Http::IsValidHeaderName(Name))
-	{
-		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: SetSessionHeader: the name is not a token (\"%s\"); not set"), *VaRest::Http::EscapeForLog(Name));
-		return;
-	}
-	if (!VaRest::Http::IsValidHeaderValue(Value))
-	{
-		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: SetSessionHeader: the value of \"%s\" holds a control character; not set"), *VaRest::Http::EscapeForLog(Name));
-		return;
-	}
-	if (State.IsValid())
-	{
-		State->SetSessionHeader(Name, Value);
-	}
-}
-
-void FVaRestClient::RemoveSessionHeader(FStringView Name)
-{
-	check(IsInGameThread());
-	if (State.IsValid())
-	{
-		State->RemoveSessionHeader(Name);
-	}
-}
-
-void FVaRestClient::ClearSession()
-{
-	check(IsInGameThread());
-	if (State.IsValid())
-	{
-		State->ClearSession();
-	}
-}
-
-FVaRestSessionData FVaRestClient::GetSession() const
-{
-	check(IsInGameThread());
-	return State.IsValid() ? State->GetSessionData() : FVaRestSessionData();
-}
-
 FString FVaRestClient::ExportSession() const
 {
+	check(IsInGameThread());
 	return State.IsValid() ? State->ExportSession() : FString();
 }
 
 bool FVaRestClient::ImportSession(FStringView Json, bool bSameIdentity)
 {
-	return State.IsValid() && State->ImportSession(Json, bSameIdentity);
-}
-
-void FVaRestClient::NotifySessionExpired()
-{
-	check(IsInGameThread());
-	if (State.IsValid())
-	{
-		State->ExpireSession(0, TEXT("NotifySessionExpired"));
-	}
-}
-
-FVaRestSessionChangedEvent& FVaRestClient::OnSessionChanged()
-{
 	check(IsInGameThread());
 	if (!State.IsValid())
 	{
-		// Leaked, like every singleton here (review I-4)
-		static FVaRestSessionChangedEvent* const Never = new FVaRestSessionChangedEvent();
-		return *Never;
+		return false;
 	}
-	return State->OnSessionChanged();
-}
-
-FVaRestSessionExpiredEvent& FVaRestClient::OnSessionExpired()
-{
-	check(IsInGameThread());
-	if (!State.IsValid())
-	{
-		static FVaRestSessionExpiredEvent* const Never = new FVaRestSessionExpiredEvent();
-		return *Never;
-	}
-	return State->OnSessionExpired();
+	// Concurrency review C-1: a change like any other, through the one door
+	bool bImported = false;
+	State->RunSessionChange([Json, bSameIdentity, &bImported](VaRest::Http::FClientState& Target) { bImported = Target.ImportSession(Json, bSameIdentity); });
+	return bImported;
 }
 ```
 
-- [ ] **Step 7: Run them, and the redactor and log suites**
+- [ ] **Step 5: Run them**
 
-Run: `Tools/run_tests.sh VaRest.Http.Session` then `Tools/run_tests.sh --no-build VaRest.Http.Redactor` then `Tools/run_tests.sh --no-build VaRest.Http.Log`
-Expected: `0 failed` each.
+Run: `Tools/run_tests.sh VaRest.Http.Session`
+Expected: `0 failed`.
 
-- [ ] **Step 8: Restore-the-bug** — in `ClearSession` call `Secrets.ClearAll()` instead of `ClearSlots`: `VaRest.Http.Session.Secrets` FAILS ("... and keeps the game's own"); restore; PASS. In `UpdateTokens` skip `PublishSessionSecrets()`: FAILS ("the tokens and the header value are scrubbed" -- the header slot still comes from `SetSessionHeader`, the tokens do not); restore; PASS.
+- [ ] **Step 6: Restore-the-bug** — drop the `MaxSessionJsonChars` check: `VaRest.Http.Session.ExportImport` FAILS ("over 64 KiB": the padded session imports); restore; PASS. Call `ImportSession` directly on the state from `FVaRestClient::ImportSession` (no `RunSessionChange`): the test crashes on `CheckInSessionChange`'s `checkf` — the one door is enforced, not documented; restore; PASS.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add Source/VaRestHttp/Public/VaRestAuthTypes.h Source/VaRestHttp/Private/VaRestSession.h Source/VaRestHttp/Private/VaRestSession.cpp \
-  Source/VaRestHttp/Public/VaRestRedactor.h Source/VaRestHttp/Private/VaRestRedactor.cpp Source/VaRestHttp/Private/VaRestClientState.h \
-  Source/VaRestHttp/Private/VaRestClientState.cpp Source/VaRestHttp/Public/VaRestClient.h Source/VaRestHttp/Private/VaRestClient.cpp \
-  Source/VaRestHttp/Private/Tests/VaRestHttpSessionTest.cpp
-git commit -m "http: M4 task 11 -- the session: tokens, expiry, session headers, change and expiry events, export/import, its secrets
+git add Source/VaRestHttp/Private/VaRestSession.h Source/VaRestHttp/Private/VaRestSession.cpp Source/VaRestHttp/Private/VaRestClientState.h \
+  Source/VaRestHttp/Public/VaRestClient.h Source/VaRestHttp/Private/VaRestClient.cpp Source/VaRestHttp/Private/Tests/VaRestHttpSessionTest.cpp
+git commit -m "http: M4 task 13 -- session export and import: one bounded game-thread parse, a change through the one door
 
 Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 ```
 
 ---
-### Task 12: `IVaRestAuth`, the built-in Bearer, ApiKey and Basic, and the `AuthApply` stage (spec §4.2; WebSocket §19 item 2)
 
-Plan decisions 4, 6, 19, 23. The interface the socket shares, three of spec §4.2's four built-ins (BearerRefresh is Task 14), the per-attempt stage that writes session headers and credentials into each attempt, and the request's auth mode. The refresh context is defined here because the interface names it; Task 13 uses it.
+### Task 14: `IVaRestAuth`, the built-in Bearer, ApiKey and Basic, and the `AuthApply` stage (spec §4.2; WebSocket §19 item 2)
+
+Plan decisions 4, 6, 19. The interface the socket shares, three of spec §4.2's four built-ins (BearerRefresh is Task 18), the per-attempt stage that writes session headers and credentials into each attempt, and the request's auth mode. The stage runs right after the limiter (Task 4, ruling I-3), so a request waiting in the queue goes out with the credentials current when it leaves it. A built-in auth whose configuration cannot work fails each request `Kind=Config` (ruling Q7). The refresh half of the interface is Task 15's.
 
 **Files:**
 - Create: `Source/VaRestHttp/Public/VaRestAuth.h`, `Source/VaRestHttp/Private/VaRestAuthInternal.h`, `Source/VaRestHttp/Private/VaRestAuth.cpp`
-- Modify: `Source/VaRestHttp/Public/VaRestClient.h`, `Source/VaRestHttp/Private/VaRestClient.cpp` (`AuthMode()`, `NoAuth()`, the private `MarkAuthRefresh()`; `WithAuth`, `WithoutAuth`, `WithBearer`, `ApplyAuth`)
+- Modify: `Source/VaRestHttp/Public/VaRestClient.h`, `Source/VaRestHttp/Private/VaRestClient.cpp` (`AuthMode()`, `NoAuth()`; `WithAuth`, `WithoutAuth`, `WithBearer`, `ApplyAuth`)
 - Modify: `Source/VaRestHttp/Public/VaRestStage.h`, `Source/VaRestHttp/Private/VaRestPipeline.cpp` (`GetAttemptUrl`; the boundary and the transport use it)
 - Modify: `Source/VaRestHttp/Private/VaRestExchangeState.h`, `Source/VaRestHttp/Private/VaRestClientState.h`, `Source/VaRestHttp/Private/VaRestClientState.cpp`
-- Modify: `Source/VaRestHttp/Private/VaRestLogStage.cpp` (the attempt URL), `Source/VaRestHttp/Private/VaRestTracePoints.cpp` (flags `NoAuth`, `AuthRefresh`; `AuthWait`, `AuthRefreshId`)
+- Modify: `Source/VaRestHttp/Private/VaRestLogStage.cpp` (the attempt URL), `Source/VaRestHttp/Private/VaRestTracePoints.cpp` (flag `NoAuth`)
 - Test: `Source/VaRestHttp/Private/Tests/VaRestHttpAuthTest.cpp`
 
 **Interfaces:**
-- Consumes: Task 11 (the session, `EVaRestAuthMode`, `AppendRedactKeys`, `SetSecrets`).
-- Produces (public, `VaRestAuth.h`): `struct FVaRestAuthTarget { FVaRestAuthTarget(FVaRestHeaders&, TArray<TPair<FString, FString>>&, const FVaRestSessionData&); FVaRestHeaders& Headers; TArray<TPair<FString, FString>>& Query; const FVaRestSessionData& Session; uint64 RequestId = 0; }`; `enum class EVaRestAuthRefreshOutcome : uint8 { Refreshed, Rejected, Unreachable }`; `struct FVaRestAuthRefreshResult { EVaRestAuthRefreshOutcome Outcome; FString AccessToken; FString RefreshToken; double ExpiresInSeconds; EVaRestErrorKind UnreachableKind; FString Message; static Refreshed(FString, FString = {}, double = 0), Rejected(FString), Unreachable(EVaRestErrorKind, FString); }`; `class FVaRestAuthRefreshContext { FVaRestAuthRefreshContext(FVaRestClient, FVaRestSessionData, uint64 RefreshId); template <typename T = FVaRestJson> TVaRestRequest<T> Request(FStringView Verb, FStringView Path) const; const FVaRestSessionData& GetSession() const; uint64 GetRefreshId() const; }`; `class IVaRestAuth { virtual FName GetAuthName() const = 0; virtual bool Apply(FVaRestAuthTarget&) const = 0; virtual bool CanRefresh(const FVaRestSessionData&) const; virtual bool NeedsRefresh(const FVaRestSessionData&, double Now) const; virtual bool IsAuthFailure(int32 Status) const; virtual void Refresh(const FVaRestAuthRefreshContext&, TUniqueFunction<void(FVaRestAuthRefreshResult&&)>&& Done); virtual void GetRedactedKeys(TArray<FString>&) const; virtual void GetSecretValues(TArray<TPair<FName, FString>>&) const; }`; `class FVaRestAuth { using FRef = TSharedRef<IVaRestAuth, ESPMode::ThreadSafe>; static FRef Bearer(); static FRef ApiKey(EVaRestApiKeyPlacement, FStringView Name, FStringView Key); static FRef Basic(FStringView User, FStringView Password); }` (Task 14 adds `BearerRefresh`). Builder: `AuthMode(EVaRestAuthMode InMode) &&`, `NoAuth() &&`. Client: `FVaRestClient& WithAuth(TSharedRef<IVaRestAuth, ESPMode::ThreadSafe> InAuth)`, `FVaRestClient& WithoutAuth()`, `FVaRestClient& WithBearer(FStringView Token)`, `bool ApplyAuth(FVaRestHeaders& Headers, TArray<TPair<FString, FString>>& Query) const`. `const FString& FVaRestExchange::GetAttemptUrl() const`. Private: `FClientConfig::Auth` (`TSharedPtr<IVaRestAuth, ESPMode::ThreadSafe>`); on `FExchangeState`: `EVaRestAuthMode AuthMode`, `bool bIsAuthRefresh`, `FString AttemptUrl`, `uint32 AppliedGeneration`, `double AuthWait`, `uint64 AuthRefreshId`; `static FVaRestClient FClientAccess::Wrap(TSharedPtr<FClientState, ESPMode::ThreadSafe>)`; in `VaRestAuthInternal.h`: `bool VaRest::Http::ApplyCredentials(const IVaRestAuth* Auth, FVaRestAuthTarget& Target)`, `FVaRestStageRef VaRest::Http::MakeAuthApplyStage()`. The chain: custom Outer → Retry → boundary → **AuthApply** → custom PerAttempt → log → limiter → transport.
+- Consumes: Task 12 (the session, `EVaRestAuthMode`, `AppendRedactKeys`, `SetSecrets`).
+- Consumes: Task 2 (`AuthInvalid` → `Config` in `KindFor`), Task 4 (the limiter right after the boundary).
+- Produces (public, `VaRestAuth.h`): `struct FVaRestAuthTarget { FVaRestAuthTarget(FVaRestHeaders&, TArray<TPair<FString, FString>>&, const FVaRestSessionData&); FVaRestHeaders& Headers; TArray<TPair<FString, FString>>& Query; const FVaRestSessionData& Session; uint64 RequestId = 0; }`; `class IVaRestAuth { virtual FName GetAuthName() const = 0; virtual bool Apply(FVaRestAuthTarget&) const = 0; virtual FString GetConfigError() const; virtual void GetRedactedKeys(TArray<FString>&) const; virtual void GetSecretValues(TArray<TPair<FName, FString>>&) const; }` (Task 15 adds the refresh functions); `class FVaRestAuth { using FRef = TSharedRef<IVaRestAuth, ESPMode::ThreadSafe>; static FRef Bearer(); static FRef ApiKey(EVaRestApiKeyPlacement, FStringView Name, FStringView Key); static FRef Basic(FStringView User, FStringView Password); }` (Task 18 adds `BearerRefresh`). Builder: `AuthMode(EVaRestAuthMode InMode) &&`, `NoAuth() &&`. Client: `FVaRestClient& WithAuth(TSharedRef<IVaRestAuth, ESPMode::ThreadSafe> InAuth)`, `FVaRestClient& WithoutAuth()`, `FVaRestClient& WithBearer(FStringView Token)`, `bool ApplyAuth(FVaRestHeaders& Headers, TArray<TPair<FString, FString>>& Query, FString* OutConfigError = nullptr) const` (false with `*OutConfigError` set for a misconfigured auth, so a socket maps it to `Config`, not `Auth`; spec review C-1). `const FString& FVaRestExchange::GetAttemptUrl() const`. Private: `FClientConfig::Auth` (`TSharedPtr<IVaRestAuth, ESPMode::ThreadSafe>`); on `FExchangeState`: `EVaRestAuthMode AuthMode`, `FString AttemptUrl`, `uint32 AppliedCredentialGeneration` (concurrency review M-6); in `VaRestAuthInternal.h`: `bool VaRest::Http::ApplyCredentials(const IVaRestAuth* Auth, FVaRestAuthTarget& Target)`, `FVaRestStageRef VaRest::Http::MakeAuthApplyStage()`. Failure detail `AuthInvalid` (ruling Q7). The chain: custom Outer → Retry → boundary → limiter → **AuthApply** → custom PerAttempt → log → transport.
 
 - [ ] **Step 1: Write the failing tests** — create `Source/VaRestHttp/Private/Tests/VaRestHttpAuthTest.cpp`:
 
@@ -5394,6 +6649,14 @@ namespace VaRest::Http::AuthTestPrivate
 			Next.Proceed(Exchange, MoveTemp(OnOutcome));
 		}
 		TSharedRef<TArray<FString>, ESPMode::ThreadSafe> Seen = MakeShared<TArray<FString>, ESPMode::ThreadSafe>();
+	};
+
+	/** A Custom auth without credentials: its Apply reports failure, which stays Kind=Auth (ruling Q7's other half) */
+	class FEmptyCustomAuth final : public IVaRestAuth
+	{
+	public:
+		virtual FName GetAuthName() const override { return TEXT("EmptyCustom"); }
+		virtual bool Apply(FVaRestAuthTarget&) const override { return false; }
 	};
 }
 
@@ -5521,31 +6784,129 @@ bool FVaRestHttpAuthApplyTest::RunTest(const FString& Parameters)
 	Rig.Client.ClearSession();
 	FVaRestHeaders After;
 	TestFalse(TEXT("no credentials: false"), Rig.Client.ApplyAuth(After, Query));
+	FString NoConfigError;
+	TestTrue(TEXT("... and no configuration error: a socket reports Kind=Auth"), !Rig.Client.ApplyAuth(After, Query, &NoConfigError) && NoConfigError.IsEmpty());
 	FTestRig Plain;
 	FVaRestHeaders Nothing;
 	TestTrue(TEXT("no auth at all: true, nothing written"), Plain.Client.ApplyAuth(Nothing, Query) && Nothing.IsEmpty());
+	// Ruling Q7 for sockets (spec review C-1): a misconfigured built-in is false with the reason, so W5 maps it to Kind=Config
+	AddExpectedErrorPlain(TEXT("VaRest: FVaRestAuth::Basic: the user holds ':'"), EAutomationExpectedErrorFlags::Contains, 1);
+	FTestRig Broken;
+	Broken.Client.WithAuth(FVaRestAuth::Basic(TEXT("a:b"), TEXT("password-123456")));
+	FVaRestHeaders Unused;
+	FString ConfigError;
+	TestTrue(TEXT("a misconfigured auth: false, saying why"), !Broken.Client.ApplyAuth(Unused, Query, &ConfigError) && ConfigError.Contains(TEXT("':'")));
 	return true;
 }
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthInvalidKeyTest, "VaRest.Http.Auth.InvalidApiKey",
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthInvalidBuiltinTest, "VaRest.Http.Auth.InvalidBuiltinAuth",
 	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
 
-bool FVaRestHttpAuthInvalidKeyTest::RunTest(const FString& Parameters)
+bool FVaRestHttpAuthInvalidBuiltinTest::RunTest(const FString& Parameters)
 {
 	using namespace VaRest::Http::Testing;
 	using namespace VaRest::Http::AuthTestPrivate;
+	// Ruling Q7 (spec review C-1): a built-in auth whose configuration cannot work is a programmer error -- WithAuth's
+	// factory logs an Error once, and every request fails Kind=Config, not retryable, without being sent, so a game that
+	// shows a login screen on Kind=Auth does not show one for a typo
 	AddExpectedErrorPlain(TEXT("VaRest: FVaRestAuth::ApiKey: the header name"), EAutomationExpectedErrorFlags::Contains, 1);
-	FTestRig Rig;
-	Rig.Client.WithAuth(FVaRestAuth::ApiKey(EVaRestApiKeyPlacement::Header, TEXT("Bad Name"), TEXT("k")));
-	auto Outcome = MakeOutcome<FVaRestJson>();
-	Observe(Rig.Client.Get(TEXT("/x")), Outcome).Send();
-	if (!TestTrue(TEXT("completes"), Rig.Wait(Outcome)))
+	AddExpectedErrorPlain(TEXT("VaRest: FVaRestAuth::ApiKey: the query key is empty"), EAutomationExpectedErrorFlags::Contains, 1);
+	AddExpectedErrorPlain(TEXT("VaRest: FVaRestAuth::Basic: the user holds ':'"), EAutomationExpectedErrorFlags::Contains, 1);
+	FTestRig BadHeader;
+	BadHeader.Client.WithAuth(FVaRestAuth::ApiKey(EVaRestApiKeyPlacement::Header, TEXT("Bad Name"), TEXT("key-value-123456")));
+	FTestRig EmptyQuery;
+	EmptyQuery.Client.WithAuth(FVaRestAuth::ApiKey(EVaRestApiKeyPlacement::Query, TEXT(""), TEXT("key-value-123456")));
+	FTestRig BadUser;
+	BadUser.Client.WithAuth(FVaRestAuth::Basic(TEXT("a:b"), TEXT("password-123456")));
+	FTestRig* const Rigs[] = { &BadHeader, &EmptyQuery, &BadUser };
+	const TCHAR* const Names[] = { TEXT("ApiKey header \"Bad Name\""), TEXT("ApiKey query \"\""), TEXT("Basic user \"a:b\"") };
+	for (int32 Index = 0; Index < UE_ARRAY_COUNT(Rigs); ++Index)
 	{
-		Abandon(Rig);
-		return false;
+		FTestRig& Rig = *Rigs[Index];
+		auto Required = MakeOutcome<FVaRestJson>();
+		auto Optional = MakeOutcome<FVaRestJson>();
+		Observe(Rig.Client.Get(TEXT("/x")), Required).Send();
+		Observe(Rig.Client.Get(TEXT("/y")).AuthMode(EVaRestAuthMode::IfAvailable), Optional).Send();
+		if (!TestTrue(FString::Printf(TEXT("%s: both complete"), Names[Index]), PumpUntil([Required, Optional] { return Required->IsDone() && Optional->IsDone(); })))
+		{
+			Abandon(Rig);
+			return false;
+		}
+		Rig.Drain();
+		for (const auto& Outcome : { Required, Optional })
+		{
+			TestTrue(FString::Printf(TEXT("%s: Kind Config, not retryable, AuthInvalid"), Names[Index]), Outcome->Error.Kind == EVaRestErrorKind::Config
+				&& !Outcome->Error.bRetryable && Outcome->Error.Message.Contains(TEXT("AuthInvalid")));
+		}
+		TestEqual(FString::Printf(TEXT("%s: nothing sent"), Names[Index]), Rig.Fake->NumCalls(), 0);
 	}
-	Rig.Drain();
-	TestTrue(TEXT("an auth that cannot apply: Kind Auth, nothing sent"), Outcome->Error.Kind == EVaRestErrorKind::Auth && Rig.Fake->NumCalls() == 0);
+	auto Login = MakeOutcome<FVaRestJson>();
+	Observe(BadHeader.Client.Post(TEXT("/login")).NoAuth().Body(TEXT("x")), Login).Send();
+	TestTrue(TEXT("NoAuth() still goes out on a misconfigured client (a login)"), BadHeader.Wait(Login) && Login->SuccessCalls.load() == 1 && BadHeader.Fake->NumCalls() == 1);
+
+	// The control: a Custom auth with no credentials is Kind=Auth, as before
+	FTestRig Custom;
+	Custom.Client.WithAuth(MakeShared<FEmptyCustomAuth, ESPMode::ThreadSafe>());
+	auto NoToken = MakeOutcome<FVaRestJson>();
+	Observe(Custom.Client.Get(TEXT("/z")), NoToken).Send();
+	TestTrue(TEXT("a Custom auth that cannot apply: Kind Auth"), Custom.Wait(NoToken) && NoToken->Error.Kind == EVaRestErrorKind::Auth && Custom.Fake->NumCalls() == 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthQueuedTest, "VaRest.Http.Auth.QueuedGetsNewToken",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthQueuedTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// Ruling I-3: credentials are written when a request leaves the limiter's queue (Task 4), so a token set while it waits
+	// is the one it goes out with, and a logout while it waits stops it before the network
+	FTestRig Rig;
+	Rig.Client.WithMaxConcurrent(1).WithBearer(TEXT("old-token-123456"));
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest& Request) { return Request.Url.EndsWith(TEXT("/hold")) ? FVaRestFakeResponse::Manual() : Json(200); });
+	const VaRest::Http::FLimiter& Slots = VaRest::Http::FClientAccess::State(Rig.Client)->GetLimiter();
+	for (int32 Half = 0; Half < 2; ++Half)
+	{
+		const TCHAR* const Change = Half == 0 ? TEXT("a token set while queued") : TEXT("a logout while queued");
+		auto Holder = MakeOutcome<FVaRestJson>();
+		auto Queued = MakeOutcome<FVaRestJson>();
+		const int32 Before = Rig.Fake->NumCalls();
+		Observe(Rig.Client.Get(TEXT("/hold")).NoAuth(), Holder).Send();
+		Observe(Rig.Client.Get(TEXT("/queued")), Queued).Send();
+		if (!TestTrue(FString::Printf(TEXT("%s: the holder has the slot, the other waits"), Change),
+			PumpUntil([&Rig, &Slots, Before] { return Rig.Fake->NumCalls() == Before + 1 && Slots.NumQueued() == 1; })))
+		{
+			Abandon(Rig);
+			return false;
+		}
+		if (Half == 0)
+		{
+			Rig.Client.SetBearerToken(TEXT("new-token-123456"));
+		}
+		else
+		{
+			Rig.Client.ClearSession();
+		}
+		Rig.Fake->Complete(Before, Json(200));
+		if (!TestTrue(FString::Printf(TEXT("%s: both complete"), Change), PumpUntil([Holder, Queued] { return Holder->IsDone() && Queued->IsDone(); })))
+		{
+			Abandon(Rig);
+			return false;
+		}
+		Rig.Drain();
+		if (Half == 0)
+		{
+			const int32 Call = FindCall(Rig, TEXT("/queued"));
+			TestTrue(TEXT("a token set while queued: its first and only call carries it"), Call != INDEX_NONE && FindCall(Rig, TEXT("/queued"), 1) == INDEX_NONE
+				&& Rig.Fake->GetCall(Call).Request.Headers.Get(TEXT("Authorization")) == TEXT("Bearer new-token-123456") && Queued->SuccessCalls.load() == 1);
+		}
+		else
+		{
+			TestEqual(TEXT("a logout while queued: never sent"), Rig.Fake->NumCalls(), Before + 1);
+			TestTrue(TEXT("... it fails Kind Auth, no credentials"), Queued->Error.Kind == EVaRestErrorKind::Auth && Queued->Error.Message.Contains(TEXT("NoCredentials")));
+		}
+	}
 	return true;
 }
 
@@ -5564,6 +6925,8 @@ bool FVaRestHttpAuthFlagsTest::RunTest(const FString& Parameters)
 	const FVaRestRequestHandle B = Observe(Rig.Client.Get(TEXT("/b")).NoAuth(), Without).Send();
 	if (!TestTrue(TEXT("both complete"), PumpUntil([With, Without] { return With->IsDone() && Without->IsDone(); })))
 	{
+		// Spec review M-5: drained before the early return
+		VaRest::Http::AuthTestPrivate::Abandon(Rig);
 		return false;
 	}
 	const auto FlagsOf = [&Scoped](uint64 Id)
@@ -5624,68 +6987,10 @@ struct FVaRestAuthTarget
 	uint64 RequestId = 0;
 };
 
-/** How a refresh ended (plan decision 3) */
-enum class EVaRestAuthRefreshOutcome : uint8
-{
-	/** New credentials */
-	Refreshed,
-	/** The server said no: the session expires, parked requests fail Kind=Auth */
-	Rejected,
-	/** The server could not be asked (connection, timeout, 408, 429, 5xx): the session stays, parked requests fail with UnreachableKind */
-	Unreachable
-};
-
-/** What IVaRestAuth::Refresh reports */
-struct VARESTHTTP_API FVaRestAuthRefreshResult
-{
-	EVaRestAuthRefreshOutcome Outcome = EVaRestAuthRefreshOutcome::Rejected;
-	FString AccessToken;
-	/** Empty: keep the current refresh token (an OAuth2 server need not rotate it) */
-	FString RefreshToken;
-	/** 0 = unknown */
-	double ExpiresInSeconds = 0.0;
-	/** Unreachable: Connection or Timeout, the kind parked requests fail with (retryable) */
-	EVaRestErrorKind UnreachableKind = EVaRestErrorKind::Connection;
-	/** Why, for the error message and the trace marker; never a token */
-	FString Message;
-
-	static FVaRestAuthRefreshResult Refreshed(FString InAccessToken, FString InRefreshToken = FString(), double InExpiresInSeconds = 0.0);
-	static FVaRestAuthRefreshResult Rejected(FString InMessage);
-	static FVaRestAuthRefreshResult Unreachable(EVaRestErrorKind InKind, FString InMessage);
-};
-
-/** Handed to IVaRestAuth::Refresh: the client, its session, and the one way to send the refresh request (plan decision 23). Game thread. */
-class VARESTHTTP_API FVaRestAuthRefreshContext
-{
-public:
-	FVaRestAuthRefreshContext(FVaRestClient InClient, FVaRestSessionData InSession, uint64 InRefreshId);
-
-	/**
-	 * A refresh request on the client: it bypasses the auth stages (no credentials, no park, no replay), the envelope and
-	 * retry; it goes Highest in the limiter and carries trace flag AuthRefresh. A refresh sent through the client itself
-	 * would park behind its own refresh.
-	 */
-	template <typename T = FVaRestJson>
-	TVaRestRequest<T> Request(FStringView Verb, FStringView Path) const
-	{
-		return Client.Request<T>(Verb, Path).MarkAuthRefresh();
-	}
-
-	/** The session the refresh started from (its refresh token) */
-	const FVaRestSessionData& GetSession() const { return Session; }
-	/** IN-2 AuthRefreshId */
-	uint64 GetRefreshId() const { return RefreshId; }
-
-private:
-	FVaRestClient Client;
-	FVaRestSessionData Session;
-	uint64 RefreshId = 0;
-};
-
 /**
  * Spec 4.2 / WebSocket spec 19 item 2: how a client authenticates. Every function runs on the game thread. Apply runs once
- * per attempt (and once per socket handshake) with the session as it is then; the core shares one Refresh among every
- * request that needs it (single-flight, Task 13). Configure with FVaRestClient::WithAuth.
+ * per attempt, when the attempt leaves the limiter's queue (and once per socket handshake), with the session as it is
+ * then. Configure with FVaRestClient::WithAuth. Task 15 adds the refresh functions.
  */
 class IVaRestAuth
 {
@@ -5698,23 +7003,12 @@ public:
 	/** This auth's credentials into Target; false when it has none (Kind=Auth under EVaRestAuthMode::Required) */
 	virtual bool Apply(FVaRestAuthTarget& Target) const = 0;
 
-	/** Refresh() can get new credentials for this session (a refresh token is there) */
-	virtual bool CanRefresh(const FVaRestSessionData& Session) const { return false; }
-
-	/** Refresh before the next attempt: no access token yet, or a known expiry within the lead time (spec 4.2: 30 s) */
-	virtual bool NeedsRefresh(const FVaRestSessionData& Session, double Now) const { return false; }
-
-	/** A status that means "credentials refused": the request refreshes and replays once (spec 4.2: 401, configurable) */
-	virtual bool IsAuthFailure(int32 Status) const { return Status == 401; }
-
 	/**
-	 * Gets new credentials. Call Done exactly once, on the game thread (later is fine; a second call is ignored; a call from
-	 * another thread is moved to the game thread). Send the refresh request with Context.Request(), never through the client.
+	 * Ruling Q7: non-empty when this auth's configuration cannot work (a programmer error). Every request whose auth mode is
+	 * Required or IfAvailable then fails Kind=Config, detail AuthInvalid, and nothing is sent. The built-ins set it; a
+	 * Custom auth keeps the default and reports missing credentials by returning false from Apply (Kind=Auth).
 	 */
-	virtual void Refresh(const FVaRestAuthRefreshContext& Context, TUniqueFunction<void(FVaRestAuthRefreshResult&&)>&& Done)
-	{
-		Done(FVaRestAuthRefreshResult::Rejected(TEXT("this auth cannot refresh")));
-	}
+	virtual FString GetConfigError() const { return FString(); }
 
 	/** IN-13 layer 2: key names this auth puts secrets under (an API key's header or query name, a token path's last segment) */
 	virtual void GetRedactedKeys(TArray<FString>& OutKeys) const {}
@@ -5732,22 +7026,20 @@ public:
 	/** Authorization: Bearer <the session's access token> (SetBearerToken, SetSession); WithBearer is the short form */
 	static FRef Bearer();
 	/**
-	 * The key in a header or in the query. A header name that is not an RFC 9110 token, or a key with a control character,
-	 * logs an Error, and the auth applies nothing (Kind=Auth under Required).
+	 * The key in a header or in the query. A header name that is not an RFC 9110 token, an empty query key, or a key with a
+	 * control character logs an Error here, and every request of the client fails Kind=Config (ruling Q7)
 	 */
 	static FRef ApiKey(EVaRestApiKeyPlacement Placement, FStringView Name, FStringView Key);
-	/** Authorization: Basic base64(user:password), UTF-8 */
+	/** Authorization: Basic base64(user:password), UTF-8. A user holding ':' (RFC 7617 2) logs an Error and fails each request Kind=Config (ruling Q7). */
 	static FRef Basic(FStringView User, FStringView Password);
 };
 ```
 
-- [ ] **Step 4: The builder's auth options** — in `Source/VaRestHttp/Public/VaRestClient.h`: forward-declare `class IVaRestAuth;` and `class FVaRestAuthRefreshContext;` with the other forward declarations; `FRequestSpec` fields after `bNoEnvelope`:
+- [ ] **Step 4: The builder's auth options** — in `Source/VaRestHttp/Public/VaRestClient.h`: forward-declare `class IVaRestAuth;` with the other forward declarations; `FRequestSpec` fields after `bNoEnvelope`:
 
 ```cpp
 		/** AuthMode() / NoAuth() (plan decision 4) */
 		EVaRestAuthMode AuthMode = EVaRestAuthMode::Required;
-		/** A refresh request (FVaRestAuthRefreshContext::Request; plan decision 23) */
-		bool bAuthRefresh = false;
 ```
 
 `TVaRestRequest` public methods after `NoEnvelope()`:
@@ -5767,24 +7059,6 @@ public:
 	}
 ```
 
-and in its `private:` section:
-
-```cpp
-	friend class ::FVaRestAuthRefreshContext;
-
-	/** Plan decision 23: a refresh request bypasses the auth stages, the envelope and retry, and goes first in the limiter */
-	TVaRestRequest MarkAuthRefresh() &&
-	{
-		Spec->bAuthRefresh = true;
-		Spec->AuthMode = EVaRestAuthMode::None;
-		Spec->Envelope.Reset();
-		Spec->bNoEnvelope = true;
-		Spec->Retry = FVaRestRetryPolicy::Disabled();
-		Spec->Priority = EVaRestPriority::Highest;
-		return MoveTemp(*this);
-	}
-```
-
 `FVaRestClient`, after the session section:
 
 ```cpp
@@ -5796,12 +7070,13 @@ and in its `private:` section:
 	FVaRestClient& WithBearer(FStringView Token);
 	/**
 	 * WebSocket spec 19 item 2: the session headers, then this client's auth, into Headers and Query (a socket handshake).
-	 * False when the client has an auth and it has no credentials; true with no auth at all.
+	 * False when the client has an auth and it has no credentials (a socket's Kind=Auth), or when the auth is misconfigured
+	 * (ruling Q7): then OutConfigError, when given, says why, and the socket fails Kind=Config. True with no auth at all.
 	 */
-	bool ApplyAuth(FVaRestHeaders& Headers, TArray<TPair<FString, FString>>& Query) const;
+	bool ApplyAuth(FVaRestHeaders& Headers, TArray<TPair<FString, FString>>& Query, FString* OutConfigError = nullptr) const;
 ```
 
-In `Source/VaRestHttp/Private/VaRestClient.cpp` (`#include "VaRestAuth.h"`, `#include "VaRestAuthInternal.h"`): `FRequestSpecAccess::Send` copies `Ex.AuthMode = Spec->AuthMode; Ex.bIsAuthRefresh = Spec->bAuthRefresh;`, and:
+In `Source/VaRestHttp/Private/VaRestClient.cpp` (`#include "VaRestAuth.h"`, `#include "VaRestAuthInternal.h"`): `FRequestSpecAccess::Send` copies `Ex.AuthMode = Spec->AuthMode;`, and:
 
 ```cpp
 FVaRestClient& FVaRestClient::WithAuth(TSharedRef<IVaRestAuth, ESPMode::ThreadSafe> InAuth)
@@ -5844,39 +7119,44 @@ FVaRestClient& FVaRestClient::WithBearer(FStringView Token)
 	return *this;
 }
 
-bool FVaRestClient::ApplyAuth(FVaRestHeaders& Headers, TArray<TPair<FString, FString>>& Query) const
+bool FVaRestClient::ApplyAuth(FVaRestHeaders& Headers, TArray<TPair<FString, FString>>& Query, FString* OutConfigError) const
 {
 	check(IsInGameThread());
 	if (!State.IsValid())
 	{
 		return true;
 	}
+	const IVaRestAuth* Auth = State->GetConfig()->Auth.Get();
+	if (Auth)
+	{
+		// Ruling Q7 for sockets (spec review C-1): a typo is Kind=Config there too, not a login screen
+		const FString Invalid = Auth->GetConfigError();
+		if (!Invalid.IsEmpty())
+		{
+			if (OutConfigError)
+			{
+				*OutConfigError = Invalid;
+			}
+			return false;
+		}
+	}
 	FVaRestAuthTarget Target(Headers, Query, State->GetSessionData());
-	return VaRest::Http::ApplyCredentials(State->GetConfig()->Auth.Get(), Target);
+	return VaRest::Http::ApplyCredentials(Auth, Target);
 }
 ```
 
-- [ ] **Step 5: The state** — `Source/VaRestHttp/Private/VaRestClientState.h`: `FClientConfig` gains `TSharedPtr<IVaRestAuth, ESPMode::ThreadSafe> Auth;` (`#include "VaRestAuth.h"`); `FClientAccess` gains
+- [ ] **Step 5: The state** — `Source/VaRestHttp/Private/VaRestClientState.h`: `FClientConfig` gains `TSharedPtr<IVaRestAuth, ESPMode::ThreadSafe> Auth;` (`#include "VaRestAuth.h"`); `Source/VaRestHttp/Private/VaRestExchangeState.h` (add `#include "VaRestAuthTypes.h"`: `EVaRestAuthMode` reached it only through the includers' `VaRestClient.h`, which the NoPCH build of Task 24 would not forgive; spec review M-6), after the envelope block:
 
 ```cpp
-		/** A handle on a state, for the refresh context (Task 13) */
-		static FVaRestClient Wrap(TSharedPtr<FClientState, ESPMode::ThreadSafe> InState) { return FVaRestClient(MoveTemp(InState)); }
-```
-
-`Source/VaRestHttp/Private/VaRestExchangeState.h`, after the envelope block:
-
-```cpp
-		// Auth (Tasks 12-13), from Send:
+		// Auth (Tasks 14-17), from Send:
 		EVaRestAuthMode AuthMode = EVaRestAuthMode::Required;
-		/** The refresh request itself (plan decision 23): the auth stages pass it through */
-		bool bIsAuthRefresh = false;
 		/** The URL of the current attempt: Url plus the auth's query pairs (AuthApply) */
 		FString AttemptUrl;
-		/** The session generation the current attempt's credentials came from (AuthGate compares it, Task 13) */
-		uint32 AppliedGeneration = 0;
-		/** IN-2: seconds the next attempt waited behind a refresh, and that refresh's id; reset after the dispatch */
-		double AuthWait = 0.0;
-		uint64 AuthRefreshId = 0;
+		/**
+		 * FVaRestSessionData::CredentialGeneration when AuthApply wrote this attempt's credentials: the auth gate's "newer
+		 * credentials" replay compares it (Task 17). Not Generation: a session header must not use up the replay (M-6).
+		 */
+		uint32 AppliedCredentialGeneration = 0;
 ```
 
 `Source/VaRestHttp/Public/VaRestStage.h`, `FVaRestExchange`, after `GetUrl()`:
@@ -5922,40 +7202,6 @@ Create `Source/VaRestHttp/Private/VaRestAuth.cpp`:
 #include "VaRestHttpLog.h"
 #include "VaRestUrl.h"
 
-FVaRestAuthRefreshResult FVaRestAuthRefreshResult::Refreshed(FString InAccessToken, FString InRefreshToken, double InExpiresInSeconds)
-{
-	FVaRestAuthRefreshResult Out;
-	Out.Outcome = EVaRestAuthRefreshOutcome::Refreshed;
-	Out.AccessToken = MoveTemp(InAccessToken);
-	Out.RefreshToken = MoveTemp(InRefreshToken);
-	Out.ExpiresInSeconds = InExpiresInSeconds;
-	return Out;
-}
-
-FVaRestAuthRefreshResult FVaRestAuthRefreshResult::Rejected(FString InMessage)
-{
-	FVaRestAuthRefreshResult Out;
-	Out.Outcome = EVaRestAuthRefreshOutcome::Rejected;
-	Out.Message = MoveTemp(InMessage);
-	return Out;
-}
-
-FVaRestAuthRefreshResult FVaRestAuthRefreshResult::Unreachable(EVaRestErrorKind InKind, FString InMessage)
-{
-	FVaRestAuthRefreshResult Out;
-	Out.Outcome = EVaRestAuthRefreshOutcome::Unreachable;
-	Out.UnreachableKind = InKind == EVaRestErrorKind::Timeout ? EVaRestErrorKind::Timeout : EVaRestErrorKind::Connection;
-	Out.Message = MoveTemp(InMessage);
-	return Out;
-}
-
-FVaRestAuthRefreshContext::FVaRestAuthRefreshContext(FVaRestClient InClient, FVaRestSessionData InSession, uint64 InRefreshId)
-	: Client(MoveTemp(InClient))
-	, Session(MoveTemp(InSession))
-	, RefreshId(InRefreshId)
-{
-}
-
 namespace VaRest::Http::AuthPrivate
 {
 	class FBearerAuth final : public IVaRestAuth
@@ -5977,19 +7223,21 @@ namespace VaRest::Http::AuthPrivate
 	class FApiKeyAuth final : public IVaRestAuth
 	{
 	public:
-		FApiKeyAuth(EVaRestApiKeyPlacement InPlacement, FString InName, FString InKey, bool bInUsable)
+		FApiKeyAuth(EVaRestApiKeyPlacement InPlacement, FString InName, FString InKey, FString InConfigError)
 			: Placement(InPlacement)
 			, Name(MoveTemp(InName))
 			, Key(MoveTemp(InKey))
-			, bUsable(bInUsable)
+			, ConfigError(MoveTemp(InConfigError))
 		{
 		}
 
 		virtual FName GetAuthName() const override { return TEXT("ApiKey"); }
 
+		virtual FString GetConfigError() const override { return ConfigError; }
+
 		virtual bool Apply(FVaRestAuthTarget& Target) const override
 		{
-			if (!bUsable || Key.IsEmpty())
+			if (!ConfigError.IsEmpty() || Key.IsEmpty())
 			{
 				return false;
 			}
@@ -6006,7 +7254,10 @@ namespace VaRest::Http::AuthPrivate
 
 		virtual void GetRedactedKeys(TArray<FString>& OutKeys) const override
 		{
-			OutKeys.Add(Name);
+			if (!Name.IsEmpty())
+			{
+				OutKeys.Add(Name);
+			}
 		}
 
 		virtual void GetSecretValues(TArray<TPair<FName, FString>>& OutValues) const override
@@ -6018,22 +7269,30 @@ namespace VaRest::Http::AuthPrivate
 		EVaRestApiKeyPlacement Placement;
 		FString Name;
 		FString Key;
-		bool bUsable;
+		/** Ruling Q7: empty unless the factory found the configuration unusable */
+		FString ConfigError;
 	};
 
 	class FBasicAuth final : public IVaRestAuth
 	{
 	public:
-		FBasicAuth(FString InCredential, FString InPassword)
+		FBasicAuth(FString InCredential, FString InPassword, FString InConfigError)
 			: Credential(MoveTemp(InCredential))
 			, Password(MoveTemp(InPassword))
+			, ConfigError(MoveTemp(InConfigError))
 		{
 		}
 
 		virtual FName GetAuthName() const override { return TEXT("Basic"); }
 
+		virtual FString GetConfigError() const override { return ConfigError; }
+
 		virtual bool Apply(FVaRestAuthTarget& Target) const override
 		{
+			if (!ConfigError.IsEmpty())
+			{
+				return false;
+			}
 			Target.Headers.Set(TEXT("Authorization"), FString(TEXT("Basic ")) + Credential);
 			return true;
 		}
@@ -6048,6 +7307,8 @@ namespace VaRest::Http::AuthPrivate
 		/** base64(user:password) */
 		FString Credential;
 		FString Password;
+		/** Ruling Q7: empty unless the user holds ':' */
+		FString ConfigError;
 	};
 
 	/** Spec 4.2, per attempt (plan decisions 4, 6) */
@@ -6059,16 +7320,36 @@ namespace VaRest::Http::AuthPrivate
 		virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) override
 		{
 			FExchangeState& Ex = Internals(*Exchange);
-			if (Ex.AuthMode == EVaRestAuthMode::None || Ex.bIsAuthRefresh)
+			// NoAuth() -- a login, and (Task 15) the refresh request, which MarkAuthRefresh sends with AuthMode None -- goes out bare
+			if (Ex.AuthMode == EVaRestAuthMode::None)
 			{
 				Next.Proceed(Exchange, MoveTemp(OnOutcome));
 				return;
+			}
+			const IVaRestAuth* Auth = Ex.Config->Auth.Get();
+			if (Auth)
+			{
+				const FString Invalid = Auth->GetConfigError();
+				if (!Invalid.IsEmpty())
+				{
+					// Ruling Q7: a programmer error, for Required and IfAvailable alike -- sending without the key would hide it
+					if (Ex.LogLevel != EVaRestLogLevel::None && UE_LOG_ACTIVE(LogVaRestHttp, Warning))
+					{
+						UE_LOG(LogVaRestHttp, Warning, TEXT("#%llu VaRest: %s %s -> misconfigured auth (%s); not sent"), Ex.RequestId, *EscapeForLog(Ex.Verb),
+							*EscapeForLog(Ex.State->GetRedactor()->RedactUrl(Ex.Url)), *Auth->GetAuthName().ToString());
+					}
+					FVaRestAttemptOutcome Refused;
+					Refused.Failure = EVaRestTransportFailure::Other;
+					Refused.FailureDetail = TEXT("AuthInvalid");
+					Refused.FailureMessage = FString::Printf(TEXT("the client's auth (%s) is misconfigured: %s"), *Auth->GetAuthName().ToString(), *Invalid);
+					OnOutcome(MoveTemp(Refused));
+					return;
+				}
 			}
 			const FVaRestSessionData& Session = Ex.State->GetSessionData();
 			TArray<TPair<FString, FString>> AuthQuery;
 			FVaRestAuthTarget Target(Ex.AttemptHeaders, AuthQuery, Session);
 			Target.RequestId = Ex.RequestId;
-			const IVaRestAuth* Auth = Ex.Config->Auth.Get();
 			if (!ApplyCredentials(Auth, Target) && Ex.AuthMode == EVaRestAuthMode::Required)
 			{
 				if (Ex.LogLevel != EVaRestLogLevel::None && UE_LOG_ACTIVE(LogVaRestHttp, Warning))
@@ -6084,7 +7365,8 @@ namespace VaRest::Http::AuthPrivate
 				OnOutcome(MoveTemp(Refused));
 				return;
 			}
-			Ex.AppliedGeneration = Session.Generation;
+			// Concurrency review M-6: the token's generation, which a session header does not move
+			Ex.AppliedCredentialGeneration = Session.CredentialGeneration;
 			if (AuthQuery.Num() > 0)
 			{
 				AppendQuery(Ex.AttemptUrl, AuthQuery);
@@ -6115,44 +7397,56 @@ FVaRestAuth::FRef FVaRestAuth::Bearer()
 
 FVaRestAuth::FRef FVaRestAuth::ApiKey(EVaRestApiKeyPlacement Placement, FStringView Name, FStringView Key)
 {
-	bool bUsable = !Name.IsEmpty();
+	// Ruling Q7: an unusable configuration is said once here (each pattern its own, for the tests' expected errors) and
+	// fails every request Kind=Config through GetConfigError
+	FString ConfigError;
 	if (Placement == EVaRestApiKeyPlacement::Header && !VaRest::Http::IsValidHeaderName(Name))
 	{
-		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: FVaRestAuth::ApiKey: the header name \"%s\" is not an RFC 9110 token; the auth applies nothing"),
+		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: FVaRestAuth::ApiKey: the header name \"%s\" is not an RFC 9110 token; requests fail with Kind=Config"),
 			*VaRest::Http::EscapeForLog(Name));
-		bUsable = false;
+		ConfigError = TEXT("the API key's header name is not an RFC 9110 token");
+	}
+	else if (Placement == EVaRestApiKeyPlacement::Query && Name.IsEmpty())
+	{
+		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: FVaRestAuth::ApiKey: the query key is empty; requests fail with Kind=Config"));
+		ConfigError = TEXT("the API key's query key is empty");
 	}
 	else if (!VaRest::Http::IsValidHeaderValue(Key))
 	{
-		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: FVaRestAuth::ApiKey: the key holds a control character; the auth applies nothing"));
-		bUsable = false;
+		// The key is a secret: not in the line
+		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: FVaRestAuth::ApiKey: the key holds a control character; requests fail with Kind=Config"));
+		ConfigError = TEXT("the API key holds a control character");
 	}
-	return MakeShared<VaRest::Http::AuthPrivate::FApiKeyAuth, ESPMode::ThreadSafe>(Placement, FString(Name), FString(Key), bUsable);
+	return MakeShared<VaRest::Http::AuthPrivate::FApiKeyAuth, ESPMode::ThreadSafe>(Placement, FString(Name), FString(Key), MoveTemp(ConfigError));
 }
 
 FVaRestAuth::FRef FVaRestAuth::Basic(FStringView User, FStringView Password)
 {
+	FString ConfigError;
+	int32 Colon = INDEX_NONE;
+	if (User.FindChar(TEXT(':'), Colon))
+	{
+		// Ruling Q7: the server would split the credential at the user's own ':' (RFC 7617 2: the user-id holds none)
+		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: FVaRestAuth::Basic: the user holds ':' (RFC 7617 2); requests fail with Kind=Config"));
+		ConfigError = TEXT("the Basic user holds ':' (RFC 7617 2)");
+	}
 	// RFC 7617 2.1: user-id ":" password, UTF-8 (the charset the RFC recommends), base64
 	const FString Pair = FString(User) + TEXT(":") + FString(Password);
 	const FTCHARToUTF8 Utf8(*Pair);
 	const FString Credential = FBase64::Encode(reinterpret_cast<const uint8*>(Utf8.Get()), static_cast<uint32>(Utf8.Length()));
-	return MakeShared<VaRest::Http::AuthPrivate::FBasicAuth, ESPMode::ThreadSafe>(Credential, FString(Password));
+	return MakeShared<VaRest::Http::AuthPrivate::FBasicAuth, ESPMode::ThreadSafe>(Credential, FString(Password), MoveTemp(ConfigError));
 }
 ```
 
-- [ ] **Step 7: The chain, the attempt URL, the trace** — `Source/VaRestHttp/Private/VaRestClientState.cpp`, `Publish`: right after `NewChain->Add(MakeAttemptBoundaryStage());` add
+- [ ] **Step 7: The chain, the attempt URL, the trace** — `Source/VaRestHttp/Private/VaRestClientState.cpp`, `Publish`: right after `NewChain->Add(MakeLimiterStage());` (Task 4) add
 
 ```cpp
-	// Spec 4.2: credentials per attempt, before the custom PerAttempt stages, which then sign the final headers
+	// Spec 4.2: credentials per attempt, when the attempt leaves the queue (ruling I-3), before the custom PerAttempt stages,
+	// which then sign the final headers
 	NewChain->Add(MakeAuthApplyStage());
 ```
 
-(`#include "VaRestAuthInternal.h"`). `Source/VaRestHttp/Private/VaRestPipeline.cpp`: `FAttemptBoundaryStage::Process` gains `Ex.AttemptUrl = Ex.Url;` after the headers copy; in `FTransportStage::Process`, `Request.Url = Ex.Url;` becomes `Request.Url = Ex.AttemptUrl;`, and after the `Ex.NextGap` reset Task 7 added:
-
-```cpp
-				Ex.AuthWait = 0.0;
-				Ex.AuthRefreshId = 0;
-```
+(`#include "VaRestAuthInternal.h"`). `Source/VaRestHttp/Private/VaRestPipeline.cpp`: `FAttemptBoundaryStage::Process` gains `Ex.AttemptUrl = Ex.Url;` after the headers copy; in `FTransportStage::Process`, `Request.Url = Ex.Url;` becomes `Request.Url = Ex.AttemptUrl;`.
 
 `Source/VaRestHttp/Private/VaRestLogStage.cpp`: in `FLogStage::Process` and `LogOutcome`, `ShownUrl(Redactor, Ex.Url)` becomes `ShownUrl(Redactor, Ex.AttemptUrl)` (the URL the attempt went to; an auth query is redacted by its key). `Source/VaRestHttp/Private/VaRestTracePoints.cpp`: in `Describe`, after the `Idempotent` flag:
 
@@ -6161,20 +7455,14 @@ FVaRestAuth::FRef FVaRestAuth::Basic(FStringView User, FStringView Password)
 	{
 		Out.Flags |= EVaRestTraceRequestFlags::NoAuth;
 	}
-	if (Ex.bIsAuthRefresh)
-	{
-		Out.Flags |= EVaRestTraceRequestFlags::AuthRefresh;
-	}
 ```
-
-and in `AttemptDispatched`, after the gap lines: `Payload.AuthWait = Ex.AuthWait; Payload.AuthRefreshId = Ex.AuthRefreshId;`.
 
 - [ ] **Step 8: Run them, then the pipeline, log and trace suites**
 
 Run: `Tools/run_tests.sh VaRest.Http.Auth` then `Tools/run_tests.sh --no-build VaRest.Http.Pipeline` then `Tools/run_tests.sh --no-build VaRest.Http.Log` then `Tools/run_tests.sh --no-build VaRest.Http.Trace`
 Expected: `0 failed` each.
 
-- [ ] **Step 9: Restore-the-bug** — in `FAuthApplyStage` skip the `ApplyCredentials` result check (always proceed): `VaRest.Http.Auth.Bearer` FAILS ("Required without credentials is Kind Auth"); restore; PASS. In the transport stage send `Ex.Url` again: `ApiKeyAndBasic` FAILS ("ApiKey in the query"); restore; PASS.
+- [ ] **Step 9: Restore-the-bug** — (a) in `FAuthApplyStage` skip the `ApplyCredentials` result check (always proceed): `VaRest.Http.Auth.Bearer` FAILS ("Required without credentials is Kind Auth"); restore; PASS. (b) In the transport stage send `Ex.Url` again: `ApiKeyAndBasic` FAILS ("ApiKey in the query"); restore; PASS. (c) In `VaRestClassify.cpp`, map `AuthInvalid` to `Auth` in `KindFor` (spec review C-1): `VaRest.Http.Auth.InvalidBuiltinAuth` FAILS on every "Kind Config" row; restore; PASS. (d) In `Publish`, add `MakeAuthApplyStage()` before `MakeLimiterStage()` (credentials written when the request joins the queue, ruling I-3): `VaRest.Http.Auth.QueuedGetsNewToken` FAILS ("its first and only call carries it" sees `Bearer old-token-123456`, and the logout half's request is sent); restore; PASS. Record all four.
 
 - [ ] **Step 10: Full suite, commit**
 
@@ -6187,29 +7475,384 @@ git add Source/VaRestHttp/Public/VaRestAuth.h Source/VaRestHttp/Private/VaRestAu
   Source/VaRestHttp/Private/VaRestPipeline.cpp Source/VaRestHttp/Private/VaRestExchangeState.h Source/VaRestHttp/Private/VaRestClientState.h \
   Source/VaRestHttp/Private/VaRestClientState.cpp Source/VaRestHttp/Private/VaRestLogStage.cpp Source/VaRestHttp/Private/VaRestTracePoints.cpp \
   Source/VaRestHttp/Private/Tests/VaRestHttpAuthTest.cpp
-git commit -m "http: M4 task 12 -- IVaRestAuth, Bearer, ApiKey and Basic, the per-attempt auth stage, auth modes (spec 4.2, WS 19 item 2)
+git commit -m "http: M4 task 14 -- IVaRestAuth, Bearer, ApiKey and Basic, the per-attempt auth stage, auth modes (spec 4.2, WS 19 item 2)
 
 Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 ```
 
 ---
-### Task 13: The single-flight refresh and the `AuthGate` stage — park, proactive refresh, replay once (spec §4.2; IN-2, IN-9; WebSocket §19 item 2)
+### Task 15: The refresh contract — `IVaRestAuth`'s refresh, its result, the context and the refresh request (spec §4.2; plan decision 23)
 
-Plan decisions 2, 3, 6, 7, 8. Spec §4.2: "the first 401 starts one refresh. Concurrent requests that hit 401 (or start while it runs) park behind it, then replay once each." The refresh is the client's (`FClientState`), shared by HTTP and sockets (`RefreshAuth`). `AuthGate` sits after `Retry` and before the attempt boundary, so a replay is a new attempt with `GapBefore = SessionRefresh`, and a parked request is held through `Interrupt` like a backoff.
+Split from Task 14. What an auth that refreshes implements, and the one way it sends its refresh request: `FVaRestAuthRefreshContext::Request()`. That request bypasses the auth stages, the envelope, retry and — ruling M-8 — the limiter's queue: single flight makes it at most one more connection per client, and a client whose slots all hold long polls must still refresh, since every parked request waits on it. The context holds its client weakly (concurrency review M-10), so an auth that keeps it to answer later makes no cycle. The first request a context builds carries the refresh's id as its own request id, so the Inspector links the parked attempts to it (spec review I-2). A refresh ends `Refreshed`, `Rejected` (the endpoint said no: the session expires) or `Failed` with a kind (anything else: the session stays) — ruling I-7, replacing the old `Unreachable`. Task 16 runs the refresh.
 
 **Files:**
-- Modify: `Source/VaRestHttp/Private/VaRestSession.h`, `Source/VaRestHttp/Private/VaRestSession.cpp` (the refresh in flight; game changes end it)
-- Modify: `Source/VaRestHttp/Private/VaRestClientState.h`, `Source/VaRestHttp/Private/VaRestClientState.cpp` (`Publish` adds the stage)
-- Create: `Source/VaRestHttp/Private/VaRestAuthGate.cpp`; modify `Source/VaRestHttp/Private/VaRestAuthInternal.h`
-- Modify: `Source/VaRestHttp/Private/VaRestPipeline.cpp` (`Resolve`: an auth that may replay copies the body)
-- Modify: `Source/VaRestHttp/Public/VaRestClient.h`, `Source/VaRestHttp/Private/VaRestClient.cpp` (`NeedsAuthRefresh`, `RefreshAuth`)
+- Modify: `Source/VaRestHttp/Public/VaRestAuth.h`, `Source/VaRestHttp/Private/VaRestAuth.cpp` (the result, the context, `IVaRestAuth`'s refresh functions)
+- Modify: `Source/VaRestHttp/Public/VaRestClient.h`, `Source/VaRestHttp/Private/VaRestClient.cpp` (`FRequestSpec::bAuthRefresh`, `PresetRequestId`; the private `MarkAuthRefresh`; `WithMaxConcurrent`'s doc)
+- Modify: `Source/VaRestHttp/Private/VaRestClientState.h` (`FClientAccess::Wrap`), `Source/VaRestHttp/Private/VaRestExchangeState.h` (`bIsAuthRefresh`)
+- Modify: `Source/VaRestHttp/Private/VaRestPipeline.cpp` (the limiter stage lets the refresh request through), `Source/VaRestHttp/Private/VaRestTracePoints.cpp` (flag `AuthRefresh`)
 - Test: `Source/VaRestHttp/Private/Tests/VaRestHttpAuthTest.cpp`
 
 **Interfaces:**
-- Consumes: Tasks 7 (`Interrupt`, `NextGap`), 11, 12.
-- Produces (private, `VaRestSession.h`): `enum class ERefreshEnd : uint8 { Ready, Rejected, Unreachable, Cleared }`; `struct FRefreshEnded { ERefreshEnd End; uint64 RefreshId; EVaRestErrorKind Kind; FString Message; }`; `using FRefreshWaiter = TUniqueFunction<void(const FRefreshEnded&)>`; `FSessionState::Refresh` (`TUniquePtr<FRefreshInFlight>`), `NextRefreshId`, `NextWaiterId`. On `FClientState`: `bool IsRefreshing() const`, `uint64 NewWaiterId()`, `void JoinRefresh(uint64 WaiterId, const TSharedRef<IVaRestAuth, ESPMode::ThreadSafe>& Auth, uint64 CauseRequestId, FRefreshWaiter&& OnDone)` (OnDone may run before it returns), `void LeaveRefresh(uint64 WaiterId)`; `FVaRestStageRef VaRest::Http::MakeAuthGateStage()`. Public: `bool FVaRestClient::NeedsAuthRefresh() const`, `void FVaRestClient::RefreshAuth(TUniqueFunction<void(bool bRefreshed)>&& OnDone)`. The chain: custom Outer → Retry → **AuthGate** → boundary → AuthApply → custom PerAttempt → log → limiter → transport.
+- Consumes: Task 4 (the limiter stage), Task 14 (`IVaRestAuth`, `VaRestAuth.h`, `FindCall`, `Abandon`).
+- Produces (public, `VaRestAuth.h`): `enum class EVaRestAuthRefreshOutcome : uint8 { Refreshed, Rejected, Failed }` (a plain C++ enum, not a `UENUM`: not on the M5 freeze list; M5 makes it one only if a Blueprint node exposes it); `struct FVaRestAuthRefreshResult { EVaRestAuthRefreshOutcome Outcome; FString AccessToken; FString RefreshToken; double ExpiresInSeconds; EVaRestErrorKind FailedKind; FString Message; static FVaRestAuthRefreshResult Refreshed(FString, FString = {}, double = 0), Rejected(FString), Failed(EVaRestErrorKind, FString); }` (`Failed` keeps `Timeout` and `Config`, anything else is `Connection`); `class FVaRestAuthRefreshContext { FVaRestAuthRefreshContext(const FVaRestClient&, FVaRestSessionData, uint64 RefreshId); template <typename T = FVaRestJson> TVaRestRequest<T> Request(FStringView Verb, FStringView Path) const; const FVaRestSessionData& GetSession() const; uint64 GetRefreshId() const; }`; `IVaRestAuth` gains `virtual bool CanRefresh(const FVaRestSessionData&) const`, `virtual bool NeedsRefresh(const FVaRestSessionData&, double Now) const`, `virtual bool IsAuthFailure(int32 Status) const`, `virtual void Refresh(const FVaRestAuthRefreshContext&, TUniqueFunction<void(FVaRestAuthRefreshResult&&)>&& Done)`. Private: `TVaRestRequest<T>::MarkAuthRefresh(uint64 InPresetId) &&`; `FRequestSpec::bAuthRefresh`, `FRequestSpec::PresetRequestId`; `bool FExchangeState::bIsAuthRefresh`; `static FVaRestClient FClientAccess::Wrap(TSharedPtr<FClientState, ESPMode::ThreadSafe>)`.
 
-- [ ] **Step 1: Write the failing tests** — append to `Source/VaRestHttp/Private/Tests/VaRestHttpAuthTest.cpp`; add to `AuthTestPrivate`:
+- [ ] **Step 1: Write the failing test** — append to `Source/VaRestHttp/Private/Tests/VaRestHttpAuthTest.cpp` (before `#endif`):
+
+```cpp
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthRefreshContextTest, "VaRest.Http.Auth.RefreshContext",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthRefreshContextTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// Plan decision 23: what Context.Request() sends -- no credentials, no retry, no envelope; past a full limiter (ruling
+	// M-8); the first one under the refresh's id (spec review I-2); and a context that does not keep its client (M-10)
+	FTestRig Rig;
+	Rig.Client.WithMaxConcurrent(1).WithBearer(TEXT("bearer-token-123456")).WithRetry(FVaRestRetryPolicy::Exponential(3));
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest& Request) { return Request.Url.EndsWith(TEXT("/hold")) ? FVaRestFakeResponse::Manual() : Json(503); });
+	FScopedTraceRecorder Scoped(EVaRestTraceDetail::Metadata);
+	auto Holder = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/hold")), Holder).Send();
+	if (!TestTrue(TEXT("the only slot is held"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 1; })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	const uint64 RefreshId = FVaRestTrace::NewRequestId();
+	const FVaRestAuthRefreshContext Context(Rig.Client, Rig.Client.GetSession(), RefreshId);
+	auto First = MakeOutcome<FVaRestJson>();
+	auto Second = MakeOutcome<FVaRestJson>();
+	const FVaRestRequestHandle FirstHandle = Observe(Context.Request(TEXT("POST"), TEXT("/auth/refresh")).Body(TEXT("{}")), First).Send();
+	const FVaRestRequestHandle SecondHandle = Observe(Context.Request(TEXT("POST"), TEXT("/auth/other")).Body(TEXT("{}")), Second).Send();
+	if (!TestTrue(TEXT("ruling M-8: both complete although the only slot is held"), PumpUntil([First, Second] { return First->IsDone() && Second->IsDone(); })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	TestEqual(TEXT("spec review I-2: the first carries the refresh's id as its own"), FirstHandle.GetId(), RefreshId);
+	TestTrue(TEXT("... a second one gets a fresh id"), SecondHandle.GetId() != RefreshId && SecondHandle.GetId() != 0);
+	const int32 Call = FindCall(Rig, TEXT("/auth/refresh"));
+	if (!TestTrue(TEXT("sent"), Call != INDEX_NONE))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	TestFalse(TEXT("plan decision 23: no credentials on a refresh request"), Rig.Fake->GetCall(Call).Request.Headers.Contains(TEXT("Authorization")));
+	TestTrue(TEXT("... no retry: the 503 is the answer, after one attempt"), First->Error.HttpStatus == 503 && First->Error.Attempts == 1);
+	EVaRestTraceRequestFlags Flags = EVaRestTraceRequestFlags::Partial;
+	for (const FVaRestTraceEvent& Event : Scoped.Recorder->For(RefreshId))
+	{
+		if (Event.Kind == EVaRestTraceKind::Started)
+		{
+			Flags = Event.Payload.Get<FVaRestTraceStarted>().Flags;
+		}
+	}
+	TestTrue(TEXT("IN-1: flagged AuthRefresh"), EnumHasAnyFlags(Flags, EVaRestTraceRequestFlags::AuthRefresh) && !EnumHasAnyFlags(Flags, EVaRestTraceRequestFlags::Partial));
+
+	// Concurrency review M-10: an auth may keep its context to answer later; the context must not keep the client alive
+	TUniquePtr<FVaRestAuthRefreshContext> Kept;
+	TWeakPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> GoneState;
+	{
+		FVaRestClient Gone = FVaRestClient::Make(TEXT("https://gone.test"));
+		GoneState = VaRest::Http::FClientAccess::State(Gone);
+		Kept = MakeUnique<FVaRestAuthRefreshContext>(Gone, FVaRestSessionData(), FVaRestTrace::NewRequestId());
+	}
+	TestFalse(TEXT("M-10: the context does not keep its client alive"), GoneState.IsValid());
+	auto Orphan = MakeOutcome<FVaRestJson>();
+	Observe(Kept->Request(TEXT("POST"), TEXT("/auth/refresh")), Orphan).Send();
+	TestTrue(TEXT("... and a request it builds then fails Kind Config"), PumpUntil([Orphan] { return Orphan->IsDone(); }) && Orphan->Error.Kind == EVaRestErrorKind::Config);
+	Rig.Fake->Complete(0, Json(200));
+	TestTrue(TEXT("the holder finishes"), Rig.Wait(Holder));
+	return true;
+}
+```
+
+- [ ] **Step 2: Build to see it fail**
+
+Run: `Tools/run_tests.sh VaRest.Http.Auth.RefreshContext`
+Expected: FAIL to compile (`FVaRestAuthRefreshContext` unknown).
+
+- [ ] **Step 3: The header** — in `Source/VaRestHttp/Public/VaRestAuth.h`, after `FVaRestAuthTarget`:
+
+```cpp
+/** How a refresh ended (plan decision 3, ruling I-7) */
+enum class EVaRestAuthRefreshOutcome : uint8
+{
+	/** New credentials */
+	Refreshed,
+	/**
+	 * The refresh endpoint said no -- a 4xx other than 408 or 429, or a success that is not JSON or has no usable access
+	 * token: the session expires, parked requests fail Kind=Auth, OnSessionExpired fires
+	 */
+	Rejected,
+	/**
+	 * Anything else -- no connection, a timeout, 408, 429, 5xx, a canceled or locally refused refresh request (HTTP
+	 * disabled, a domain not allowed): the session stays; parked requests fail with FailedKind
+	 */
+	Failed
+};
+
+/** What IVaRestAuth::Refresh reports */
+struct VARESTHTTP_API FVaRestAuthRefreshResult
+{
+	EVaRestAuthRefreshOutcome Outcome = EVaRestAuthRefreshOutcome::Rejected;
+	FString AccessToken;
+	/** Empty: keep the current refresh token (an OAuth2 server need not rotate it) */
+	FString RefreshToken;
+	/** 0 = unknown */
+	double ExpiresInSeconds = 0.0;
+	/**
+	 * Failed: what parked requests fail with -- Connection or Timeout (retryable: Retry and M4b's offline queue act on
+	 * them) or Config (not retryable: sending again fails again). ClassifyAttempt decides bRetryable, as for any attempt.
+	 */
+	EVaRestErrorKind FailedKind = EVaRestErrorKind::Connection;
+	/** Why, for the error message and the trace marker; never a token */
+	FString Message;
+
+	static FVaRestAuthRefreshResult Refreshed(FString InAccessToken, FString InRefreshToken = FString(), double InExpiresInSeconds = 0.0);
+	static FVaRestAuthRefreshResult Rejected(FString InMessage);
+	/** Ruling I-7: the session stays. InKind Timeout and Config are kept; any other kind is Connection. */
+	static FVaRestAuthRefreshResult Failed(EVaRestErrorKind InKind, FString InMessage);
+};
+
+/**
+ * Handed to IVaRestAuth::Refresh: the session the refresh starts from and the one way to send the refresh request (plan
+ * decision 23). Game thread. Holds its client weakly (concurrency review M-10): an auth may keep it to answer later.
+ */
+class VARESTHTTP_API FVaRestAuthRefreshContext
+{
+public:
+	FVaRestAuthRefreshContext(const FVaRestClient& InClient, FVaRestSessionData InSession, uint64 InRefreshId);
+
+	/**
+	 * A refresh request on the client. It bypasses the auth stages (no credentials, no park, no replay), the envelope, retry
+	 * and the limiter's queue (ruling M-8: one more connection at most, so a client whose slots all hold long polls still
+	 * refreshes), and carries trace flag AuthRefresh. The first one a context builds has the refresh's id as its request id
+	 * (spec review I-2). On a client that is gone: a builder on an empty client, whose request fails Kind=Config. A refresh
+	 * sent through the client itself would park behind its own refresh.
+	 */
+	template <typename T = FVaRestJson>
+	TVaRestRequest<T> Request(FStringView Verb, FStringView Path) const
+	{
+		const uint64 Preset = bIdTaken ? 0 : RefreshId;
+		bIdTaken = true;
+		return GetClient().Request<T>(Verb, Path).MarkAuthRefresh(Preset);
+	}
+
+	/** The session the refresh started from (its refresh token) */
+	const FVaRestSessionData& GetSession() const { return Session; }
+	/** IN-2 AuthRefreshId: the refresh request's RequestId when the auth sends one through Request() (spec review I-2) */
+	uint64 GetRefreshId() const { return RefreshId; }
+
+private:
+	/** The client while it lives, else an empty one (VaRestAuth.cpp) */
+	FVaRestClient GetClient() const;
+
+	TWeakPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> State;
+	FVaRestSessionData Session;
+	uint64 RefreshId = 0;
+	/** Request() gave its id away already */
+	mutable bool bIdTaken = false;
+};
+```
+
+and in `IVaRestAuth`, after `GetConfigError()`:
+
+```cpp
+	/** Refresh() can get new credentials for this session (a refresh token is there) */
+	virtual bool CanRefresh(const FVaRestSessionData& Session) const { return false; }
+
+	/** Refresh before the next attempt: no access token yet, or a known expiry within the lead time (spec 4.2: 30 s) */
+	virtual bool NeedsRefresh(const FVaRestSessionData& Session, double Now) const { return false; }
+
+	/** A status that means "credentials refused": the request refreshes and replays once (spec 4.2: 401, configurable) */
+	virtual bool IsAuthFailure(int32 Status) const { return Status == 401; }
+
+	/**
+	 * Gets new credentials; the core shares one Refresh among every request and socket that needs it (single flight, Task
+	 * 16). Call Done exactly once, from any thread: the core finishes the refresh on the game thread, from a later task; a
+	 * second call is ignored. Done dropped uncalled -- an error path that forgets it, an SDK that frees its callback -- ends
+	 * the refresh as Failed(Connection), the session kept (concurrency review I-4). Holding Done without calling it is
+	 * allowed (a re-login screen): parked requests wait, each bounded by its own retry deadline, Cancel() and its owner; no
+	 * watchdog ends the refresh (ruling I-4). Send the refresh request with Context.Request(), never through the client.
+	 */
+	virtual void Refresh(const FVaRestAuthRefreshContext& Context, TUniqueFunction<void(FVaRestAuthRefreshResult&&)>&& Done)
+	{
+		Done(FVaRestAuthRefreshResult::Failed(EVaRestErrorKind::Config, TEXT("this auth cannot refresh")));
+	}
+```
+
+(`IVaRestAuth` names `FVaRestAuthRefreshContext`, defined above it.)
+
+- [ ] **Step 4: The builder** — in `Source/VaRestHttp/Public/VaRestClient.h`: forward-declare `class FVaRestAuthRefreshContext;` beside `class IVaRestAuth;`; `FRequestSpec` fields after `AuthMode`:
+
+```cpp
+		/** A refresh request (FVaRestAuthRefreshContext::Request; plan decision 23) */
+		bool bAuthRefresh = false;
+		/** Spec review I-2: the request id to use instead of a new one -- the refresh's own (FVaRestTrace::NewRequestId); 0 = a new one */
+		uint64 PresetRequestId = 0;
+```
+
+and in `TVaRestRequest`'s `private:` section:
+
+```cpp
+	friend class ::FVaRestAuthRefreshContext;
+
+	/**
+	 * Plan decision 23: a refresh request bypasses the auth stages (AuthMode None), the envelope, retry and (ruling M-8) the
+	 * limiter's queue; InPresetId, when not 0, becomes its request id (spec review I-2)
+	 */
+	TVaRestRequest MarkAuthRefresh(uint64 InPresetId) &&
+	{
+		Spec->bAuthRefresh = true;
+		Spec->PresetRequestId = InPresetId;
+		Spec->AuthMode = EVaRestAuthMode::None;
+		Spec->Envelope.Reset();
+		Spec->bNoEnvelope = true;
+		Spec->Retry = FVaRestRetryPolicy::Disabled();
+		// Not the limiter's (it skips the queue): the transport's, for the engine request
+		Spec->Priority = EVaRestPriority::Highest;
+		return MoveTemp(*this);
+	}
+```
+
+`WithMaxConcurrent`'s list of waits gains (ruling M-8):
+
+```cpp
+	 * - An auth's refresh request (FVaRestAuthRefreshContext::Request) skips the queue: during a refresh up to
+	 *   MaxConcurrent + 1 requests are out, so a client whose slots all hold long polls can still refresh.
+```
+
+In `Source/VaRestHttp/Private/VaRestClient.cpp`, `FRequestSpecAccess::Send`: the M3 line `Ex.RequestId = FVaRestTrace::NewRequestId(); // IN-10: ...` becomes
+
+```cpp
+	// IN-10: assigned at creation, whatever the trace mask; a refresh request takes its refresh's id (spec review I-2)
+	Ex.RequestId = Spec->PresetRequestId != 0 ? Spec->PresetRequestId : FVaRestTrace::NewRequestId();
+```
+
+and after `Ex.AuthMode = Spec->AuthMode;`: `Ex.bIsAuthRefresh = Spec->bAuthRefresh;`.
+
+`Source/VaRestHttp/Private/VaRestClientState.h`, `FClientAccess` gains
+
+```cpp
+		/** A handle on a state, for the refresh context and the coordinator (Tasks 15-16) */
+		static FVaRestClient Wrap(TSharedPtr<FClientState, ESPMode::ThreadSafe> InState) { return FVaRestClient(MoveTemp(InState)); }
+```
+
+`Source/VaRestHttp/Private/VaRestExchangeState.h`, after `AuthMode`:
+
+```cpp
+		/** The refresh request itself (plan decision 23): the gate (Task 17) and the limiter pass it through */
+		bool bIsAuthRefresh = false;
+```
+
+- [ ] **Step 5: The definitions** — in `Source/VaRestHttp/Private/VaRestAuth.cpp`, before `namespace VaRest::Http::AuthPrivate`:
+
+```cpp
+FVaRestAuthRefreshResult FVaRestAuthRefreshResult::Refreshed(FString InAccessToken, FString InRefreshToken, double InExpiresInSeconds)
+{
+	FVaRestAuthRefreshResult Out;
+	Out.Outcome = EVaRestAuthRefreshOutcome::Refreshed;
+	Out.AccessToken = MoveTemp(InAccessToken);
+	Out.RefreshToken = MoveTemp(InRefreshToken);
+	Out.ExpiresInSeconds = InExpiresInSeconds;
+	return Out;
+}
+
+FVaRestAuthRefreshResult FVaRestAuthRefreshResult::Rejected(FString InMessage)
+{
+	FVaRestAuthRefreshResult Out;
+	Out.Outcome = EVaRestAuthRefreshOutcome::Rejected;
+	Out.Message = MoveTemp(InMessage);
+	return Out;
+}
+
+FVaRestAuthRefreshResult FVaRestAuthRefreshResult::Failed(EVaRestErrorKind InKind, FString InMessage)
+{
+	FVaRestAuthRefreshResult Out;
+	Out.Outcome = EVaRestAuthRefreshOutcome::Failed;
+	// Ruling I-7: the kinds a parked request can fail with and keep its meaning; the rest is a network failure
+	Out.FailedKind = InKind == EVaRestErrorKind::Timeout || InKind == EVaRestErrorKind::Config ? InKind : EVaRestErrorKind::Connection;
+	Out.Message = MoveTemp(InMessage);
+	return Out;
+}
+
+FVaRestAuthRefreshContext::FVaRestAuthRefreshContext(const FVaRestClient& InClient, FVaRestSessionData InSession, uint64 InRefreshId)
+	: State(VaRest::Http::FClientAccess::State(InClient))
+	, Session(MoveTemp(InSession))
+	, RefreshId(InRefreshId)
+{
+}
+
+FVaRestClient FVaRestAuthRefreshContext::GetClient() const
+{
+	// Concurrency review M-10: an empty client's requests fail Kind=Config, which the auth reports as its refresh's failure
+	const TSharedPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> Pinned = State.Pin();
+	return Pinned.IsValid() ? VaRest::Http::FClientAccess::Wrap(Pinned) : FVaRestClient();
+}
+```
+
+- [ ] **Step 6: The limiter and the trace** — in `Source/VaRestHttp/Private/VaRestPipeline.cpp`, `FLimiterStage::Process`, first lines:
+
+```cpp
+			FExchangeState& Ex = Internals(*Exchange);
+			if (Ex.bIsAuthRefresh)
+			{
+				// Ruling M-8: the refresh request skips the queue. Single flight makes it at most one more connection per client,
+				// and every parked request waits on it: behind long polls holding every slot it would never run.
+				Next.Proceed(Exchange, MoveTemp(OnOutcome));
+				return;
+			}
+```
+
+(the existing `FExchangeState& Ex = Internals(*Exchange);` line moves up into this block). In `Source/VaRestHttp/Private/VaRestTracePoints.cpp`, `Describe`, after the `NoAuth` flag:
+
+```cpp
+	if (Ex.bIsAuthRefresh)
+	{
+		Out.Flags |= EVaRestTraceRequestFlags::AuthRefresh;
+	}
+```
+
+- [ ] **Step 7: Run them**
+
+Run: `Tools/run_tests.sh VaRest.Http.Auth` then `Tools/run_tests.sh --no-build VaRest.Http.Limiter`
+Expected: `0 failed` each.
+
+- [ ] **Step 8: Restore-the-bug** — (a) drop the limiter stage's `bIsAuthRefresh` pass-through: `VaRest.Http.Auth.RefreshContext` FAILS ("ruling M-8: both complete although the only slot is held" times out: they queue behind `/hold`); restore; PASS. (b) In `FRequestSpecAccess::Send` always take `NewRequestId()`: FAILS ("spec review I-2: the first carries the refresh's id"); restore; PASS. (c) Hold the client in the context as an `FVaRestClient` (strong): FAILS ("M-10: the context does not keep its client alive"); restore; PASS. (d) Drop `Spec->Retry = FVaRestRetryPolicy::Disabled();` from `MarkAuthRefresh`: FAILS (the 503 arms a backoff on the virtual clock, so the refresh request never completes and "both complete" times out); restore; PASS. Record all four.
+
+- [ ] **Step 9: Full suite, commit**
+
+Run: `Tools/run_tests.sh VaRest`
+Expected: `0 failed`.
+
+```bash
+git add Source/VaRestHttp/Public/VaRestAuth.h Source/VaRestHttp/Private/VaRestAuth.cpp Source/VaRestHttp/Public/VaRestClient.h \
+  Source/VaRestHttp/Private/VaRestClient.cpp Source/VaRestHttp/Private/VaRestClientState.h Source/VaRestHttp/Private/VaRestExchangeState.h \
+  Source/VaRestHttp/Private/VaRestPipeline.cpp Source/VaRestHttp/Private/VaRestTracePoints.cpp Source/VaRestHttp/Private/Tests/VaRestHttpAuthTest.cpp
+git commit -m "http: M4 task 15 -- the refresh contract: Refreshed, Rejected or Failed(kind); a weak context whose request skips the limiter and carries the refresh's id
+
+Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
+```
+
+---
+
+### Task 16: The single-flight refresh — one refresh per client, how it ends, `RefreshAuth` (spec §4.2; WebSocket §19 item 2)
+
+Plan decision 3; split from the old gate task. Spec §4.2's single flight runs on the client state, shared by HTTP requests (the gate, Task 17) and sockets (`RefreshAuth`). `JoinRefresh` adds a waiter and starts the refresh when none runs; its id is a process-unique request id, which the refresh request carries as its own (spec review I-2). The auth's `Done` owns a guard: dropped uncalled, it ends the refresh as `Failed(Connection)` (concurrency review I-4), and either way the refresh finishes from a later game-thread task inside `RunSessionChange`. `FinishRefresh` applies ruling I-7: `Refreshed` updates the tokens (`OnSessionChanged(Refreshed)`), `Rejected` expires the session (`OnSessionExpired`, once), `Failed` keeps it. The game's own changes end a refresh in flight too. The waiters of an ended refresh run from one later game-thread task holding them (concurrency review I-1, ruled), so no request callback and no dispatch runs inside the session call that ended it. `RefreshAuth` tells a socket how the refresh ended (spec review I-5).
+
+**Files:**
+- Modify: `Source/VaRestHttp/Private/VaRestSession.h`, `Source/VaRestHttp/Private/VaRestSession.cpp` (the refresh in flight; the game's changes end it)
+- Modify: `Source/VaRestHttp/Private/VaRestClientState.h` (the coordinator; `NumRefreshWaitersInternal`)
+- Modify: `Source/VaRestHttp/Public/VaRestClient.h`, `Source/VaRestHttp/Private/VaRestClient.cpp` (`NeedsAuthRefresh`, `RefreshAuth`; the session methods' docs)
+- Test: `Source/VaRestHttp/Private/Tests/VaRestHttpAuthTest.cpp`
+
+**Interfaces:**
+- Consumes: Task 12 (`RunSessionChange`, `CheckInSessionChange`, `UpdateTokens`, `AnnounceSession`, `ExpireSession`), Task 15 (`FVaRestAuthRefreshResult`, `FVaRestAuthRefreshContext`, `FClientAccess::Wrap`).
+- Produces (private, `VaRestSession.h`): `enum class ERefreshEnd : uint8 { Ready, Rejected, Failed, Cleared }`; `struct FRefreshEnded { ERefreshEnd End; uint64 RefreshId; EVaRestErrorKind Kind; FString Message; }`; `using FRefreshWaiter = TUniqueFunction<void(const FRefreshEnded&)>`; `struct FRefreshInFlight { uint64 RefreshId; uint64 CauseRequestId; TArray<TPair<uint64, FRefreshWaiter>> Waiters; }`; `FSessionState::Refresh` (`TUniquePtr<FRefreshInFlight>`), `NextWaiterId`. On `FClientState`: `bool IsRefreshing() const`, `uint64 NewWaiterId()`, `void JoinRefresh(uint64 WaiterId, const TSharedRef<IVaRestAuth, ESPMode::ThreadSafe>& Auth, uint64 CauseRequestId, FRefreshWaiter&& OnDone)` (OnDone runs from a later game-thread task, never inside), `void LeaveRefresh(uint64 WaiterId)`, `void FinishRefresh(uint64 RefreshId, FVaRestAuthRefreshResult&& Result)` (inside a change), `int32 NumRefreshWaitersInternal() const` (tests). Public: `bool FVaRestClient::NeedsAuthRefresh() const`, `void FVaRestClient::RefreshAuth(TUniqueFunction<void(EVaRestAuthRefreshOutcome Outcome, EVaRestErrorKind FailedKind)>&& OnDone)`.
+
+- [ ] **Step 1: Write the failing test** — append to `Source/VaRestHttp/Private/Tests/VaRestHttpAuthTest.cpp`; add to `AuthTestPrivate` (Task 17 uses these too):
 
 ```cpp
 	/** A bearer whose refresh the test answers by hand: a refresh endpoint as slow as the test wants */
@@ -6254,6 +7897,12 @@ Plan decisions 2, 3, 6, 7, 8. Spec §4.2: "the first 401 starts one refresh. Con
 			}
 		}
 
+		/** Concurrency review I-4: an auth that drops its Done uncalled (an error branch that forgot it) */
+		void Drop()
+		{
+			Pending.Reset();
+		}
+
 		int32 Refreshes = 0;
 		uint64 LastRefreshId = 0;
 
@@ -6292,9 +7941,481 @@ Plan decisions 2, 3, 6, 7, 8. Spec §4.2: "the first 401 starts one refresh. Con
 		}
 		return Out;
 	}
+
+	using FRefreshAnswer = TPair<EVaRestAuthRefreshOutcome, EVaRestErrorKind>;
+	using FRefreshAnswers = TSharedRef<TArray<FRefreshAnswer>, ESPMode::ThreadSafe>;
+
+	FRefreshAnswers MakeAnswers()
+	{
+		return MakeShared<TArray<FRefreshAnswer>, ESPMode::ThreadSafe>();
+	}
+
+	/** RefreshAuth's callback, recording what it was told */
+	TUniqueFunction<void(EVaRestAuthRefreshOutcome, EVaRestErrorKind)> Record(const FRefreshAnswers& Into)
+	{
+		return [Into](EVaRestAuthRefreshOutcome Outcome, EVaRestErrorKind FailedKind) { Into->Emplace(Outcome, FailedKind); };
+	}
 ```
 
-and the tests:
+The test:
+
+```cpp
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthRefreshPublicTest, "VaRest.Http.Auth.RefreshAuthPublic",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthRefreshPublicTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// WebSocket spec 19 item 2: a socket refreshes through the client, sharing HTTP's single flight. Spec review I-5: it is
+	// told how the refresh ended, so a rejection (the session is gone) is not mistaken for a network failure (try later).
+	FTestRig Rig;
+	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = HandRig(Rig);
+	TSharedRef<int32, ESPMode::ThreadSafe> Expired = MakeShared<int32, ESPMode::ThreadSafe>(0);
+	Rig.Client.OnSessionExpired().AddLambda([Expired] { ++*Expired; });
+	const TSharedPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> State = VaRest::Http::FClientAccess::State(Rig.Client);
+
+	// Refreshed, one refresh for two callers
+	const FRefreshAnswers Shared = MakeAnswers();
+	Rig.Client.RefreshAuth(Record(Shared));
+	Rig.Client.RefreshAuth(Record(Shared));
+	TestEqual(TEXT("one refresh for both"), Auth->Refreshes, 1);
+	TestEqual(TEXT("... two waiters"), State->NumRefreshWaitersInternal(), 2);
+	TestTrue(TEXT("spec review I-2: the refresh's id is a request id"), Auth->LastRefreshId != 0);
+	Auth->Answer(FVaRestAuthRefreshResult::Refreshed(TEXT("new-access-123456")));
+	TestEqual(TEXT("concurrency review I-1: nothing inside the answer either"), Shared->Num(), 0);
+	TestTrue(TEXT("both told: Refreshed"), PumpUntil([Shared] { return Shared->Num() == 2; })
+		&& (*Shared)[0] == FRefreshAnswer(EVaRestAuthRefreshOutcome::Refreshed, EVaRestErrorKind::None) && (*Shared)[1] == (*Shared)[0]);
+	TestEqualSensitive(TEXT("... the session holds the new token"), Rig.Client.GetSession().AccessToken, FString(TEXT("new-access-123456")));
+
+	// The game's own token ends the refresh in flight (Ready); its waiters go on from a later task, not inside the call (I-1)
+	const FRefreshAnswers Game = MakeAnswers();
+	Rig.Client.RefreshAuth(Record(Game));
+	Rig.Client.SetBearerToken(TEXT("game-access-123456"), /*bSameIdentity*/ true);
+	TestEqual(TEXT("concurrency review I-1: the waiter does not run inside SetBearerToken"), Game->Num(), 0);
+	TestTrue(TEXT("... it runs later: Refreshed"), PumpUntil([Game] { return Game->Num() == 1; })
+		&& (*Game)[0] == FRefreshAnswer(EVaRestAuthRefreshOutcome::Refreshed, EVaRestErrorKind::None));
+	Auth->Answer(FVaRestAuthRefreshResult::Refreshed(TEXT("late-access-123456")));
+	Rig.Drain();
+	TestEqualSensitive(TEXT("... and the ended refresh's late answer changes nothing"), Rig.Client.GetSession().AccessToken, FString(TEXT("game-access-123456")));
+
+	// Failed(Connection): the session stays (ruling Q1, I-7)
+	const FRefreshAnswers Failed = MakeAnswers();
+	Rig.Client.RefreshAuth(Record(Failed));
+	Auth->Answer(FVaRestAuthRefreshResult::Failed(EVaRestErrorKind::Connection, TEXT("no route to the refresh endpoint")));
+	TestTrue(TEXT("Failed: (Failed, Connection)"), PumpUntil([Failed] { return Failed->Num() == 1; })
+		&& (*Failed)[0] == FRefreshAnswer(EVaRestAuthRefreshOutcome::Failed, EVaRestErrorKind::Connection));
+	TestTrue(TEXT("... the session kept, nothing expired"), Rig.Client.GetSession().HasRefreshToken() && *Expired == 0);
+
+	// Concurrency review I-4: Done dropped uncalled ends the refresh as Failed(Connection), the session kept
+	const FRefreshAnswers Dropped = MakeAnswers();
+	Rig.Client.RefreshAuth(Record(Dropped));
+	Auth->Drop();
+	TestTrue(TEXT("a dropped Done: (Failed, Connection)"), PumpUntil([Dropped] { return Dropped->Num() == 1; })
+		&& (*Dropped)[0] == FRefreshAnswer(EVaRestAuthRefreshOutcome::Failed, EVaRestErrorKind::Connection));
+	TestTrue(TEXT("... the session kept, no refresh left running"), Rig.Client.GetSession().HasRefreshToken() && !State->IsRefreshing() && *Expired == 0);
+
+	// Rejected: the session goes, OnSessionExpired once -- also when the socket calls NotifySessionExpired anyway (I-2)
+	const FRefreshAnswers Rejected = MakeAnswers();
+	Rig.Client.RefreshAuth([Rejected, Notifier = Rig.Client](EVaRestAuthRefreshOutcome Outcome, EVaRestErrorKind FailedKind) mutable
+	{
+		Rejected->Emplace(Outcome, FailedKind);
+		Notifier.NotifySessionExpired();
+	});
+	Auth->Answer(FVaRestAuthRefreshResult::Rejected(TEXT("the refresh endpoint answered 400")));
+	TestTrue(TEXT("Rejected: (Rejected, None)"), PumpUntil([Rejected] { return Rejected->Num() == 1; })
+		&& (*Rejected)[0] == FRefreshAnswer(EVaRestAuthRefreshOutcome::Rejected, EVaRestErrorKind::None));
+	TestTrue(TEXT("... the session expired"), !Rig.Client.GetSession().HasAccessToken() && !Rig.Client.GetSession().HasRefreshToken());
+	TestEqual(TEXT("... OnSessionExpired once, the socket's NotifySessionExpired notwithstanding"), *Expired, 1);
+
+	// No auth (or nothing to refresh with): (Failed, Config), and still not inside the call
+	FTestRig Plain;
+	const FRefreshAnswers None = MakeAnswers();
+	Plain.Client.RefreshAuth(Record(None));
+	TestEqual(TEXT("decision 3: nothing inside the call"), None->Num(), 0);
+	TestTrue(TEXT("no auth: (Failed, Config)"), PumpUntil([None] { return None->Num() == 1; })
+		&& (*None)[0] == FRefreshAnswer(EVaRestAuthRefreshOutcome::Failed, EVaRestErrorKind::Config));
+	return true;
+}
+```
+
+- [ ] **Step 2: Build to see it fail**
+
+Run: `Tools/run_tests.sh VaRest.Http.Auth.RefreshAuthPublic`
+Expected: FAIL to compile (`RefreshAuth`, `NumRefreshWaitersInternal`, `IsRefreshing` unknown).
+
+- [ ] **Step 3: The refresh in flight** — in `Source/VaRestHttp/Private/VaRestSession.h`, before `FSessionState`:
+
+```cpp
+	/** How a waiter's refresh ended (plan decision 3, ruling I-7) */
+	enum class ERefreshEnd : uint8
+	{
+		/** New credentials, from the refresh or from the game: go */
+		Ready,
+		/** The refresh was rejected, or NotifySessionExpired: Kind=Auth */
+		Rejected,
+		/** The refresh failed otherwise (Kind: Connection, Timeout or Config): the session stays */
+		Failed,
+		/** ClearSession (a logout) while waiting: Kind=Auth */
+		Cleared
+	};
+
+	struct FRefreshEnded
+	{
+		ERefreshEnd End = ERefreshEnd::Ready;
+		/** Spec review I-2: the refresh request's RequestId (IN-2 AuthRefreshId) */
+		uint64 RefreshId = 0;
+		/** Failed: what the waiters fail with */
+		EVaRestErrorKind Kind = EVaRestErrorKind::Connection;
+		FString Message;
+	};
+
+	using FRefreshWaiter = TUniqueFunction<void(const FRefreshEnded&)>;
+
+	/** Spec 4.2's single flight: the refresh running now and who waits for it */
+	struct FRefreshInFlight
+	{
+		uint64 RefreshId = 0;
+		/** IN-9 CauseRequestId: the request whose 401 (or due expiry) started it; 0 for RefreshAuth */
+		uint64 CauseRequestId = 0;
+		TArray<TPair<uint64, FRefreshWaiter>> Waiters;
+	};
+```
+
+and in `FSessionState`:
+
+```cpp
+		/** Null when no refresh runs */
+		TUniquePtr<FRefreshInFlight> Refresh;
+		uint64 NextWaiterId = 0;
+```
+
+In `Source/VaRestHttp/Private/VaRestClientState.h`, `FClientState` public, after the session functions:
+
+```cpp
+		// ---- Single-flight refresh (spec 4.2; Task 16; VaRestSession.cpp). Game thread.
+		bool IsRefreshing() const { return Session.Refresh.IsValid(); }
+		uint64 NewWaiterId() { return ++Session.NextWaiterId; }
+		/**
+		 * Waits for the refresh in flight, or starts one with Auth. Not a session change (it queues no event), so callable
+		 * outside RunSessionChange; the caller keeps this state alive (an exchange, RefreshAuth's pin). OnDone runs once,
+		 * from a later game-thread task -- never inside this call (concurrency review I-1).
+		 */
+		void JoinRefresh(uint64 WaiterId, const TSharedRef<IVaRestAuth, ESPMode::ThreadSafe>& Auth, uint64 CauseRequestId, FRefreshWaiter&& OnDone);
+		/** A parked request was canceled: its waiter goes uncalled; the refresh goes on */
+		void LeaveRefresh(uint64 WaiterId);
+		/** Inside a change only: the auth's answer for RefreshId (a stale one is ignored); plan decision 3, ruling I-7 */
+		void FinishRefresh(uint64 RefreshId, FVaRestAuthRefreshResult&& Result);
+#if WITH_DEV_AUTOMATION_TESTS
+		/** Tests (concurrency review I-5): the waiters of the refresh in flight */
+		int32 NumRefreshWaitersInternal() const { return Session.Refresh.IsValid() ? Session.Refresh->Waiters.Num() : 0; }
+#endif
+```
+
+private:
+
+```cpp
+		void StartRefresh(const TSharedRef<IVaRestAuth, ESPMode::ThreadSafe>& Auth);
+		/** Inside a change only: ends the refresh in flight without its result -- the game changed the session (Ready, Cleared) or it expired (Rejected) */
+		void EndRefresh(ERefreshEnd End, const TCHAR* Message);
+```
+
+In `Source/VaRestHttp/Private/VaRestSession.cpp` (`#include "Tasks/Task.h"`, `#include "VaRestAuth.h"`, `#include "VaRestTrace.h"` for `NewRequestId`, `#include <atomic>`), in `SessionPrivate`:
+
+```cpp
+	/**
+	 * Concurrency review I-1 (ruled): the waiters of an ended refresh run from ONE later game-thread task that holds them,
+	 * so no request callback and no dispatch runs inside the session call that ended the refresh -- M3 decision 3's rule
+	 * for configuration calls (VaRestClientState.cpp:149-150). A waiter whose request was canceled meanwhile finds it
+	 * answered and returns; one that LeaveRefresh dropped is not in this list any more.
+	 */
+	void ResolveWaitersLater(TUniquePtr<FRefreshInFlight>&& Ended, FRefreshEnded&& End)
+	{
+		UE::Tasks::Launch(TEXT("VaRest.RefreshEnded"), [Waiting = MoveTemp(Ended), Result = MoveTemp(End)]() mutable
+		{
+			for (TPair<uint64, FRefreshWaiter>& Waiter : Waiting->Waiters)
+			{
+				Waiter.Value(Result);
+			}
+		}, UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
+	}
+
+	/**
+	 * Concurrency review I-4: what the auth's Done owns. The first Deliver wins (any thread); a second is ignored. Destroyed
+	 * without one -- the auth dropped Done uncalled -- it ends the refresh as Failed(Connection), the session kept (ruling
+	 * Q1), so nothing parks forever behind a refresh that can no longer end. An auth that holds Done uncalled (a re-login
+	 * screen) is not ended: no watchdog (ruling I-4). Either way the refresh finishes from a later game-thread task, inside
+	 * RunSessionChange (the answer runs listeners, concurrency review C-1).
+	 */
+	class FRefreshDoneGuard
+	{
+	public:
+		FRefreshDoneGuard(TWeakPtr<FClientState, ESPMode::ThreadSafe> InState, uint64 InRefreshId)
+			: State(MoveTemp(InState))
+			, RefreshId(InRefreshId)
+			, Answered(MakeShared<std::atomic<bool>, ESPMode::ThreadSafe>(false))
+		{
+		}
+
+		/** Moving leaves the source without a flag: only the guard the auth's Done holds can fire */
+		FRefreshDoneGuard(FRefreshDoneGuard&&) = default;
+		FRefreshDoneGuard& operator=(FRefreshDoneGuard&&) = default;
+		FRefreshDoneGuard(const FRefreshDoneGuard&) = delete;
+		FRefreshDoneGuard& operator=(const FRefreshDoneGuard&) = delete;
+
+		~FRefreshDoneGuard()
+		{
+			if (Answered.IsValid() && !Answered->exchange(true))
+			{
+				Post(FVaRestAuthRefreshResult::Failed(EVaRestErrorKind::Connection, TEXT("the auth dropped its refresh callback")));
+			}
+		}
+
+		void Deliver(FVaRestAuthRefreshResult&& Result)
+		{
+			if (Answered.IsValid() && !Answered->exchange(true))
+			{
+				Post(MoveTemp(Result));
+			}
+		}
+
+	private:
+		void Post(FVaRestAuthRefreshResult&& Result) const
+		{
+			if (FClientState::IsShuttingDown())
+			{
+				// Engine exit: the refresh no longer matters, and the task system may be going
+				return;
+			}
+			UE::Tasks::Launch(TEXT("VaRest.RefreshDone"), [Weak = State, Id = RefreshId, Moved = MoveTemp(Result)]() mutable
+			{
+				if (const TSharedPtr<FClientState, ESPMode::ThreadSafe> Pinned = Weak.Pin())
+				{
+					Pinned->RunSessionChange([Id, &Moved](FClientState& Target) { Target.FinishRefresh(Id, MoveTemp(Moved)); });
+				}
+			}, UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
+		}
+
+		TWeakPtr<FClientState, ESPMode::ThreadSafe> State;
+		uint64 RefreshId = 0;
+		TSharedPtr<std::atomic<bool>, ESPMode::ThreadSafe> Answered;
+	};
+```
+
+and the functions:
+
+```cpp
+void VaRest::Http::FClientState::JoinRefresh(uint64 WaiterId, const TSharedRef<IVaRestAuth, ESPMode::ThreadSafe>& Auth, uint64 CauseRequestId, FRefreshWaiter&& OnDone)
+{
+	check(IsInGameThread());
+	const bool bStart = !Session.Refresh.IsValid();
+	if (bStart)
+	{
+		Session.Refresh = MakeUnique<FRefreshInFlight>();
+		// Spec review I-2: a process-unique request id, which the refresh request carries as its own (Task 15), so IN-2's
+		// AuthRefreshId names a record the Inspector has
+		Session.Refresh->RefreshId = FVaRestTrace::NewRequestId();
+		Session.Refresh->CauseRequestId = CauseRequestId;
+	}
+	Session.Refresh->Waiters.Emplace(WaiterId, MoveTemp(OnDone));
+	if (bStart)
+	{
+		StartRefresh(Auth);
+	}
+}
+
+void VaRest::Http::FClientState::LeaveRefresh(uint64 WaiterId)
+{
+	check(IsInGameThread());
+	if (Session.Refresh.IsValid())
+	{
+		Session.Refresh->Waiters.RemoveAll([WaiterId](const TPair<uint64, FRefreshWaiter>& Waiter) { return Waiter.Key == WaiterId; });
+	}
+}
+
+void VaRest::Http::FClientState::StartRefresh(const TSharedRef<IVaRestAuth, ESPMode::ThreadSafe>& Auth)
+{
+	const uint64 RefreshId = Session.Refresh->RefreshId;
+	const FVaRestAuthRefreshContext Context(FClientAccess::Wrap(AsShared()), Session.Data, RefreshId);
+	// Concurrency review I-4: Done owns the guard; called or dropped, the refresh ends from a later game-thread task
+	Auth->Refresh(Context, [Guard = SessionPrivate::FRefreshDoneGuard(AsShared(), RefreshId)](FVaRestAuthRefreshResult&& Result) mutable
+	{
+		Guard.Deliver(MoveTemp(Result));
+	});
+}
+
+void VaRest::Http::FClientState::FinishRefresh(uint64 RefreshId, FVaRestAuthRefreshResult&& Result)
+{
+	CheckInSessionChange();
+	if (!Session.Refresh.IsValid() || Session.Refresh->RefreshId != RefreshId)
+	{
+		// Ended without its result: the game set, cleared or expired the session meanwhile (EndRefresh)
+		return;
+	}
+	TUniquePtr<FRefreshInFlight> Ended = MoveTemp(Session.Refresh);
+	FRefreshEnded End;
+	End.RefreshId = RefreshId;
+	End.Message = Result.Message;
+	if (Result.Outcome == EVaRestAuthRefreshOutcome::Refreshed && !Result.AccessToken.IsEmpty() && IsValidHeaderValue(Result.AccessToken)
+		&& IsValidHeaderValue(Result.RefreshToken))
+	{
+		UpdateTokens(Result.AccessToken, Result.RefreshToken.IsEmpty() ? nullptr : &Result.RefreshToken, Result.ExpiresInSeconds);
+		End.End = ERefreshEnd::Ready;
+		AnnounceSession(EVaRestSessionChange::Refreshed, Ended->CauseRequestId, TEXT("refreshed by the auth"));
+	}
+	else if (Result.Outcome == EVaRestAuthRefreshOutcome::Failed)
+	{
+		// Plan decision 3, ruling I-7: the session stays; the waiters fail with the refresh's kind
+		End.End = ERefreshEnd::Failed;
+		End.Kind = Result.FailedKind;
+	}
+	else
+	{
+		// Rejected, or a success with nothing usable in it (a malformed success, ruling Q1): the session expires, once (I-2)
+		End.End = ERefreshEnd::Rejected;
+		if (Result.Outcome == EVaRestAuthRefreshOutcome::Refreshed)
+		{
+			End.Message = TEXT("the refresh gave no usable access token");
+		}
+		ExpireSession(Ended->CauseRequestId, End.Message);
+	}
+	// The events queued above reach the listeners when this change returns; the waiters run after, from their own task
+	SessionPrivate::ResolveWaitersLater(MoveTemp(Ended), MoveTemp(End));
+}
+
+void VaRest::Http::FClientState::EndRefresh(ERefreshEnd EndKind, const TCHAR* Message)
+{
+	CheckInSessionChange();
+	if (!Session.Refresh.IsValid())
+	{
+		return;
+	}
+	TUniquePtr<FRefreshInFlight> Ended = MoveTemp(Session.Refresh);
+	FRefreshEnded End;
+	End.End = EndKind;
+	End.RefreshId = Ended->RefreshId;
+	End.Message = Message;
+	// The refresh's own late answer finds another id (or none) and is ignored (FinishRefresh)
+	SessionPrivate::ResolveWaitersLater(MoveTemp(Ended), MoveTemp(End));
+}
+```
+
+The game's changes end a refresh in flight (Task 12's functions): in `SetTokensByGame`, inside `if (UpdateTokens(...))` and before `AnnounceSession`: `EndRefresh(ERefreshEnd::Ready, TEXT("the game set new credentials"));`. In `ClearSession`, before `AnnounceSession(EVaRestSessionChange::Cleared, ...)`: `EndRefresh(ERefreshEnd::Cleared, TEXT("SessionCleared"));` — and in its early return for an empty session, the same call before `return;`. In `ExpireSession`, the already-expired return also needs no refresh in flight — `if (!Data.HasAccessToken() && !Data.HasRefreshToken() && !Session.Refresh.IsValid())` — and after `PublishSessionSecrets();`: `EndRefresh(ERefreshEnd::Rejected, TEXT("AuthRejected"));`.
+
+- [ ] **Step 4: The public refresh** — `Source/VaRestHttp/Public/VaRestClient.h`, auth section:
+
+```cpp
+	/** WebSocket spec 19 item 2: a refresh is due -- no access token but a refresh token, or a known expiry within the auth's lead time */
+	bool NeedsAuthRefresh() const;
+	/**
+	 * WebSocket spec 19 item 2: refresh the session now, sharing a refresh already in flight (single flight, spec 4.2).
+	 * OnDone(Outcome, FailedKind), from a later game-thread task -- never inside this call (decision 3):
+	 * - Refreshed: the session has new credentials (FailedKind None).
+	 * - Rejected: the session is gone -- the refresh endpoint rejected it (the client has already expired the session and
+	 *   fired OnSessionExpired), or the game cleared or expired it meanwhile. Do not call NotifySessionExpired: it is done.
+	 * - Failed: the session stays; FailedKind says why -- Connection or Timeout (try again later), Config (no auth, nothing
+	 *   to refresh with, or a refresh the configuration refuses).
+	 * Spec review I-5: a socket must not treat a Wi-Fi blip as a logout (ruling Q1).
+	 */
+	void RefreshAuth(TUniqueFunction<void(EVaRestAuthRefreshOutcome Outcome, EVaRestErrorKind FailedKind)>&& OnDone);
+```
+
+The session section's opening comment (Task 12) gains, and the docs of `SetBearerToken`, `SetSession`, `ImportSession`, `ClearSession` and `NotifySessionExpired` each end with, the sentence (concurrency review I-1): `Requests parked behind a session refresh that this ends or resumes continue from a later game-thread task, never inside this call.`
+
+`Source/VaRestHttp/Private/VaRestClient.cpp` (`#include "Tasks/Task.h"`):
+
+```cpp
+bool FVaRestClient::NeedsAuthRefresh() const
+{
+	check(IsInGameThread());
+	if (!State.IsValid())
+	{
+		return false;
+	}
+	const TSharedRef<const VaRest::Http::FClientConfig, ESPMode::ThreadSafe> Current = State->GetConfig();
+	const FVaRestSessionData& Data = State->GetSessionData();
+	return Current->Auth.IsValid() && Current->Auth->CanRefresh(Data) && Current->Auth->NeedsRefresh(Data, Current->Clock->Now());
+}
+
+void FVaRestClient::RefreshAuth(TUniqueFunction<void(EVaRestAuthRefreshOutcome Outcome, EVaRestErrorKind FailedKind)>&& OnDone)
+{
+	check(IsInGameThread());
+	// Held for the call: the auth's Refresh runs code that is not VaRest's (concurrency review C-1's rule)
+	const TSharedPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> Pinned = State;
+	const TSharedPtr<IVaRestAuth, ESPMode::ThreadSafe> Auth = Pinned.IsValid() ? Pinned->GetConfig()->Auth : nullptr;
+	if (!Auth.IsValid() || !Auth->CanRefresh(Pinned->GetSessionData()))
+	{
+		// Spec review I-5: nothing to refresh with is the configuration's answer -- and still from a later task (decision 3)
+		UE::Tasks::Launch(TEXT("VaRest.RefreshAuth"), [Done = MoveTemp(OnDone)]() mutable
+		{
+			if (Done)
+			{
+				Done(EVaRestAuthRefreshOutcome::Failed, EVaRestErrorKind::Config);
+			}
+		}, UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
+		return;
+	}
+	Pinned->JoinRefresh(Pinned->NewWaiterId(), Auth.ToSharedRef(), 0, [Done = MoveTemp(OnDone)](const VaRest::Http::FRefreshEnded& End) mutable
+	{
+		if (!Done)
+		{
+			return;
+		}
+		switch (End.End)
+		{
+		case VaRest::Http::ERefreshEnd::Ready:
+			Done(EVaRestAuthRefreshOutcome::Refreshed, EVaRestErrorKind::None);
+			break;
+		case VaRest::Http::ERefreshEnd::Failed:
+			Done(EVaRestAuthRefreshOutcome::Failed, End.Kind);
+			break;
+		default:
+			// Rejected, or the game cleared or expired the session meanwhile: it is gone either way
+			Done(EVaRestAuthRefreshOutcome::Rejected, EVaRestErrorKind::None);
+			break;
+		}
+	});
+}
+```
+
+- [ ] **Step 5: Run them, then the session suite**
+
+Run: `Tools/run_tests.sh VaRest.Http.Auth` then `Tools/run_tests.sh --no-build VaRest.Http.Session`
+Expected: `0 failed` each.
+
+- [ ] **Step 6: Restore-the-bug** — (a) in `JoinRefresh` start a refresh for every waiter (drop the `bStart` test): `VaRest.Http.Auth.RefreshAuthPublic` FAILS ("one refresh for both"); restore; PASS. (b) In `RefreshAuth`'s waiter report `Rejected` for every end that is not `Ready`: FAILS on "Failed: (Failed, Connection)" (spec review I-5); restore; PASS. (c) Remove `FRefreshDoneGuard`'s destructor body: FAILS ("a dropped Done: (Failed, Connection)" times out; concurrency review I-4); restore; PASS. (d) In `FinishRefresh` treat `Failed` like `Rejected`: FAILS ("... the session kept, nothing expired"); restore; PASS. (e) In `EndRefresh` call the waiters inline instead of `ResolveWaitersLater`: FAILS ("concurrency review I-1: the waiter does not run inside SetBearerToken"); restore; PASS. Record all five.
+
+- [ ] **Step 7: Full suite, commit**
+
+Run: `Tools/run_tests.sh VaRest`
+Expected: `0 failed`.
+
+```bash
+git add Source/VaRestHttp/Private/VaRestSession.h Source/VaRestHttp/Private/VaRestSession.cpp Source/VaRestHttp/Private/VaRestClientState.h \
+  Source/VaRestHttp/Public/VaRestClient.h Source/VaRestHttp/Private/VaRestClient.cpp Source/VaRestHttp/Private/Tests/VaRestHttpAuthTest.cpp
+git commit -m "http: M4 task 16 -- single-flight refresh: one per client, a guarded Done, Refreshed/Rejected/Failed, waiters from a later task, RefreshAuth's outcome
+
+Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
+```
+
+---
+
+### Task 17: The `AuthGate` stage — park, proactive refresh, replay once (spec §4.2; IN-2, IN-9; WebSocket §19 item 2)
+
+Plan decisions 2, 3, 6, 7, 8; split from the old gate task. Spec §4.2: "the first 401 starts one refresh. Concurrent requests that hit 401 (or start while it runs) park behind it, then replay once each." `AuthGate` sits after `Retry` and before the attempt boundary, so a replay is a new attempt with `GapBefore = SessionRefresh`, and a parked request is held through `Interrupt` like a backoff. A park before the first attempt is that attempt's `Auth` phase, and the attempt starts when it parks (spec review I-1); a park is bounded by the request's retry deadline (concurrency review M-1); the "newer credentials" replay compares the credentials' own generation (review M-6). Failures map per ruling I-7: `Failed` keeps the refresh's kind, `Rejected` and `Cleared` are `Kind=Auth`.
+
+**Files:**
+- Create: `Source/VaRestHttp/Private/VaRestAuthGate.cpp`; modify `Source/VaRestHttp/Private/VaRestAuthInternal.h`
+- Modify: `Source/VaRestHttp/Private/VaRestClientState.cpp` (`Publish` adds the stage)
+- Modify: `Source/VaRestHttp/Private/VaRestExchangeState.h` (`AuthWait`, `AuthRefreshId`, `PendingAttemptStart`)
+- Modify: `Source/VaRestHttp/Private/VaRestPipeline.cpp` (`Resolve`: an auth that may replay copies the body; the boundary takes `PendingAttemptStart`; the transport resets the IN-2 auth fields), `Source/VaRestHttp/Private/VaRestTracePoints.cpp` (`AuthWait`, `AuthRefreshId`)
+- Test: `Source/VaRestHttp/Private/Tests/VaRestHttpAuthTest.cpp`
+
+**Interfaces:**
+- Consumes: Tasks 8 (`Interrupt`, `NextGap`), 9 (`MakeDeadlineOutcome`, `FOutcomeProbe`), 12 (`CredentialGeneration`), 14 (`AppliedCredentialGeneration`), 15 (`bIsAuthRefresh`), 16 (`JoinRefresh`, `LeaveRefresh`, `FRefreshEnded`, `FHandAuth`).
+- Produces: `FVaRestStageRef VaRest::Http::MakeAuthGateStage()`; on `FExchangeState`: `double AuthWait`, `uint64 AuthRefreshId`, `double PendingAttemptStart` (-1 = none). The chain: custom Outer → Retry → **AuthGate** → boundary → limiter → AuthApply → custom PerAttempt → log → transport.
+
+- [ ] **Step 1: Write the failing tests** — append to `Source/VaRestHttp/Private/Tests/VaRestHttpAuthTest.cpp` (before `#endif`):
 
 ```cpp
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthSingleFlightTest, "VaRest.Http.Auth.SingleFlight",
@@ -6354,10 +8475,12 @@ bool FVaRestHttpAuthSingleFlightTest::RunTest(const FString& Parameters)
 	{
 		return false;
 	}
-	TestTrue(TEXT("the replay: GapBefore SessionRefresh 0.25 s, AuthWait, the refresh's id"), Replayed[1].GapKind == EVaRestTraceGap::SessionRefresh
-		&& FMath::IsNearlyEqual(Replayed[1].GapSeconds, 0.25) && FMath::IsNearlyEqual(Replayed[1].AuthWait, 0.25) && Replayed[1].AuthRefreshId == Auth->LastRefreshId);
-	TestTrue(TEXT("the late one: no gap, AuthWait, the same refresh"), Late[0].GapKind == EVaRestTraceGap::None && FMath::IsNearlyEqual(Late[0].AuthWait, 0.25)
-		&& Late[0].AuthRefreshId == Auth->LastRefreshId && Late[0].Attempt == 1);
+	// Spec review I-1 (Inspector 3.3): a replay's park is the Gap before it, outside its attempt -- no AuthWait; a park
+	// before the first attempt is inside it, which starts when it parked
+	TestTrue(TEXT("the replay: GapBefore SessionRefresh 0.25 s, no AuthWait, the refresh's id"), Replayed[1].GapKind == EVaRestTraceGap::SessionRefresh
+		&& FMath::IsNearlyEqual(Replayed[1].GapSeconds, 0.25) && Replayed[1].AuthWait == 0.0 && Replayed[1].AuthRefreshId == Auth->LastRefreshId);
+	TestTrue(TEXT("the late one: attempt 1 started when it parked, AuthWait 0.25 s, the same refresh"), Late[0].GapKind == EVaRestTraceGap::None
+		&& Late[0].AttemptStart == 0.0 && FMath::IsNearlyEqual(Late[0].AuthWait, 0.25) && Late[0].AuthRefreshId == Auth->LastRefreshId && Late[0].Attempt == 1);
 	const TArray<FVaRestTraceMarker> Markers = Scoped.Recorder->MarkersOf(Rig.Client.GetId());
 	TestTrue(TEXT("IN-9: SessionRefreshed, caused by one of the 401s"), Markers.ContainsByPredicate([&Ids](const FVaRestTraceMarker& Marker)
 	{
@@ -6402,38 +8525,72 @@ bool FVaRestHttpAuthRejectedTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthUnreachableTest, "VaRest.Http.Auth.RefreshUnreachableKeepsSession",
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthFailedTest, "VaRest.Http.Auth.RefreshFailedKeepsSession",
 	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
 
-bool FVaRestHttpAuthUnreachableTest::RunTest(const FString& Parameters)
+bool FVaRestHttpAuthFailedTest::RunTest(const FString& Parameters)
 {
 	using namespace VaRest::Http::Testing;
 	using namespace VaRest::Http::AuthTestPrivate;
+	// Plan decision 3, rulings Q1 and I-7; spec review I-3 (Review Focus line 2): twenty requests park on their 401s, two
+	// more start while the refresh runs, and the refresh fails on the network -- one refresh, each request fails once,
+	// none replays, the player stays logged in
 	FTestRig Rig;
 	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = HandRig(Rig);
 	TSharedRef<int32, ESPMode::ThreadSafe> Expired = MakeShared<int32, ESPMode::ThreadSafe>(0);
 	Rig.Client.OnSessionExpired().AddLambda([Expired] { ++*Expired; });
-	auto A = MakeOutcome<FVaRestJson>();
-	Observe(Rig.Client.Get(TEXT("/a")), A).Send();
-	if (!TestTrue(TEXT("parked"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 1; }) && Rig.Drain() && Auth->IsPending()))
+	TArray<TSharedRef<TTestOutcome<FVaRestJson>, ESPMode::ThreadSafe>> Outcomes;
+	for (int32 Index = 0; Index < 20; ++Index)
+	{
+		Outcomes.Add(MakeOutcome<FVaRestJson>());
+		Observe(Rig.Client.Get(FString::Printf(TEXT("/p/%d"), Index)), Outcomes.Last()).Send();
+	}
+	if (!TestTrue(TEXT("twenty 401s, one refresh"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 20; }) && Rig.Drain() && Auth->IsPending()))
 	{
 		Abandon(Rig);
 		return false;
 	}
-	Auth->Answer(FVaRestAuthRefreshResult::Unreachable(EVaRestErrorKind::Connection, TEXT("the refresh endpoint did not answer")));
-	if (!TestTrue(TEXT("completes"), Rig.Wait(A)))
+	for (int32 Index = 0; Index < 2; ++Index)
+	{
+		Outcomes.Add(MakeOutcome<FVaRestJson>());
+		Observe(Rig.Client.Get(FString::Printf(TEXT("/late/%d"), Index)), Outcomes.Last()).Send();
+	}
+	Rig.Drain();
+	Auth->Answer(FVaRestAuthRefreshResult::Failed(EVaRestErrorKind::Connection, TEXT("the refresh endpoint did not answer")));
+	const auto AllDone = [&Outcomes] { for (const auto& One : Outcomes) { if (!One->IsDone()) { return false; } } return true; };
+	if (!TestTrue(TEXT("all complete"), PumpUntil(AllDone)))
 	{
 		Abandon(Rig);
 		return false;
 	}
-	// Plan decision 3: a network blip must not log the player out
-	TestTrue(TEXT("the parked request fails as the refresh did: Connection, retryable"), A->Error.Kind == EVaRestErrorKind::Connection && A->Error.bRetryable
-		&& A->Error.Message.Contains(TEXT("could not reach")));
+	Rig.Drain();
+	TestEqual(TEXT("one refresh"), Auth->Refreshes, 1);
+	bool bEachOnce = true;
+	for (const auto& One : Outcomes)
+	{
+		bEachOnce &= One->ErrorCalls.load() == 1 && One->CompleteCalls.load() == 1 && One->SuccessCalls.load() == 0
+			&& One->Error.Kind == EVaRestErrorKind::Connection && One->Error.bRetryable && One->Error.Message.Contains(TEXT("AuthRefreshFailed"));
+	}
+	TestTrue(TEXT("each fails once, as the refresh did: Connection, retryable, saying why"), bEachOnce);
+	TestEqual(TEXT("none replayed; the late ones were never sent"), Rig.Fake->NumCalls(), 20);
 	TestTrue(TEXT("the session is kept"), Rig.Client.GetSession().AccessToken == TEXT("old-access-123456") && Rig.Client.GetSession().HasRefreshToken());
 	TestEqual(TEXT("no OnSessionExpired"), *Expired, 0);
+
+	// Ruling I-7's row: a refresh the configuration refuses (HTTP disabled) keeps the session too, and is not retryable
+	auto Refused = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/c")), Refused).Send();
+	if (!TestTrue(TEXT("the next 401 starts a new refresh"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 21; }) && Rig.Drain() && Auth->Refreshes == 2))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Auth->Answer(FVaRestAuthRefreshResult::Failed(EVaRestErrorKind::Config, TEXT("HttpDisabled")));
+	TestTrue(TEXT("HTTP disabled: session kept, the parked request Kind Config, not retryable"), Rig.Wait(Refused) && Refused->Error.Kind == EVaRestErrorKind::Config
+		&& !Refused->Error.bRetryable && Rig.Client.GetSession().HasRefreshToken() && *Expired == 0);
+
 	auto B = MakeOutcome<FVaRestJson>();
 	Observe(Rig.Client.Get(TEXT("/b")), B).Send();
-	if (!TestTrue(TEXT("the next 401 starts a new refresh"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 2; }) && Rig.Drain() && Auth->Refreshes == 2))
+	if (!TestTrue(TEXT("a third refresh"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 22; }) && Rig.Drain() && Auth->Refreshes == 3))
 	{
 		Abandon(Rig);
 		return false;
@@ -6452,19 +8609,27 @@ bool FVaRestHttpAuthStopTest::RunTest(const FString& Parameters)
 	using namespace VaRest::Http::AuthTestPrivate;
 	FTestRig Rig;
 	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = HandRig(Rig);
+	// Concurrency review I-5: an Outer stage sees decision 7's one outcome per request; the waiter count shows LeaveRefresh
+	const TSharedRef<FOutcomeProbe, ESPMode::ThreadSafe> Probe = MakeShared<FOutcomeProbe, ESPMode::ThreadSafe>();
+	Rig.Client.Use(Probe, EVaRestStageSlot::Outer);
+	const TSharedPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> State = VaRest::Http::FClientAccess::State(Rig.Client);
 	UObject* Owner = NewObject<UVaRestHttpSettings>(GetTransientPackage(), NAME_None, RF_Transient);
 	auto Canceled = MakeOutcome<FVaRestJson>();
 	auto Owned = MakeOutcome<FVaRestJson>();
 	auto ShutDown = MakeOutcome<FVaRestJson>();
 	const FVaRestRequestHandle Handle = Observe(Rig.Client.Get(TEXT("/c")), Canceled).Send();
-	Observe(Rig.Client.Get(TEXT("/o")).Owner(Owner), Owned).Send();
-	Observe(Rig.Client.Get(TEXT("/s")).Tag(TEXT("Exit")), ShutDown).Send();
-	if (!TestTrue(TEXT("all three parked"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 3; }) && Rig.Drain() && Auth->IsPending()))
+	const FVaRestRequestHandle OwnedHandle = Observe(Rig.Client.Get(TEXT("/o")).Owner(Owner), Owned).Send();
+	const FVaRestRequestHandle ShutDownHandle = Observe(Rig.Client.Get(TEXT("/s")).Tag(TEXT("Exit")), ShutDown).Send();
+	if (!TestTrue(TEXT("all three parked"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 3; }) && Rig.Drain() && Auth->IsPending()
+		&& State->NumRefreshWaitersInternal() == 3))
 	{
 		Abandon(Rig);
 		return false;
 	}
 	Handle.Cancel();
+	// Inside Cancel(), before any pump: the park's interrupt left the refresh and answered through the chain (decision 7)
+	TestEqual(TEXT("Cancel() leaves the refresh: two waiters left"), State->NumRefreshWaitersInternal(), 2);
+	TestEqual(TEXT("... and the Outer stage got its one Canceled inside Cancel()"), Probe->Count(Handle.GetId(), EVaRestTransportFailure::Canceled), 1);
 	if (!TestTrue(TEXT("Cancel() ends the park"), PumpUntil([Canceled] { return Canceled->IsDone(); })))
 	{
 		Abandon(Rig);
@@ -6485,6 +8650,9 @@ bool FVaRestHttpAuthStopTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("shutdown and owner gone: no callbacks"), ShutDown->CompleteCalls.load() + Owned->CompleteCalls.load() + ShutDown->ErrorCalls.load()
 		+ Owned->ErrorCalls.load(), 0);
 	TestEqualSensitive(TEXT("the refresh still updates the session"), Rig.Client.GetSession().AccessToken, FString(TEXT("new-access-123456")));
+	TestTrue(TEXT("each stop: one outcome for the Outer stage, a Canceled"), Probe->Total(Handle.GetId()) == 1 && Probe->Total(OwnedHandle.GetId()) == 1
+		&& Probe->Total(ShutDownHandle.GetId()) == 1 && Probe->Count(OwnedHandle.GetId(), EVaRestTransportFailure::Canceled) == 1
+		&& Probe->Count(ShutDownHandle.GetId(), EVaRestTransportFailure::Canceled) == 1);
 	return true;
 }
 
@@ -6518,8 +8686,8 @@ bool FVaRestHttpAuthProactiveTest::RunTest(const FString& Parameters)
 	}
 	TestTrue(TEXT("one attempt, with the new token"), Outcome->SuccessCalls.load() == 1 && Outcome->Response.Attempts == 1 && Rig.Fake->NumCalls() == 1);
 	const TArray<FVaRestTraceAttemptDispatched> Dispatched = DispatchesOf(*Scoped.Recorder, Handle.GetId());
-	TestTrue(TEXT("IN-2: AuthWait 0.5 s, no gap"), Dispatched.Num() == 1 && FMath::IsNearlyEqual(Dispatched[0].AuthWait, 0.5)
-		&& Dispatched[0].GapKind == EVaRestTraceGap::None);
+	TestTrue(TEXT("IN-2: attempt 1 started at the park (spec review I-1), AuthWait 0.5 s, no gap"), Dispatched.Num() == 1 && Dispatched[0].AttemptStart == 0.0
+		&& FMath::IsNearlyEqual(Dispatched[0].AuthWait, 0.5) && Dispatched[0].GapKind == EVaRestTraceGap::None);
 	TestFalse(TEXT("an hour left: no refresh due"), Rig.Client.NeedsAuthRefresh());
 	return true;
 }
@@ -6576,7 +8744,10 @@ bool FVaRestHttpAuthGameChangesTest::RunTest(const FString& Parameters)
 		Abandon(Rig);
 		return false;
 	}
+	const int32 BeforeLogin = Rig.Fake->NumCalls();
 	Rig.Client.SetBearerToken(TEXT("game-access-123456"));
+	// Concurrency review I-1: the waiters resume from a later game-thread task, so nothing is dispatched inside the call
+	TestEqual(TEXT("decision 3: A's replay is not dispatched inside SetBearerToken()"), Rig.Fake->NumCalls(), BeforeLogin);
 	TestTrue(TEXT("A replays with the game's token"), Rig.Wait(A) && A->SuccessCalls.load() == 1);
 	Auth->Answer(FVaRestAuthRefreshResult::Refreshed(TEXT("new-access-123456")));
 	TestEqualSensitive(TEXT("the late refresh changes nothing"), Rig.Client.GetSession().AccessToken, FString(TEXT("game-access-123456")));
@@ -6590,6 +8761,7 @@ bool FVaRestHttpAuthGameChangesTest::RunTest(const FString& Parameters)
 		return false;
 	}
 	Rig.Client.ClearSession();
+	TestFalse(TEXT("decision 3: B's callbacks do not run inside ClearSession()"), B->IsDone());
 	TestTrue(TEXT("B fails Kind Auth, the session cleared"), Rig.Wait(B) && B->Error.Kind == EVaRestErrorKind::Auth && B->Error.Message.Contains(TEXT("SessionCleared")));
 
 	// A socket's NotifySessionExpired while a refresh runs: Kind Auth, rejected
@@ -6601,31 +8773,125 @@ bool FVaRestHttpAuthGameChangesTest::RunTest(const FString& Parameters)
 		return false;
 	}
 	Rig.Client.NotifySessionExpired();
+	TestFalse(TEXT("... nor C's inside NotifySessionExpired()"), C->IsDone());
 	TestTrue(TEXT("C fails Kind Auth"), Rig.Wait(C) && C->Error.Kind == EVaRestErrorKind::Auth && C->Error.Message.Contains(TEXT("AuthRejected")));
 	return true;
 }
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthRefreshPublicTest, "VaRest.Http.Auth.RefreshAuthPublic",
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthExpiredOnceTest, "VaRest.Http.Auth.ExpiredOnce",
 	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
 
-bool FVaRestHttpAuthRefreshPublicTest::RunTest(const FString& Parameters)
+bool FVaRestHttpAuthExpiredOnceTest::RunTest(const FString& Parameters)
 {
 	using namespace VaRest::Http::Testing;
 	using namespace VaRest::Http::AuthTestPrivate;
-	// WebSocket spec 19 item 2: a socket refreshes through the client, sharing HTTP's refresh
+	// Concurrency review I-2: a parked request's OnError calls NotifySessionExpired -- the documented call for a terminal
+	// auth failure -- after its refresh was rejected, which already expired the session: one expiry, one OnSessionExpired
 	FTestRig Rig;
 	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = HandRig(Rig);
-	TSharedRef<TArray<bool>, ESPMode::ThreadSafe> Answers = MakeShared<TArray<bool>, ESPMode::ThreadSafe>();
-	Rig.Client.RefreshAuth([Answers](bool bRefreshed) { Answers->Add(bRefreshed); });
-	Rig.Client.RefreshAuth([Answers](bool bRefreshed) { Answers->Add(bRefreshed); });
-	TestEqual(TEXT("nothing inside the call (decision 3)"), Answers->Num(), 0);
-	TestEqual(TEXT("one refresh for both"), Auth->Refreshes, 1);
+	TSharedRef<int32, ESPMode::ThreadSafe> Expired = MakeShared<int32, ESPMode::ThreadSafe>(0);
+	Rig.Client.OnSessionExpired().AddLambda([Expired] { ++*Expired; });
+	const TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> AuthErrors = MakeShared<std::atomic<int32>, ESPMode::ThreadSafe>(0);
+	auto Parked = MakeOutcome<FVaRestJson>();
+	// After Observe: this OnError replaces its recorder; OnComplete still records
+	Observe(Rig.Client.Get(TEXT("/a")), Parked).OnError([AuthErrors, Notifier = Rig.Client](const FVaRestError& Error) mutable
+	{
+		*AuthErrors += Error.Kind == EVaRestErrorKind::Auth ? 1 : 0;
+		Notifier.NotifySessionExpired();
+	}).Send();
+	if (!TestTrue(TEXT("parked"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 1; }) && Rig.Drain() && Auth->IsPending()))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Auth->Answer(FVaRestAuthRefreshResult::Rejected(TEXT("the refresh endpoint answered 400")));
+	if (!TestTrue(TEXT("completes"), Rig.Wait(Parked)))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Drain();
+	TestEqual(TEXT("the request failed Kind Auth"), AuthErrors->load(), 1);
+	TestEqual(TEXT("one expiry, one OnSessionExpired"), *Expired, 1);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthDroppedTest, "VaRest.Http.Auth.RefreshDropped",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthDroppedTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// Concurrency review I-4: an auth drops its Done uncalled; the parked request still ends (Connection, retryable: no
+	// logout), and the next 401 refreshes again
+	FTestRig Rig;
+	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = HandRig(Rig);
+	const TSharedPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> State = VaRest::Http::FClientAccess::State(Rig.Client);
+	auto Parked = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/a")), Parked).Send();
+	if (!TestTrue(TEXT("parked"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 1; }) && Rig.Drain() && Auth->IsPending()))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Auth->Drop();
+	if (!TestTrue(TEXT("the parked request ends"), Rig.Wait(Parked)))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	TestTrue(TEXT("... Connection, retryable"), Parked->Error.Kind == EVaRestErrorKind::Connection && Parked->Error.bRetryable);
+	TestTrue(TEXT("no refresh left running, none due, the session kept"), !State->IsRefreshing() && !Rig.Client.NeedsAuthRefresh()
+		&& Rig.Client.GetSession().HasRefreshToken());
+	auto Next = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/b")), Next).Send();
+	if (!TestTrue(TEXT("a new 401 starts a second refresh"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 2; }) && Rig.Drain() && Auth->Refreshes == 2))
+	{
+		Abandon(Rig);
+		return false;
+	}
 	Auth->Answer(FVaRestAuthRefreshResult::Refreshed(TEXT("new-access-123456")));
-	TestTrue(TEXT("both told: refreshed"), PumpUntil([Answers] { return Answers->Num() == 2; }) && (*Answers)[0] && (*Answers)[1]);
-	FTestRig Plain;
-	TSharedRef<TArray<bool>, ESPMode::ThreadSafe> None = MakeShared<TArray<bool>, ESPMode::ThreadSafe>();
-	Plain.Client.RefreshAuth([None](bool bRefreshed) { None->Add(bRefreshed); });
-	TestTrue(TEXT("no auth: false, later"), None->Num() == 0 && PumpUntil([None] { return None->Num() == 1; }) && !(*None)[0]);
+	TestTrue(TEXT("... which works"), Rig.Wait(Next) && Next->SuccessCalls.load() == 1);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthDropsClientParkedTest, "VaRest.Http.Session.HandlerDropsClientWhileParked",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthDropsClientParkedTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// Concurrency review C-1, its parked half: a parked request's OnError drops the last client during a logout. With
+	// I-1 the callback runs from a later game-thread task, not inside ClearSession; that task holds the exchange, and so
+	// the state, while it runs.
+	FTestRig Rig;
+	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = HandRig(Rig);
+	AcceptTokens(Rig, {});
+	const TSharedRef<FVaRestClient, ESPMode::ThreadSafe> Holder = MakeShared<FVaRestClient, ESPMode::ThreadSafe>(Rig.Client);
+	Rig.Client = FVaRestClient(); // the holder is the only handle now
+	const TWeakPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> Weak = VaRest::Http::FClientAccess::State(*Holder);
+	const TSharedRef<TArray<bool>, ESPMode::ThreadSafe> Alive = MakeShared<TArray<bool>, ESPMode::ThreadSafe>();
+	auto Parked = MakeOutcome<FVaRestJson>();
+	Observe(Holder->Get(TEXT("/b")), Parked).OnError([Holder, Weak, Alive](const FVaRestError&)
+	{
+		const TSharedRef<FVaRestClient, ESPMode::ThreadSafe> Owner = Holder;
+		const TWeakPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> Watched = Weak;
+		const TSharedRef<TArray<bool>, ESPMode::ThreadSafe> Into = Alive;
+		*Owner = FVaRestClient();
+		Into->Add(Watched.IsValid());
+	}).Send();
+	if (!TestTrue(TEXT("parked"), PumpUntil([&Rig, &Auth] { return Rig.Fake->NumCalls() == 1 && Auth->IsPending(); })))
+	{
+		Holder->CancelAll();
+		PumpUntil([Parked] { return Parked->IsDone(); });
+		return false;
+	}
+	Holder->ClearSession();
+	TestEqual(TEXT("concurrency review I-1: the callback does not run inside ClearSession()"), Alive->Num(), 0);
+	TestTrue(TEXT("it runs later, the state alive inside it"), PumpUntil([Alive] { return Alive->Num() == 1; }) && (*Alive)[0]);
+	TestTrue(TEXT("... and the state goes once the request is done"), PumpUntil([Weak] { return !Weak.IsValid(); }));
 	return true;
 }
 ```
@@ -6633,220 +8899,9 @@ bool FVaRestHttpAuthRefreshPublicTest::RunTest(const FString& Parameters)
 - [ ] **Step 2: Build to see it fail**
 
 Run: `Tools/run_tests.sh VaRest.Http.Auth`
-Expected: FAIL to compile (`NeedsAuthRefresh`, `RefreshAuth` unknown).
+Expected: compiles (Task 16 built the coordinator); every new test FAILS — with no gate the 401s are the answer (`SingleFlight` "twenty 401s, one refresh" sees no refresh, `Proactive` "parked before its first attempt" sees a call).
 
-- [ ] **Step 3: The refresh in flight** — in `Source/VaRestHttp/Private/VaRestSession.h`, before `FSessionState`:
-
-```cpp
-	/** How a parked request's wait for a refresh ended (plan decision 3) */
-	enum class ERefreshEnd : uint8
-	{
-		/** New credentials, from the refresh or from the game: go */
-		Ready,
-		/** The refresh was rejected, or NotifySessionExpired: Kind=Auth */
-		Rejected,
-		/** The refresh could not reach the server: fail with Kind (Connection or Timeout), retryable */
-		Unreachable,
-		/** ClearSession (a logout) while waiting: Kind=Auth */
-		Cleared
-	};
-
-	struct FRefreshEnded
-	{
-		ERefreshEnd End = ERefreshEnd::Ready;
-		uint64 RefreshId = 0;
-		EVaRestErrorKind Kind = EVaRestErrorKind::Connection;
-		FString Message;
-	};
-
-	using FRefreshWaiter = TUniqueFunction<void(const FRefreshEnded&)>;
-
-	/** Spec 4.2's single flight: the refresh running now and who waits for it */
-	struct FRefreshInFlight
-	{
-		uint64 RefreshId = 0;
-		/** IN-9 CauseRequestId: the request whose 401 (or due expiry) started it; 0 for RefreshAuth */
-		uint64 CauseRequestId = 0;
-		TArray<TPair<uint64, FRefreshWaiter>> Waiters;
-	};
-```
-
-and in `FSessionState`:
-
-```cpp
-		/** Null when no refresh runs */
-		TUniquePtr<FRefreshInFlight> Refresh;
-		uint64 NextRefreshId = 0;
-		uint64 NextWaiterId = 0;
-```
-
-In `Source/VaRestHttp/Private/VaRestClientState.h`, `FClientState` public, after the session functions:
-
-```cpp
-		// ---- Single-flight refresh (spec 4.2; Task 13; VaRestSession.cpp). Game thread.
-		bool IsRefreshing() const { return Session.Refresh.IsValid(); }
-		uint64 NewWaiterId() { return ++Session.NextWaiterId; }
-		/**
-		 * Waits for the refresh in flight, or starts one with Auth. OnDone runs once on the game thread -- possibly before this
-		 * returns (an auth that answers at once), so a caller sets up what OnDone undoes (FExchangeState::Interrupt) first.
-		 */
-		void JoinRefresh(uint64 WaiterId, const TSharedRef<IVaRestAuth, ESPMode::ThreadSafe>& Auth, uint64 CauseRequestId, FRefreshWaiter&& OnDone);
-		/** A parked request was canceled: its waiter goes uncalled; the refresh goes on */
-		void LeaveRefresh(uint64 WaiterId);
-```
-
-private:
-
-```cpp
-		void StartRefresh(const TSharedRef<IVaRestAuth, ESPMode::ThreadSafe>& Auth);
-		void FinishRefresh(uint64 RefreshId, FVaRestAuthRefreshResult&& Result);
-		/** Ends the refresh in flight without its result: the game changed the session (Ready, Cleared) or it expired (Rejected) */
-		void EndRefresh(ERefreshEnd End, const TCHAR* Message);
-```
-
-In `Source/VaRestHttp/Private/VaRestSession.cpp` (`#include "Tasks/Task.h"`, `#include "VaRestAuth.h"`):
-
-```cpp
-void VaRest::Http::FClientState::JoinRefresh(uint64 WaiterId, const TSharedRef<IVaRestAuth, ESPMode::ThreadSafe>& Auth, uint64 CauseRequestId, FRefreshWaiter&& OnDone)
-{
-	check(IsInGameThread());
-	const bool bStart = !Session.Refresh.IsValid();
-	if (bStart)
-	{
-		Session.Refresh = MakeUnique<FRefreshInFlight>();
-		Session.Refresh->RefreshId = ++Session.NextRefreshId;
-		Session.Refresh->CauseRequestId = CauseRequestId;
-	}
-	Session.Refresh->Waiters.Emplace(WaiterId, MoveTemp(OnDone));
-	if (bStart)
-	{
-		StartRefresh(Auth);
-	}
-}
-
-void VaRest::Http::FClientState::LeaveRefresh(uint64 WaiterId)
-{
-	check(IsInGameThread());
-	if (Session.Refresh.IsValid())
-	{
-		Session.Refresh->Waiters.RemoveAll([WaiterId](const TPair<uint64, FRefreshWaiter>& Waiter) { return Waiter.Key == WaiterId; });
-	}
-}
-
-void VaRest::Http::FClientState::StartRefresh(const TSharedRef<IVaRestAuth, ESPMode::ThreadSafe>& Auth)
-{
-	const uint64 RefreshId = Session.Refresh->RefreshId;
-	const TWeakPtr<FClientState, ESPMode::ThreadSafe> Weak = AsShared();
-	const TSharedRef<std::atomic<bool>, ESPMode::ThreadSafe> bAnswered = MakeShared<std::atomic<bool>, ESPMode::ThreadSafe>(false);
-	const FVaRestAuthRefreshContext Context(FClientAccess::Wrap(AsShared()), Session.Data, RefreshId);
-	Auth->Refresh(Context, [Weak, RefreshId, bAnswered](FVaRestAuthRefreshResult&& Result)
-	{
-		// IVaRestAuth::Refresh: Done once; a second call is ignored
-		if (bAnswered->exchange(true))
-		{
-			return;
-		}
-		TUniqueFunction<void()> Finish = [Weak, RefreshId, Moved = MoveTemp(Result)]() mutable
-		{
-			if (const TSharedPtr<FClientState, ESPMode::ThreadSafe> Pinned = Weak.Pin())
-			{
-				Pinned->FinishRefresh(RefreshId, MoveTemp(Moved));
-			}
-		};
-		if (IsInGameThread())
-		{
-			Finish();
-			return;
-		}
-		UE::Tasks::Launch(TEXT("VaRest.RefreshDone"), MoveTemp(Finish), UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
-	});
-}
-
-void VaRest::Http::FClientState::FinishRefresh(uint64 RefreshId, FVaRestAuthRefreshResult&& Result)
-{
-	check(IsInGameThread());
-	if (!Session.Refresh.IsValid() || Session.Refresh->RefreshId != RefreshId)
-	{
-		// Ended without its result: the game set or cleared the session meanwhile (EndRefresh)
-		return;
-	}
-	const TUniquePtr<FRefreshInFlight> Ended = MoveTemp(Session.Refresh);
-	FRefreshEnded End;
-	End.RefreshId = RefreshId;
-	End.Message = Result.Message;
-	bool bRefreshed = false;
-	bool bExpired = false;
-	if (Result.Outcome == EVaRestAuthRefreshOutcome::Refreshed)
-	{
-		if (!Result.AccessToken.IsEmpty() && IsValidHeaderValue(Result.AccessToken) && IsValidHeaderValue(Result.RefreshToken))
-		{
-			UpdateTokens(Result.AccessToken, Result.RefreshToken.IsEmpty() ? nullptr : &Result.RefreshToken, Result.ExpiresInSeconds);
-			End.End = ERefreshEnd::Ready;
-			bRefreshed = true;
-		}
-		else
-		{
-			End.End = ERefreshEnd::Rejected;
-			End.Message = TEXT("the refresh gave no usable access token");
-			bExpired = true;
-		}
-	}
-	else if (Result.Outcome == EVaRestAuthRefreshOutcome::Unreachable)
-	{
-		// Plan decision 3: the session stays; the parked requests fail as the refresh did, retryable
-		End.End = ERefreshEnd::Unreachable;
-		End.Kind = Result.UnreachableKind == EVaRestErrorKind::Timeout ? EVaRestErrorKind::Timeout : EVaRestErrorKind::Connection;
-	}
-	else
-	{
-		End.End = ERefreshEnd::Rejected;
-		bExpired = true;
-	}
-	if (bExpired)
-	{
-		Session.Data.AccessToken.Reset();
-		Session.Data.RefreshToken.Reset();
-		Session.Data.ExpiresAt = 0.0;
-		++Session.Data.Generation;
-		PublishSessionSecrets();
-	}
-	// The waiters first, so each replays with the new token (or fails) before a handler of the events below runs
-	for (TPair<uint64, FRefreshWaiter>& Waiter : Ended->Waiters)
-	{
-		Waiter.Value(End);
-	}
-	if (bRefreshed)
-	{
-		AnnounceSession(EVaRestSessionChange::Refreshed, Ended->CauseRequestId, TEXT("refreshed by the auth"));
-	}
-	if (bExpired)
-	{
-		TracePoints::Marker(*this, EVaRestTraceMarkerKind::SessionExpired, Ended->CauseRequestId, End.Message);
-		Session.Expired.Broadcast();
-	}
-}
-
-void VaRest::Http::FClientState::EndRefresh(ERefreshEnd EndKind, const TCHAR* Message)
-{
-	if (!Session.Refresh.IsValid())
-	{
-		return;
-	}
-	const TUniquePtr<FRefreshInFlight> Ended = MoveTemp(Session.Refresh);
-	FRefreshEnded End;
-	End.End = EndKind;
-	End.RefreshId = Ended->RefreshId;
-	End.Message = Message;
-	for (TPair<uint64, FRefreshWaiter>& Waiter : Ended->Waiters)
-	{
-		Waiter.Value(End);
-	}
-}
-```
-
-The game's changes end a refresh in flight. In `SetTokensByGame`, inside `if (UpdateTokens(...))` and before `AnnounceSession`: `EndRefresh(ERefreshEnd::Ready, TEXT("the game set new credentials"));`. In `ClearSession`, before `AnnounceSession(EVaRestSessionChange::Cleared, ...)`: `EndRefresh(ERefreshEnd::Cleared, TEXT("SessionCleared"));` — and in its early return for an empty session, `EndRefresh(ERefreshEnd::Cleared, TEXT("SessionCleared"));` before `return;`. In `ExpireSession`, after `PublishSessionSecrets();`: `EndRefresh(ERefreshEnd::Rejected, TEXT("AuthRejected"));`.
-
-- [ ] **Step 4: The gate** — in `Source/VaRestHttp/Private/VaRestAuthInternal.h` declare:
+- [ ] **Step 3: The gate** — in `Source/VaRestHttp/Private/VaRestAuthInternal.h` declare:
 
 ```cpp
 	/** Spec 4.2: the built-in Outer stage after retry -- parks, refreshes, replays once through the attempt boundary */
@@ -6862,6 +8917,7 @@ Create `Source/VaRestHttp/Private/VaRestAuthGate.cpp`:
 
 #include "VaRestClientState.h"
 #include "VaRestExchangeState.h"
+#include "VaRestRetryInternal.h"
 
 namespace VaRest::Http::AuthGatePrivate
 {
@@ -6897,6 +8953,8 @@ namespace VaRest::Http::AuthGatePrivate
 		TSharedRef<IVaRestAuth, ESPMode::ThreadSafe> Auth;
 		/** Spec 4.2: "then replay once each" */
 		bool bReplayed = false;
+		/** Concurrency review M-1: the retry deadline while parked */
+		FVaRestTimerHandle DeadlineTimer;
 	};
 
 	using FRunRef = TSharedRef<FRun, ESPMode::ThreadSafe>;
@@ -6906,11 +8964,20 @@ namespace VaRest::Http::AuthGatePrivate
 		FVaRestAttemptOutcome Out;
 		switch (End.End)
 		{
-		case ERefreshEnd::Unreachable:
-			// Plan decision 3: the refresh's own kind, retryable, so Retry (outside) and M4b's offline queue can act
-			Out.Failure = End.Kind == EVaRestErrorKind::Timeout ? EVaRestTransportFailure::Timeout : EVaRestTransportFailure::Connection;
-			Out.FailureDetail = TEXT("AuthRefreshUnreachable");
-			Out.FailureMessage = FString::Printf(TEXT("the session refresh could not reach the server: %s"), *End.Message);
+		case ERefreshEnd::Failed:
+			// Plan decision 3, ruling I-7: the session stays and the refresh's own kind comes through -- Connection and Timeout
+			// retryable, so Retry (outside) and M4b's offline queue can act; Config not (ClassifyAttempt: AuthRefreshConfig)
+			if (End.Kind == EVaRestErrorKind::Config)
+			{
+				Out.Failure = EVaRestTransportFailure::Other;
+				Out.FailureDetail = TEXT("AuthRefreshConfig");
+			}
+			else
+			{
+				Out.Failure = End.Kind == EVaRestErrorKind::Timeout ? EVaRestTransportFailure::Timeout : EVaRestTransportFailure::Connection;
+				Out.FailureDetail = TEXT("AuthRefreshFailed");
+			}
+			Out.FailureMessage = FString::Printf(TEXT("the session refresh failed: %s"), *End.Message);
 			break;
 		case ERefreshEnd::Cleared:
 			Out.Failure = EVaRestTransportFailure::Other;
@@ -6935,23 +9002,58 @@ namespace VaRest::Http::AuthGatePrivate
 		FClientState& State = *Ex.State;
 		const uint64 WaiterId = State.NewWaiterId();
 		const double ParkedAt = Ex.Config->Clock->Now();
-		const TWeakPtr<FRun, ESPMode::ThreadSafe> Weak = Run;
-		// Set before JoinRefresh: an auth that answers at once resolves the waiter inside it, and the waiter clears this
-		Ex.Interrupt = [Weak, WaiterId]
+		if (!bReplay)
 		{
-			if (const TSharedPtr<FRun, ESPMode::ThreadSafe> Pinned = Weak.Pin())
+			// Spec review I-1 (Inspector 3.3): a park before the first attempt is inside that attempt (its Auth phase), so the
+			// attempt starts here; the boundary takes this time. A replay's park is the Gap before its attempt, outside both.
+			Ex.PendingAttemptStart = ParkedAt;
+		}
+		const TWeakPtr<FRun, ESPMode::ThreadSafe> Weak = Run;
+		// Set before JoinRefresh, as a backoff's is (decision 7): Cancel, owner-gone and shutdown reach the park through it
+		Ex.Interrupt = [Weak, WaiterId]() -> bool
+		{
+			const TSharedPtr<FRun, ESPMode::ThreadSafe> Pinned = Weak.Pin();
+			if (!Pinned.IsValid())
 			{
-				Internals(*Pinned->Exchange).State->LeaveRefresh(WaiterId);
-				Pinned->Answer(FVaRestAttemptOutcome::Canceled());
+				return false;
 			}
+			FExchangeState& Stopped = Internals(*Pinned->Exchange);
+			Stopped.Config->Clock->ClearTimer(Pinned->DeadlineTimer);
+			Stopped.State->LeaveRefresh(WaiterId);
+			Pinned->Answer(FVaRestAttemptOutcome::Canceled());
+			return true;
 		};
+		if (Ex.DeadlineAt > 0.0)
+		{
+			// Concurrency review M-1: the retry deadline is armed in a park too. Behind a slow refresh, or one an auth holds
+			// open (a re-login screen, ruling I-4), the request ends at its deadline: Timeout (Deadline), not retryable.
+			Run->DeadlineTimer = Ex.Config->Clock->SetTimer(FMath::Max(0.0, Ex.DeadlineAt - ParkedAt), [Weak, WaiterId]
+			{
+				if (const TSharedPtr<FRun, ESPMode::ThreadSafe> Pinned = Weak.Pin())
+				{
+					FExchangeState& Late = Internals(*Pinned->Exchange);
+					Pinned->DeadlineTimer.Invalidate();
+					Late.Interrupt.Reset();
+					Late.State->LeaveRefresh(WaiterId);
+					Pinned->Answer(MakeDeadlineOutcome());
+				}
+			});
+		}
+		// The waiter runs from the refresh's one game-thread task (concurrency review I-1), never inside this call
 		State.JoinRefresh(WaiterId, Run->Auth, Ex.RequestId, [Run, ParkedAt, bReplay](const FRefreshEnded& End)
 		{
-			FExchangeState& Back = Internals(*Run->Exchange);
-			Back.Interrupt.Reset();
 			if (Run->IsAnswered())
 			{
+				// Canceled, or past its deadline, while the end was on its way: answered once already
 				return;
+			}
+			FExchangeState& Back = Internals(*Run->Exchange);
+			Back.Interrupt.Reset();
+			Back.Config->Clock->ClearTimer(Run->DeadlineTimer);
+			if (End.End != ERefreshEnd::Ready || IsOwnerGone(Back))
+			{
+				// No attempt follows this park: a retry after it (a Failed refresh is retryable) starts its own attempt
+				Back.PendingAttemptStart = -1.0;
 			}
 			if (End.End != ERefreshEnd::Ready)
 			{
@@ -6965,12 +9067,17 @@ namespace VaRest::Http::AuthGatePrivate
 				return;
 			}
 			const double Seconds = Back.Config->Clock->Now() - ParkedAt;
-			Back.AuthWait = Seconds;
 			Back.AuthRefreshId = End.RefreshId;
 			if (bReplay)
 			{
+				// Inspector 3.3: a replay's park is its Gap (SessionRefresh), drawn before the attempt -- not AuthWait as well
 				Back.NextGap = EVaRestTraceGap::SessionRefresh;
 				Back.NextGapSeconds = Seconds;
+			}
+			else
+			{
+				// ... and a first attempt's park is its Auth phase, inside the span PendingAttemptStart opened
+				Back.AuthWait = Seconds;
 			}
 			Dispatch(Run);
 		});
@@ -6988,7 +9095,8 @@ namespace VaRest::Http::AuthGatePrivate
 		const FVaRestSessionData& Session = Ex.State->GetSessionData();
 		// Plan decision 8: a body moved into the engine cannot go again; a BodyFile always can (its path is copied)
 		const bool bCanResend = Ex.bMayReissue || Ex.Body.IsEmpty() || !Ex.Body.FilePath.IsEmpty();
-		const bool bNewerCredentials = Session.Generation != Ex.AppliedGeneration;
+		// Concurrency review M-6: the credentials' own generation -- a session header changed since does not count
+		const bool bNewerCredentials = Session.CredentialGeneration != Ex.AppliedCredentialGeneration;
 		if (!bCanResend || (!bNewerCredentials && !Ex.State->IsRefreshing() && !Run->Auth->CanRefresh(Session)))
 		{
 			// Nothing would change: the refusal is the answer
@@ -7053,14 +9161,43 @@ FVaRestStageRef VaRest::Http::MakeAuthGateStage()
 }
 ```
 
-- [ ] **Step 5: The chain and the body copy** — `Source/VaRestHttp/Private/VaRestClientState.cpp`, `Publish`: after `NewChain->Add(MakeRetryStage());`:
+- [ ] **Step 4: The chain, the body copy, the attempt start** — `Source/VaRestHttp/Private/VaRestClientState.cpp`, `Publish`: after `NewChain->Add(MakeRetryStage());`:
 
 ```cpp
 	// Spec 4.2: after retry (a replay is not a retry, plan decision 2), before the boundary (a replay is a new attempt)
 	NewChain->Add(MakeAuthGateStage());
 ```
 
-`Source/VaRestHttp/Private/VaRestPipeline.cpp`, `Resolve`: the `bMayReissue` line becomes
+`Source/VaRestHttp/Private/VaRestExchangeState.h`, after `AppliedCredentialGeneration`:
+
+```cpp
+		/**
+		 * IN-2: seconds this attempt waited behind a refresh inside it (a first attempt's park, Inspector 3.3 Auth), and that
+		 * refresh's id (also for a replay, whose park is its Gap); reset after the dispatch
+		 */
+		double AuthWait = 0.0;
+		uint64 AuthRefreshId = 0;
+		/** Spec review I-1: when a first attempt parked behind a refresh; the boundary starts the attempt there. -1 = none. */
+		double PendingAttemptStart = -1.0;
+```
+
+`Source/VaRestHttp/Private/VaRestPipeline.cpp`: in `FAttemptBoundaryStage::Process`, `Ex.AttemptStartedAt = Ex.Config->Clock->Now();` becomes
+
+```cpp
+			// Spec review I-1 (Inspector 3.3): a first attempt parked behind a refresh started when it parked -- its Auth phase
+			// is inside its span, so Prepare (dispatch - start - Auth - Queued) is never negative
+			Ex.AttemptStartedAt = Ex.PendingAttemptStart >= 0.0 ? Ex.PendingAttemptStart : Ex.Config->Clock->Now();
+			Ex.PendingAttemptStart = -1.0;
+```
+
+(Task 8's backoff-gap measurement right after it reads this `AttemptStartedAt`.) In `FTransportStage::Process`, after the `Ex.NextGap` reset Task 8 added:
+
+```cpp
+				Ex.AuthWait = 0.0;
+				Ex.AuthRefreshId = 0;
+```
+
+`Resolve`: the `bMayReissue` line becomes
 
 ```cpp
 	// Plan decision 8: copy the body only when something may send it again -- a custom stage, a retry, or a session replay
@@ -7069,85 +9206,34 @@ FVaRestStageRef VaRest::Http::MakeAuthGateStage()
 	Exchange.bMayReissue = Cfg.bMayReissue || Exchange.bRetryEligible || bAuthMayReplay;
 ```
 
-- [ ] **Step 6: The public refresh** — `Source/VaRestHttp/Public/VaRestClient.h`, auth section:
+`Source/VaRestHttp/Private/VaRestTracePoints.cpp`, `AttemptDispatched`, after the gap lines: `Payload.AuthWait = Ex.AuthWait; Payload.AuthRefreshId = Ex.AuthRefreshId;`.
 
-```cpp
-	/** WebSocket spec 19 item 2: a refresh is due -- no access token but a refresh token, or a known expiry within the auth's lead time */
-	bool NeedsAuthRefresh() const;
-	/**
-	 * WebSocket spec 19 item 2: refresh the session now, sharing a refresh already in flight (single-flight, spec 4.2).
-	 * OnDone(true) when the session has new credentials, false otherwise (no auth, nothing to refresh with, rejected,
-	 * unreachable). Never inside this call (decision 3). Game thread.
-	 */
-	void RefreshAuth(TUniqueFunction<void(bool bRefreshed)>&& OnDone);
-```
+- [ ] **Step 5: Run them, then the retry, cancel, limiter and pipeline suites**
 
-`Source/VaRestHttp/Private/VaRestClient.cpp`:
-
-```cpp
-bool FVaRestClient::NeedsAuthRefresh() const
-{
-	check(IsInGameThread());
-	if (!State.IsValid())
-	{
-		return false;
-	}
-	const TSharedRef<const VaRest::Http::FClientConfig, ESPMode::ThreadSafe> Current = State->GetConfig();
-	const FVaRestSessionData& Data = State->GetSessionData();
-	return Current->Auth.IsValid() && Current->Auth->CanRefresh(Data) && Current->Auth->NeedsRefresh(Data, Current->Clock->Now());
-}
-
-void FVaRestClient::RefreshAuth(TUniqueFunction<void(bool bRefreshed)>&& OnDone)
-{
-	check(IsInGameThread());
-	const TSharedRef<TUniqueFunction<void(bool)>, ESPMode::ThreadSafe> Callback = MakeShared<TUniqueFunction<void(bool)>, ESPMode::ThreadSafe>(MoveTemp(OnDone));
-	// Decision 3: a later game-thread task, whether the answer is known now or comes from the refresh
-	const auto Later = [Callback](bool bRefreshed)
-	{
-		UE::Tasks::Launch(TEXT("VaRest.RefreshAuth"), [Callback, bRefreshed]
-		{
-			if (*Callback)
-			{
-				(*Callback)(bRefreshed);
-			}
-		}, UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
-	};
-	const TSharedPtr<IVaRestAuth, ESPMode::ThreadSafe> Auth = State.IsValid() ? State->GetConfig()->Auth : nullptr;
-	if (!Auth.IsValid() || !Auth->CanRefresh(State->GetSessionData()))
-	{
-		Later(false);
-		return;
-	}
-	State->JoinRefresh(State->NewWaiterId(), Auth.ToSharedRef(), 0, [Later](const VaRest::Http::FRefreshEnded& End) { Later(End.End == VaRest::Http::ERefreshEnd::Ready); });
-}
-```
-
-- [ ] **Step 7: Run them, then the retry, cancel and pipeline suites**
-
-Run: `Tools/run_tests.sh VaRest.Http.Auth` then `Tools/run_tests.sh --no-build VaRest.Http.Retry` then `Tools/run_tests.sh --no-build VaRest.Http.Cancel` then `Tools/run_tests.sh --no-build VaRest.Http.Pipeline`
+Run: `Tools/run_tests.sh VaRest.Http.Auth` then `Tools/run_tests.sh --no-build VaRest.Http.Retry` then `Tools/run_tests.sh --no-build VaRest.Http.Cancel` then `Tools/run_tests.sh --no-build VaRest.Http.Limiter` then `Tools/run_tests.sh --no-build VaRest.Http.Pipeline`
 Expected: `0 failed` each.
 
-- [ ] **Step 8: Restore-the-bug** — (a) in `JoinRefresh` start a refresh for every waiter (drop the `bStart` test): `SingleFlight` FAILS ("one refresh for all of them"); restore; PASS. (b) In `FinishRefresh` treat `Unreachable` like `Rejected`: `RefreshUnreachableKeepsSession` FAILS ("the session is kept"); restore; PASS. (c) In `Park` drop `Ex.Interrupt = ...`: `StopWhileParked` FAILS (Cancel() finishes the request but the replay still runs, or the canceled request's waiter answers twice -- the "no replay after any stop" or "one OnError" check); restore; PASS. (d) Drop `Run->bReplayed = true;`: `ReplayOnce` FAILS (a second refresh); restore; PASS. Record all four.
+- [ ] **Step 6: Restore-the-bug** — (a) in `JoinRefresh` start a refresh for every waiter (drop the `bStart` test): `SingleFlight` FAILS ("one refresh for all of them"); restore; PASS. (b) In `FinishRefresh` treat `Failed` like `Rejected`: `RefreshFailedKeepsSession` FAILS (each request `Kind=Auth`, "no OnSessionExpired" reads 1); restore; PASS. (c) In `Park` drop `Ex.Interrupt = ...`: `StopWhileParked` FAILS ("Cancel() leaves the refresh: two waiters left" reads 3, and the Outer probe holds no `Canceled` inside `Cancel()`: the request is finished by a later task with nothing to answer the gate's outcome; concurrency review I-5); restore; PASS. (d) Drop `Run->bReplayed = true;`: `ReplayOnce` FAILS (a second refresh); restore; PASS. (e) In the waiter set `Back.AuthWait = Seconds;` for a replay too: `SingleFlight` FAILS ("the replay: ... no AuthWait"); restore; PASS. Drop `Ex.PendingAttemptStart = ParkedAt;`: `SingleFlight` FAILS ("the late one: attempt 1 started when it parked") and `Proactive` FAILS ("attempt 1 started at the park"); restore; PASS (spec review I-1). (f) Drop `ExpireSession`'s already-expired return (Task 12): `ExpiredOnce` FAILS ("one expiry, one OnSessionExpired" reads 2; concurrency review I-2); restore; PASS. (g) In Task 16's `EndRefresh` call the waiters inline: `GameChangesWhileRefreshing` FAILS ("A's replay is not dispatched inside SetBearerToken()", "B's callbacks do not run inside ClearSession()") and `HandlerDropsClientWhileParked` FAILS ("the callback does not run inside ClearSession()"); restore; PASS (concurrency review I-1). (h) Remove `FRefreshDoneGuard`'s destructor body (Task 16): `RefreshDropped` FAILS ("the parked request ends" times out; concurrency review I-4); restore; PASS. Record all eight.
 
-- [ ] **Step 9: Full suite, commit**
+- [ ] **Step 7: Full suite, commit**
 
 Run: `Tools/run_tests.sh VaRest`
 Expected: `0 failed`.
 
 ```bash
-git add Source/VaRestHttp/Private/VaRestSession.h Source/VaRestHttp/Private/VaRestSession.cpp Source/VaRestHttp/Private/VaRestClientState.h \
-  Source/VaRestHttp/Private/VaRestClientState.cpp Source/VaRestHttp/Private/VaRestAuthGate.cpp Source/VaRestHttp/Private/VaRestAuthInternal.h \
-  Source/VaRestHttp/Private/VaRestPipeline.cpp Source/VaRestHttp/Public/VaRestClient.h Source/VaRestHttp/Private/VaRestClient.cpp \
+git add Source/VaRestHttp/Private/VaRestAuthGate.cpp Source/VaRestHttp/Private/VaRestAuthInternal.h Source/VaRestHttp/Private/VaRestClientState.cpp \
+  Source/VaRestHttp/Private/VaRestExchangeState.h Source/VaRestHttp/Private/VaRestPipeline.cpp Source/VaRestHttp/Private/VaRestTracePoints.cpp \
   Source/VaRestHttp/Private/Tests/VaRestHttpAuthTest.cpp
-git commit -m "http: M4 task 13 -- single-flight session refresh and the auth gate: park, proactive refresh, replay once, rejected vs unreachable
+git commit -m "http: M4 task 17 -- the auth gate: park, proactive refresh, replay once; a park is its attempt's Auth phase, a replay's its gap; deadlines armed
 
 Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 ```
 
 ---
-### Task 14: `BearerRefresh` — the refresh request, JSON and OAuth2 form styles, token paths, outcomes, redaction (spec §4.2; OpenAPI N15; carry (d))
 
-Plan decisions 3, 22, 23. The built-in refreshing auth: its refresh request goes through the same client (logged, traced, limited) by `FVaRestAuthRefreshContext::Request`, and its response is read raw through the configured token paths.
+### Task 18: `BearerRefresh` — the refresh request, JSON and OAuth2 form styles, token paths, outcomes, redaction (spec §4.2; OpenAPI N15; carry (d))
+
+Plan decisions 3, 22, 23. The built-in refreshing auth: its refresh request goes through the same client (logged, traced; past the limiter's queue, ruling M-8) by `FVaRestAuthRefreshContext::Request`, and its response is read raw through the configured token paths. Its answer follows ruling I-7: only the endpoint's own "no" (a 4xx other than 408 and 429, or a success that is not JSON or has no access token) is `Rejected`; everything else is `Failed` with the refresh request's kind, and the session stays. It refreshes proactively at most half a token's lifetime early (concurrency review M-7).
 
 **Files:**
 - Create: `Source/VaRestHttp/Private/VaRestBearerRefresh.cpp`
@@ -7155,7 +9241,7 @@ Plan decisions 3, 22, 23. The built-in refreshing auth: its refresh request goes
 - Test: `Source/VaRestHttp/Private/Tests/VaRestHttpAuthTest.cpp`
 
 **Interfaces:**
-- Consumes: Tasks 11-13 (`FVaRestBearerRefreshConfig`, `IVaRestAuth`, the context, the coordinator).
+- Consumes: Tasks 12-17 (`FVaRestBearerRefreshConfig`, `FVaRestSessionData::Lifetime`, `IVaRestAuth`, the context, the coordinator, the gate; `DispatchesOf`).
 - Produces: `static FVaRestAuth::FRef FVaRestAuth::BearerRefresh(const FVaRestBearerRefreshConfig& Config)`; private `FString VaRest::Http::BearerRefreshPrivate::LastSegment(FString Path)`.
 
 - [ ] **Step 1: Write the failing tests** — append to `Source/VaRestHttp/Private/Tests/VaRestHttpAuthTest.cpp`; add to `AuthTestPrivate`:
@@ -7216,7 +9302,7 @@ bool FVaRestHttpAuthBearerRefreshTest::RunTest(const FString& Parameters)
 	TestEqualSensitive(TEXT("... a JSON body with the refresh token under RefreshTokenField"), Text(Rig.Fake->ReadBody(1)), FString(TEXT(R"({"refreshToken":"old-refresh-123456"})")));
 	TestTrue(TEXT("... application/json, no Authorization (it bypasses the auth stages)"), Refresh.Headers.Get(TEXT("Content-Type")) == TEXT("application/json")
 		&& !Refresh.Headers.Contains(TEXT("Authorization")));
-	TestTrue(TEXT("... first in the limiter (plan decision 23)"), Refresh.Priority == EVaRestPriority::Highest);
+	TestTrue(TEXT("... Highest for the engine (it skips the limiter's queue, ruling M-8)"), Refresh.Priority == EVaRestPriority::Highest);
 	const FVaRestSessionData Data = Rig.Client.GetSession();
 	TestTrue(TEXT("the session: both new tokens, the expiry from expiresIn"), Data.AccessToken == TEXT("new-access-123456")
 		&& Data.RefreshToken == TEXT("new-refresh-123456") && Data.ExpiresAt == 60.0);
@@ -7228,6 +9314,9 @@ bool FVaRestHttpAuthBearerRefreshTest::RunTest(const FString& Parameters)
 		bFlagged |= Event.Kind == EVaRestTraceKind::Started && EnumHasAnyFlags(Event.Payload.Get<FVaRestTraceStarted>().Flags, EVaRestTraceRequestFlags::AuthRefresh);
 	}
 	TestTrue(TEXT("IN-1: the refresh request has flag AuthRefresh"), bFlagged);
+	// Spec review I-2: the refresh request's own RequestId is the refresh's id, which the replay names (IN-2 AuthRefreshId)
+	const TArray<FVaRestTraceAttemptDispatched> Dispatched = DispatchesOf(*Scoped.Recorder, Handle.GetId());
+	TestTrue(TEXT("the replay names the refresh request by its id"), Dispatched.Num() == 2 && Dispatched[1].AuthRefreshId == RefreshId);
 	TestTrue(TEXT("IN-9: SessionRefreshed, caused by the 401"), Scoped.Recorder->MarkersOf(Rig.Client.GetId()).ContainsByPredicate([&Handle](const FVaRestTraceMarker& Marker)
 	{
 		return Marker.Kind == EVaRestTraceMarkerKind::SessionRefreshed && Marker.CauseRequestId == Handle.GetId();
@@ -7276,21 +9365,27 @@ bool FVaRestHttpAuthRefreshOutcomesTest::RunTest(const FString& Parameters)
 {
 	using namespace VaRest::Http::Testing;
 	using namespace VaRest::Http::AuthTestPrivate;
+	// Ruling I-7: Rejected only for the endpoint's own "no"; everything else is Failed, the session kept
 	struct FCase
 	{
 		const TCHAR* Name;
 		FVaRestFakeResponse Answer;
 		EVaRestErrorKind Kind;
+		bool bRetryable;
 		bool bExpires;
 	};
 	const FCase Cases[] = {
-		{ TEXT("400: rejected"), Json(400, R"({"error":"invalid_grant"})"), EVaRestErrorKind::Auth, true },
-		{ TEXT("503: unreachable"), Json(503), EVaRestErrorKind::Connection, false },
-		{ TEXT("429: unreachable"), Json(429), EVaRestErrorKind::Connection, false },
-		{ TEXT("no access token: rejected"), Json(200, R"({"refreshToken":"x"})"), EVaRestErrorKind::Auth, true },
-		{ TEXT("not JSON: rejected"), FVaRestFakeResponse::Text(200, TEXT("ok")), EVaRestErrorKind::Auth, true },
-		{ TEXT("connection error: unreachable"), FVaRestFakeResponse::Failed(EVaRestTransportFailure::Connection, TEXT("ConnectionError")), EVaRestErrorKind::Connection, false },
-		{ TEXT("timeout: unreachable as Timeout"), FVaRestFakeResponse::Failed(EVaRestTransportFailure::Timeout, TEXT("TimedOut")), EVaRestErrorKind::Timeout, false },
+		{ TEXT("400: rejected"), Json(400, R"({"error":"invalid_grant"})"), EVaRestErrorKind::Auth, false, true },
+		{ TEXT("503: failed"), Json(503), EVaRestErrorKind::Connection, true, false },
+		{ TEXT("429: failed"), Json(429), EVaRestErrorKind::Connection, true, false },
+		{ TEXT("408: failed"), Json(408), EVaRestErrorKind::Connection, true, false },
+		{ TEXT("no access token: rejected"), Json(200, R"({"refreshToken":"x"})"), EVaRestErrorKind::Auth, false, true },
+		{ TEXT("not JSON: rejected"), FVaRestFakeResponse::Text(200, TEXT("ok")), EVaRestErrorKind::Auth, false, true },
+		{ TEXT("connection error: failed"), FVaRestFakeResponse::Failed(EVaRestTransportFailure::Connection, TEXT("ConnectionError")), EVaRestErrorKind::Connection, true, false },
+		{ TEXT("timeout: failed as Timeout"), FVaRestFakeResponse::Failed(EVaRestTransportFailure::Timeout, TEXT("TimedOut")), EVaRestErrorKind::Timeout, true, false },
+		// Concurrency review I-7's row: a local switch must not log the player out
+		{ TEXT("HTTP disabled: session kept, the parked request Kind Config, not retryable"), FVaRestFakeResponse::Failed(EVaRestTransportFailure::Other, TEXT("HttpDisabled")),
+			EVaRestErrorKind::Config, false, false },
 	};
 	for (const FCase& Case : Cases)
 	{
@@ -7306,6 +9401,7 @@ bool FVaRestHttpAuthRefreshOutcomesTest::RunTest(const FString& Parameters)
 			return false;
 		}
 		TestEqual(FString::Printf(TEXT("%s: the parked request's kind"), Case.Name), Outcome->Error.Kind, Case.Kind);
+		TestEqual(FString::Printf(TEXT("%s: ... retryable or not"), Case.Name), Outcome->Error.bRetryable, Case.bRetryable);
 		TestEqual(FString::Printf(TEXT("%s: the session expired or kept (plan decision 3)"), Case.Name), !Rig.Client.GetSession().HasRefreshToken(), Case.bExpires);
 	}
 	return true;
@@ -7320,8 +9416,15 @@ bool FVaRestHttpAuthBearerProactiveTest::RunTest(const FString& Parameters)
 	using namespace VaRest::Http::AuthTestPrivate;
 	FTestRig Rig;
 	Rig.Client.WithAuth(FVaRestAuth::BearerRefresh(FVaRestBearerRefreshConfig()));
-	Rig.Client.SetSession(TEXT("old-access-123456"), TEXT("old-refresh-123456"), 10.0);
+	Rig.Client.SetSession(TEXT("old-access-123456"), TEXT("old-refresh-123456"), 20.0);
 	RefreshServer(Rig, NewTokens());
+	// Concurrency review M-7: the lead is at most half the token's lifetime -- 10 s for this one, not the configured 30 s,
+	// which would refresh before every request
+	TestFalse(TEXT("a fresh 20 s token is not due at once"), Rig.Client.NeedsAuthRefresh());
+	Rig.Clock->Advance(9.0);
+	TestFalse(TEXT("... nor with 11 s left"), Rig.Client.NeedsAuthRefresh());
+	Rig.Clock->Advance(1.0);
+	TestTrue(TEXT("... it is with 10 s left"), Rig.Client.NeedsAuthRefresh());
 	auto Outcome = MakeOutcome<FVaRestJson>();
 	Observe(Rig.Client.Get(TEXT("/p")), Outcome).Send();
 	if (!TestTrue(TEXT("completes"), Rig.Wait(Outcome)) || !TestEqual(TEXT("the refresh, then one attempt"), Rig.Fake->NumCalls(), 2))
@@ -7331,6 +9434,57 @@ bool FVaRestHttpAuthBearerProactiveTest::RunTest(const FString& Parameters)
 	}
 	TestTrue(TEXT("spec 4.2: refreshed before the known expiry, no 401 needed"), Rig.Fake->GetCall(0).Request.Url.Contains(TEXT("/auth/refresh"))
 		&& Outcome->Response.Attempts == 1 && Outcome->SuccessCalls.load() == 1);
+	TestFalse(TEXT("the new 60 s token is not due"), Rig.Client.NeedsAuthRefresh());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthBearerFlightTest, "VaRest.Http.Auth.BearerRefreshFailsOnce",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthBearerFlightTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// Spec review I-3 (Review Focus line 2) with the real refresh request: twenty 401s while the refresh endpoint is slow,
+	// then the refresh fails on the network -- one refresh request, each parked request fails once, the session stays
+	FTestRig Rig;
+	Rig.Client.WithAuth(FVaRestAuth::BearerRefresh(FVaRestBearerRefreshConfig()));
+	Rig.Client.SetSession(TEXT("old-access-123456"), TEXT("old-refresh-123456"));
+	RefreshServer(Rig, FVaRestFakeResponse::Manual());
+	TArray<TSharedRef<TTestOutcome<FVaRestJson>, ESPMode::ThreadSafe>> Outcomes;
+	for (int32 Index = 0; Index < 20; ++Index)
+	{
+		Outcomes.Add(MakeOutcome<FVaRestJson>());
+		Observe(Rig.Client.Get(FString::Printf(TEXT("/p/%d"), Index)), Outcomes.Last()).Send();
+	}
+	if (!TestTrue(TEXT("twenty 401s and one refresh call"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 21; }) && Rig.Drain()))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	const int32 RefreshCall = FindCall(Rig, TEXT("/auth/refresh"));
+	TestTrue(TEXT("exactly one call to the refresh endpoint"), RefreshCall != INDEX_NONE && FindCall(Rig, TEXT("/auth/refresh"), 1) == INDEX_NONE);
+	if (RefreshCall == INDEX_NONE)
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Fake->Complete(RefreshCall, FVaRestFakeResponse::Failed(EVaRestTransportFailure::Connection, TEXT("ConnectionError")));
+	const auto AllDone = [&Outcomes] { for (const auto& One : Outcomes) { if (!One->IsDone()) { return false; } } return true; };
+	if (!TestTrue(TEXT("all complete"), PumpUntil(AllDone)))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Drain();
+	bool bEachOnce = true;
+	for (const auto& One : Outcomes)
+	{
+		bEachOnce &= One->ErrorCalls.load() == 1 && One->CompleteCalls.load() == 1 && One->Error.Kind == EVaRestErrorKind::Connection && One->Error.bRetryable;
+	}
+	TestTrue(TEXT("each fails once: Connection, retryable"), bEachOnce);
+	TestEqual(TEXT("none replayed"), Rig.Fake->NumCalls(), 21);
+	TestTrue(TEXT("the session is kept"), Rig.Client.GetSession().HasRefreshToken() && Rig.Client.GetSession().AccessToken == TEXT("old-access-123456"));
 	return true;
 }
 
@@ -7352,6 +9506,11 @@ bool FVaRestHttpAuthRedactedTest::RunTest(const FString& Parameters)
 		{
 			return NewTokens();
 		}
+		if (Request.Url.EndsWith(TEXT("/b")))
+		{
+			// Spec review M-11: in flight across the refresh; the test answers it after the new token exists
+			return FVaRestFakeResponse::Manual();
+		}
 		if (Request.Headers.Get(TEXT("Authorization")) != TEXT("Bearer new-access-123456"))
 		{
 			return Json(401, R"({"error":"expired","hint":"old-access-123456"})");
@@ -7364,9 +9523,26 @@ bool FVaRestHttpAuthRedactedTest::RunTest(const FString& Parameters)
 	FScopedTraceRecorder Scoped(EVaRestTraceDetail::Metadata | EVaRestTraceDetail::Headers);
 	FLogCapture Capture;
 	AddExpectedMessagePlain(TEXT("-> 401"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
+	// Spec review M-11 (Review Focus line 4): /b goes out with the old token before the refresh and is answered after it
+	auto InFlight = MakeOutcome<FString>();
+	const FVaRestRequestHandle InFlightHandle = Observe(Rig.Client.Get<FString>(TEXT("/b")), InFlight).Send();
+	if (!TestTrue(TEXT("/b is out, with the old token"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 1; })))
+	{
+		Abandon(Rig);
+		return false;
+	}
 	auto Outcome = MakeOutcome<FString>();
 	const FVaRestRequestHandle Handle = Observe(Rig.Client.Get<FString>(TEXT("/p")), Outcome).Send();
 	if (!TestTrue(TEXT("completes"), Rig.Wait(Outcome)))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	FVaRestFakeResponse Late = FVaRestFakeResponse::Text(200, TEXT("refreshed to new-access-123456"));
+	Late.Headers.Set(TEXT("X-Echo"), TEXT("new-access-123456"));
+	Late.Headers.Set(TEXT("Location"), TEXT("/after?t=new-access-123456"));
+	Rig.Fake->Complete(FindCall(Rig, TEXT("/b")), MoveTemp(Late));
+	if (!TestTrue(TEXT("/b completes after the refresh"), Rig.Wait(InFlight)))
 	{
 		Abandon(Rig);
 		return false;
@@ -7384,15 +9560,18 @@ bool FVaRestHttpAuthRedactedTest::RunTest(const FString& Parameters)
 		}
 	}
 	TArray<FString> Traced;
-	for (const FVaRestTraceEvent& Event : Scoped.Recorder->For(Handle.GetId()))
+	for (const uint64 Id : { Handle.GetId(), InFlightHandle.GetId() })
 	{
-		if (Event.Kind == EVaRestTraceKind::AttemptEnded)
+		for (const FVaRestTraceEvent& Event : Scoped.Recorder->For(Id))
 		{
-			const FVaRestTraceAttemptEnded& Ended = Event.Payload.Get<FVaRestTraceAttemptEnded>();
-			Traced.Add(Ended.EffectiveUrl);
-			for (const FVaRestHeaders::FPair& Pair : Ended.Headers)
+			if (Event.Kind == EVaRestTraceKind::AttemptEnded)
 			{
-				Traced.Add(Pair.Value);
+				const FVaRestTraceAttemptEnded& Ended = Event.Payload.Get<FVaRestTraceAttemptEnded>();
+				Traced.Add(Ended.EffectiveUrl);
+				for (const FVaRestHeaders::FPair& Pair : Ended.Headers)
+				{
+					Traced.Add(Pair.Value);
+				}
 			}
 		}
 	}
@@ -7408,6 +9587,7 @@ bool FVaRestHttpAuthRedactedTest::RunTest(const FString& Parameters)
 	}
 	TestTrue(TEXT("the echoed header is in the trace, scrubbed"), Traced.Contains(TEXT("***")));
 	TestTrue(TEXT("the body line was written, scrubbed"), Capture.Contains(TEXT("your token is ***")));
+	TestTrue(TEXT("... and the in-flight request's too (plan decision 17: the current redactor)"), Capture.Contains(TEXT("refreshed to ***")));
 	return true;
 }
 
@@ -7441,9 +9621,12 @@ Expected: FAIL to compile (`FVaRestAuth::BearerRefresh` unknown).
 ```cpp
 	/**
 	 * Spec 4.2 BearerRefresh: the access token as Bearer; on a refresh status (401) or a known expiry within the lead time,
-	 * one refresh shared by every request (Task 13): a POST of the refresh token to Config.RefreshPath, the new tokens read
-	 * from the raw response at Config's paths. A 4xx answer expires the session; no answer (or 408, 429, 5xx) keeps it
-	 * (plan decision 3). Each path's last segment becomes a redaction key (plan decision 22).
+	 * one refresh shared by every request (Task 16): a POST of the refresh token to Config.RefreshPath, the new tokens read
+	 * from the raw response at Config's paths. The endpoint's own "no" -- a 4xx other than 408 and 429, or a success that
+	 * is not JSON or has no access token -- expires the session; anything else keeps it (no answer, a timeout, 408, 429,
+	 * 5xx, a refusal by the configuration such as HTTP disabled), and the parked requests fail with that kind (plan
+	 * decision 3, ruling I-7). The proactive lead is RefreshLeadSeconds, at most half the token's lifetime (concurrency
+	 * review M-7). Each path's last segment becomes a redaction key (plan decision 22).
 	 */
 	static FRef BearerRefresh(const FVaRestBearerRefreshConfig& Config);
 ```
@@ -7507,14 +9690,19 @@ namespace VaRest::Http::BearerRefreshPrivate
 		}
 		const FVaRestError& Error = Result.Error;
 		const FString Why = Error.Kind == EVaRestErrorKind::Http ? FString::Printf(TEXT("the refresh endpoint answered %d"), Error.HttpStatus) : Error.Message;
-		// Plan decision 3: only the server's "no" expires the session; a request canceled (CancelAll) or at shutdown is no answer either
-		const bool bUnreachable = Error.Kind == EVaRestErrorKind::Connection || Error.Kind == EVaRestErrorKind::Timeout || Error.Kind == EVaRestErrorKind::Canceled
-			|| (Error.Kind == EVaRestErrorKind::Http && (Error.HttpStatus == 408 || Error.HttpStatus == 429 || Error.HttpStatus >= 500));
-		if (bUnreachable)
+		// Ruling I-7: only the endpoint's own "no" expires the session -- a 4xx other than 408 and 429, or a success that is
+		// not JSON (a 2xx Decode error; one without an access token is caught above)
+		const int32 Status = Result.Response.Status;
+		const bool bRefused = Error.Kind == EVaRestErrorKind::Http && Error.HttpStatus >= 400 && Error.HttpStatus < 500 && Error.HttpStatus != 408 && Error.HttpStatus != 429;
+		const bool bMalformed = Error.Kind == EVaRestErrorKind::Decode && Status >= 200 && Status < 300;
+		if (bRefused || bMalformed)
 		{
-			return FVaRestAuthRefreshResult::Unreachable(Error.Kind == EVaRestErrorKind::Timeout ? EVaRestErrorKind::Timeout : EVaRestErrorKind::Connection, Why);
+			return FVaRestAuthRefreshResult::Rejected(Why);
 		}
-		return FVaRestAuthRefreshResult::Rejected(Why);
+		// Everything else keeps the session: no answer, a timeout, 408, 429, 5xx, a canceled refresh request (CancelAll, shutdown),
+		// and a refusal by the configuration (HTTP disabled, a domain not allowed), whose kind the parked requests fail with.
+		// Failed keeps Timeout and Config and makes the rest Connection.
+		return FVaRestAuthRefreshResult::Failed(Error.Kind, Why);
 	}
 
 	class FBearerRefreshAuth final : public IVaRestAuth
@@ -7544,7 +9732,10 @@ namespace VaRest::Http::BearerRefreshPrivate
 
 		virtual bool NeedsRefresh(const FVaRestSessionData& Session, double Now) const override
 		{
-			const double Lead = FMath::IsFinite(Config.RefreshLeadSeconds) ? FMath::Max(0.0, static_cast<double>(Config.RefreshLeadSeconds)) : 0.0;
+			const double Configured = FMath::IsFinite(Config.RefreshLeadSeconds) ? FMath::Max(0.0, static_cast<double>(Config.RefreshLeadSeconds)) : 0.0;
+			// Concurrency review M-7: at most half the token's lifetime early, recorded when it was set -- a 20 s dev-server
+			// token with the 30 s lead would refresh before every request
+			const double Lead = Session.Lifetime > 0.0 ? FMath::Min(Configured, Session.Lifetime * 0.5) : Configured;
 			return Session.HasRefreshToken() && (!Session.HasAccessToken() || (Session.ExpiresAt > 0.0 && Now >= Session.ExpiresAt - Lead));
 		}
 
@@ -7612,7 +9803,7 @@ FVaRestAuth::FRef FVaRestAuth::BearerRefresh(const FVaRestBearerRefreshConfig& C
 Run: `Tools/run_tests.sh VaRest.Http.Auth`
 Expected: `0 failed`.
 
-- [ ] **Step 5: Restore-the-bug** — (a) in `ReadRefresh` make every failure `Rejected`: `RefreshOutcomes` FAILS on the 503, 429, connection and timeout rows; restore; PASS. (b) In `GetRedactedKeys` add the whole path instead of `LastSegment(Path)`: `TokenPathKeys` FAILS; restore; PASS. (c) In `VaRestSession.cpp`, `UpdateTokens`, comment out `PublishSessionSecrets();`: `RefreshedTokenRedacted` FAILS (the X-Echo header and the body line hold the new token); restore; PASS.
+- [ ] **Step 5: Restore-the-bug** — (a) in `ReadRefresh` make every failure `Rejected`: `RefreshOutcomes` FAILS on the 503, 429, 408, connection, timeout and HTTP-disabled rows, and `BearerRefreshFailsOnce` FAILS ("each fails once: Connection, retryable"); restore; PASS. (a') Make only `Config` errors `Rejected` (the committed plan's mapping): `RefreshOutcomes` FAILS on the HTTP-disabled row (the session expires; concurrency review I-7); restore; PASS. (a'') In `NeedsRefresh` use the configured lead alone: `BearerRefreshProactive` FAILS ("a fresh 20 s token is not due at once"; review M-7); restore; PASS. (a''') In Task 16's `JoinRefresh` number refreshes per client (`++Counter`) instead of `FVaRestTrace::NewRequestId()`: `BearerRefresh` FAILS ("the replay names the refresh request by its id"; spec review I-2); restore; PASS. (b) In `GetRedactedKeys` add the whole path instead of `LastSegment(Path)`: `TokenPathKeys` FAILS; restore; PASS. (c) In `VaRestSession.cpp`, `UpdateTokens`, comment out `PublishSessionSecrets();`: `RefreshedTokenRedacted` FAILS (the X-Echo header and the body line hold the new token); restore; PASS. (d) In Task 3's `LogOutcome` use the redactor the log stage held at dispatch: `RefreshedTokenRedacted` FAILS ("a log line holds new-access-123456" for `/b`, which went out before the token existed; spec review M-11); restore; PASS.
 
 - [ ] **Step 6: Full suite, commit**
 
@@ -7621,22 +9812,22 @@ Expected: `0 failed`.
 
 ```bash
 git add Source/VaRestHttp/Private/VaRestBearerRefresh.cpp Source/VaRestHttp/Public/VaRestAuth.h Source/VaRestHttp/Private/Tests/VaRestHttpAuthTest.cpp
-git commit -m "http: M4 task 14 -- BearerRefresh: the refresh request, JSON and OAuth2 form, token paths, rejected vs unreachable, redaction keys
+git commit -m "http: M4 task 18 -- BearerRefresh: the refresh request, JSON and OAuth2 form, token paths, rejected vs failed (I-7), half-lifetime lead, redaction keys
 
 Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 ```
 
 ---
 
-### Task 15: Auth against the rest of the pipeline — replayed stream bodies, retry around the gate, the refresh first in the limiter (carries (c), (e))
+### Task 19: Auth against the rest of the pipeline — replayed stream bodies, retry around the gate, the refresh past the limiter, deadlines and header changes while parked (carries (c), (e))
 
-Plan decisions 2, 8, 23, 24. The interplay M3's lessons list, each with a test.
+Plan decisions 2, 8, 10, 23, 24; rulings M-1, M-6, M-8. The interplay M3's lessons list, each with a test.
 
 **Files:**
 - Test: `Source/VaRestHttp/Private/Tests/VaRestHttpAuthTest.cpp`
 
 **Interfaces:**
-- Consumes: Tasks 7, 8, 12-14. Produces nothing new; a test that fails here names the task to fix.
+- Consumes: Tasks 4, 8, 9, 12, 14-18. Produces nothing new; a test that fails here names the task to fix.
 
 - [ ] **Step 1: Write the tests** — append to `Source/VaRestHttp/Private/Tests/VaRestHttpAuthTest.cpp` (add `#include "HAL/FileManager.h"`, `#include "Misc/FileHelper.h"`, `#include "Misc/Guid.h"`, `#include "Misc/Paths.h"`, `#include "Misc/ScopeExit.h"`, `#include "VaRestRetry.h"`):
 
@@ -7709,8 +9900,9 @@ bool FVaRestHttpAuthRetryAroundTest::RunTest(const FString& Parameters)
 {
 	using namespace VaRest::Http::Testing;
 	using namespace VaRest::Http::AuthTestPrivate;
-	// Plan decision 2: Retry is outside AuthGate. An unreachable refresh fails the parked request as a Connection error,
-	// which Retry retries; the next attempt meets the old token again and starts a new refresh, which works.
+	// Plan decision 2: Retry is outside AuthGate. A refresh that fails on the network (a 503: Failed(Connection), ruling I-7)
+	// fails the parked request as a Connection error, which Retry retries; the next attempt meets the old token again and
+	// starts a new refresh, which works.
 	FTestRig Rig;
 	FVaRestRetryPolicy Policy = FVaRestRetryPolicy::Exponential(2);
 	Policy.Backoff.Jitter = EVaRestJitter::None;
@@ -7732,7 +9924,7 @@ bool FVaRestHttpAuthRetryAroundTest::RunTest(const FString& Parameters)
 		Abandon(Rig);
 		return false;
 	}
-	TestTrue(TEXT("the session survived the unreachable refresh"), Rig.Client.GetSession().HasRefreshToken());
+	TestTrue(TEXT("the session survived the failed refresh"), Rig.Client.GetSession().HasRefreshToken());
 	Rig.Clock->Advance(0.5);
 	if (!TestTrue(TEXT("completes"), Rig.Wait(Outcome)))
 	{
@@ -7745,56 +9937,136 @@ bool FVaRestHttpAuthRetryAroundTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthJumpsQueueTest, "VaRest.Http.Auth.RefreshJumpsTheQueue",
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthBypassTest, "VaRest.Http.Auth.RefreshBypassesLimiter",
 	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
 
-bool FVaRestHttpAuthJumpsQueueTest::RunTest(const FString& Parameters)
+bool FVaRestHttpAuthBypassTest::RunTest(const FString& Parameters)
 {
 	using namespace VaRest::Http::Testing;
 	using namespace VaRest::Http::AuthTestPrivate;
-	// Plan decision 23 with spec 4.6: one slot; A answers 401 while B and C wait. A's freed slot goes to B (it waited);
-	// the refresh, Highest, then goes before C.
+	// Ruling M-8: the refresh request skips the limiter's queue. One slot, which a long poll (NoAuth, never answered)
+	// takes when A's 401 frees it; A's refresh still reaches the transport, and A's replay then waits its turn.
 	FTestRig Rig;
 	Rig.Client.WithMaxConcurrent(1).WithAuth(FVaRestAuth::BearerRefresh(FVaRestBearerRefreshConfig()));
 	Rig.Client.SetSession(TEXT("old-access-123456"), TEXT("old-refresh-123456"));
 	Rig.Fake->SetResponder([](const FVaRestTransportRequest&) { return FVaRestFakeResponse::Manual(); });
 	auto A = MakeOutcome<FVaRestJson>();
-	auto B = MakeOutcome<FVaRestJson>();
-	auto C = MakeOutcome<FVaRestJson>();
+	auto Poll = MakeOutcome<FVaRestJson>();
 	Observe(Rig.Client.Get(TEXT("/a")), A).Send();
-	Observe(Rig.Client.Get(TEXT("/b")).NoAuth(), B).Send();
-	Observe(Rig.Client.Get(TEXT("/c")).NoAuth(), C).Send();
 	if (!TestTrue(TEXT("A holds the slot"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 1; })))
 	{
 		Abandon(Rig);
 		return false;
 	}
+	Observe(Rig.Client.Get(TEXT("/poll")).NoAuth(), Poll).Send();
 	Rig.Fake->Complete(0, Json(401));
-	if (!TestTrue(TEXT("B gets it"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 2; }) && Rig.Drain()))
+	if (!TestTrue(TEXT("the poll takes the slot and the refresh goes out anyway"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 3; }) && Rig.Drain()))
 	{
 		Abandon(Rig);
 		return false;
 	}
-	Rig.Fake->Complete(1, Json(200));
-	if (!TestTrue(TEXT("then the refresh"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 3; })))
+	const int32 RefreshCall = FindCall(Rig, TEXT("/auth/refresh"));
+	const int32 PollCall = FindCall(Rig, TEXT("/poll"));
+	if (!TestTrue(TEXT("both at the transport"), RefreshCall != INDEX_NONE && PollCall != INDEX_NONE))
 	{
 		Abandon(Rig);
 		return false;
 	}
-	TestTrue(TEXT("... before C"), Rig.Fake->GetCall(2).Request.Url.Contains(TEXT("/auth/refresh")));
-	Rig.Fake->Complete(2, NewTokens());
-	// C, then A's replay: both Normal, FIFO -- C was queued first
-	for (int32 Index = 3; Index < 5; ++Index)
+	TestEqual(TEXT("... MaxConcurrent + 1 out during the refresh (WithMaxConcurrent's doc)"), Rig.Fake->NumInFlight(), 2);
+	Rig.Fake->Complete(RefreshCall, NewTokens());
+	Rig.Drain();
+	TestEqual(TEXT("A's replay waits its turn: every attempt passes the limiter (spec 4.6)"), Rig.Fake->NumCalls(), 3);
+	Rig.Fake->Complete(PollCall, Json(200));
+	if (!TestTrue(TEXT("then A replays"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 4; })))
 	{
-		if (!TestTrue(FString::Printf(TEXT("call %d"), Index + 1), PumpUntil([&Rig, Index] { return Rig.Fake->NumCalls() == Index + 1; })))
+		Abandon(Rig);
+		return false;
+	}
+	TestEqualSensitive(TEXT("... with the new token"), Rig.Fake->GetCall(3).Request.Headers.Get(TEXT("Authorization")), FString(TEXT("Bearer new-access-123456")));
+	Rig.Fake->Complete(3, Json(200));
+	TestTrue(TEXT("A succeeds on its replay"), Rig.Wait(A) && A->SuccessCalls.load() == 1 && A->Response.Attempts == 2);
+	TestTrue(TEXT("the poll finished"), Poll->SuccessCalls.load() == 1);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthDeadlineParkTest, "VaRest.Http.Auth.DeadlineWhileParked",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthDeadlineParkTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// Concurrency review M-1: a park is bounded by the request's retry deadline -- an auth may hold its refresh open (a
+	// re-login screen, ruling I-4) -- and ends as Timeout (Deadline), not retryable, out of the refresh, which goes on
+	FTestRig Rig;
+	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = HandRig(Rig);
+	// Due at once for FHandAuth (expiry within its 30 s): the request parks before its first attempt
+	Rig.Client.SetSession(TEXT("old-access-123456"), TEXT("old-refresh-123456"), 10.0);
+	const TSharedPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> State = VaRest::Http::FClientAccess::State(Rig.Client);
+	auto Outcome = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/p")).Retry(FVaRestRetryPolicy::Exponential(1).WithDeadline(2.f)), Outcome).Send();
+	Rig.Drain();
+	if (!TestTrue(TEXT("parked before its first attempt"), Rig.Fake->NumCalls() == 0 && Auth->IsPending() && State->NumRefreshWaitersInternal() == 1))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Clock->Advance(1.999);
+	Rig.Drain();
+	TestFalse(TEXT("not before the deadline"), Outcome->IsDone());
+	Rig.Clock->Advance(0.001);
+	if (!TestTrue(TEXT("ends at the deadline"), Rig.Wait(Outcome)))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	TestTrue(TEXT("... Timeout, not retryable, saying Deadline"), Outcome->Error.Kind == EVaRestErrorKind::Timeout && !Outcome->Error.bRetryable
+		&& Outcome->Error.Message.Contains(TEXT("Deadline")));
+	TestEqual(TEXT("... out of the refresh"), State->NumRefreshWaitersInternal(), 0);
+	TestTrue(TEXT("... nothing sent, the refresh still running"), Rig.Fake->NumCalls() == 0 && Auth->IsPending());
+	Auth->Answer(FVaRestAuthRefreshResult::Refreshed(TEXT("new-access-123456")));
+	Rig.Drain();
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthHeaderChangeTest, "VaRest.Http.Auth.HeaderChangeKeepsTheReplay",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthHeaderChangeTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// Concurrency review M-6: a session header set while a request is out does not make its 401 a "newer credentials"
+	// replay -- that would spend its one replay on the same expired token; it refreshes instead
+	FTestRig Rig;
+	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = HandRig(Rig);
+	TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> OldTokenCalls = MakeShared<std::atomic<int32>, ESPMode::ThreadSafe>(0);
+	Rig.Fake->SetResponder([OldTokenCalls](const FVaRestTransportRequest& Request)
+	{
+		if (Request.Headers.Get(TEXT("Authorization")) == TEXT("Bearer new-access-123456"))
 		{
-			Abandon(Rig);
-			return false;
+			return Json(200);
 		}
-		Rig.Fake->Complete(Index, Json(200));
+		// The first is held for the test to answer; any later one with the old token is refused at once
+		return ++*OldTokenCalls == 1 ? FVaRestFakeResponse::Manual() : Json(401);
+	});
+	auto Outcome = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/a")), Outcome).Send();
+	if (!TestTrue(TEXT("out with the old token"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 1; })))
+	{
+		Abandon(Rig);
+		return false;
 	}
-	TestTrue(TEXT("all complete"), PumpUntil([A, B, C] { return A->IsDone() && B->IsDone() && C->IsDone(); }));
-	TestTrue(TEXT("A succeeds on its replay"), A->SuccessCalls.load() == 1 && A->Response.Attempts == 2);
+	Rig.Client.SetSessionHeader(TEXT("X-Session-ID"), TEXT("sid-1234567890"));
+	Rig.Fake->Complete(0, Json(401));
+	if (!TestTrue(TEXT("the 401 parks behind a refresh"), PumpUntil([&Auth] { return Auth->IsPending(); }) && Rig.Drain() && Rig.Fake->NumCalls() == 1))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Auth->Answer(FVaRestAuthRefreshResult::Refreshed(TEXT("new-access-123456")));
+	TestTrue(TEXT("... and its replay carries the new token"), Rig.Wait(Outcome) && Outcome->SuccessCalls.load() == 1 && Outcome->Response.Attempts == 2);
+	TestEqual(TEXT("one refresh"), Auth->Refreshes, 1);
 	return true;
 }
 ```
@@ -7804,7 +10076,7 @@ bool FVaRestHttpAuthJumpsQueueTest::RunTest(const FString& Parameters)
 Run: `Tools/run_tests.sh VaRest.Http.Auth`
 Expected: `0 failed`. If one fails, the behaviour it names is missing from the task named in its comment: fix it there (with that task's restore-the-bug), not by editing the test.
 
-- [ ] **Step 3: Restore-the-bug** — (a) in `Resolve` drop `|| bAuthMayReplay`: `ReplayBodies` FAILS (the multipart and JSON replays send empty bodies); restore; PASS. (b) In `MarkAuthRefresh` drop the `Priority = Highest` line: `RefreshJumpsTheQueue` FAILS (C goes before the refresh); restore; PASS. (c) In `Publish` put `MakeAuthGateStage()` before `MakeRetryStage()`: `RetryAroundTheGate` FAILS (the unreachable refresh is final); restore; PASS.
+- [ ] **Step 3: Restore-the-bug** — (a) in `Resolve` drop `|| bAuthMayReplay`: `ReplayBodies` FAILS on "all three succeed on their replay" — the multipart and JSON bodies were moved into the engine, so `AfterAttempt`'s `bCanResend` is false and their 401 is the answer; the `BodyFile` one, whose path is copied, still replays (spec review M-4); restore; PASS. (b) In `FLimiterStage` drop the `bIsAuthRefresh` pass-through (Task 15): `RefreshBypassesLimiter` FAILS ("the poll takes the slot and the refresh goes out anyway": the refresh waits behind the poll; ruling M-8); restore; PASS. (c) In `Publish` put `MakeAuthGateStage()` before `MakeRetryStage()`: `RetryAroundTheGate` FAILS (the failed refresh is final); restore; PASS. (d) Drop the park's deadline timer (Task 17): `DeadlineWhileParked` FAILS ("ends at the deadline" times out; concurrency review M-1); restore; PASS. (e) In Task 12's `SetSessionHeader` bump `CredentialGeneration` as well (a header change counted as new credentials): `HeaderChangeKeepsTheReplay` FAILS (the 401 replays at once with the old token, gets 401 again, and that is the answer; concurrency review M-6); restore; PASS. Record all five.
 
 - [ ] **Step 4: Full suite, commit**
 
@@ -7813,24 +10085,25 @@ Expected: `0 failed`.
 
 ```bash
 git add Source/VaRestHttp/Private/Tests/VaRestHttpAuthTest.cpp
-git commit -m "http tests: M4 task 15 -- auth against the pipeline: replayed stream bodies, retry around the gate, the refresh first in the limiter
+git commit -m "http tests: M4 task 19 -- auth against the pipeline: replayed stream bodies, retry around the gate, the refresh past the limiter, deadline and header change while parked
 
 Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 ```
 
 ---
-### Task 16: `stat VaRest` and the LLM tags (spec §4.8; plan decision 21)
+### Task 20: `stat VaRest` and the LLM tags (spec §4.8; plan decision 21)
 
-Spec §4.8: "Stats: `stat VaRest` (requests, in-flight, bytes up/down, retries, cache hit ratio) and an LLM tag `VaRest`." The cache hit ratio is M4b's (it has no cache yet). Inspector IN-14 adds the tag `VaRest_Trace` for the trace's copies (Task 17 uses it).
+Spec §4.8: "Stats: `stat VaRest` (requests, in-flight, bytes up/down, retries, cache hit ratio) and an LLM tag `VaRest`." The cache hit ratio is M4b's (it has no cache yet). Inspector IN-14 adds the tag `VaRest_Trace` for the trace's copies (Task 21 uses it).
 
 **Files:**
 - Create: `Source/VaRestHttp/Public/VaRestHttpStats.h`, `Source/VaRestHttp/Private/VaRestHttpStatsInternal.h`, `Source/VaRestHttp/Private/VaRestHttpStats.cpp`
 - Modify: `Source/VaRestHttp/Private/VaRestPipeline.cpp` (`Enter`, `Complete`, `OnAttemptDone`, the decode task), `Source/VaRestHttp/Private/VaRestRetry.cpp` (retries), `Source/VaRestHttp/Private/VaRestClient.cpp` (`FRequestSpecAccess::Send`), `Source/VaRestHttp/Private/VaRestHttpTransport.cpp` (`Start`, the body stream), `Source/VaRestHttp/Private/VaRestTracePoints.cpp` (the trace tag)
+- Modify: `Source/VaRestHttp/Private/VaRestClientState.h` (each client's own counters, concurrency review M-13)
 - Test: `Source/VaRestHttp/Private/Tests/VaRestHttpStatsTest.cpp`
 
 **Interfaces:**
-- Consumes: Task 7 (the retry stage).
-- Produces: public `LLM_DECLARE_TAG_API(VaRest, VARESTHTTP_API)`, `LLM_DECLARE_TAG_API(VaRest_Trace, VARESTHTTP_API)`; private `struct VaRest::Http::FHttpStats { std::atomic<int64> Requests, InFlight, BytesUp, BytesDown, Retries; static FHttpStats& Get(); void RequestStarted(); void RequestFinished(); void Transferred(int64 Up, int64 Down); void Retried(); }`. M4b adds `CacheLookups`, `CacheHits` and the ratio.
+- Consumes: Task 8 (the retry stage).
+- Produces: public `LLM_DECLARE_TAG_API(VaRest, VARESTHTTP_API)`, `LLM_DECLARE_TAG_API(VaRest_Trace, VARESTHTTP_API)`; private `struct VaRest::Http::FHttpCounters { std::atomic<int64> Requests, InFlight, BytesUp, BytesDown, Retries; }`, `struct VaRest::Http::FHttpStats { static FHttpCounters& Global(); static void RequestStarted(FHttpCounters& Client); static void RequestFinished(FHttpCounters& Client); static void Transferred(FHttpCounters& Client, int64 Up, int64 Down); static void Retried(FHttpCounters& Client); }` (each adds to the process-wide counters behind `stat VaRest` and to the client's own); `FHttpCounters& FClientState::GetCounters()`. M4b adds `CacheLookups`, `CacheHits` and the ratio.
 
 - [ ] **Step 1: Write the failing test** — create `Source/VaRestHttp/Private/Tests/VaRestHttpStatsTest.cpp`:
 
@@ -7842,6 +10115,7 @@ Spec §4.8: "Stats: `stat VaRest` (requests, in-flight, bytes up/down, retries, 
 #include "Misc/AutomationTest.h"
 #include "UObject/Package.h"
 #include "VaRestClient.h"
+#include "VaRestClientState.h"
 #include "VaRestHttpSettings.h"
 #include "VaRestHttpStatsInternal.h"
 #include "VaRestHttpTesting.h"
@@ -7859,14 +10133,12 @@ bool FVaRestHttpStatsCountersTest::RunTest(const FString& Parameters)
 	Rig.Fake->Enqueue(FVaRestFakeResponse::Json(503, FUtf8StringView(UTF8TEXT("{}"))));
 	Rig.Fake->Enqueue(FVaRestFakeResponse::Json(200, FUtf8StringView(UTF8TEXT("{\"a\":1}"))));
 	Rig.Fake->Enqueue(FVaRestFakeResponse::Json(200, FUtf8StringView(UTF8TEXT("{}"))));
-	// Process-wide counters: earlier tests' late work lands first, then the baseline
-	Rig.Drain();
-	VaRest::Http::FHttpStats& Stats = VaRest::Http::FHttpStats::Get();
-	const int64 Requests = Stats.Requests.load();
-	const int64 InFlight = Stats.InFlight.load();
-	const int64 Down = Stats.BytesDown.load();
-	const int64 Up = Stats.BytesUp.load();
-	const int64 Retries = Stats.Retries.load();
+	// Concurrency review M-13: this client's own counters, exact -- a request of an earlier test that ends during this one
+	// moves only the process-wide ones, which are checked to grow, not compared
+	const VaRest::Http::FHttpCounters& Mine = VaRest::Http::FClientAccess::State(Rig.Client)->GetCounters();
+	const VaRest::Http::FHttpCounters& Global = VaRest::Http::FHttpStats::Global();
+	const int64 GlobalRequests = Global.Requests.load();
+	const int64 GlobalDown = Global.BytesDown.load();
 	auto Retried = MakeOutcome<FVaRestJson>();
 	auto Posted = MakeOutcome<FVaRestJson>();
 	Observe(Rig.Client.Get(TEXT("/r")), Retried).Send();
@@ -7876,7 +10148,7 @@ bool FVaRestHttpStatsCountersTest::RunTest(const FString& Parameters)
 		PumpUntil([&Rig] { return Rig.Client.GetInFlightCount() == 0; });
 		return false;
 	}
-	TestEqual(TEXT("in flight while it waits"), Stats.InFlight.load() - InFlight, static_cast<int64>(1));
+	TestEqual(TEXT("in flight while it waits"), Mine.InFlight.load(), static_cast<int64>(1));
 	Observe(Rig.Client.Post(TEXT("/p")).Body(TEXT("12345")), Posted).Send();
 	// A silent request (its owner is gone at entry): counted in and out like any other
 	UObject* Gone = NewObject<UVaRestHttpSettings>(GetTransientPackage(), NAME_None, RF_Transient);
@@ -7886,14 +10158,19 @@ bool FVaRestHttpStatsCountersTest::RunTest(const FString& Parameters)
 	Rig.Clock->Advance(0.5);
 	if (!TestTrue(TEXT("both complete"), PumpUntil([Retried, Posted] { return Retried->IsDone() && Posted->IsDone(); })))
 	{
+		// Spec review M-5: drained before the early return
+		Rig.Client.CancelAll();
+		PumpUntil([&Rig] { return Rig.Client.GetInFlightCount() == 0; });
 		return false;
 	}
+	PumpUntil([&Rig] { return Rig.Client.GetInFlightCount() == 0; });
 	Rig.Drain();
-	TestEqual(TEXT("three requests (a retry is not a request)"), Stats.Requests.load() - Requests, static_cast<int64>(3));
-	TestEqual(TEXT("one retry"), Stats.Retries.load() - Retries, static_cast<int64>(1));
-	TestEqual(TEXT("none in flight after"), Stats.InFlight.load(), InFlight);
-	TestEqual(TEXT("bytes down: every attempt's body (2 + 7 + 2)"), Stats.BytesDown.load() - Down, static_cast<int64>(11));
-	TestEqual(TEXT("bytes up: the POST body"), Stats.BytesUp.load() - Up, static_cast<int64>(5));
+	TestEqual(TEXT("three requests (a retry is not a request)"), Mine.Requests.load(), static_cast<int64>(3));
+	TestEqual(TEXT("one retry"), Mine.Retries.load(), static_cast<int64>(1));
+	TestEqual(TEXT("none in flight after"), Mine.InFlight.load(), static_cast<int64>(0));
+	TestEqual(TEXT("bytes down: every attempt's body (2 + 7 + 2)"), Mine.BytesDown.load(), static_cast<int64>(11));
+	TestEqual(TEXT("bytes up: the POST body"), Mine.BytesUp.load(), static_cast<int64>(5));
+	TestTrue(TEXT("stat VaRest's process-wide counters grew by at least as much"), Global.Requests.load() - GlobalRequests >= 3 && Global.BytesDown.load() - GlobalDown >= 11);
 	return true;
 }
 
@@ -7937,11 +10214,8 @@ Create `Source/VaRestHttp/Private/VaRestHttpStatsInternal.h`:
 
 namespace VaRest::Http
 {
-	/**
-	 * Spec 4.8's stat VaRest (plan decision 21): VaRest's own counters, process-wide, any thread (relaxed atomics), mirrored to
-	 * the engine's stats where STATS is on. Engine stats are compiled out in Shipping and a test cannot read them back.
-	 */
-	struct FHttpStats
+	/** One set of counters; any thread (relaxed atomics) */
+	struct FHttpCounters
 	{
 		/** Logical requests that entered a pipeline */
 		std::atomic<int64> Requests{ 0 };
@@ -7950,14 +10224,22 @@ namespace VaRest::Http
 		std::atomic<int64> BytesDown{ 0 };
 		/** Re-issues by the retry stage (a session replay is not one, plan decision 2) */
 		std::atomic<int64> Retries{ 0 };
+	};
 
-		static FHttpStats& Get();
+	/**
+	 * Spec 4.8's stat VaRest (plan decision 21): VaRest's own counters, process-wide, mirrored to the engine's stats where
+	 * STATS is on -- engine stats are compiled out in Shipping and a test cannot read them back. Each call also counts on
+	 * the client's own set (FClientState::GetCounters), which a test compares exactly (concurrency review M-13).
+	 */
+	struct FHttpStats
+	{
+		static FHttpCounters& Global();
 
-		void RequestStarted();
-		void RequestFinished();
+		static void RequestStarted(FHttpCounters& Client);
+		static void RequestFinished(FHttpCounters& Client);
 		/** One attempt's bytes */
-		void Transferred(int64 Up, int64 Down);
-		void Retried();
+		static void Transferred(FHttpCounters& Client, int64 Up, int64 Down);
+		static void Retried(FHttpCounters& Client);
 	};
 }
 ```
@@ -7981,70 +10263,90 @@ DECLARE_DWORD_ACCUMULATOR_STAT(TEXT("Bytes up"), STAT_VaRestBytesUp, STATGROUP_V
 DECLARE_DWORD_ACCUMULATOR_STAT(TEXT("Bytes down"), STAT_VaRestBytesDown, STATGROUP_VaRest);
 DECLARE_DWORD_ACCUMULATOR_STAT(TEXT("Retries"), STAT_VaRestRetries, STATGROUP_VaRest);
 
-VaRest::Http::FHttpStats& VaRest::Http::FHttpStats::Get()
+VaRest::Http::FHttpCounters& VaRest::Http::FHttpStats::Global()
 {
 	// Atomics only: trivially destructible, but leaked like every singleton here (review I-4)
-	static FHttpStats* Instance = new FHttpStats();
+	static FHttpCounters* Instance = new FHttpCounters();
 	return *Instance;
 }
 
-void VaRest::Http::FHttpStats::RequestStarted()
+void VaRest::Http::FHttpStats::RequestStarted(FHttpCounters& Client)
 {
-	Requests.fetch_add(1, std::memory_order_relaxed);
-	InFlight.fetch_add(1, std::memory_order_relaxed);
+	for (FHttpCounters* Counters : { &Global(), &Client })
+	{
+		Counters->Requests.fetch_add(1, std::memory_order_relaxed);
+		Counters->InFlight.fetch_add(1, std::memory_order_relaxed);
+	}
 	INC_DWORD_STAT(STAT_VaRestRequests);
 	INC_DWORD_STAT(STAT_VaRestInFlight);
 }
 
-void VaRest::Http::FHttpStats::RequestFinished()
+void VaRest::Http::FHttpStats::RequestFinished(FHttpCounters& Client)
 {
-	InFlight.fetch_sub(1, std::memory_order_relaxed);
+	for (FHttpCounters* Counters : { &Global(), &Client })
+	{
+		Counters->InFlight.fetch_sub(1, std::memory_order_relaxed);
+	}
 	DEC_DWORD_STAT(STAT_VaRestInFlight);
 }
 
-void VaRest::Http::FHttpStats::Transferred(int64 Up, int64 Down)
+void VaRest::Http::FHttpStats::Transferred(FHttpCounters& Client, int64 Up, int64 Down)
 {
-	BytesUp.fetch_add(Up, std::memory_order_relaxed);
-	BytesDown.fetch_add(Down, std::memory_order_relaxed);
+	for (FHttpCounters* Counters : { &Global(), &Client })
+	{
+		Counters->BytesUp.fetch_add(Up, std::memory_order_relaxed);
+		Counters->BytesDown.fetch_add(Down, std::memory_order_relaxed);
+	}
 	INC_DWORD_STAT_BY(STAT_VaRestBytesUp, Up);
 	INC_DWORD_STAT_BY(STAT_VaRestBytesDown, Down);
 }
 
-void VaRest::Http::FHttpStats::Retried()
+void VaRest::Http::FHttpStats::Retried(FHttpCounters& Client)
 {
-	Retries.fetch_add(1, std::memory_order_relaxed);
+	for (FHttpCounters* Counters : { &Global(), &Client })
+	{
+		Counters->Retries.fetch_add(1, std::memory_order_relaxed);
+	}
 	INC_DWORD_STAT(STAT_VaRestRetries);
 }
 ```
 
-- [ ] **Step 4: Count and tag** — in `Source/VaRestHttp/Private/VaRestPipeline.cpp` (`#include "VaRestHttpStatsInternal.h"`):
-- `FClientState::Enter`: first line after `check(IsInGameThread());` is `LLM_SCOPE_BYTAG(VaRest);`; after `InFlight.Add(Ex.RequestId, Exchange);` add `FHttpStats::Get().RequestStarted();`.
-- `FClientState::Complete`: after `InFlight.Remove(Ex.RequestId);` add `FHttpStats::Get().RequestFinished();`.
-- `FClientState::OnAttemptDone`: `LLM_SCOPE_BYTAG(VaRest);` first, and after `Ex.TransportCall.Reset();` add `FHttpStats::Get().Transferred(Result.BytesUp, Result.BytesDown);`.
+- [ ] **Step 4: Count and tag** — in `Source/VaRestHttp/Private/VaRestClientState.h` (`#include "VaRestHttpStatsInternal.h"`), `FClientState` public:
+
+```cpp
+		/** This client's share of stat VaRest (concurrency review M-13: what a test compares exactly). Any thread. */
+		FHttpCounters& GetCounters() { return Counters; }
+```
+
+and private `FHttpCounters Counters;`. In `Source/VaRestHttp/Private/VaRestPipeline.cpp` (`#include "VaRestHttpStatsInternal.h"`):
+- `FClientState::Enter`: first line after `check(IsInGameThread());` is `LLM_SCOPE_BYTAG(VaRest);`; after `InFlight.Add(Ex.RequestId, Exchange);` add `FHttpStats::RequestStarted(Counters);`.
+- `FClientState::Complete`: after `InFlight.Remove(Ex.RequestId);` add `FHttpStats::RequestFinished(Counters);`.
+- `FClientState::OnAttemptDone`: `LLM_SCOPE_BYTAG(VaRest);` first, and after `Ex.TransportCall.Reset();` add `FHttpStats::Transferred(Counters, Result.BytesUp, Result.BytesDown);`.
 - The decode task lambda in `OnChainDone`: `LLM_SCOPE_BYTAG(VaRest);` as its first line.
 
-In `Source/VaRestHttp/Private/VaRestRetry.cpp`, `OnAttempt`, after `++Ex.RetriesDone;`: `FHttpStats::Get().Retried();` (`#include "VaRestHttpStatsInternal.h"`). In `Source/VaRestHttp/Private/VaRestClient.cpp`, `FRequestSpecAccess::Send` starts with `LLM_SCOPE_BYTAG(VaRest);` (`#include "VaRestHttpStats.h"`). In `Source/VaRestHttp/Private/VaRestHttpTransport.cpp`: `FHttpModuleTransport::Start` and the `SetResponseBodyReceiveStreamDelegateV2` lambda start with `LLM_SCOPE_BYTAG(VaRest);` (`#include "VaRestHttpStats.h"`). In `Source/VaRestHttp/Private/VaRestTracePoints.cpp`, each trace point gets `LLM_SCOPE_BYTAG(VaRest_Trace);` right after its mask check (`#include "VaRestHttpStats.h"`).
+In `Source/VaRestHttp/Private/VaRestRetry.cpp`, `OnAttempt`, after `++Ex.RetriesDone;`: `FHttpStats::Retried(Ex.State->GetCounters());` (`#include "VaRestHttpStatsInternal.h"`). In `Source/VaRestHttp/Private/VaRestClient.cpp`, `FRequestSpecAccess::Send` starts with `LLM_SCOPE_BYTAG(VaRest);` (`#include "VaRestHttpStats.h"`). In `Source/VaRestHttp/Private/VaRestHttpTransport.cpp`: `FHttpModuleTransport::Start` and the `SetResponseBodyReceiveStreamDelegateV2` lambda start with `LLM_SCOPE_BYTAG(VaRest);` (`#include "VaRestHttpStats.h"`). In `Source/VaRestHttp/Private/VaRestTracePoints.cpp`, each trace point gets `LLM_SCOPE_BYTAG(VaRest_Trace);` right after its mask check (`#include "VaRestHttpStats.h"`).
 
 - [ ] **Step 5: Run it, then the whole suite**
 
 Run: `Tools/run_tests.sh VaRest.Http.Stats` then `Tools/run_tests.sh --no-build VaRest`
 Expected: `0 failed` both.
 
-- [ ] **Step 6: Restore-the-bug** — in `Complete`, move `FHttpStats::Get().RequestFinished();` from after `InFlight.Remove` to after the `if (!Handler.IsValid() || bSilent) { return; }` line: `VaRest.Http.Stats.Counters` FAILS ("none in flight after": the silent request never decrements). Restore; PASS.
+- [ ] **Step 6: Restore-the-bug** — in `Complete`, move `FHttpStats::RequestFinished(Counters);` from after `InFlight.Remove` to after the `if (!Handler.IsValid() || bSilent) { return; }` line: `VaRest.Http.Stats.Counters` FAILS ("none in flight after" reads 1: the silent request never decrements). Restore; PASS.
 
 - [ ] **Step 7: Commit**
 
 ```bash
 git add Source/VaRestHttp/Public/VaRestHttpStats.h Source/VaRestHttp/Private/VaRestHttpStatsInternal.h Source/VaRestHttp/Private/VaRestHttpStats.cpp \
   Source/VaRestHttp/Private/VaRestPipeline.cpp Source/VaRestHttp/Private/VaRestRetry.cpp Source/VaRestHttp/Private/VaRestClient.cpp \
-  Source/VaRestHttp/Private/VaRestHttpTransport.cpp Source/VaRestHttp/Private/VaRestTracePoints.cpp Source/VaRestHttp/Private/Tests/VaRestHttpStatsTest.cpp
-git commit -m "http: M4 task 16 -- stat VaRest (requests, in flight, bytes, retries) and the LLM tags VaRest and VaRest_Trace (spec 4.8)
+  Source/VaRestHttp/Private/VaRestHttpTransport.cpp Source/VaRestHttp/Private/VaRestTracePoints.cpp Source/VaRestHttp/Private/Tests/VaRestHttpStatsTest.cpp \
+  Source/VaRestHttp/Private/VaRestClientState.h
+git commit -m "http: M4 task 20 -- stat VaRest (requests, in flight, bytes, retries) and the LLM tags VaRest and VaRest_Trace (spec 4.8)
 
 Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 ```
 
 ---
-### Task 17: Trace excerpts (Inspector IN-6, IN-14; plan decision 20)
+### Task 21: Trace excerpts (Inspector IN-6, IN-14; plan decision 20)
 
 IN-14: "A request's prefix is copied at `Send` (up to the cap). A decoded response is redacted on the decode task before `ParseOwned` parses it in situ, with zero copies. An undecoded response (raw, `void`, bytes) has its prefix copied at the game-thread hop and redacted on the core `FPipe`. Raw copies waiting for redaction are bounded by an admission counter (the sink detail sets it; default 16 MiB); over it, `Excerpt{Skipped: Backlog}`. LLM tag `VaRest_Trace`. Compiled under `VAREST_WITH_TRACE_EXCERPTS`." Logs keep their own excerpts (M3 Task 14); this is the trace's.
 
@@ -8055,8 +10357,8 @@ IN-14: "A request's prefix is copied at `Send` (up to the cap). A decoded respon
 - Test: `Source/VaRestHttp/Private/Tests/VaRestHttpExcerptTest.cpp`
 
 **Interfaces:**
-- Consumes: Tasks 3 (`LaunchRedaction`), 4 (`FVaRestTraceExcerptEvent`, `MaxPendingExcerptBytes`), 16 (`VaRest_Trace`).
-- Produces: private `namespace VaRest::Http::Excerpts { int64 AdmissionCap(); int64 PendingBytes(); struct FJob { ...; bool IsSet() const; void Launch(); }; FJob PrepareRequest(const FExchangeState&); bool WillExcerptOnDecode(const FExchangeState&, const FVaRestTransportResult&); FJob PrepareResponse(const FExchangeState&, const FVaRestTransportResult&); void EmitOnDecode(const FFinish&); }`; `FExchangeState::ExcerptOnDecodeAttempt`; `FFinish::ExcerptAttempt`, `ExcerptRedactor`, `ExcerptCap`; `TracePoints::AttemptEnded` now takes `FExchangeState&`.
+- Consumes: Tasks 3 (`LaunchRedaction`), 5 (`FVaRestTraceExcerptEvent`, `MaxPendingExcerptBytes`), 20 (`VaRest_Trace`).
+- Produces: private `namespace VaRest::Http::Excerpts { int64 AdmissionCap(); int64 PendingBytes(); class FAdmission { ...; int64 Num() const; void Reset(); }; TOptional<FAdmission> TryAdmit(int64 Bytes); struct FJob { ...; FAdmission Admitted; bool IsSet() const; void Launch(); }; FJob PrepareRequest(const FExchangeState&); bool WillExcerptOnDecode(const FExchangeState&, const FVaRestTransportResult&); FJob PrepareResponse(const FExchangeState&, const FVaRestTransportResult&); void EmitOnDecode(const FFinish&); }`; `FExchangeState::ExcerptOnDecodeAttempt`; `FFinish::ExcerptAttempt`, `ExcerptRedactor`, `ExcerptCap`; `TracePoints::AttemptEnded` now takes `FExchangeState&`.
 
 - [ ] **Step 1: Write the failing tests** — create `Source/VaRestHttp/Private/Tests/VaRestHttpExcerptTest.cpp`:
 
@@ -8086,6 +10388,13 @@ namespace VaRest::Http::ExcerptTestPrivate
 	const FVaRestTraceExcerptEvent* Find(const TArray<FVaRestTraceExcerptEvent>& Excerpts, EVaRestTraceExcerptOwner Owner)
 	{
 		return Excerpts.FindByPredicate([Owner](const FVaRestTraceExcerptEvent& One) { return One.Owner == Owner; });
+	}
+
+	/** Cancels what the rig has in flight and pumps until it is done: the drain of a test that stops early (spec review M-5) */
+	void Abandon(VaRest::Http::Testing::FTestRig& Rig)
+	{
+		Rig.Client.CancelAll();
+		VaRest::Http::Testing::PumpUntil([&Rig] { return Rig.Client.GetInFlightCount() == 0; });
 	}
 
 	/** The first event of Kind for request Id, its payload copied out (For() returns a copy of the list) */
@@ -8151,6 +10460,7 @@ bool FVaRestHttpExcerptsTest::RunTest(const FString& Parameters)
 	const uint64 EmptyId = Observe(Rig.Client.Get(TEXT("/empty")), Empty).Send().GetId();
 	if (!TestTrue(TEXT("all complete"), PumpUntil([&] { return Login->IsDone() && Bytes->IsDone() && Missing->IsDone() && Parts->IsDone() && File->IsDone() && Empty->IsDone(); })))
 	{
+		Abandon(Rig);
 		return false;
 	}
 	FlushRedactionPipe();
@@ -8206,11 +10516,13 @@ bool FVaRestHttpExcerptBacklogTest::RunTest(const FString& Parameters)
 	const uint64 BigId = Observe(Rig.Client.Post(TEXT("/big")).Body(FString::ChrN(1000, TEXT('x'))), Big).Send().GetId();
 	if (!TestTrue(TEXT("completes"), Rig.Wait(Big)))
 	{
+		Abandon(Rig);
 		return false;
 	}
 	const uint64 SmallId = Observe(Rig.Client.Post(TEXT("/small")).Body(FString::ChrN(50, TEXT('y'))), Small).Send().GetId();
 	if (!TestTrue(TEXT("completes"), Rig.Wait(Small)))
 	{
+		Abandon(Rig);
 		return false;
 	}
 	FlushRedactionPipe();
@@ -8220,6 +10532,17 @@ bool FVaRestHttpExcerptBacklogTest::RunTest(const FString& Parameters)
 	const FVaRestTraceExcerptEvent* Admitted = Find(Scoped.Recorder->ExcerptsOf(SmallId), EVaRestTraceExcerptOwner::Request);
 	TestTrue(TEXT("under it: the excerpt"), Admitted && Admitted->Excerpt.Kind == EVaRestExcerptKind::Text);
 	TestEqual(TEXT("the counter is back at 0"), VaRest::Http::Excerpts::PendingBytes(), static_cast<int64>(0));
+
+	// Concurrency review M-12: an admission is counted out when its holder goes -- a job prepared and never launched, a
+	// refused launch -- not only after a redaction ran; a leaked count would make every later excerpt Skipped: Backlog
+	{
+		TOptional<VaRest::Http::Excerpts::FAdmission> Held = VaRest::Http::Excerpts::TryAdmit(60);
+		TestTrue(TEXT("M-12: admitted under the cap"), Held.IsSet() && VaRest::Http::Excerpts::PendingBytes() == 60);
+		TestFalse(TEXT("... and the cap still holds"), VaRest::Http::Excerpts::TryAdmit(60).IsSet());
+		TOptional<VaRest::Http::Excerpts::FAdmission> Moved = MoveTemp(Held);
+		TestEqual(TEXT("... a move keeps one count"), VaRest::Http::Excerpts::PendingBytes(), static_cast<int64>(60));
+	}
+	TestEqual(TEXT("... and dropping it counts it out"), VaRest::Http::Excerpts::PendingBytes(), static_cast<int64>(0));
 	return true;
 }
 
@@ -8237,6 +10560,7 @@ bool FVaRestHttpExcerptNeedBodiesTest::RunTest(const FString& Parameters)
 	const uint64 Id = Observe(Rig.Client.Post(TEXT("/x")).Body(TEXT("hello")), Outcome).Send().GetId();
 	if (!TestTrue(TEXT("completes"), Rig.Wait(Outcome)))
 	{
+		Abandon(Rig);
 		return false;
 	}
 	FlushRedactionPipe();
@@ -8282,6 +10606,51 @@ namespace VaRest::Http
 		/** Bytes of raw copies waiting for redaction now (tests) */
 		int64 PendingBytes();
 
+		/**
+		 * Concurrency review M-12: bytes counted in by the admission counter, counted out when this goes -- after the
+		 * redaction ran on the pipe, at a refused launch (the dropped body takes it along), or for a job prepared and never
+		 * launched -- so no early return can leak the count. Move-only; any thread.
+		 */
+		class FAdmission
+		{
+		public:
+			FAdmission() = default;
+			FAdmission(FAdmission&& Other)
+				: Bytes(Other.Bytes)
+			{
+				Other.Bytes = 0;
+			}
+			FAdmission& operator=(FAdmission&& Other)
+			{
+				if (this != &Other)
+				{
+					Reset();
+					Bytes = Other.Bytes;
+					Other.Bytes = 0;
+				}
+				return *this;
+			}
+			FAdmission(const FAdmission&) = delete;
+			FAdmission& operator=(const FAdmission&) = delete;
+			~FAdmission() { Reset(); }
+
+			int64 Num() const { return Bytes; }
+			/** Counts the bytes out now (once) */
+			void Reset();
+
+		private:
+			friend TOptional<FAdmission> TryAdmit(int64 InBytes);
+			explicit FAdmission(int64 InBytes)
+				: Bytes(InBytes)
+			{
+			}
+
+			int64 Bytes = 0;
+		};
+
+		/** Counts Bytes in when they fit under AdmissionCap(); unset (nothing counted) when they do not */
+		TOptional<FAdmission> TryAdmit(int64 Bytes);
+
 		/** An excerpt prepared on the game thread and launched right after the event that announces it (bExcerptPending) */
 		struct FJob
 		{
@@ -8289,8 +10658,8 @@ namespace VaRest::Http
 			uint64 RequestId = 0;
 			int32 Attempt = 0;
 			int64 TotalBytes = 0;
-			/** Bytes counted in by the admission counter, counted out once the redaction ran */
-			int64 Admitted = 0;
+			/** The admission counter's share of this job's copy (concurrency review M-12: released whatever path drops the job) */
+			FAdmission Admitted;
 			/** The copy would pass the admission cap: Skipped, Backlog, emitted at once */
 			bool bBacklog = false;
 			/** IVaRestClock seconds of the hop: the excerpt's Time (the clock itself stays on the game thread, review I-1) */
@@ -8347,21 +10716,6 @@ namespace VaRest::Http::ExcerptsPrivate
 #endif
 	}
 
-	/** Counts Bytes in when they fit under the cap */
-	bool Admit(int64 Bytes)
-	{
-		const int64 Cap = Excerpts::AdmissionCap();
-		int64 Seen = Pending.load();
-		do
-		{
-			if (Seen + Bytes > Cap)
-			{
-				return false;
-			}
-		}
-		while (!Pending.compare_exchange_weak(Seen, Seen + Bytes));
-		return true;
-	}
 
 	void Emit(EVaRestTraceExcerptOwner Owner, uint64 RequestId, int32 Attempt, FVaRestTraceExcerpt&& Excerpt, double Time)
 	{
@@ -8377,12 +10731,13 @@ namespace VaRest::Http::ExcerptsPrivate
 	Excerpts::FJob WithCopy(Excerpts::FJob&& Job, TConstArrayView<uint8> Bytes, int32 Cap, FString ContentType)
 	{
 		const int32 Take = FMath::Min(Bytes.Num(), FMath::Max(0, Cap));
-		if (!Admit(Take))
+		TOptional<Excerpts::FAdmission> Admission = Excerpts::TryAdmit(Take);
+		if (!Admission.IsSet())
 		{
 			Job.bBacklog = true;
 			return MoveTemp(Job);
 		}
-		Job.Admitted = Take;
+		Job.Admitted = MoveTemp(Admission.GetValue());
 		Job.Redact = [Prefix = TArray<uint8>(Bytes.GetData(), Take), Type = MoveTemp(ContentType), Total = Job.TotalBytes, Cap](const FVaRestRedactor& Redactor)
 		{
 			return Redactor.RedactBody(Type, Prefix, Total, Cap);
@@ -8424,6 +10779,31 @@ int64 VaRest::Http::Excerpts::PendingBytes()
 	return ExcerptsPrivate::Pending.load();
 }
 
+TOptional<VaRest::Http::Excerpts::FAdmission> VaRest::Http::Excerpts::TryAdmit(int64 InBytes)
+{
+	using namespace ExcerptsPrivate;
+	const int64 Cap = AdmissionCap();
+	int64 Seen = Pending.load();
+	do
+	{
+		if (Seen + InBytes > Cap)
+		{
+			return TOptional<FAdmission>();
+		}
+	}
+	while (!Pending.compare_exchange_weak(Seen, Seen + InBytes));
+	return TOptional<FAdmission>(FAdmission(InBytes));
+}
+
+void VaRest::Http::Excerpts::FAdmission::Reset()
+{
+	if (Bytes > 0)
+	{
+		ExcerptsPrivate::Pending.fetch_sub(Bytes);
+		Bytes = 0;
+	}
+}
+
 void VaRest::Http::Excerpts::FJob::Launch()
 {
 	using namespace ExcerptsPrivate;
@@ -8441,19 +10821,17 @@ void VaRest::Http::Excerpts::FJob::Launch()
 	{
 		return;
 	}
-	const bool bLaunched = LaunchRedaction(TEXT("VaRest.TraceExcerpt"),
-		[ForOwner = Owner, Id = RequestId, ForAttempt = Attempt, Bytes = Admitted, At = Time, Redacting = Redactor, Work = MoveTemp(Redact)]() mutable
+	// Refused (the pipe is stopping, engine exit): the body is dropped, and its FAdmission with it; the excerpt never comes,
+	// which the Inspector shows as "excerpt timed out" (its 2.3)
+	LaunchRedaction(TEXT("VaRest.TraceExcerpt"),
+		[ForOwner = Owner, Id = RequestId, ForAttempt = Attempt, Held = MoveTemp(Admitted), At = Time, Redacting = Redactor, Work = MoveTemp(Redact)]() mutable
 		{
 			LLM_SCOPE_BYTAG(VaRest_Trace);
 			FVaRestTraceExcerpt Excerpt = Work(*Redacting);
-			Pending.fetch_sub(Bytes);
+			// Counted out before the emit, here rather than when the task body dies, so a test that waits for the pipe sees it
+			Held.Reset();
 			Emit(ForOwner, Id, ForAttempt, MoveTemp(Excerpt), At);
 		});
-	if (!bLaunched)
-	{
-		// The pipe is stopping (engine exit): the excerpt never comes; the Inspector shows "excerpt timed out" (its 2.3)
-		Pending.fetch_sub(Admitted);
-	}
 }
 
 VaRest::Http::Excerpts::FJob VaRest::Http::Excerpts::PrepareRequest(const FExchangeState& Ex)
@@ -8484,12 +10862,13 @@ VaRest::Http::Excerpts::FJob VaRest::Http::Excerpts::PrepareRequest(const FExcha
 	{
 		int64 Copied = 0;
 		TArray<FVaRestMultipartPart> Parts = CopyParts(Body.PartDescriptors, static_cast<int64>(Detail.BodyCap) + Job.Redactor->GetMaxNeedleBytes(), Copied);
-		if (!Admit(Copied))
+		TOptional<FAdmission> Admission = TryAdmit(Copied);
+		if (!Admission.IsSet())
 		{
 			Job.bBacklog = true;
 			return Job;
 		}
-		Job.Admitted = Copied;
+		Job.Admitted = MoveTemp(Admission.GetValue());
 		Job.Redact = [Described = MoveTemp(Parts), Total = Body.ContentLength, Cap = Detail.BodyCap](const FVaRestRedactor& Redactor)
 		{
 			return Redactor.DescribeMultipart(Described, Total, Cap);
@@ -8608,7 +10987,7 @@ and `RunDecode` begins (after its counters block) with `Excerpts::EmitOnDecode(F
 Run: `Tools/run_tests.sh VaRest.Http.Trace` then `Tools/run_tests.sh --no-build VaRest.Http.Decode`
 Expected: `0 failed` both.
 
-- [ ] **Step 6: Restore-the-bug** — (a) call `Excerpts::EmitOnDecode(Finish)` after `Handler.Decode(Finish)` in `RunDecode` instead of first: `VaRest.Http.Trace.Excerpts` FAILS (the response excerpt is empty or garbage: the in-situ parse rewrote the buffer, and a JSON result's body was moved into the document); restore; PASS. (b) Make `Admit` always succeed: `ExcerptBacklog` FAILS; restore; PASS. (c) Emit Started after `Job.Launch()`: run `VaRest.Http.Trace.Excerpts` ten times -- order is a race, so report what was seen; the review checks the comment's reasoning. Restore.
+- [ ] **Step 6: Restore-the-bug** — (a) call `Excerpts::EmitOnDecode(Finish)` after `Handler.Decode(Finish)` in `RunDecode` instead of first: `VaRest.Http.Trace.Excerpts` FAILS (the response excerpt is empty or garbage: the in-situ parse rewrote the buffer, and a JSON result's body was moved into the document); restore; PASS. (b) Make `TryAdmit` always succeed: `ExcerptBacklog` FAILS; restore; PASS. (b') Empty `FAdmission::~FAdmission` (no `Reset()`): `ExcerptBacklog` FAILS ("... and dropping it counts it out" reads 60; concurrency review M-12); restore; PASS. (c) Emit Started after `Job.Launch()`: run `VaRest.Http.Trace.Excerpts` ten times -- order is a race, so report what was seen; the review checks the comment's reasoning. Restore.
 
 - [ ] **Step 7: Full suite, commit**
 
@@ -8619,24 +10998,66 @@ Expected: `0 failed`.
 git add Source/VaRestHttp/Private/VaRestTraceExcerpts.h Source/VaRestHttp/Private/VaRestTraceExcerpts.cpp Source/VaRestHttp/Private/VaRestTracePoints.h \
   Source/VaRestHttp/Private/VaRestTracePoints.cpp Source/VaRestHttp/Private/VaRestExchangeState.h Source/VaRestHttp/Public/VaRestResultHandler.h \
   Source/VaRestHttp/Private/VaRestPipeline.cpp Source/VaRestHttp/Private/Tests/VaRestHttpExcerptTest.cpp
-git commit -m "http: M4 task 17 -- trace excerpts: request prefix at Started, decoded responses on the decode task, the rest via the pipe, admission cap (IN-14)
+git commit -m "http: M4 task 21 -- trace excerpts: request prefix at Started, decoded responses on the decode task, the rest via the pipe, admission cap (IN-14)
 
 Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 ```
 
 ---
-### Task 18: The IN-17 goldens that M4a owns
+### Task 22: The IN-17 goldens that M4a owns
 
 Inspector IN-17: "Core-owned goldens `VaRest.Http.Trace.*`, which assert event sequences **and phase values**: success; retry with `Retry-After`; 401 → refresh → replay with two parked requests (`GapBefore`, `AuthWait`, `AuthRefreshId`); proactive refresh; cache hit; 304; offline queued + replay + expiry; cancel; decode error with warnings; envelope failure; attach mid-flight." M3 has success (`VaRest.Http.Trace.Success`). Cache hit, 304 and the offline queue are M4b's. The socket and Socket.IO halves of attach mid-flight are W5's and S4's. Each golden pins the order and the virtual-clock times, so a change in either is a deliberate one.
 
+Every golden also checks Inspector §3.3's phase invariant, which the spec says the goldens check (spec review I-1): for each attempt, Prepare = dispatch − attempt start − Auth − Queued is not negative, and the transport finished no earlier than it was dispatched.
+
 **Files:**
 - Create: `Source/VaRestHttp/Private/Tests/VaRestHttpTraceGoldenTest.cpp`
+- Modify: `Source/VaRestHttp/Public/VaRestHttpTesting.h` (`PhasesHold`, the invariant, for the three files below)
 - Test: `Source/VaRestHttp/Private/Tests/VaRestHttpAuthTest.cpp` (the two auth goldens, beside `FHandAuth`), `Source/VaRestTests/Private/VaRestHttpStructDecodeTest.cpp` (decode warnings: they need a USTRUCT)
 
 **Interfaces:**
-- Consumes: Tasks 4, 7, 10, 13, 17. Produces nothing; a failing golden names the task whose trace point moved.
+- Consumes: Tasks 5, 8, 11, 16, 17, 21. Produces `bool VaRest::Http::Testing::PhasesHold(const FTraceRecorder& Recorder, uint64 Id, FString& OutWhy)` (header-inline); otherwise nothing: a failing golden names the task whose trace point moved.
 
-- [ ] **Step 1: Write the goldens** — create `Source/VaRestHttp/Private/Tests/VaRestHttpTraceGoldenTest.cpp`:
+- [ ] **Step 1: Write the goldens** — in `Source/VaRestHttp/Public/VaRestHttpTesting.h`, after `FTraceRecorder` (inside `WITH_DEV_AUTOMATION_TESTS`):
+
+```cpp
+	/**
+	 * Spec review I-1, Inspector 3.3 ("an attempt's in-attempt phases sum to its wall span ... checked by the golden tests",
+	 * IN-17): for every attempt of request Id, Prepare = dispatch - AttemptStart - AuthWait - LimiterWait is not negative,
+	 * and TransportDoneAt (when stamped) is not before the dispatch. False with OutWhy naming the attempt.
+	 */
+	inline bool PhasesHold(const FTraceRecorder& Recorder, uint64 Id, FString& OutWhy)
+	{
+		TMap<int32, double> DispatchedAt;
+		for (const FVaRestTraceEvent& Event : Recorder.For(Id))
+		{
+			if (Event.Kind == EVaRestTraceKind::AttemptDispatched)
+			{
+				const FVaRestTraceAttemptDispatched& Dispatched = Event.Payload.Get<FVaRestTraceAttemptDispatched>();
+				const double Prepare = Event.Time - Dispatched.AttemptStart - Dispatched.AuthWait - Dispatched.LimiterWait;
+				if (Prepare < -1e-9)
+				{
+					OutWhy = FString::Printf(TEXT("attempt %d: Prepare %.6f s"), Dispatched.Attempt, Prepare);
+					return false;
+				}
+				DispatchedAt.Add(Dispatched.Attempt, Event.Time);
+			}
+			else if (Event.Kind == EVaRestTraceKind::AttemptEnded)
+			{
+				const FVaRestTraceAttemptEnded& Ended = Event.Payload.Get<FVaRestTraceAttemptEnded>();
+				const double* At = DispatchedAt.Find(Ended.Attempt);
+				if (At && Ended.TransportDoneAt >= 0.0 && Ended.TransportDoneAt < *At - 1e-9)
+				{
+					OutWhy = FString::Printf(TEXT("attempt %d: TransportDoneAt %.6f s before its dispatch at %.6f s"), Ended.Attempt, Ended.TransportDoneAt, *At);
+					return false;
+				}
+			}
+		}
+		return true;
+	}
+```
+
+Create `Source/VaRestHttp/Private/Tests/VaRestHttpTraceGoldenTest.cpp`:
 
 ```cpp
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
@@ -8674,6 +11095,13 @@ namespace VaRest::Http::GoldenTestPrivate
 			}
 		}
 		return Out;
+	}
+
+	/** Cancels what the rig has in flight and pumps until it is done: the drain of a test that stops early (spec review M-5) */
+	void Abandon(VaRest::Http::Testing::FTestRig& Rig)
+	{
+		Rig.Client.CancelAll();
+		VaRest::Http::Testing::PumpUntil([&Rig] { return Rig.Client.GetInFlightCount() == 0; });
 	}
 
 	bool SeqIncreases(const VaRest::Http::Testing::FTraceRecorder& Recorder, uint64 Id)
@@ -8716,11 +11144,15 @@ bool FVaRestHttpGoldenRetryAfterTest::RunTest(const FString& Parameters)
 	Rig.Clock->Advance(2.0);
 	if (!TestTrue(TEXT("completes"), Rig.Wait(Outcome)))
 	{
+		Abandon(Rig);
 		return false;
 	}
 	const FTraceRecorder& Recorder = *Scoped.Recorder;
 	TestEqualSensitive(TEXT("the sequence"), Recorder.KindsOf(Id), FString(TEXT("Started,Dispatched,Ended,Note,Dispatched,Ended,Completed")));
 	TestTrue(TEXT("Seq increases"), SeqIncreases(Recorder, Id));
+	FString Why;
+	TestTrue(TEXT("Inspector 3.3: the phases hold"), PhasesHold(Recorder, Id, Why));
+	TestEqualSensitive(TEXT("... (why not)"), Why, FString());
 	const auto Dispatched = All<FVaRestTraceAttemptDispatched>(Recorder, Id, EVaRestTraceKind::AttemptDispatched);
 	const auto Ended = All<FVaRestTraceAttemptEnded>(Recorder, Id, EVaRestTraceKind::AttemptEnded);
 	const auto Notes = All<FVaRestTraceNote>(Recorder, Id, EVaRestTraceKind::Note);
@@ -8765,9 +11197,16 @@ bool FVaRestHttpGoldenCancelTest::RunTest(const FString& Parameters)
 	B.Cancel();
 	if (!TestTrue(TEXT("both complete"), PumpUntil([InTransport, BackingOff] { return InTransport->IsDone() && BackingOff->IsDone(); })))
 	{
+		Abandon(Rig);
 		return false;
 	}
 	const FTraceRecorder& Recorder = *Scoped.Recorder;
+	for (const uint64 Each : { A.GetId(), B.GetId() })
+	{
+		FString Why;
+		const bool bHold = PhasesHold(Recorder, Each, Why);
+		TestTrue(FString::Printf(TEXT("#%llu: Inspector 3.3's phases hold (%s)"), Each, *Why), bHold);
+	}
 	TestEqualSensitive(TEXT("canceled in the transport"), Recorder.KindsOf(A.GetId()), FString(TEXT("Started,Dispatched,Ended,Completed")));
 	TestEqualSensitive(TEXT("canceled while backing off: the note, then Completed"), Recorder.KindsOf(B.GetId()), FString(TEXT("Started,Dispatched,Ended,Note,Completed")));
 	const auto EndedA = All<FVaRestTraceAttemptEnded>(Recorder, A.GetId(), EVaRestTraceKind::AttemptEnded);
@@ -8796,9 +11235,12 @@ bool FVaRestHttpGoldenEnvelopeTest::RunTest(const FString& Parameters)
 	const uint64 Id = Observe(Rig.Client.Get(TEXT("/e")), Outcome).Send().GetId();
 	if (!TestTrue(TEXT("completes"), Rig.Wait(Outcome)))
 	{
+		Abandon(Rig);
 		return false;
 	}
 	TestEqualSensitive(TEXT("the sequence"), Scoped.Recorder->KindsOf(Id), FString(TEXT("Started,Dispatched,Ended,Completed")));
+	FString Why;
+	TestTrue(TEXT("Inspector 3.3: the phases hold"), PhasesHold(*Scoped.Recorder, Id, Why));
 	const auto Completed = All<FVaRestTraceCompleted>(*Scoped.Recorder, Id, EVaRestTraceKind::Completed);
 	if (!TestEqual(TEXT("one Completed"), Completed.Num(), 1))
 	{
@@ -8847,6 +11289,7 @@ bool FVaRestHttpGoldenAttachTest::RunTest(const FString& Parameters)
 	const TArray<FVaRestTraceSnapshot> Snapshots = Scoped.Recorder->GetSnapshots();
 	if (!TestEqual(TEXT("one snapshot"), Snapshots.Num(), 1))
 	{
+		Abandon(Rig);
 		return false;
 	}
 	const auto Partial = [&Snapshots](uint64 Id) { return Snapshots[0].InFlight.FindByPredicate([Id](const FVaRestTraceStarted& Entry) { return Entry.RequestId == Id; }); };
@@ -8858,8 +11301,11 @@ bool FVaRestHttpGoldenAttachTest::RunTest(const FString& Parameters)
 	Rig.Clock->Advance(0.5);
 	if (!TestTrue(TEXT("both complete"), PumpUntil([InTransport, BackingOff] { return InTransport->IsDone() && BackingOff->IsDone(); })))
 	{
+		Abandon(Rig);
 		return false;
 	}
+	FString Why;
+	TestTrue(TEXT("Inspector 3.3: B's retry's phases hold"), PhasesHold(*Scoped.Recorder, B, Why));
 	TestEqualSensitive(TEXT("A: the rest of its record"), Scoped.Recorder->KindsOf(A), FString(TEXT("Ended,Completed")));
 	TestEqualSensitive(TEXT("B: its retry and the end"), Scoped.Recorder->KindsOf(B), FString(TEXT("Dispatched,Ended,Completed")));
 	const auto Dispatched = All<FVaRestTraceAttemptDispatched>(*Scoped.Recorder, B, EVaRestTraceKind::AttemptDispatched);
@@ -8913,15 +11359,23 @@ bool FVaRestHttpGoldenRefreshTest::RunTest(const FString& Parameters)
 	{
 		return false;
 	}
-	TestTrue(TEXT("A's replay: attempt 2 at 0.4 s, GapBefore SessionRefresh 0.4 s, AuthWait 0.4 s, the refresh's id"), ForA[1].Attempt == 2 && ForA[1].AttemptStart == 0.4
-		&& ForA[1].GapKind == EVaRestTraceGap::SessionRefresh && FMath::IsNearlyEqual(ForA[1].GapSeconds, 0.4) && FMath::IsNearlyEqual(ForA[1].AuthWait, 0.4)
+	// Spec review I-1 (Inspector 3.3): a replay's park is the Gap before its attempt, not inside it -- no AuthWait; a park
+	// before the first attempt is inside it (Auth), and the attempt starts when it parked
+	TestTrue(TEXT("A's replay: attempt 2 at 0.4 s, GapBefore SessionRefresh 0.4 s, no AuthWait, the refresh's id"), ForA[1].Attempt == 2 && ForA[1].AttemptStart == 0.4
+		&& ForA[1].GapKind == EVaRestTraceGap::SessionRefresh && FMath::IsNearlyEqual(ForA[1].GapSeconds, 0.4) && ForA[1].AuthWait == 0.0
 		&& ForA[1].AuthRefreshId == Auth->LastRefreshId);
 	for (const uint64 Id : { B, C })
 	{
 		const TArray<FVaRestTraceAttemptDispatched> Parked = DispatchesOf(Recorder, Id);
-		TestTrue(FString::Printf(TEXT("#%llu: attempt 1 at 0.4 s, no gap, AuthWait 0.4 s, the same refresh"), Id), Parked.Num() == 1 && Parked[0].Attempt == 1
-			&& Parked[0].AttemptStart == 0.4 && Parked[0].GapKind == EVaRestTraceGap::None && FMath::IsNearlyEqual(Parked[0].AuthWait, 0.4)
+		TestTrue(FString::Printf(TEXT("#%llu: attempt 1 started at 0 s when it parked, no gap, AuthWait 0.4 s, the same refresh"), Id), Parked.Num() == 1 && Parked[0].Attempt == 1
+			&& Parked[0].AttemptStart == 0.0 && Parked[0].GapKind == EVaRestTraceGap::None && FMath::IsNearlyEqual(Parked[0].AuthWait, 0.4)
 			&& Parked[0].AuthRefreshId == Auth->LastRefreshId);
+	}
+	for (const uint64 Id : { A, B, C })
+	{
+		FString Why;
+		TestTrue(FString::Printf(TEXT("#%llu: Inspector 3.3's phases hold"), Id), PhasesHold(Recorder, Id, Why));
+		TestEqualSensitive(FString::Printf(TEXT("#%llu: ... (why not)"), Id), Why, FString());
 	}
 	const TArray<FVaRestTraceMarker> Markers = Scoped.Recorder->MarkersOf(Rig.Client.GetId());
 	TestTrue(TEXT("IN-9: SessionRefreshed caused by A"), Markers.ContainsByPredicate([A](const FVaRestTraceMarker& Marker)
@@ -8954,8 +11408,11 @@ bool FVaRestHttpGoldenProactiveTest::RunTest(const FString& Parameters)
 	}
 	TestEqualSensitive(TEXT("one attempt, after the refresh"), Scoped.Recorder->KindsOf(Id), FString(TEXT("Started,Dispatched,Ended,Completed")));
 	const TArray<FVaRestTraceAttemptDispatched> Dispatched = DispatchesOf(*Scoped.Recorder, Id);
-	TestTrue(TEXT("attempt 1 at 0.3 s, AuthWait 0.3 s, no gap"), Dispatched.Num() == 1 && Dispatched[0].AttemptStart == 0.3
+	TestTrue(TEXT("attempt 1 started at 0 s when it parked (spec review I-1), AuthWait 0.3 s, no gap"), Dispatched.Num() == 1 && Dispatched[0].AttemptStart == 0.0
 		&& FMath::IsNearlyEqual(Dispatched[0].AuthWait, 0.3) && Dispatched[0].GapKind == EVaRestTraceGap::None && Dispatched[0].AuthRefreshId == Auth->LastRefreshId);
+	FString Why;
+	TestTrue(TEXT("Inspector 3.3's phases hold"), PhasesHold(*Scoped.Recorder, Id, Why));
+	TestEqualSensitive(TEXT("... (why not)"), Why, FString());
 	TestTrue(TEXT("IN-9: SessionRefreshed caused by the request"), Scoped.Recorder->MarkersOf(Rig.Client.GetId()).ContainsByPredicate([Id](const FVaRestTraceMarker& Marker)
 	{
 		return Marker.Kind == EVaRestTraceMarkerKind::SessionRefreshed && Marker.CauseRequestId == Id;
@@ -8985,11 +11442,16 @@ bool FVaRestHttpGoldenDecodeTest::RunTest(const FString& Parameters)
 	const uint64 B = Observe(Rig.Client.Get<FVaRestHttpTestProfile>(TEXT("/s")).StrictDecode(), Strict).Send().GetId();
 	if (!TestTrue(TEXT("both complete"), PumpUntil([Tolerant, Strict] { return Tolerant->IsDone() && Strict->IsDone(); })))
 	{
+		// Spec review M-5: drained before the early return
+		Rig.Client.CancelAll();
+		PumpUntil([&Rig] { return Rig.Client.GetInFlightCount() == 0; });
 		return false;
 	}
 	for (const uint64 Id : { A, B })
 	{
 		TestEqualSensitive(FString::Printf(TEXT("#%llu: the sequence"), Id), Scoped.Recorder->KindsOf(Id), FString(TEXT("Started,Dispatched,Ended,Completed")));
+		FString Why;
+		TestTrue(FString::Printf(TEXT("#%llu: Inspector 3.3's phases hold"), Id), PhasesHold(*Scoped.Recorder, Id, Why));
 	}
 	TOptional<FVaRestTraceCompleted> First;
 	TOptional<FVaRestTraceCompleted> Second;
@@ -9024,21 +11486,21 @@ bool FVaRestHttpGoldenDecodeTest::RunTest(const FString& Parameters)
 Run: `Tools/run_tests.sh VaRest.Http.Trace.Golden`
 Expected: `0 failed`. A golden that fails shows a trace point in the wrong place or with the wrong value: fix the task that owns it (named in the test's comment), never the golden, unless the spec says the golden is wrong -- then stop and report.
 
-- [ ] **Step 3: Restore-the-bug** — reset `Ex.NextGap` in the retry stage right after setting it (so the gap never reaches the dispatch): `Golden.RetryAfter` and `Golden.AttachMidFlight` FAIL; restore; PASS. In `AuthGate::Park` stop setting `Back.AuthWait`: `Golden.RefreshParked` and `Golden.ProactiveRefresh` FAIL; restore; PASS.
+- [ ] **Step 3: Restore-the-bug** — reset `Ex.NextGap` in the retry stage right after setting it (so the gap never reaches the dispatch): `Golden.RetryAfter` and `Golden.AttachMidFlight` FAIL; restore; PASS. In `AuthGate::Park` stop setting `Back.AuthWait`: `Golden.RefreshParked` and `Golden.ProactiveRefresh` FAIL; restore; PASS. Set `Back.AuthWait = Seconds;` for a replay too: `Golden.RefreshParked` FAILS on A's "no AuthWait" (spec review I-1); restore; PASS. Drop `Ex.PendingAttemptStart = ParkedAt;` (Task 17): `Golden.RefreshParked` FAILS for B and C ("attempt 1 started at 0 s" and "Inspector 3.3's phases hold": Prepare is -0.4 s), and `Golden.ProactiveRefresh` likewise; restore; PASS.
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git add Source/VaRestHttp/Private/Tests/VaRestHttpTraceGoldenTest.cpp Source/VaRestHttp/Private/Tests/VaRestHttpAuthTest.cpp \
-  Source/VaRestTests/Private/VaRestHttpStructDecodeTest.cpp
-git commit -m "http tests: M4 task 18 -- IN-17 goldens: Retry-After, refresh with parked requests, proactive refresh, cancel, envelope, decode warnings, attach mid-flight
+  Source/VaRestTests/Private/VaRestHttpStructDecodeTest.cpp Source/VaRestHttp/Public/VaRestHttpTesting.h
+git commit -m "http tests: M4 task 22 -- IN-17 goldens: Retry-After, refresh with parked requests, proactive refresh, cancel, envelope, decode warnings, attach mid-flight
 
 Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 ```
 
 ---
 
-### Task 19: The test server and the integration suite for M4a (spec §7.1)
+### Task 23: The test server and the integration suite for M4a (spec §7.1)
 
 `Tools/testserver/server.py` already has M4's routes (`/retry-after`, `/flaky`, `/login`, `/refresh`, `/protected`, `/envelope/*`; M3 Task 16). It needs two more: one to expire the current access token while keeping the refresh token (a 401 the refresh can fix), and an envelope error with a 4xx status.
 
@@ -9248,25 +11710,25 @@ Expected: `0 failed` (the runner starts the server).
 
 ```bash
 git add Tools/testserver/server.py Tools/testserver/selftest.py Source/VaRestTests/Private/VaRestIntegrationTest.cpp
-git commit -m "testserver + integration: M4 task 19 -- /expire and /envelope/gone; retry, Retry-After, flaky, session refresh and envelope against the server
+git commit -m "testserver + integration: M4 task 23 -- /expire and /envelope/gone; retry, Retry-After, flaky, session refresh and envelope against the server
 
 Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 ```
 
 ---
-### Task 20: Close M4a — docs, the freeze line, the milestone builds, the non-unity compile, the MSVC sweep, beads
+### Task 24: Close M4a — docs, the freeze line, the milestone builds, the non-unity compile, the MSVC sweep, beads
 
 **Files:**
 - Modify: `CLAUDE.md` (module row, freeze line), `docs/dev/http-thread-completion.md` (Apple item 5)
 - Temporarily modify, then revert: `Source/VaRestHttp/VaRestHttp.Build.cs`, `Source/VaRestTests/VaRestTests.Build.cs`
 
 **Interfaces:**
-- Consumes: Tasks 1-19.
+- Consumes: Tasks 1-23.
 
 - [ ] **Step 1: CLAUDE.md** — in the module table, the `VaRestHttp` row becomes:
 
 ```markdown
-| `VaRestHttp` | Runtime | `FVaRestClient` and its `[[nodiscard]]` builder over a stage pipeline (retry, auth gate, attempt boundary, auth apply, log/redaction, limiter, transport; M4b adds the offline queue and the cache), HTTP-thread completion with zero-copy JSON decode off the game thread, the envelope, the session and its single-flight refresh, the public redactor, the Inspector trace surface with excerpts, `stat VaRest`, `UVaRestHttpSettings`; M5 adds the `UVaRestApi` asset, `UVaRestHub` and async BP actions |
+| `VaRestHttp` | Runtime | `FVaRestClient` and its `[[nodiscard]]` builder over a stage pipeline (retry, auth gate, attempt boundary, limiter, auth apply, log/redaction, transport; M4b adds the offline queue and the cache), HTTP-thread completion with zero-copy JSON decode off the game thread, the envelope, the session and its single-flight refresh, the public redactor, the Inspector trace surface with excerpts, `stat VaRest`, `UVaRestHttpSettings`; M5 adds the `UVaRestApi` asset, `UVaRestHub` and async BP actions |
 ```
 
 and the freeze paragraph that names `FVaRestError`'s fields gains a sentence:
@@ -9274,13 +11736,14 @@ and the freeze paragraph that names `FVaRestError`'s fields gains a sentence:
 ```markdown
   `EVaRestJitter`, `FVaRestBackoff`, `FVaRestRetryPolicy`, `FVaRestEnvelope`, `EVaRestAuthMode`, `EVaRestApiKeyPlacement`,
   `EVaRestRefreshStyle`, `EVaRestSessionChange` and `FVaRestBearerRefreshConfig` (M4a), with their `UPROPERTY` field names,
-  freeze with M5 too: M5's asset stores them.
+  freeze with M5 too: M5's asset stores them. `EVaRestAuthRefreshOutcome` (`RefreshAuth`'s answer) is a plain C++ enum, not
+  a Blueprint type: it freezes only if M5 makes it a `UENUM`.
 ```
 
 - [ ] **Step 2: The platform note** — in `docs/dev/http-thread-completion.md`, Mac/iOS item 5 ("Stream bodies cannot be resent"), append:
 
 ```markdown
-   VaRest's own re-issues -- a retry (M4a Task 7) and a session replay after a refresh (Task 13) -- are new engine requests
+   VaRest's own re-issues -- a retry (M4a Task 8) and a session replay after a refresh (Task 17) -- are new engine requests
    with a new stream (M4a plan decision 24), so they are not affected; only a resend NSURLSession attempts by itself is.
    Check `VaRest.Http.Auth.ReplayBodies` and `VaRest.Http.Retry.BodiesResent` on the device.
 ```
@@ -9299,7 +11762,7 @@ Run:
 /w/Unreal/UnrealEngine/Engine/Build/BatchFiles/Linux/Build.sh VaRestHost Linux Shipping -project=/w/Unreal/VaRestHost/VaRestHost.uproject
 ```
 
-Expected: both succeed with no warning from `Source/VaRestHttp`. Shipping compiles out `VAREST_WITH_TRACE_EXCERPTS` (Task 17's `Wanted()` returns false), the engine stats (Task 16's `INC_DWORD_STAT` are empty) and the test helpers.
+Expected: both succeed with no warning from `Source/VaRestHttp`. Shipping compiles out `VAREST_WITH_TRACE_EXCERPTS` (Task 21's `Wanted()` returns false), the engine stats (Task 20's `INC_DWORD_STAT` are empty) and the test helpers.
 
 - [ ] **Step 5: The per-module non-unity, no-PCH compile** (the M3 ruling: never `-DisableUnity`, which rebuilds the engine) — in `Source/VaRestHttp/VaRestHttp.Build.cs` replace `PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;` with
 
@@ -9325,7 +11788,7 @@ python3 - Source/VaRestHttp Source/VaRestTests <<'PY'
 import pathlib, re, sys
 capture = re.compile(r'\[(?:[^\]]*[ ,])?([A-Za-z_]\w*) = (?:MoveTemp\()?\1\)?[\],]')
 member = re.compile(r'^\s+(?:const )?[\w:<>, ]+[ &*](Config|State|Url|Verb|Body|Tag|Priority|Owner|Attempt|InFlight|Limiter|Session|Auth|Envelope|Random|Retry|Interrupt) = ')
-declared = re.compile(r'^\s+(?:const )?(?:auto|[A-Z][\w:]*(?:<[^;=()]*>)?)[ &*]+([A-Za-z_]\w*)(?: = |\(|\{| : )')
+declared = re.compile(r'^\s+(?:const )?(?:auto|[A-Z][\w:]*(?:<[^;=()]*>)?)[ &*]+([A-Za-z_]\w*)(?: = |\(|\{| : |;)')
 owners = {"VaRestClient.cpp", "VaRestClientState.cpp", "VaRestPipeline.cpp", "VaRestLogStage.cpp", "VaRestTracePoints.cpp", "VaRestRetry.cpp",
           "VaRestAuth.cpp", "VaRestAuthGate.cpp", "VaRestSession.cpp", "VaRestBearerRefresh.cpp", "VaRestTraceExcerpts.cpp", "VaRestEnvelope.cpp"}
 for root in sys.argv[1:]:
@@ -9351,14 +11814,14 @@ for root in sys.argv[1:]:
 PY
 ```
 
-Expected: no `init-capture reuses a name` line (`[Result = MoveTemp(Result)]`: C4456/C4458 are errors in this build, `CppCompileWarnings.cs:88-90`). Read every `check:` line: a local named like a member matters only inside a member function of that class (C4458: `FClientState`, `FVaRestClient`, `FVaRestExchange`, `TVaRestRequest`, `FVaRestEnvelope`, `FVaRestBackoff`, `FVaRestRetryPolicy`); a lambda local hiding an enclosing local is C4456. Then read, by hand, each new class's member functions against its member and method names (the script is an approximation): `TVaRestRequest` (`Retry`, `NoRetry`, `Envelope`, `NoEnvelope`, `AuthMode`, `NoAuth`, `MarkAuthRefresh`), `FVaRestClient` (Task 11-13's methods), `FVaRestEnvelope` (`DataAt`, `SuccessWhen`, `ErrorMessageAt`, `ErrorCodeAt`, `ParseErrorBodies` vs the fields), `FVaRestAuthRefreshContext`, `Excerpts::FJob::Launch` (its init-captures are renamed on purpose). Rename what is real and rebuild.
+Expected: no `init-capture reuses a name` line (`[Result = MoveTemp(Result)]`: C4456/C4458 are errors in this build, `CppCompileWarnings.cs:88-90`). Read every `check:` line: a local named like a member matters only inside a member function of that class (C4458: `FClientState`, `FVaRestClient`, `FVaRestExchange`, `TVaRestRequest`, `FVaRestEnvelope`, `FVaRestBackoff`, `FVaRestRetryPolicy`); a lambda local hiding an enclosing local is C4456. Then read, by hand, each new class's member functions against its member and method names (the script is an approximation): `TVaRestRequest` (`Retry`, `NoRetry`, `Envelope`, `NoEnvelope`, `AuthMode`, `NoAuth`, `MarkAuthRefresh`), `FVaRestClient` (Task 12-17's methods), `FVaRestEnvelope` (`DataAt`, `SuccessWhen`, `ErrorMessageAt`, `ErrorCodeAt`, `ParseErrorBodies` vs the fields), `FVaRestAuthRefreshContext` (`GetClient`, `Request` vs `State`, `Session`, `RefreshId`, `bIdTaken`), `SessionPrivate::FRefreshDoneGuard`, `Excerpts::FAdmission`, `Excerpts::FJob::Launch` (its init-captures are renamed on purpose), and the test helpers with members (`FProbeStage`, `FOutcomeProbe`, `FHoldingOuter`, `FLateClock`, `FHandAuth`). The `declared` pattern also matches a bare declaration (`TArray<FString> Parts;`, spec review I-7: Task 9's `Leftovers` lambda would have hidden its test's `Parts`). Rename what is real and rebuild.
 
 - [ ] **Step 7: Beads** — record what M4a leaves:
 
 ```bash
 bd create --title="Inspector: binary excerpt hex capture (BinaryCap > 0)" --type=task --priority=3 \
   --description="M4a plan decision 20: FVaRestRedactor::RedactBody has no hex mode, so a binary body is always a descriptor even when a sink sets BinaryCap (Inspector 2.2 layer 4, MaxBinaryExcerptBytes, default 0). Add the opt-in hex capture to the redactor and the excerpt jobs (VaRestTraceExcerpts.cpp) before the Inspector exposes the setting."
-bd update VaRest-ajz --notes "M4a carries: (1) plan decision 1 -- clients retry only with WithRetry; M5's UVaRestHttpSettings default retry policy decides the project default. (2) spec 4.2's UVaRestAuthConfig (instanced, EditInlineNew) and the BP Custom auth (native events Apply/Refresh, Finish Refresh) build on IVaRestAuth / FVaRestAuth (VaRestAuth.h); FVaRestBearerRefreshConfig is the BearerRefresh fields; RefreshPath takes a path in M4a, an endpoint name is M5's. (3) OpenAPI N15 AuthMode maps to EVaRestAuthMode (M4a)."
+bd update VaRest-ajz --notes "M4a carries: (1) ruling Q2: the UVaRestApi asset's retry field defaults to FVaRestRetryPolicy::Exponential(3), visible in the Details panel; FVaRestClient::Make clients never retry without WithRetry/Retry(); UVaRestHttpSettings gets no client-wide retry default. (2) spec 4.2's UVaRestAuthConfig (instanced, EditInlineNew) and the BP Custom auth (native events Apply/Refresh, Finish Refresh) build on IVaRestAuth / FVaRestAuth (VaRestAuth.h); the BP Finish Refresh node reports Refreshed, Rejected or Failed(kind) (ruling I-7), and a BP auth may hold its refresh open (a re-login screen: no watchdog, ruling I-4); FVaRestBearerRefreshConfig is the BearerRefresh fields; RefreshPath takes a path in M4a, an endpoint name is M5's. (3) OpenAPI N15 AuthMode maps to EVaRestAuthMode (M4a). (4) ruling M-17: OpenAPI 7.7's first token goes in with SetSession (ImportSession reads only ExportSession's format); a client_credentials grant (client secret, scope, no refresh token) is an additive M5 auth, not a grant string on FVaRestBearerRefreshConfig."
 ```
 
 Report the new bead's id.
@@ -9378,8 +11841,8 @@ Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 
 What M4b and later milestones take from here, so their plans start from code that exists:
 
-- **M4b offline queue and cache** go in `FClientState::Publish` between the custom `Outer` stages and `MakeRetryStage()` (spec §4 order: offline queue, cache, retry). A replayed queue item enters the normal pipeline minus the offline stage (spec §4.4) and gets auth re-applied for free (`AuthApply` reads the live session). The cache key's auth identity is SHA-256 of the applied `Authorization` (spec §4.3): read it from `FExchangeState::AttemptHeaders` after `AuthApply`, so the cache's *lookup* must run per attempt or compute the identity from `ApplyCredentials` up front -- M4b decides (outline item 3). An offline queue item fails "after its retries" (spec §4.4): it sits outside `Retry`, so it sees the final outcome. `FHttpStats` gains `CacheLookups`/`CacheHits` and the ratio; `FVaRestTraceNote` already has the cache and queue kinds; `EVaRestTraceMarkerKind` has `Online`/`Offline`; `FVaRestTraceStarted` has `CachePolicy`, `CacheLookup` and `QueueReplayOf`.
+- **M4b offline queue and cache** go in `FClientState::Publish` between the custom `Outer` stages and `MakeRetryStage()` (spec §4 order: offline queue, cache, retry). The chain they join: custom `Outer` → offline queue → cache → `Retry` → `AuthGate` → attempt boundary → limiter → `AuthApply` → custom `PerAttempt` → log → transport (ruling I-3: the limiter opens the attempt, so credentials are written when a request leaves it). A replayed queue item enters the normal pipeline minus the offline stage (spec §4.4) and gets auth re-applied for free (`AuthApply` reads the live session). The offline queue passes the auth-refresh request through (`bIsAuthRefresh`), or fails it `Offline` at once — never holds it, or every parked request waits behind a refresh that cannot run (ruling I-4). The cache computes its auth identity itself (ruling Q5), not from an applied header: a token *refresh* must not empty the cache (a hash of the rotating access token would miss after every refresh), and a disk cache must not serve one user's data to another after a restart and `ImportSession`. M4b designs the identity — for example an id minted on `Replaced` and on import, kept on `Refreshed`, carried in `ExportSession` (which ignores unknown fields on import, so the field is additive) — and amends spec §4.3's "SHA-256 of the applied `Authorization`" sentence when its plan is written. An offline queue item fails "after its retries" (spec §4.4): it sits outside `Retry`, so it sees the final outcome; a parked request failed by a refresh that could not reach the server is `Connection` (ruling I-7), which the queue can hold. `FHttpStats` gains `CacheLookups`/`CacheHits` and the ratio; `FVaRestTraceNote` already has the cache and queue kinds; `EVaRestTraceMarkerKind` has `Online`/`Offline`; `FVaRestTraceStarted` has `CachePolicy`, `CacheLookup` and `QueueReplayOf`.
 - **W2** (WebSocket): `FVaRestBackoff::GetDelay(Step, Stream)` with the socket's own `FRandomStream` and `EVaRestJitter::Ratio`; `IVaRestClock` timers as M3 built them.
-- **W5**: `FVaRestClient::ApplyAuth`, `NeedsAuthRefresh`, `RefreshAuth`, `NotifySessionExpired`, `OnSessionChanged` (`Replaced` restarts sockets, `Cleared` closes them), the session headers; socket payload types join `FVaRestTracePayload` next to M4a's three.
+- **W5**: `FVaRestClient::ApplyAuth` (with its `OutConfigError` for a misconfigured auth, ruling Q7), `NeedsAuthRefresh`, `RefreshAuth` (its `EVaRestAuthRefreshOutcome` and `FailedKind`: `Rejected` is terminal and already expired, `Failed(Connection/Timeout)` retries later — a Wi-Fi blip is no logout), `NotifySessionExpired` (once per expiry), `OnSessionChanged` (`Replaced` restarts sockets, `Cleared` closes them; events of one change arrive in order, after it), the session headers; socket payload types join `FVaRestTracePayload` next to M4a's three. WebSocket spec §19 item 2 and §3.3 are amended to these names in this plan's revision.
 - **M5**: the asset's retry, envelope and auth properties are M4a's USTRUCTs and UENUMs (plan decision 27); the BP Custom auth and `UVaRestAuthConfig` subclasses produce an `IVaRestAuth`; Blueprint events `OnSessionChanged`, `OnSessionExpired` wrap the client's delegates.
-- **Inspector I1**: needs M4b too (cache and queue notes, the remaining goldens). Excerpt hex capture is a bead (Task 20).
+- **Inspector I1**: needs M4b too (cache and queue notes, the remaining goldens). Excerpt hex capture is a bead (Task 24).
