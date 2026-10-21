@@ -88,6 +88,91 @@ namespace VaRest::Http::UrlPrivate
 			return false;
 		}
 	}
+
+	/** Review M2: AddQueryValues' delimiters, carried in a value as control characters (see there) */
+	constexpr TCHAR CsvDelimiter = 1;
+	constexpr TCHAR PipesDelimiter = 2;
+	constexpr TCHAR SsvDelimiter = 3;
+
+	bool IsDelimiterMarker(TCHAR C)
+	{
+		return C == CsvDelimiter || C == PipesDelimiter || C == SsvDelimiter;
+	}
+
+	FString EncodeQueryValue(const FString& Value)
+	{
+		FString Out;
+		Out.Reserve(Value.Len() + 8);
+		int32 Start = 0;
+		for (int32 i = 0; i <= Value.Len(); ++i)
+		{
+			if (i < Value.Len() && !IsDelimiterMarker(Value[i]))
+			{
+				continue;
+			}
+			Out += VaRest::Http::PercentEncode(FStringView(*Value + Start, i - Start));
+			if (i < Value.Len())
+			{
+				Out += Value[i] == CsvDelimiter ? TEXT(",") : Value[i] == PipesDelimiter ? TEXT("|") : TEXT("%20");
+			}
+			Start = i + 1;
+		}
+		return Out;
+	}
+
+	/** The host part of "http(s)://host/...": [Start, End) */
+	bool FindAuthority(FStringView Url, int32& Start, int32& End)
+	{
+		for (const FStringView Scheme : { TEXTVIEW("http://"), TEXTVIEW("https://") })
+		{
+			if (Url.StartsWith(Scheme, ESearchCase::IgnoreCase))
+			{
+				Start = Scheme.Len();
+				End = Start;
+				while (End < Url.Len() && Url[End] != TEXT('/') && Url[End] != TEXT('?') && Url[End] != TEXT('#'))
+				{
+					++End;
+				}
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * RFC 3987 3.1 IRI to URI (review I2): after the authority, every UTF-8 byte >= 0x80, CTL and space becomes %XX; other
+	 * ASCII, '%' included, stays so that already-encoded text is not encoded twice. The engine would otherwise turn each
+	 * non-ASCII character into '?' (CurlHttp.cpp:926 TCHAR_TO_ANSI; GenericPlatformString.h:90-93) and curl rejects a space.
+	 */
+	FString ToUri(FStringView Url)
+	{
+		int32 Start = 0;
+		int32 AuthorityEnd = 0;
+		if (!FindAuthority(Url, Start, AuthorityEnd))
+		{
+			AuthorityEnd = 0;
+		}
+		VaRest::Json::FUtf8Scratch Scratch;
+		const FUtf8StringView Utf8 = VaRest::Json::ConvertForDocument(Url.RightChop(AuthorityEnd), Scratch, /*bWarn*/ false);
+		FString Out(Url.Left(AuthorityEnd));
+		Out.Reserve(Url.Len() + 8);
+		for (const UTF8CHAR Ch : Utf8)
+		{
+			const uint32 C = static_cast<uint8>(Ch);
+			if (C >= 0x80 || C < 0x20 || C == 0x7F || C == ' ')
+			{
+				Out.AppendChar(TEXT('%'));
+				Out.AppendChar(HexDigits[C >> 4]);
+				Out.AppendChar(HexDigits[C & 15]);
+			}
+			else
+			{
+				Out.AppendChar(static_cast<TCHAR>(C));
+			}
+		}
+		return Out;
+	}
+
 }
 
 FString VaRest::Http::PercentEncode(FStringView Text)
@@ -148,17 +233,28 @@ FString VaRest::Http::JoinUrl(FStringView BaseUrl, FStringView Path)
 	FStringView Rest = Path.TrimStartAndEnd();
 	if (IsAbsoluteHttpUrl(Rest) || Base.IsEmpty())
 	{
-		return FString(Rest);
+		return UrlPrivate::ToUri(Rest);
+	}
+	// A fragment is never sent (RFC 9110 7.1), and left on the base it would swallow the path and query that follow
+	// ("https://h/v1#f" + "/pets" -> "https://h/v1#f/pets"); the join drops it (review M1).
+	int32 BaseFragmentAt = INDEX_NONE;
+	if (Base.FindChar(TEXT('#'), BaseFragmentAt))
+	{
+		Base = Base.Left(BaseFragmentAt);
 	}
 	// Decision 33 (review M22): a base URL's query stays, after the joined path and before the request's own pairs
-	// ("https://h/v1?key=k" + "/pets?limit=2" -> "https://h/v1/pets?key=k&limit=2"). A base with a fragment is refused
-	// before this (Resolve, Kind=Config).
+	// ("https://h/v1?key=k" + "/pets?limit=2" -> "https://h/v1/pets?key=k&limit=2").
 	FStringView BaseQuery;
 	int32 BaseQueryAt = INDEX_NONE;
 	if (Base.FindChar(TEXT('?'), BaseQueryAt))
 	{
 		BaseQuery = Base.RightChop(BaseQueryAt + 1);
 		Base = Base.Left(BaseQueryAt);
+		// "?a=1&" + "&b=2" would otherwise join as "a=1&&b=2" (review M10)
+		while (BaseQuery.EndsWith(TEXT('&')))
+		{
+			BaseQuery.LeftChopInline(1);
+		}
 	}
 	// The request's own tail: its query and fragment, after its path
 	FStringView Tail;
@@ -205,7 +301,25 @@ FString VaRest::Http::JoinUrl(FStringView BaseUrl, FStringView Path)
 		}
 	}
 	Out += Tail;
-	return Out;
+	return UrlPrivate::ToUri(Out);
+}
+
+bool VaRest::Http::HasNonAsciiHost(FStringView Url)
+{
+	int32 Start = 0;
+	int32 End = 0;
+	if (!UrlPrivate::FindAuthority(Url.TrimStartAndEnd(), Start, End))
+	{
+		return false;
+	}
+	for (const TCHAR C : Url.TrimStartAndEnd().Mid(Start, End - Start))
+	{
+		if (C > 0x7F)
+		{
+			return true;
+		}
+	}
+	return false;
 }
 
 TValueOrError<FString, FString> VaRest::Http::ExpandPathTemplate(FStringView Template, TConstArrayView<TPair<FString, FString>> Params)
@@ -261,6 +375,12 @@ TValueOrError<FString, FString> VaRest::Http::ExpandPathTemplate(FStringView Tem
 		{
 			return MakeError(FString::Printf(TEXT("path parameter {%s} is empty"), *FString(Name)));
 		}
+		// Review I1: '.' is unreserved, so "id=.." would expand to "/users/../delete" and curl (which never sets
+		// CURLOPT_PATH_AS_IS) would send "/delete". %2E does not help, servers decode and normalise it.
+		if (Params[Found].Value == TEXT(".") || Params[Found].Value == TEXT(".."))
+		{
+			return MakeError(FString::Printf(TEXT("path parameter {%s} is a dot-segment"), *FString(Name)));
+		}
 		Out += PercentEncode(Params[Found].Value);
 		i = Close;
 	}
@@ -305,7 +425,7 @@ void VaRest::Http::AppendQuery(FString& Url, TConstArrayView<TPair<FString, FStr
 		Separator = TEXT('&');
 		Url += PercentEncode(Pair.Key);
 		Url.AppendChar(TEXT('='));
-		Url += PercentEncode(Pair.Value);
+		Url += UrlPrivate::EncodeQueryValue(Pair.Value);
 	}
 	Url += Fragment;
 }
@@ -324,8 +444,25 @@ void VaRest::Http::AddQueryValues(TArray<TPair<FString, FString>>& Query, FStrin
 		}
 		return;
 	}
-	const TCHAR* Joiner = Style == EVaRestQueryStyle::Csv ? TEXT(",") : Style == EVaRestQueryStyle::Ssv ? TEXT(" ") : TEXT("|");
-	Query.Emplace(FString(Name), FString::Join(Values, Joiner));
+	// Review M2: each value is encoded on its own and the delimiter is written literally (RFC 6570 form expansion,
+	// OpenAPI 3 style=form explode=false), so ["a,b","c"] is "a%2Cb,c", not the ambiguous "a%2Cb%2Cc". The pair type has
+	// no room for a flag, so the delimiter travels in the value as a control character that AppendQuery turns into the
+	// literal. A control character in a value itself is replaced first: it can then only ever be a delimiter, and a
+	// delimiter is never URL-structural (',', '|', "%20"), so no value can inject '&' or '#' through this.
+	const TCHAR Delimiter = Style == EVaRestQueryStyle::Csv ? UrlPrivate::CsvDelimiter : Style == EVaRestQueryStyle::Ssv ? UrlPrivate::SsvDelimiter : UrlPrivate::PipesDelimiter;
+	FString Joined;
+	for (int32 i = 0; i < Values.Num(); ++i)
+	{
+		if (i > 0)
+		{
+			Joined.AppendChar(Delimiter);
+		}
+		for (const TCHAR C : Values[i])
+		{
+			Joined.AppendChar(UrlPrivate::IsDelimiterMarker(C) ? TEXT('\xFFFD') : C);
+		}
+	}
+	Query.Emplace(FString(Name), MoveTemp(Joined));
 }
 
 bool VaRest::Http::IsValidHeaderName(FStringView Name)
@@ -346,12 +483,16 @@ bool VaRest::Http::IsValidHeaderName(FStringView Name)
 
 bool VaRest::Http::IsValidHeaderValue(FStringView Value)
 {
+	// RFC 9110 5.5: a field value holds no CTL but HTAB. CR, LF and NUL are the injection bytes; the rest are refused
+	// because a sender must not generate invalid syntax (RFC 9110 2.2, review M5). Bytes >= 0x80 pass: curl sends the
+	// header as UTF-8 (CurlHttp.cpp:1030, TCHAR_TO_UTF8), so no character can truncate into a CR or LF.
 	for (const TCHAR C : Value)
 	{
-		if (C == TEXT('\r') || C == TEXT('\n') || C == TEXT('\0'))
+		if ((C < 0x20 && C != TEXT('\t')) || C == 0x7F)
 		{
 			return false;
 		}
 	}
 	return true;
 }
+

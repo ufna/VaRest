@@ -16,6 +16,12 @@ namespace VaRest::Http::UrlTestPrivate
 		return FString::ConstructFromPtrSize(reinterpret_cast<const UTF8CHAR*>(Bytes.GetData()), Bytes.Num());
 	}
 
+	/** A result that unexpectedly holds a value fails the assertion instead of check()-crashing the run on GetError() */
+	bool ErrorContains(const TValueOrError<FString, FString>& Result, const TCHAR* Needle)
+	{
+		return Result.HasError() && Result.GetError().Contains(Needle);
+	}
+
 	TArray<uint8> Utf8(FStringView Text)
 	{
 		FTCHARToUTF8 Converted(Text.GetData(), Text.Len());
@@ -75,6 +81,18 @@ bool FVaRestHttpJoinTest::RunTest(const FString& Parameters)
 		{ TEXT("https://h/v1?key=k"), TEXT(""), TEXT("https://h/v1?key=k") },
 		{ TEXT("https://h/v1?key=k"), TEXT("?a=1"), TEXT("https://h/v1?key=k&a=1") },
 		{ TEXT("https://h/v1?key=k"), TEXT("/p#top"), TEXT("https://h/v1/p?key=k#top") },
+		// An absolute Path drops the base, its query too: a ?key= must never reach another host
+		{ TEXT("https://h/v1?key=k"), TEXT("https://other/x"), TEXT("https://other/x") },
+		// Review M1: a base fragment is dropped, so it cannot swallow the path or the request's query
+		{ TEXT("https://h/v1#f"), TEXT("/pets"), TEXT("https://h/v1/pets") },
+		{ TEXT("https://h/v1?k=v#f"), TEXT("/p?x=1"), TEXT("https://h/v1/p?k=v&x=1") },
+		// Review M10: a base query ending in '&' is not doubled
+		{ TEXT("https://h/v1?k=v&"), TEXT("/p?x=1"), TEXT("https://h/v1/p?k=v&x=1") },
+		// Review I2 (RFC 3987 3.1): non-ASCII, space and CTL become %XX after the authority; '%' and other ASCII stay
+		{ TEXT("https://h/v1"), TEXT("/files/résumé?q=日本 x"), TEXT("https://h/v1/files/r%C3%A9sum%C3%A9?q=%E6%97%A5%E6%9C%AC%20x") },
+		{ TEXT("https://h/v1"), TEXT("/a%2Fb"), TEXT("https://h/v1/a%2Fb") },
+		{ TEXT("https://h/é"), TEXT("/p\tq"), TEXT("https://h/%C3%A9/p%09q") },
+		{ TEXT("https://h/v1"), TEXT("https://other/ü x"), TEXT("https://other/%C3%BC%20x") },
 	};
 	for (const FCase& Case : Cases)
 	{
@@ -86,6 +104,9 @@ bool FVaRestHttpJoinTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("... nor an empty host"), IsAbsoluteHttpUrl(TEXT("https:///x")));
 	TestFalse(TEXT("other schemes are not http(s)"), IsAbsoluteHttpUrl(TEXT("ftp://h/x")));
 	TestFalse(TEXT("a path is not"), IsAbsoluteHttpUrl(TEXT("/users/7")));
+	TestTrue(TEXT("a non-ASCII host is detected (IDN is out of scope, Config)"), HasNonAsciiHost(TEXT("https://münchen.de/x")));
+	TestFalse(TEXT("... a non-ASCII path is not a host"), HasNonAsciiHost(TEXT("https://h/münchen")));
+	TestFalse(TEXT("... nor a query"), HasNonAsciiHost(TEXT("https://h?q=é")));
 	return true;
 }
 
@@ -95,25 +116,35 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpPathTemplateTest, "VaRest.Http.Url.P
 bool FVaRestHttpPathTemplateTest::RunTest(const FString& Parameters)
 {
 	using namespace VaRest::Http;
+	using namespace VaRest::Http::UrlTestPrivate;
 	using FParams = TArray<TPair<FString, FString>>;
 
 	const FParams Params = { { TEXT("id"), TEXT("a/b?c#d e") }, { TEXT("item"), TEXT("日本") } };
 	const TValueOrError<FString, FString> Expanded = ExpandPathTemplate(TEXT("/users/{id}/items/{item}"), Params);
-	TestTrue(TEXT("expands"), Expanded.HasValue());
+	if (!TestTrue(TEXT("expands"), Expanded.HasValue()))
+	{
+		return false;
+	}
 	TestEqualSensitive(TEXT("each value is one percent-encoded segment"), Expanded.GetValue(),
 		FString(TEXT("/users/a%2Fb%3Fc%23d%20e/items/%E6%97%A5%E6%9C%AC")));
 
 	const FParams Twice = { { TEXT("id"), TEXT("1") }, { TEXT("id"), TEXT("2") } };
 	TestEqualSensitive(TEXT("a placeholder used twice gets the value twice; the last Path() wins"),
 		ExpandPathTemplate(TEXT("/{id}/x/{id}"), Twice).GetValue(), FString(TEXT("/2/x/2")));
+	// '%' is encoded, not trusted (no double decoding), and '+' is not a space in a path
+	TestEqualSensitive(TEXT("% and + in a value"), ExpandPathTemplate(TEXT("/x/{v}"), FParams{ { TEXT("v"), TEXT("100%+1") } }).GetValue(), FString(TEXT("/x/100%25%2B1")));
+	TestEqualSensitive(TEXT("dots inside a value are fine"), ExpandPathTemplate(TEXT("/x/{v}"), FParams{ { TEXT("v"), TEXT("a..b") } }).GetValue(), FString(TEXT("/x/a..b")));
 	TestEqualSensitive(TEXT("no placeholders, no parameters"), ExpandPathTemplate(TEXT("/plain"), FParams()).GetValue(), FString(TEXT("/plain")));
 
 	// Decision 10: every misuse is a Config error, never a silent "/users/"
 	const FParams Empty = { { TEXT("id"), TEXT("") } };
 	const FParams Unknown = { { TEXT("id"), TEXT("1") }, { TEXT("idd"), TEXT("2") } };
-	TestTrue(TEXT("a missing parameter is an error"), ExpandPathTemplate(TEXT("/users/{id}"), FParams()).GetError().Contains(TEXT("{id}")));
-	TestTrue(TEXT("an empty parameter is an error"), ExpandPathTemplate(TEXT("/users/{id}"), Empty).GetError().Contains(TEXT("empty")));
-	TestTrue(TEXT("a parameter the template lacks is an error (a typo)"), ExpandPathTemplate(TEXT("/users/{id}"), Unknown).GetError().Contains(TEXT("idd")));
+	TestTrue(TEXT("a missing parameter is an error"), ErrorContains(ExpandPathTemplate(TEXT("/users/{id}"), FParams()), TEXT("{id}")));
+	TestTrue(TEXT("an empty parameter is an error"), ErrorContains(ExpandPathTemplate(TEXT("/users/{id}"), Empty), TEXT("empty")));
+	TestTrue(TEXT("a parameter the template lacks is an error (a typo)"), ErrorContains(ExpandPathTemplate(TEXT("/users/{id}"), Unknown), TEXT("idd")));
+	// Review I1: curl removes dot-segments, so ".." would climb out of the segment
+	TestTrue(TEXT("'..' is a dot-segment error"), ErrorContains(ExpandPathTemplate(TEXT("/users/{id}/delete"), FParams{ { TEXT("id"), TEXT("..") } }), TEXT("dot-segment")));
+	TestTrue(TEXT("'.' is a dot-segment error"), ErrorContains(ExpandPathTemplate(TEXT("/users/{id}/delete"), FParams{ { TEXT("id"), TEXT(".") } }), TEXT("dot-segment")));
 	TestTrue(TEXT("an unclosed '{' is an error"), ExpandPathTemplate(TEXT("/users/{id"), FParams()).HasError());
 	TestTrue(TEXT("a stray '}' is an error"), ExpandPathTemplate(TEXT("/users/id}"), FParams()).HasError());
 	TestTrue(TEXT("'{}' is an error"), ExpandPathTemplate(TEXT("/users/{}"), FParams()).HasError());
@@ -155,8 +186,18 @@ bool FVaRestHttpQueryTest::RunTest(const FString& Parameters)
 	AddQueryValues(Styled, TEXT("none"), TArray<FString>(), EVaRestQueryStyle::Csv);
 	Url = TEXT("https://h/x");
 	AppendQuery(Url, Styled);
-	TestEqualSensitive(TEXT("Repeat, Csv, Ssv and Pipes; joined before encoding; no values, no pair"), Url,
-		FString(TEXT("https://h/x?tag=a%20b&tag=c&csv=a%20b%2Cc&ssv=a%20b%20c&pipes=a%20b%7Cc")));
+	TestEqualSensitive(TEXT("Repeat, Csv, Ssv and Pipes; literal delimiters (RFC 6570); no values, no pair"), Url,
+		FString(TEXT("https://h/x?tag=a%20b&tag=c&csv=a%20b,c&ssv=a%20b%20c&pipes=a%20b|c")));
+
+	// Review M2: a delimiter inside a value stays encoded, so ["a,b","c"] differs from ["a","b","c"]; a value cannot forge one
+	FPairs Tricky;
+	AddQueryValues(Tricky, TEXT("csv"), TArray<FString>{ TEXT("a,b"), TEXT("c") }, EVaRestQueryStyle::Csv);
+	AddQueryValues(Tricky, TEXT("p"), TArray<FString>{ TEXT("a|b"), TEXT("c&d=e#f") }, EVaRestQueryStyle::Pipes);
+	AddQueryValues(Tricky, TEXT("m"), TArray<FString>{ TEXT("x\x01y"), TEXT("z") }, EVaRestQueryStyle::Csv);
+	Url = TEXT("https://h/x");
+	AppendQuery(Url, Tricky);
+	TestEqualSensitive(TEXT("delimiters in values stay encoded; structural characters cannot escape"), Url,
+		FString(TEXT("https://h/x?csv=a%2Cb,c&p=a%7Cb|c%26d%3De%23f&m=x%EF%BF%BDy,z")));
 
 	Url = TEXT("https://h/x");
 	AppendQuery(Url, FPairs());
@@ -179,6 +220,8 @@ bool FVaRestHttpHeaderChecksTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("ordinary values"), IsValidHeaderValue(TEXT("Bearer abc.def; q=1, é")));
 	TestFalse(TEXT("CR in a value"), IsValidHeaderValue(TEXT("a\rb")));
 	TestFalse(TEXT("LF in a value (header injection)"), IsValidHeaderValue(TEXT("a\nX-Evil: 1")));
+	TestFalse(TEXT("other CTLs in a value (review M5)"), IsValidHeaderValue(TEXT("a\x01" "b")) || IsValidHeaderValue(TEXT("a\x1f")) || IsValidHeaderValue(TEXT("a\x7f")));
+	TestTrue(TEXT("HTAB is allowed in a value"), IsValidHeaderValue(TEXT("a\tb")));
 	const TCHAR WithNul[] = { TEXT('a'), TEXT('\0'), TEXT('b') };
 	TestFalse(TEXT("NUL in a value"), IsValidHeaderValue(FStringView(WithNul, 3)));
 	return true;
@@ -197,6 +240,8 @@ bool FVaRestHttpFormTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("form body kind"), Body.Kind == EVaRestBodyKind::Form);
 	TestEqualSensitive(TEXT("form content type"), Body.ContentType, FString(TEXT("application/x-www-form-urlencoded")));
 	TestEqual(TEXT("content length"), Body.ContentLength, static_cast<int64>(Body.Bytes.Num()));
+	TestTrue(TEXT("a content type with CRLF is dropped (review M7)"), FVaRestRequestBody::FromBytes(TArray<uint8>(), EVaRestBodyKind::Text, TEXT("text/plain\r\nX-Evil: 1")).ContentType.IsEmpty());
+	TestEqualSensitive(TEXT("... a clean one is kept"), FVaRestRequestBody::FromBytes(TArray<uint8>(), EVaRestBodyKind::Text, TEXT("text/plain")).ContentType, FString(TEXT("text/plain")));
 	return true;
 }
 
@@ -213,7 +258,10 @@ bool FVaRestHttpMultipartTest::RunTest(const FString& Parameters)
 	TestEqualSensitive(TEXT("content type names the boundary"), Multipart.GetContentType(), FString(TEXT("multipart/form-data; boundary=XyZ")));
 
 	const TValueOrError<FVaRestRequestBody, FString> Body = FVaRestRequestBody::FromMultipart(Multipart);
-	TestTrue(TEXT("builds"), Body.HasValue());
+	if (!TestTrue(TEXT("builds"), Body.HasValue()))
+	{
+		return false;
+	}
 	TArray<uint8> Expected = Utf8(TEXT("--XyZ\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nhi \"there\"\r\n")
 		TEXT("--XyZ\r\nContent-Disposition: form-data; name=\"blob\"; filename=\"a.bin\"\r\nContent-Type: application/octet-stream\r\n\r\n"));
 	Expected.Append({ 1, 2, 3 });
@@ -232,6 +280,39 @@ bool FVaRestHttpMultipartTest::RunTest(const FString& Parameters)
 	FVaRestMultipart NulBoundary(FStringView(TEXT("ab\0cd"), 5));
 	NulBoundary.AddField(TEXT("a"), TEXT("1"));
 	TestTrue(TEXT("a boundary holding NUL is refused (review N-M1)"), FVaRestRequestBody::FromMultipart(NulBoundary).HasError());
+
+	// Review M9/I3: the boundary ends up in the Content-Type header, so each of these is refused
+	FString Long71;
+	for (int32 i = 0; i < 71; ++i)
+	{
+		Long71.AppendChar(TEXT('a'));
+	}
+	for (const FString& BadBoundary : { FString(TEXT("a\rb")), FString(TEXT("a\nb")), FString(TEXT("a\"b")), FString(), Long71, FString(TEXT("ab ")) })
+	{
+		FVaRestMultipart BadBoundaryPart(BadBoundary);
+		BadBoundaryPart.AddField(TEXT("a"), TEXT("1"));
+		TestTrue(FString::Printf(TEXT("a boundary of %d characters is refused"), BadBoundary.Len()), !BadBoundaryPart.GetError().IsEmpty() && FVaRestRequestBody::FromMultipart(BadBoundaryPart).HasError());
+	}
+	// Review I3: tspecials need a quoted parameter
+	TestEqualSensitive(TEXT("a boundary with a space is quoted"), FVaRestMultipart(TEXT("a b")).GetContentType(), FString(TEXT("multipart/form-data; boundary=\"a b\"")));
+	TestEqualSensitive(TEXT("... and one with ':'"), FVaRestMultipart(TEXT("a:b")).GetContentType(), FString(TEXT("multipart/form-data; boundary=\"a:b\"")));
+	TestTrue(TEXT("... a token boundary is not"), FVaRestMultipart(TEXT("a-b")).GetContentType().EndsWith(TEXT("boundary=a-b")));
+
+	// Review M6: a file name is escaped like a name; NUL cannot be escaped, so it is refused
+	FVaRestMultipart Escaped(TEXT("XyZ"));
+	Escaped.AddBytes(TEXT("f"), TEXT("a\"b\r\nc.bin"), TEXT("text/plain"), { 1 });
+	const TValueOrError<FVaRestRequestBody, FString> EscapedBody = FVaRestRequestBody::FromMultipart(Escaped);
+	if (!TestTrue(TEXT("escaped file name builds"), EscapedBody.HasValue()))
+	{
+		return false;
+	}
+	TestTrue(TEXT("'\"', CR and LF in a file name are escaped"), AsText(EscapedBody.GetValue().Bytes).Contains(TEXT("filename=\"a%22b%0D%0Ac.bin\"")));
+	FVaRestMultipart NulName(TEXT("XyZ"));
+	NulName.AddField(FStringView(TEXT("a\0b"), 3), TEXT("v"));
+	TestTrue(TEXT("a name holding NUL is refused"), FVaRestRequestBody::FromMultipart(NulName).HasError());
+	FVaRestMultipart NulFileName(TEXT("XyZ"));
+	NulFileName.AddBytes(TEXT("f"), FStringView(TEXT("a\0b"), 3), TEXT("text/plain"), { 1 });
+	TestTrue(TEXT("... and a file name"), FVaRestRequestBody::FromMultipart(NulFileName).HasError());
 
 	FVaRestMultipart Random;
 	TestTrue(TEXT("the default boundary is random and long"), Random.GetBoundary().Len() >= 32 && Random.GetBoundary() != FVaRestMultipart().GetBoundary());
@@ -252,7 +333,10 @@ bool FVaRestHttpMultipartStreamTest::RunTest(const FString& Parameters)
 	{
 		FileBytes[i] = static_cast<uint8>(i * 31 + 7);
 	}
-	TestTrue(TEXT("fixture written"), FFileHelper::SaveArrayToFile(FileBytes, *File));
+	if (!TestTrue(TEXT("fixture written"), FFileHelper::SaveArrayToFile(FileBytes, *File)))
+	{
+		return false;
+	}
 
 	FVaRestMultipart Multipart(TEXT("B"));
 	Multipart.AddField(TEXT("a"), TEXT("1")).AddFile(TEXT("f"), File, TEXT("image/png"));
@@ -260,7 +344,10 @@ bool FVaRestHttpMultipartStreamTest::RunTest(const FString& Parameters)
 	TestEqualSensitive(TEXT("the file name defaults to the clean file name"), Multipart.GetParts()[1].FileName, FString(TEXT("multipart-file.bin")));
 
 	const TValueOrError<FVaRestRequestBody, FString> Body = FVaRestRequestBody::FromMultipart(Multipart);
-	TestTrue(TEXT("builds"), Body.HasValue());
+	if (!TestTrue(TEXT("builds"), Body.HasValue()))
+	{
+		return false;
+	}
 	const FVaRestRequestBody& B = Body.GetValue();
 	TestTrue(TEXT("streamed: memory, file, memory"), B.IsStreamed() && B.Segments.Num() == 3 && !B.Segments[1].FilePath.IsEmpty());
 
@@ -290,11 +377,38 @@ bool FVaRestHttpMultipartStreamTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("seeking back to 0 reads it again"), Again == Expected);
 	Stream.Close();
 
+	// Review M4: a file that shrank or grew since its part was added reads as zeros with the error flag set
+	AddExpectedMessagePlain(TEXT("could not be read at byte"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 2);
+	const int64 FileStart = B.Segments[0].Size();
+	for (const int32 ChangedSize : { 10, 200000 })
+	{
+		TArray<uint8> Changed;
+		Changed.SetNumZeroed(ChangedSize);
+		FMemory::Memset(Changed.GetData(), 0x5A, ChangedSize);
+		FFileHelper::SaveArrayToFile(Changed, *File);
+		FVaRestSegmentStream ChangedStream(B.Segments);
+		TArray<uint8> Got;
+		Got.Init(0xFF, 16);
+		ChangedStream.Seek(FileStart);
+		ChangedStream.Serialize(Got.GetData(), Got.Num());
+		TestTrue(FString::Printf(TEXT("a file now %d bytes long: error flag, zeros"), ChangedSize), ChangedStream.IsError() && !Got.ContainsByPredicate([](uint8 Byte) { return Byte != 0; }));
+	}
+	FFileHelper::SaveArrayToFile(FileBytes, *File);
+
 	FVaRestMultipart Missing(TEXT("B"));
 	Missing.AddFile(TEXT("f"), Dir / TEXT("does-not-exist.bin"));
 	TestTrue(TEXT("a missing file is an error"), !Missing.GetError().IsEmpty() && FVaRestRequestBody::FromMultipart(Missing).HasError());
 
+	FVaRestMultipart BadType(TEXT("B"));
+	BadType.AddFile(TEXT("f"), File, TEXT("text/plain\r\nX-Evil: 1"));
+	TestTrue(TEXT("a CRLF content type through AddFile is refused for that reason"), BadType.GetError().Contains(TEXT("content type")) && FVaRestRequestBody::FromMultipart(BadType).HasError());
+	TestTrue(TEXT("... and through FromFile"), FVaRestRequestBody::FromFile(File, TEXT("text/plain\r\nX-Evil: 1")).HasError());
+
 	const TValueOrError<FVaRestRequestBody, FString> Upload = FVaRestRequestBody::FromFile(File, TEXT("application/octet-stream"));
+	if (!TestTrue(TEXT("upload builds"), Upload.HasValue()))
+	{
+		return false;
+	}
 	TestTrue(TEXT("a streamed file body"), Upload.HasValue() && Upload.GetValue().Kind == EVaRestBodyKind::Stream && Upload.GetValue().ContentLength == FileBytes.Num());
 	TestTrue(TEXT("a missing upload file is an error"), FVaRestRequestBody::FromFile(Dir / TEXT("nope.bin"), TEXT("a/b")).HasError());
 	IFileManager::Get().Delete(*File);

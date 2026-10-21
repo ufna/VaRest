@@ -20,6 +20,46 @@ namespace VaRest::Http::BodyPrivate
 		Out.Append(reinterpret_cast<const uint8*>(Utf8.GetData()), Utf8.Len());
 	}
 
+	bool HasNul(FStringView Text)
+	{
+		for (const TCHAR C : Text)
+		{
+			if (C == 0)
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Review I3 and M8: the boundary goes into the Content-Type header -- 1 to 70 RFC 2046 bchars (2046 5.1.1), so no
+	 * CR/LF (header injection) and no '"'. Empty when valid. The text is not repeated in the message: it may hold control
+	 * characters.
+	 */
+	FString BoundaryProblem(const FString& Boundary)
+	{
+		bool bValidBoundary = Boundary.Len() >= 1 && Boundary.Len() <= 70 && !Boundary.EndsWith(TEXT(" "));
+		for (const TCHAR C : Boundary)
+		{
+			const bool bAlnum = (C >= TEXT('0') && C <= TEXT('9')) || (C >= TEXT('a') && C <= TEXT('z')) || (C >= TEXT('A') && C <= TEXT('Z'));
+			// C != 0: Strchr finds the terminator, so NUL would pass (FGenericWidePlatformString::Strchr,
+			// GenericWidePlatformString.h:157-165, used on Linux, Mac, iOS and Android; Windows' _tcschr,
+			// MicrosoftPlatformString.h:144-147, does the same; review N-M1, M3)
+			bValidBoundary &= bAlnum || (C != 0 && FCString::Strchr(TEXT("'()+_,-./:=? "), C) != nullptr);
+		}
+		return bValidBoundary ? FString() : FString(TEXT("the multipart boundary must be 1-70 characters of digits, letters and '()+_,-./:=? (no space at the end; RFC 2046 5.1.1)"));
+	}
+
+	/** Review M6: WHATWG escaping cannot express NUL, so a name or file name holding one is refused */
+	void RefuseNul(FString& Error, FStringView Name, FStringView FileName)
+	{
+		if (Error.IsEmpty() && (HasNul(Name) || HasNul(FileName)))
+		{
+			Error = FString(TEXT("a multipart part name or file name holds NUL"));
+		}
+	}
+
 	/** WHATWG HTML, multipart/form-data encoding: '"', CR and LF in a name or file name are percent-escaped */
 	FString EscapeQuoted(FStringView Text)
 	{
@@ -86,10 +126,13 @@ FVaRestMultipart::FVaRestMultipart()
 FVaRestMultipart::FVaRestMultipart(FStringView InBoundary)
 	: Boundary(InBoundary)
 {
+	// Review M8: every path (GetContentType, Encode, FromMultipart) sees a bad boundary through GetError()
+	Error = VaRest::Http::BodyPrivate::BoundaryProblem(Boundary);
 }
 
 FVaRestMultipart& FVaRestMultipart::AddField(FStringView Name, FStringView Value) &
 {
+	VaRest::Http::BodyPrivate::RefuseNul(Error, Name, FStringView());
 	FVaRestMultipartPart& Part = Parts.AddDefaulted_GetRef();
 	Part.Name = FString(Name);
 	Part.bField = true;
@@ -110,6 +153,7 @@ FVaRestMultipart& FVaRestMultipart::AddBytes(FStringView Name, FStringView FileN
 	{
 		Error = FString::Printf(TEXT("multipart part \"%s\": the content type holds CR, LF or NUL"), *FString(Name));
 	}
+	VaRest::Http::BodyPrivate::RefuseNul(Error, Name, FileName);
 	FVaRestMultipartPart& Part = Parts.AddDefaulted_GetRef();
 	Part.Name = FString(Name);
 	Part.FileName = FString(FileName);
@@ -137,6 +181,7 @@ FVaRestMultipart& FVaRestMultipart::AddFile(FStringView Name, FStringView FilePa
 	{
 		Error = FString::Printf(TEXT("multipart part \"%s\": the content type holds CR, LF or NUL"), *FString(Name));
 	}
+	VaRest::Http::BodyPrivate::RefuseNul(Error, Name, FileName);
 	FVaRestMultipartPart& Part = Parts.AddDefaulted_GetRef();
 	Part.Name = FString(Name);
 	Part.FileName = FileName.IsEmpty() ? FPaths::GetCleanFilename(Path) : FString(FileName);
@@ -154,7 +199,9 @@ FVaRestMultipart FVaRestMultipart::AddFile(FStringView Name, FStringView FilePat
 
 FString FVaRestMultipart::GetContentType() const
 {
-	return TEXT("multipart/form-data; boundary=") + Boundary;
+	// Review I3: bchars include RFC 2045 tspecials ( ) , / : = ? and space, which a parameter value may hold only as a
+	// quoted-string. The validator excludes '"' and '\\', so the quoted form needs no escaping.
+	return TEXT("multipart/form-data; boundary=") + (VaRest::Http::IsValidHeaderName(Boundary) ? Boundary : TEXT("\"") + Boundary + TEXT("\""));
 }
 
 bool FVaRestMultipart::HasFiles() const
@@ -237,6 +284,12 @@ bool FVaRestSegmentStream::ReadFileSegment(int32 Index, int64 Offset, uint8* Out
 	{
 		OpenFile.Reset(FPlatformFileManager::Get().GetPlatformFile().OpenRead(*Segments[Index].FilePath));
 		OpenIndex = Index;
+		// Review M4: Count is capped at the size recorded when the part was added, so a file that grew would otherwise send
+		// the first N bytes of its new content as if nothing had happened
+		if (OpenFile.IsValid() && OpenFile->Size() != Segments[Index].FileSize)
+		{
+			OpenFile.Reset();
+		}
 	}
 	return OpenFile.IsValid() && OpenFile->Seek(Offset) && OpenFile->Read(Out, Count);
 }
@@ -278,7 +331,8 @@ void FVaRestSegmentStream::Serialize(void* Data, int64 Length)
 			if (!bWarned)
 			{
 				bWarned = true;
-				UE_LOG(LogVaRestHttp, Warning, TEXT("VaRest: multipart file %s could not be read at byte %lld (changed since it was added?); sending zeros"), *Segment.FilePath, Offset);
+				// The file name only: a full local path is not for logs (review M4)
+				UE_LOG(LogVaRestHttp, Warning, TEXT("VaRest: multipart file %s could not be read at byte %lld (missing, or its size changed since it was added); sending zeros"), *FPaths::GetCleanFilename(Segment.FilePath), Offset);
 			}
 		}
 		Out += Count;
@@ -291,7 +345,16 @@ FVaRestRequestBody FVaRestRequestBody::FromBytes(TArray<uint8>&& InBytes, EVaRes
 {
 	FVaRestRequestBody Out;
 	Out.Kind = InKind;
-	Out.ContentType = FString(InContentType);
+	// Review M7: FromFile refuses a content type holding CR, LF or NUL. This one cannot return an error (frozen signature),
+	// so it sends no default Content-Type rather than one that could end the header.
+	if (VaRest::Http::IsValidHeaderValue(InContentType))
+	{
+		Out.ContentType = FString(InContentType);
+	}
+	else
+	{
+		UE_LOG(LogVaRestHttp, Warning, TEXT("VaRest: a request body content type holding a control character was dropped"));
+	}
 	Out.ContentLength = InBytes.Num();
 	Out.Bytes = MoveTemp(InBytes);
 	return Out;
@@ -307,20 +370,6 @@ TValueOrError<FVaRestRequestBody, FString> FVaRestRequestBody::FromMultipart(con
 	if (!Multipart.GetError().IsEmpty())
 	{
 		return MakeError(Multipart.GetError());
-	}
-	// Review I3: the boundary goes into the Content-Type header -- 1 to 70 RFC 2046 bchars (2046 5.1.1), so no CR/LF
-	// (header injection) and no '"'. The text is not repeated in the message: it may hold control characters.
-	const FString& Boundary = Multipart.GetBoundary();
-	bool bValidBoundary = Boundary.Len() >= 1 && Boundary.Len() <= 70 && !Boundary.EndsWith(TEXT(" "));
-	for (const TCHAR C : Boundary)
-	{
-		const bool bAlnum = (C >= TEXT('0') && C <= TEXT('9')) || (C >= TEXT('a') && C <= TEXT('z')) || (C >= TEXT('A') && C <= TEXT('Z'));
-		// C != 0: Strchr finds the terminator, so NUL would pass (StandardPlatformString.h:139-142; review N-M1)
-		bValidBoundary &= bAlnum || (C != 0 && FCString::Strchr(TEXT("'()+_,-./:=? "), C) != nullptr);
-	}
-	if (!bValidBoundary)
-	{
-		return MakeError(FString(TEXT("the multipart boundary must be 1-70 characters of digits, letters and '()+_,-./:=? (no space at the end; RFC 2046 5.1.1)")));
 	}
 	FVaRestRequestBody Out;
 	Out.Kind = EVaRestBodyKind::Multipart;
@@ -340,10 +389,17 @@ TValueOrError<FVaRestRequestBody, FString> FVaRestRequestBody::FromMultipart(con
 	}
 	for (const FVaRestMultipartPart& Part : Multipart.GetParts())
 	{
-		FVaRestMultipartPart& Descriptor = Out.PartDescriptors.Add_GetRef(Part);
-		if (!Part.bField)
+		// Field by field: copying the part and emptying its bytes would copy a large in-memory file first (review M10)
+		FVaRestMultipartPart& Descriptor = Out.PartDescriptors.AddDefaulted_GetRef();
+		Descriptor.Name = Part.Name;
+		Descriptor.FileName = Part.FileName;
+		Descriptor.ContentType = Part.ContentType;
+		Descriptor.FilePath = Part.FilePath;
+		Descriptor.Size = Part.Size;
+		Descriptor.bField = Part.bField;
+		if (Part.bField)
 		{
-			Descriptor.Bytes.Empty();
+			Descriptor.Bytes = Part.Bytes;
 		}
 	}
 	return MakeValue(MoveTemp(Out));

@@ -22,14 +22,19 @@ namespace VaRest::Http
 
 	/**
 	 * BaseUrl + Path with exactly one '/' between them (OpenAPI N14: https://h/v1 + /pets is https://h/v1/pets, never
-	 * RFC 3986 resolution). An absolute Path replaces BaseUrl; a Path starting with '?' or '#' is appended as is. Both are
-	 * trimmed first (v1's iOS fix, spec 3.2).
+	 * RFC 3986 resolution -- though curl still removes dot-segments from a literal path, which is why ExpandPathTemplate
+	 * refuses "." and ".."). An absolute Path replaces BaseUrl; a Path starting with '?' or '#' is appended as is. Both are
+	 * trimmed first (v1's iOS fix, spec 3.2). The base's fragment is dropped. After the authority, every non-ASCII byte,
+	 * CTL and space is percent-encoded (RFC 3987 3.1), other text -- '%' included -- is left alone.
 	 */
 	VARESTHTTP_API FString JoinUrl(FStringView BaseUrl, FStringView Path);
 
+	/** True when the host of an "http(s)://host/..." URL holds a non-ASCII character: IDN needs punycode, which is out of scope, so the caller reports Kind=Config */
+	VARESTHTTP_API bool HasNonAsciiHost(FStringView Url);
+
 	/**
 	 * "/users/{id}" with each {name} replaced by PercentEncode(value): one segment, so '/' in a value is %2F. The last
-	 * value given for a name wins. Errors (decision 10): a placeholder without a value, an empty value, a value whose name
+	 * value given for a name wins. Errors (decision 10): a placeholder without a value, an empty value, a value that is "." or "..", a value whose name
 	 * the template lacks, '{' without '}', a stray '}', and "{}".
 	 */
 	VARESTHTTP_API TValueOrError<FString, FString> ExpandPathTemplate(FStringView Template, TConstArrayView<TPair<FString, FString>> Params);
@@ -39,13 +44,15 @@ namespace VaRest::Http
 
 	/**
 	 * OpenAPI N9's array styles (decision 34): adds Values to Query as Style says -- Repeat one pair per value, Csv/Ssv/Pipes
-	 * one pair with the values joined by ',', ' ' or '|' (encoded later, by AppendQuery). No values: no pair.
+	 * one pair, each value encoded on its own and joined by a literal ',', "%20" or '|' (RFC 6570 form
+	 * expansion; a delimiter inside a value stays encoded). The pair carries the delimiters as control characters that
+	 * only AppendQuery turns into the literal. No values: no pair.
 	 */
 	VARESTHTTP_API void AddQueryValues(TArray<TPair<FString, FString>>& Query, FStringView Name, TConstArrayView<FString> Values, EVaRestQueryStyle Style);
 
 	/** RFC 9110 5.6.2 token: one or more of ALPHA DIGIT !#$%&'*+-.^_`|~ */
 	VARESTHTTP_API bool IsValidHeaderName(FStringView Name);
 
-	/** No CR, LF or NUL: a value holding one could end its header and start another (header injection) */
+	/** No CTL but HTAB (RFC 9110 5.5): CR or LF in a value could end its header and start another (header injection) */
 	VARESTHTTP_API bool IsValidHeaderValue(FStringView Value);
 }
