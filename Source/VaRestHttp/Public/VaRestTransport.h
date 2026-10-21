@@ -116,3 +116,9 @@ public:
 	 */
 	virtual TSharedRef<IVaRestTransportCall, ESPMode::ThreadSafe> Start(FVaRestTransportRequest&& Request, FVaRestTransportComplete&& OnComplete) = 0;
 };
+
+namespace VaRest::Http
+{
+	/** The FHttpModule transport (spec 0.4: "UE's FHttpModule is the transport"); every client uses it unless WithTransport replaces it */
+	VARESTHTTP_API TSharedRef<IVaRestTransport, ESPMode::ThreadSafe> GetDefaultTransport();
+}
