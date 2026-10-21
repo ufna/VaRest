@@ -1,0 +1,446 @@
+// Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
+
+#pragma once
+
+#include "CoreMinimal.h"
+#include "Delegates/Delegate.h"
+#include "HAL/PlatformTime.h"
+#include "Misc/DateTime.h"
+#include "Misc/TVariant.h"
+#include "UObject/WeakObjectPtr.h"
+#include "VaRestBody.h"
+#include "VaRestHttpTypes.h"
+
+#include <atomic>
+
+/**
+ * Inspector spec 9: thirteen kinds in all, in its order. M3 emits Started, AttemptDispatched, AttemptEnded, Completed and
+ * Client, and provides scope 0 through the snapshot; Note, Excerpt and Marker arrive with M4, the socket kinds with W5.
+ */
+enum class EVaRestTraceKind : uint8
+{
+	Started,
+	AttemptDispatched,
+	AttemptEnded,
+	Note,
+	Completed,
+	Excerpt,
+	Scope,
+	Client,
+	Marker,
+	Socket,
+	SocketAttempt,
+	SocketFrame,
+	SocketNote
+};
+
+/** WebSocket spec 19 item 4: who emitted an event. Sinks ignore payload types they do not know. */
+enum class EVaRestTraceSource : uint8
+{
+	Http,
+	Socket
+};
+
+/** IN-11: what a sink wants. 0 = nothing: every trace point returns after one relaxed load. */
+enum class EVaRestTraceDetail : uint32
+{
+	None = 0,
+	Metadata = 1 << 0,
+	Headers = 1 << 1,
+	Bodies = 1 << 2
+};
+ENUM_CLASS_FLAGS(EVaRestTraceDetail);
+
+struct FVaRestTraceDetailSettings
+{
+	EVaRestTraceDetail Flags = EVaRestTraceDetail::None;
+	/** Text and JSON excerpt cap (Inspector 3.4 MaxBodyBytes) */
+	int32 BodyCap = 0;
+	/** Binary excerpt cap; 0 = a descriptor only (Inspector 3.4) */
+	int32 BinaryCap = 0;
+	/** Socket frame excerpt cap */
+	int32 FrameCap = 0;
+};
+
+/** IN-6 */
+enum class EVaRestExcerptKind : uint8
+{
+	Json,
+	Text,
+	Form,
+	Multipart,
+	Binary,
+	Stream,
+	Skipped
+};
+
+enum class EVaRestExcerptSkip : uint8
+{
+	None,
+	Backlog,
+	Disabled
+};
+
+/** IN-6: a redacted body excerpt. FVaRestRedactor builds it (logs use it in M3); M4's Excerpt event carries it. */
+struct VARESTHTTP_API FVaRestTraceExcerpt
+{
+	/** Redacted UTF-8 text: a JSON prefix, form pairs, plain text or a descriptor. Shared and never changed. */
+	TSharedPtr<const TArray<uint8>, ESPMode::ThreadSafe> Bytes;
+	EVaRestExcerptKind Kind = EVaRestExcerptKind::Text;
+	/** The whole body's size */
+	int64 TotalBytes = 0;
+	bool bTruncated = false;
+	bool bRedacted = false;
+	/** "" when complete, "cap" when the cap cut it, else the JSON parse error */
+	FString StopReason;
+	/** Binary: the first 8 hex digits of the body's SHA-256, when the whole body was seen */
+	FString Sha256Prefix;
+	EVaRestExcerptSkip SkipReason = EVaRestExcerptSkip::None;
+
+	FString ToText() const;
+};
+
+/** IN-15 */
+struct FVaRestTraceInitiator
+{
+	FString OwnerPath;
+	FString ScriptObject;
+	FString ScriptFunction;
+	/** Code - Script of the top Blueprint frame; -1 without one */
+	int32 ScriptCodeOffset = INDEX_NONE;
+	FString SourceFile;
+	int32 SourceLine = 0;
+};
+
+enum class EVaRestTraceRequestFlags : uint8
+{
+	None = 0,
+	Idempotent = 1 << 0,
+	QueueWhenOffline = 1 << 1,
+	NoAuth = 1 << 2,
+	AuthRefresh = 1 << 3,
+	/** A snapshot entry for a request that started before the sink attached */
+	Partial = 1 << 4
+};
+ENUM_CLASS_FLAGS(EVaRestTraceRequestFlags);
+
+enum class EVaRestTraceCacheLookup : uint8
+{
+	None,
+	Miss,
+	HitMemory,
+	HitDisk,
+	Stale,
+	Revalidate
+};
+
+struct FVaRestTraceBody
+{
+	FString ContentType;
+	int64 Bytes = 0;
+	EVaRestBodyKind Kind = EVaRestBodyKind::None;
+};
+
+struct FVaRestTraceQueueReplay
+{
+	FString QueueId;
+	uint64 OriginalRequestId = 0;
+};
+
+/** IN-1. Fields marked * in the spec arrive redacted: Url, Headers. */
+struct FVaRestTraceStarted
+{
+	uint64 RequestId = 0;
+	uint64 ScopeId = 0;
+	uint64 ClientId = 0;
+	FString Verb;
+	FString Url;
+	/** The path before {param} substitution, without the query */
+	FString PathTemplate;
+	FName Endpoint;
+	FName Tag;
+	EVaRestPriority Priority = EVaRestPriority::Normal;
+	EVaRestTraceRequestFlags Flags = EVaRestTraceRequestFlags::None;
+	FVaRestTraceQueueReplay QueueReplayOf;
+	FVaRestTraceInitiator Initiator;
+	/** M4 */
+	FName CachePolicy;
+	/** M4 */
+	EVaRestTraceCacheLookup CacheLookup = EVaRestTraceCacheLookup::None;
+	/** As built, redacted; empty unless a sink wants Headers */
+	FVaRestHeaders Headers;
+	FVaRestTraceBody Body;
+	bool bExcerptPending = false;
+	FDateTime StartUtc;
+	/** Snapshot entries (Partial): the attempt in progress */
+	int32 CurrentAttempt = 0;
+	/** Snapshot entries: when the request entered the pipeline (IVaRestClock seconds) */
+	double StartedAt = 0.0;
+};
+
+enum class EVaRestTraceGap : uint8
+{
+	None,
+	Backoff,
+	SessionRefresh
+};
+
+/** IN-2: on the game thread, immediately before the transport is started */
+struct FVaRestTraceAttemptDispatched
+{
+	uint64 RequestId = 0;
+	int32 Attempt = 0;
+	double AttemptStart = 0.0;
+	/** M4 */
+	EVaRestTraceGap GapKind = EVaRestTraceGap::None;
+	double GapSeconds = 0.0;
+	/** M4 */
+	double AuthWait = 0.0;
+	uint64 AuthRefreshId = 0;
+	/** Seconds this attempt waited in the limiter queue */
+	double LimiterWait = 0.0;
+	/** Final (after auth and custom per-attempt stages), redacted; empty unless a sink wants Headers */
+	FVaRestHeaders Headers;
+	/** M4 (revalidation) */
+	bool bConditional = false;
+};
+
+/** IN-3: on the game thread, when the outcome re-enters the stage chain. The times were written on the HTTP thread. */
+struct FVaRestTraceAttemptEnded
+{
+	uint64 RequestId = 0;
+	int32 Attempt = 0;
+	/** 0 = no response */
+	int32 Status = 0;
+	/** Redacted; empty unless a sink wants Headers */
+	FVaRestHeaders Headers;
+	/** Redacted */
+	FString EffectiveUrl;
+	FString ContentType;
+	int64 BytesUp = 0;
+	int64 BytesDown = 0;
+	EVaRestTransportFailure Failure = EVaRestTransportFailure::None;
+	FName FailureDetail;
+	/**
+	 * IVaRestClock seconds; -1 when unknown. UploadDoneAt is when the transport took the last body byte (curl's read
+	 * callback, NSURLSession's didSendBodyData), which for a body smaller than the socket's send buffer is before it left
+	 * the machine: the upload phase reads short and the wait phase long (decision 29, review N-8).
+	 */
+	double UploadDoneAt = -1.0;
+	double StatusAt = -1.0;
+	double TransportDoneAt = -1.0;
+	bool bExcerptPending = false;
+};
+
+enum class EVaRestTraceOutcome : uint8
+{
+	Success,
+	Error,
+	Queued,
+	Canceled
+};
+
+struct FVaRestTraceError
+{
+	EVaRestErrorKind Kind = EVaRestErrorKind::None;
+	int32 HttpStatus = 0;
+	FString Code;
+	/** Value-scrubbed */
+	FString Message;
+};
+
+struct FVaRestTraceDecodeWarning
+{
+	FString Path;
+	FString Message;
+};
+
+/** M4 fills it */
+struct FVaRestTraceEnvelope
+{
+	bool bApplied = false;
+	FString DataPath;
+	FString PredicatePath;
+	FString Expected;
+	FString Actual;
+	FString Code;
+	FString Message;
+};
+
+/** IN-5: on the game thread, before any callback (OnHttpThread ones included) */
+struct FVaRestTraceCompleted
+{
+	static constexpr int32 MaxDecodeWarnings = 32;
+
+	uint64 RequestId = 0;
+	EVaRestTraceOutcome Outcome = EVaRestTraceOutcome::Success;
+	EVaRestCancelReason CancelReason = EVaRestCancelReason::None;
+	FVaRestTraceError Error;
+	FName ResultType;
+	/** IVaRestClock seconds; -1 when there was no decode step */
+	double DecodeStartAt = -1.0;
+	double DecodeEndAt = -1.0;
+	/** The first MaxDecodeWarnings, Message scrubbed */
+	TArray<FVaRestTraceDecodeWarning> DecodeWarnings;
+	int32 DecodeWarningCount = 0;
+	FVaRestTraceEnvelope Envelope;
+};
+
+/** IN-7. M3 has only scope 0, "Process"; M5's hubs add one per game instance. */
+struct FVaRestTraceScope
+{
+	bool bOpened = true;
+	uint64 ScopeId = 0;
+	int32 PIEInstance = INDEX_NONE;
+	bool bEditorScope = false;
+	FString Label;
+	/** Game thread use only */
+	TWeakObjectPtr<UObject> GameInstance;
+};
+
+/** IN-8 */
+struct FVaRestTraceClient
+{
+	bool bCreated = true;
+	uint64 ClientId = 0;
+	uint64 ScopeId = 0;
+	/** The asset path (M5), WithName, or the base URL */
+	FString DisplayName;
+};
+
+using FVaRestTracePayload = TVariant<FVaRestTraceStarted, FVaRestTraceAttemptDispatched, FVaRestTraceAttemptEnded, FVaRestTraceCompleted, FVaRestTraceScope, FVaRestTraceClient>;
+
+struct FVaRestTraceEvent
+{
+	EVaRestTraceKind Kind = EVaRestTraceKind::Started;
+	EVaRestTraceSource Source = EVaRestTraceSource::Http;
+	/** Taken only when the mask is non-zero (Inspector 2.3) */
+	uint64 Seq = 0;
+	/** IVaRestClock seconds of the emitting client */
+	double Time = 0.0;
+	FVaRestTracePayload Payload;
+};
+
+/** IN-12: what a sink learns when it attaches */
+struct FVaRestTraceSnapshot
+{
+	TArray<FVaRestTraceScope> Scopes;
+	TArray<FVaRestTraceClient> Clients;
+	/** Every in-flight request as Started{Partial} */
+	TArray<FVaRestTraceStarted> InFlight;
+};
+
+class IVaRestTraceSink
+{
+public:
+	virtual ~IVaRestTraceSink() = default;
+
+	/** Game thread; read by AddSink and RefreshDetail */
+	virtual FVaRestTraceDetailSettings GetDetail() const = 0;
+
+	/** Game thread, from AddSink, before the sink receives any event */
+	virtual void OnAttached(const FVaRestTraceSnapshot& Snapshot) = 0;
+
+	/**
+	 * The emitting thread: the game thread for every kind but Excerpt (a background task); never the HTTP thread
+	 * (Inspector 9). Return quickly. A background emitter may still deliver once after RemoveSink returns (IN-12).
+	 */
+	virtual void OnEvent(const FVaRestTraceEvent& Event) = 0;
+};
+
+/** IN-11 dev-test counters: the zero-cost proof counts instead of timing (Inspector 3.1 item 6) */
+struct FVaRestTraceCounters
+{
+	std::atomic<uint64> EventsBuilt{ 0 };
+	std::atomic<uint64> RedactorCalls{ 0 };
+	/** Transport delegate binds made for tracing or progress (OnStatusCodeReceived, OnRequestProgress64) */
+	std::atomic<uint64> DelegateBinds{ 0 };
+	/** Dev-only cycle accumulator of the trace points (Inspector 8) */
+	std::atomic<uint64> TraceCycles{ 0 };
+
+	void Reset()
+	{
+		EventsBuilt = 0;
+		RedactorCalls = 0;
+		DelegateBinds = 0;
+		TraceCycles = 0;
+	}
+};
+
+/** Test-only (IN-12): while one lives, only the sinks added inside it are active. Game thread; nests. */
+class VARESTHTTP_API FVaRestScopedSinkIsolation
+{
+public:
+	FVaRestScopedSinkIsolation();
+	~FVaRestScopedSinkIsolation();
+	FVaRestScopedSinkIsolation(const FVaRestScopedSinkIsolation&) = delete;
+	FVaRestScopedSinkIsolation& operator=(const FVaRestScopedSinkIsolation&) = delete;
+};
+
+/** The sink registry and the trace points' gate (Inspector 3.1, IN-10 to IN-12) */
+class VARESTHTTP_API FVaRestTrace
+{
+public:
+	using FSinkRef = TSharedRef<IVaRestTraceSink, ESPMode::ThreadSafe>;
+	using FSinkList = TArray<FSinkRef>;
+	using FScopedSinkIsolation = FVaRestScopedSinkIsolation;
+
+	/** IN-7: before M5, everything is in this scope */
+	static constexpr uint64 ProcessScopeId = 0;
+
+	/** IN-11: one relaxed load. Every trace point starts with `if (FVaRestTrace::Detail() == EVaRestTraceDetail::None) { return; }`. */
+	static EVaRestTraceDetail Detail()
+	{
+		return static_cast<EVaRestTraceDetail>(DetailMask.load(std::memory_order_relaxed));
+	}
+
+	static bool Wants(EVaRestTraceDetail Flag)
+	{
+		return EnumHasAnyFlags(Detail(), Flag);
+	}
+
+	/** The largest caps any sink asked for; read after the mask check */
+	static FVaRestTraceDetailSettings GetDetailSettings();
+
+	/** Game thread. Calls Sink->OnAttached(BuildSnapshot()) first (IN-12). */
+	static void AddSink(const FSinkRef& Sink);
+	/** Game thread */
+	static void RemoveSink(const FSinkRef& Sink);
+	/** Game thread: a sink's GetDetail() changed */
+	static void RefreshDetail();
+	/** Any thread: the current immutable list (null when there is none) */
+	static TSharedPtr<const FSinkList, ESPMode::ThreadSafe> GetSinks();
+
+	/** Stamps Seq and hands the event to every sink. Game thread for every kind but Excerpt. Callers checked Detail() first. */
+	static void Emit(EVaRestTraceKind Kind, double Time, FVaRestTracePayload&& Payload, EVaRestTraceSource Source = EVaRestTraceSource::Http);
+
+	/** Snapshot contributors (core: clients and in-flight requests; W5: sockets). Game thread. */
+	static TMulticastDelegate<void(FVaRestTraceSnapshot&)>& OnBuildSnapshot();
+	/** Scope 0, then every contributor. Game thread. */
+	static FVaRestTraceSnapshot BuildSnapshot();
+
+	/** IN-10: assigned at creation whatever the mask; any thread; never 0 */
+	static uint64 NewRequestId();
+	static uint64 NewClientId();
+
+	static FVaRestTraceCounters& Counters();
+
+	/** Adds the cycles it lived to Counters().TraceCycles. Build one inside a trace point, after the mask check. */
+	struct FScopedCycles
+	{
+		uint64 Start = FPlatformTime::Cycles64();
+		~FScopedCycles() { Counters().TraceCycles += FPlatformTime::Cycles64() - Start; }
+	};
+
+private:
+	friend class FVaRestScopedSinkIsolation;
+
+	/**
+	 * Game thread. Publishes Next with its mask and caps. The caps are merged before the lock is taken and the old list is
+	 * released after it is dropped (review M-8): a sink's GetDetail may call GetDetailSettings or GetSinks, and a sink's
+	 * destructor may drop a client whose Client{Destroyed} calls GetSinks -- FRWLock is not recursive.
+	 */
+	static void Swap(TSharedPtr<const FSinkList, ESPMode::ThreadSafe> Next);
+
+	static std::atomic<uint32> DetailMask;
+};
