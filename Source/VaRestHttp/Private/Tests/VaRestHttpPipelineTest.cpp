@@ -94,6 +94,16 @@ namespace VaRest::Http::PipelineTestPrivate
 	{
 		return FVaRestFakeResponse::Json(Status, FUtf8StringView(reinterpret_cast<const UTF8CHAR*>(Text)));
 	}
+
+	/** One configuration edit that sets X-A and X-B to Gen together: a request that sees X-A != X-B saw half an edit */
+	void EditGeneration(const FVaRestClient& Client, int32 Gen)
+	{
+		Client.GetStateInternal()->EditConfig([Gen](FClientConfig& Edited)
+		{
+			Edited.DefaultHeaders.Set(TEXT("X-A"), LexToString(Gen));
+			Edited.DefaultHeaders.Set(TEXT("X-B"), LexToString(Gen));
+		});
+	}
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpPipelineGetJsonTest, "VaRest.Http.Pipeline.GetJson",
@@ -353,21 +363,27 @@ bool FVaRestHttpPipelineDroppedTest::RunTest(const FString& Parameters)
 	using namespace VaRest::Http::PipelineTestPrivate;
 	FTestRig Rig;
 	Rig.Fake->Enqueue(FVaRestFakeResponse::Manual());
+	const int32 ExchangesOffBefore = Counters().ExchangesDestroyedOffGameThread.load();
 	auto Outcome = MakeOutcome<FVaRestJson>();
-	Observe(Rig.Client.Get(TEXT("/slow")), Outcome).Send();
+	Observe(Rig.Client.Get(TEXT("/slow")), Outcome).Send(); // on the game thread, and no handle pinned anywhere
 	PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 1; });
 	TWeakPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> WeakState = Rig.Client.GetStateInternal();
 	Rig.Client = FVaRestClient(); // the last handle
 	TestTrue(TEXT("spec 3.2: the in-flight exchange keeps the client state alive"), WeakState.IsValid());
 	const int32 OffBefore = Counters().ClientStatesDestroyedOffGameThread.load();
-	// The completion comes from a worker (bCompleteOnWorker) and the JSON is decoded on another: both hand their
-	// references over to the game thread instead of dropping the last one where they run (review I-1)
+	// The completion comes from a worker (bCompleteOnWorker) and the JSON is decoded on another: both move their
+	// reference to the exchange into the game-thread continuation instead of dropping it where they run (review I-1).
+	// Two layers are counted. The exchange: a continuation that copied its reference instead of moving it would let the
+	// exchange die on a worker whenever that copy happened to be the last -- a timing-dependent catch, so a regression
+	// shows often, not always. The client state: a regression of the exchange's backstop as well.
 	Rig.Fake->Complete(0, Json(200, R"({"late":true})"));
 	TestTrue(TEXT("the request still completes"), Rig.Wait(Outcome));
 	TestTrue(TEXT("... and calls back"), Outcome->SuccessCalls == 1);
 	PumpUntil([&WeakState] { return !WeakState.IsValid(); }, 1.0);
 	TestFalse(TEXT("then the state dies"), WeakState.IsValid());
 	TestEqual(TEXT("... on the game thread (spec 1; review I-1)"), Counters().ClientStatesDestroyedOffGameThread.load() - OffBefore, 0);
+	TestEqual(TEXT("the exchange died on the game thread too: no continuation kept a reference (review I-1)"),
+		Counters().ExchangesDestroyedOffGameThread.load() - ExchangesOffBefore, 0);
 	return true;
 }
 
@@ -415,6 +431,7 @@ bool FVaRestHttpPipelineConfigRaceTest::RunTest(const FString& Parameters)
 		});
 	};
 	EditBoth(0);
+	const int32 ExchangesOffBefore = Counters().ExchangesDestroyedOffGameThread.load();
 	FVaRestClient Client = Rig.Client;
 	TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> Finished = MakeShared<std::atomic<int32>, ESPMode::ThreadSafe>(0);
 	for (int32 t = 0; t < 4; ++t)
@@ -461,10 +478,82 @@ bool FVaRestHttpPipelineConfigRaceTest::RunTest(const FString& Parameters)
 		}
 	}
 	TestTrue(TEXT("every request carries one whole configuration (X-A == X-B)"), bWhole);
-	TestTrue(TEXT("spec 3.1: a request carries the configuration of its Send(), not of its later Enter"), bAtSend);
-	TestTrue(TEXT("... so generations never go back in transport order"), bOrdered);
+	// A game-thread Send() enters at once, so these two hold for a snapshot at Send and at Enter alike: the worker's
+	// snapshot at Send() is VaRest.Http.Pipeline.SnapshotAtSend's (task 8 review I1). Worker requests are left out of the
+	// order check: with a correct snapshot at Send, one made at generation 5 may still enter after /gt/7.
+	TestTrue(TEXT("a game-thread request carries the configuration of the edit just before its Send()"), bAtSend);
+	TestTrue(TEXT("... so game-thread generations never go back in transport order"), bOrdered);
 	TestTrue(TEXT("snapshots were taken at different generations"), Seen.Num() > 1);
+	// Task 8 review minor 2: a worker's Send() moves its reference into the Enter task, so no exchange dies on a sender
+	// thread even when the game thread runs the whole request before Send() returns there (timing-dependent: a
+	// regression shows only when that happens)
+	TestEqual(TEXT("no exchange died on a sending worker (review I-1)"), Counters().ExchangesDestroyedOffGameThread.load() - ExchangesOffBefore, 0);
 	// The data-race half (a worker reading while the game thread swaps) is a crash/TSAN smoke test: it fails only by crashing
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpPipelineSnapshotAtSendTest, "VaRest.Http.Pipeline.SnapshotAtSend",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpPipelineSnapshotAtSendTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::PipelineTestPrivate;
+	// Spec 3.1, verbatim: "A request snapshots the configuration at Send()" (decision 27; reviews I-7, I6; task 8 review
+	// I1). Deterministic: a worker sends while generation 1 is current; the game thread drains no task until that Send()
+	// returned (review I-6), so the request's Enter task cannot have run; it then edits to generation 2, and only then
+	// lets the request enter. A snapshot taken at Enter would carry 2.
+	FTestRig Rig;
+	EditGeneration(Rig.Client, 1);
+	FVaRestClient Client = Rig.Client;
+	auto FromWorker = MakeOutcome<FVaRestJson>();
+	TSharedRef<std::atomic<bool>, ESPMode::ThreadSafe> bSent = MakeShared<std::atomic<bool>, ESPMode::ThreadSafe>(false);
+	// Not Wait(): a waited task may be retracted and run on the waiting thread (TaskPrivate.cpp:75-100)
+	UE::Tasks::Launch(TEXT("VaRest.Test.SnapshotSender"), [Client, FromWorker, bSent]
+	{
+		Observe(Client.Get(TEXT("/snap")), FromWorker).Send();
+		*bSent = true;
+	});
+	// The worker never needs the game thread to send, so this cannot deadlock
+	const double SpinUntil = FPlatformTime::Seconds() + 10.0;
+	while (!bSent->load() && FPlatformTime::Seconds() < SpinUntil)
+	{
+		FPlatformProcess::Yield();
+	}
+	TestTrue(TEXT("the worker sent"), bSent->load());
+	TestEqual(TEXT("... and its request has not entered the pipeline: the Enter task waits for the game thread"), Rig.Fake->NumCalls(), 0);
+	EditGeneration(Rig.Client, 2);
+	auto AfterEdit = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/after")), AfterEdit).Send(); // the control: the edit took effect before the worker's request entered
+	TestTrue(TEXT("both complete"), PumpUntil([FromWorker, AfterEdit] { return FromWorker->IsDone() && AfterEdit->IsDone(); }));
+	TestTrue(TEXT("... nothing left in flight"), PumpUntil([&Rig] { return Rig.Client.GetInFlightCount() == 0; }));
+	FString SnapA;
+	FString SnapB;
+	FString AfterA;
+	int32 Found = 0;
+	for (int32 i = 0; i < Rig.Fake->NumCalls(); ++i)
+	{
+		const FVaRestTransportRequest& Sent = Rig.Fake->GetCall(i).Request;
+		if (Sent.Url.EndsWith(TEXT("/snap"), ESearchCase::CaseSensitive))
+		{
+			SnapA = Sent.Headers.Get(TEXT("X-A"));
+			SnapB = Sent.Headers.Get(TEXT("X-B"));
+			++Found;
+		}
+		else if (Sent.Url.EndsWith(TEXT("/after"), ESearchCase::CaseSensitive))
+		{
+			AfterA = Sent.Headers.Get(TEXT("X-A"));
+			++Found;
+		}
+	}
+	if (!TestEqual(TEXT("both reached the transport, once each"), Found, 2))
+	{
+		return false;
+	}
+	TestEqualSensitive(TEXT("spec 3.1: the worker's request carries the configuration of its Send() (generation 1), not of its later Enter (2)"),
+		SnapA, FString(TEXT("1")));
+	TestEqualSensitive(TEXT("... all of it"), SnapB, FString(TEXT("1")));
+	TestEqualSensitive(TEXT("a request sent after the edit carries generation 2"), AfterA, FString(TEXT("2")));
 	return true;
 }
 

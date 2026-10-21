@@ -23,7 +23,10 @@ namespace VaRest::Http::PipelinePrivate
 		UE::Tasks::Launch(DebugName, Forward<FuncType>(Func), UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
 	}
 
-	/** While a public call (Send, Cancel) runs on an exchange, Complete defers its callbacks (decision 3) */
+	/**
+	 * While Enter (so a game-thread Send(), and the Enter task of a request sent from another thread) or Cancel runs on an
+	 * exchange, Complete defers its callbacks (decision 3)
+	 */
 	struct FApiScope
 	{
 		explicit FApiScope(FVaRestExchange& InExchange)
@@ -263,10 +266,21 @@ FVaRestAttemptOutcome FVaRestAttemptOutcome::Canceled()
 
 FVaRestExchange::~FVaRestExchange()
 {
-	if (!IsInGameThread() && (State.IsValid() || Config.IsValid()))
+	if (IsInGameThread())
 	{
-		// Review I-1 backstop: a pin taken on another thread (IsActive, Cancel) can be the last reference
-		VaRest::Http::PipelinePrivate::OnGameThread(TEXT("VaRest.ReleaseExchange"), [DoomedState = MoveTemp(State), DoomedConfig = MoveTemp(Config)] {});
+		return;
+	}
+#if !UE_BUILD_SHIPPING
+	// The pipeline's own references die on the game thread (review I-1); only a pin taken elsewhere may be the last
+	++VaRest::Http::Testing::Counters().ExchangesDestroyedOffGameThread;
+#endif
+	if (State.IsValid() || Config.IsValid() || Handler.IsValid())
+	{
+		// Review I-1 backstop: a pin taken on another thread (IsActive, Cancel) can be the last reference. The handler goes
+		// too: it holds the user's callbacks and their captures (null by now in every path but a shutdown that never ran
+		// the Enter task; task 8 review, minor 4).
+		VaRest::Http::PipelinePrivate::OnGameThread(TEXT("VaRest.ReleaseExchange"),
+			[DoomedState = MoveTemp(State), DoomedConfig = MoveTemp(Config), DoomedHandler = MoveTemp(Handler)] {});
 	}
 }
 
@@ -515,8 +529,9 @@ void VaRest::Http::FClientState::Complete(const FVaRestExchangeRef& Exchange, FF
 	}
 	if (Ex.Phase == EVaRestExchangePhase::Decoding && !Ex.Handler.IsValid())
 	{
-		// Review C-3: a decode task holds the handler. It completes the exchange when it returns -- as Canceled when the
-		// flag is set -- so finishing here would leave nothing to deliver to and lose every callback.
+		// Review C-3: a decode task holds the handler. It completes the exchange when it returns (as Canceled when the
+		// cancel flag is set, once Task 11 adds the cancel path to Complete), so finishing here would leave nothing to
+		// deliver to and lose every callback.
 		return;
 	}
 	if (Ex.ApiDepth > 0)

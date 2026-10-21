@@ -54,8 +54,10 @@ FVaRestRequestHandle VaRest::Http::SendRequest(TUniquePtr<FRequestSpec>&& Spec, 
 		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: Send() on an empty FVaRestClient (make one with FVaRestClient::Make); the %s request is dropped"), *Spec->Verb);
 		return FVaRestRequestHandle();
 	}
-	FVaRestExchangeRef Exchange = MakeShared<FVaRestExchange, ESPMode::ThreadSafe>();
-	FVaRestExchange& Ex = *Exchange;
+	// A TSharedPtr, so that the worker path can move it into the Enter task (review I-1; a TSharedRef "move" copies,
+	// SharedPointer.h:354-361): this thread then holds no reference that could be the last one
+	TSharedPtr<FVaRestExchange, ESPMode::ThreadSafe> Created = MakeShared<FVaRestExchange, ESPMode::ThreadSafe>();
+	FVaRestExchange& Ex = *Created;
 	Ex.RequestId = FVaRestTrace::NewRequestId(); // IN-10: assigned at creation, whatever the trace mask
 	Ex.ClientId = Spec->State->GetClientId();
 	// Spec 3.1, verbatim: "A request snapshots the configuration at Send()" -- here, on the sending thread, under the
@@ -88,18 +90,23 @@ FVaRestRequestHandle VaRest::Http::SendRequest(TUniquePtr<FRequestSpec>&& Spec, 
 	Ex.SourceLine = SourceLine;
 	Ex.Handler = MoveTemp(Spec->Handler);
 
-	FVaRestRequestHandle Handle(Exchange);
+	FVaRestRequestHandle Handle(Created.ToSharedRef());
 	if (IsInGameThread())
 	{
-		Ex.State->Enter(Exchange);
+		Ex.State->Enter(Created.ToSharedRef());
 	}
 	else
 	{
 		// Spec 1: "A request may be sent from any thread; it is marshalled to the game thread before entering the pipeline".
-		// Review N-3: the builder's configuration goes along -- one the game thread replaced since may hold its last
-		// reference, and it then dies with this task's body on the game thread (TaskPrivate.h:871-877), not here
-		UE::Tasks::Launch(TEXT("VaRest.Enter"), [Exchange, Built = MoveTemp(Spec->ConfigAtBuild)] { Exchange->State->Enter(Exchange); },
-			UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
+		// The exchange is moved in, never copied (review I-1): were the game thread to run the whole request before this
+		// function returns, a reference kept here would be the last. Ex is not touched after the Launch. Review N-3: the
+		// builder's configuration goes along -- one the game thread replaced since may hold its last reference, and it
+		// then dies with this task's body on the game thread (TaskPrivate.h:871-877), not here.
+		UE::Tasks::Launch(TEXT("VaRest.Enter"), [Moved = MoveTemp(Created), Built = MoveTemp(Spec->ConfigAtBuild)]
+		{
+			const FVaRestExchangeRef Entering = Moved.ToSharedRef();
+			Entering->State->Enter(Entering);
+		}, UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
 	}
 	return Handle;
 }

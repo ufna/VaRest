@@ -167,9 +167,10 @@ public:
 	uint32 SourceLine = 0;
 	FVaRestTraceInitiator Initiator;
 	TUniquePtr<VaRest::Http::IResultHandler> Handler;
+	/** Spec 3.1, decision 27: the configuration snapshot, taken by Send on the sending thread (Enter fills it only for an exchange made another way) */
+	TSharedPtr<const VaRest::Http::FClientConfig, ESPMode::ThreadSafe> Config;
 
 	// Resolved on entry (game thread):
-	TSharedPtr<const VaRest::Http::FClientConfig, ESPMode::ThreadSafe> Config;
 	FString Url;
 	FString PathTemplate;
 	FVaRestHeaders RequestHeaders;
@@ -198,7 +199,10 @@ public:
 	EVaRestCancelReason CancelReason = EVaRestCancelReason::None;
 	/** Complete ran: nothing else is delivered */
 	bool bFinished = false;
-	/** Inside Send() or Cancel() on this exchange: Complete defers the callbacks (decision 3) */
+	/**
+	 * Inside Enter or Cancel() on this exchange: Complete defers the callbacks (decision 3). The scope is taken in Enter, so
+	 * a game-thread Send() is covered, and so is the Enter task of a request sent from another thread (one extra hop).
+	 */
 	int32 ApiDepth = 0;
 	std::atomic<bool> bCancelRequested{ false };
 	std::atomic<bool> bDone{ false };

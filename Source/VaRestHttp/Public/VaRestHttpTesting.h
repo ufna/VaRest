@@ -20,6 +20,11 @@ namespace VaRest::Http::Testing
 		std::atomic<int32> DecodesOffGameThread{ 0 };
 		/** ~FClientState off the game thread (review I-1: it must not happen) */
 		std::atomic<int32> ClientStatesDestroyedOffGameThread{ 0 };
+		/**
+		 * ~FVaRestExchange off the game thread: the pipeline moves its references to the game thread (review I-1), so only a
+		 * pin taken on another thread (IsActive, Cancel) may make this count; a request sent and completed without one never does
+		 */
+		std::atomic<int32> ExchangesDestroyedOffGameThread{ 0 };
 	};
 	VARESTHTTP_API FTestCounters& Counters();
 }
