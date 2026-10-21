@@ -49,6 +49,7 @@ VaRest::Http::FSha256::FSha256()
 
 void VaRest::Http::FSha256::Update(const void* Data, int64 Size)
 {
+	check(Size >= 0);
 	const uint8* In = static_cast<const uint8*>(Data);
 	TotalBytes += static_cast<uint64>(Size);
 	while (Size > 0)

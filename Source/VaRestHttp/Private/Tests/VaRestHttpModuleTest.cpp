@@ -137,6 +137,38 @@ bool FVaRestHttpSha256Test::RunTest(const FString& Parameters)
 		Step = Step * 7 % 97 + 1;
 	}
 	TestEqualSensitive(TEXT("incremental"), Pieces.Finalize().ToHex(), FString(TEXT("cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0")));
+
+	// Padding boundaries (FIPS 180-4 5.1.1): 55 bytes is the longest message whose padding fits the first block, 56 and 57
+	// need a second, 64 fills a block exactly, 119/120 are the same edge one block later. Digests from Python hashlib.
+	struct FBoundary { int32 Length; const TCHAR* Digest; };
+	const FBoundary Boundaries[] = {
+		{ 55, TEXT("9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318") },
+		{ 56, TEXT("b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a") },
+		{ 57, TEXT("f13b2d724659eb3bf47f2dd6af1accc87b81f09f59f2b75e5c0bed6589dfe8c6") },
+		{ 63, TEXT("7d3e74a05d7db15bce4ad9ec0658ea98e3f06eeecf16b4c6fff2da457ddc2f34") },
+		{ 64, TEXT("ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb") },
+		{ 65, TEXT("635361c48bb9eab14198e76ea8ab7f1a41685d6ad62aa9146d301d4f17eb0ae0") },
+		{ 119, TEXT("31eba51c313a5c08226adf18d4a359cfdfd8d2e816b13f4af952f7ea6584dcfb") },
+		{ 120, TEXT("2f3d335432c70b580af0e8e1b3674a7c020d683aa5f73aaaedfdc55af904c21c") },
+	};
+	for (const FBoundary& Case : Boundaries)
+	{
+		TArray<uint8> Input;
+		Input.Init('a', Case.Length);
+		TestEqualSensitive(*FString::Printf(TEXT("%d bytes of 'a'"), Case.Length), FSha256::Hash(Input).ToHex(), FString(Case.Digest));
+	}
+
+	// Every split of the 119-byte message into two Update calls lands the buffer at a different fill level
+	TArray<uint8> Edge;
+	Edge.Init('a', 119);
+	for (int32 Split = 0; Split <= 119; ++Split)
+	{
+		FSha256 Halves;
+		Halves.Update(Edge.GetData(), Split);
+		Halves.Update(Edge.GetData() + Split, 119 - Split);
+		TestEqualSensitive(*FString::Printf(TEXT("119 bytes split at %d"), Split), Halves.Finalize().ToHex(),
+			FString(TEXT("31eba51c313a5c08226adf18d4a359cfdfd8d2e816b13f4af952f7ea6584dcfb")));
+	}
 	return true;
 }
 
