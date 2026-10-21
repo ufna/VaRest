@@ -73,13 +73,13 @@ bool FVaRestLwsProbeRigFactLineTest::RunTest(const FString& Parameters)
 	VaRest::Http::Testing::FLogCapture Capture;
 	Fact(*this, TEXT("rig.fact_line"), EVerdict::Recorded, TEXT("a \"quoted\" | piped value"), TEXT("none"), TEXT("the rig's own check"));
 	const TArray<FString> Lines = Capture.GetLines();
-	const FString* Line = Lines.FindByPredicate([](const FString& Each) { return Each.StartsWith(TEXT("LogVaRestLwsProbe: FACT {")); });
+	const FString* Line = Lines.FindByPredicate([](const FString& Each) { return Each.StartsWith(TEXT("LogVaRestLwsProbe: FACT {"), ESearchCase::CaseSensitive); });
 	if (!TestNotNull(TEXT("one FACT line"), Line))
 	{
 		return false;
 	}
 	FString Json;
-	Line->Split(TEXT("FACT "), nullptr, &Json);
+	Line->Split(TEXT("FACT "), nullptr, &Json, ESearchCase::CaseSensitive);
 	TValueOrError<FVaRestJson, FVaRestJsonError> Parsed = FVaRestJson::Parse(FStringView(Json));
 	if (!TestTrue(TEXT("the line is JSON"), Parsed.HasValue()))
 	{
@@ -89,7 +89,7 @@ bool FVaRestLwsProbeRigFactLineTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("id, verdict and observed survive"), Value[TEXT("id")].AsString().Equals(TEXT("rig.fact_line"), ESearchCase::CaseSensitive)
 		&& Value[TEXT("verdict")].AsString().Equals(TEXT("recorded"), ESearchCase::CaseSensitive)
 		&& Value[TEXT("observed")].AsString().Equals(TEXT("a \"quoted\" | piped value"), ESearchCase::CaseSensitive));
-	TestTrue(TEXT("the test is named"), Value[TEXT("test")].AsString().Contains(TEXT("Probe.VaRest.Lws.Rig.FactLine")));
+	TestTrue(TEXT("the test is named"), Value[TEXT("test")].AsString().Contains(TEXT("Probe.VaRest.Lws.Rig.FactLine"), ESearchCase::CaseSensitive));
 	return true;
 }
 
@@ -184,6 +184,66 @@ bool FVaRestLwsProbeRigTeardownTest::RunTest(const FString& Parameters)
 	FEvent Destroyed;
 	TestTrue(TEXT("the open connection ended inside the teardown"), Rig.Find(Conn, LWS_CALLBACK_WSI_DESTROY, Destroyed) && Destroyed.Time >= Before);
 	TestTrue(TEXT("the server saw the connection end"), FetchJournal(*this, Site, Key)[TEXT("ended")].AsBool());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestLwsProbeRigWriteBeforeOpenTest, "Probe.VaRest.Lws.Rig.WriteBeforeOpen",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestLwsProbeRigWriteBeforeOpenTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::LwsProbe;
+	// The engine's ::FEvent (HAL/Event.h:21) is visible here too, so the directive alone makes FEvent ambiguous
+	using VaRest::LwsProbe::FEvent;
+	// Task 4 review: a Write queued while the handshake is in flight still goes out once the connection opens
+	FServer Site;
+	if (!FindServer(*this, Site))
+	{
+		return false;
+	}
+	FRig Rig(Site);
+	if (!TestTrue(TEXT("the probe's context exists"), Rig.IsReady()))
+	{
+		return false;
+	}
+	const FString Key = NewKey();
+	FConnectSpec Spec;
+	// The server holds its 101 for 500 ms (ws.py ws_slowupgrade), so the write below is queued before the open
+	Spec.Path = TEXT("/ws/slowupgrade?ms=500&key=") + Key;
+	const int32 Conn = Rig.Connect(MoveTemp(Spec));
+	Rig.WriteText(Conn, TEXT("early"));
+	if (!TestTrue(TEXT("the connection opens"), Rig.WaitReason(Conn, LWS_CALLBACK_CLIENT_ESTABLISHED)))
+	{
+		return false;
+	}
+	const TArray<FEvent> Opening = Rig.Events(Conn);
+	const int32 Queued = Opening.IndexOfByPredicate([](const FEvent& Each)
+	{
+		return Each.Reason == CommandRan && Each.Note.Equals(TEXT("write"), ESearchCase::CaseSensitive);
+	});
+	const int32 Open = Opening.IndexOfByPredicate([](const FEvent& Each) { return Each.Reason == LWS_CALLBACK_CLIENT_ESTABLISHED; });
+	TestTrue(FString::Printf(TEXT("the write was queued on the connection before it opened (%s)"), *CallSequence(Opening)),
+		Queued != INDEX_NONE && Queued < Open);
+	TestTrue(TEXT("the early write is echoed"), Rig.WaitFor([Conn](const TArray<FEvent>& All)
+	{
+		return All.ContainsByPredicate([Conn](const FEvent& Each)
+		{
+			return Each.Conn == Conn && Each.Reason == LWS_CALLBACK_CLIENT_RECEIVE && EventText(Each).Equals(TEXT("early"), ESearchCase::CaseSensitive);
+		});
+	}, 5.0));
+	AddInfo(FString::Printf(TEXT("sequence: %s"), *CallSequence(Rig.Events(Conn))));
+	Rig.Close(Conn, 1000, TEXT("bye"));
+	if (!TestTrue(TEXT("the connection ends"), Rig.WaitEnded(Conn)))
+	{
+		return false;
+	}
+	const FVaRestJson Journal = FetchJournal(*this, Site, Key);
+	if (!TestTrue(TEXT("the server's journal has ended"), Journal[TEXT("ended")].AsBool()))
+	{
+		return false;
+	}
+	const TArray<FVaRestJson> Messages = JournalEvents(Journal, TEXT("message"));
+	TestTrue(TEXT("the server got early, once"), Messages.Num() == 1 && Messages[0][TEXT("text")].AsString().Equals(TEXT("early"), ESearchCase::CaseSensitive));
 	return true;
 }
 

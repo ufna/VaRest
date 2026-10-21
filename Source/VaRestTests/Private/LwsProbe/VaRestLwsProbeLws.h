@@ -8,10 +8,11 @@
 // includes openssl/ssl.h itself (libwebsockets.h:221); the others are for the probe's own TLS checks.
 //
 // UI is renamed for the headers: OpenSSL's typedef struct ui_st UI (OpenSSL/1.1.1t/include/Unix/openssl/ossl_typ.h:144)
-// collides with CoreUObject's namespace UI (UObject/ObjectMacros.h:965), which this module's other files bring into the
-// same unity translation unit. The engine does the same where it includes OpenSSL next to UObject code
-// (Runtime/Online/BuildPatchServices/Private/Common/Crypto.cpp:6-12); the engine's WebSockets module does not need it
-// because it depends on Core and HTTP only (WebSockets.Build.cs:92-97).
+// collides with CoreUObject's namespace UI (UObject/ObjectMacros.h:965), which is already in scope wherever the probe's
+// header includes this one, unity or not: VaRestLwsProbe.h includes VaRestJson.h first, whose line 7 includes
+// UObject/Class.h, which includes ObjectMacros.h (Class.h:57). The engine does the same where it includes OpenSSL next
+// to UObject code (Runtime/Online/BuildPatchServices/Private/Common/Crypto.cpp:6-12); the engine's WebSockets module does
+// not need it because it depends on Core and HTTP only (WebSockets.Build.cs:92-97).
 
 #include "CoreMinimal.h"
 

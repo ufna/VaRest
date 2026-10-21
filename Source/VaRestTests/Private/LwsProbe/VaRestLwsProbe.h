@@ -213,10 +213,16 @@ namespace VaRest::LwsProbe
 		void Exec(const TCHAR* Label, TFunction<void(FRig&)> Command);
 		/** ... with the connection; recorded as "<Label>: no wsi" (and not run) when the connection is gone */
 		void ExecOn(int32 ConnId, const TCHAR* Label, TFunction<void(FConn&)> Command);
-		/** Queues one lws_write; WRITEABLE writes one per callback, as WebSocket spec 2.4 plans */
+		/**
+		 * Queues one lws_write; WRITEABLE writes one per callback, as WebSocket spec 2.4 plans. Also before the open: LWS
+		 * drops a writable request made during the handshake, so CLIENT_ESTABLISHED asks again when anything is queued
+		 */
 		void Write(int32 ConnId, int32 Protocol, TArray<uint8> Payload);
 		void WriteText(int32 ConnId, const FString& Text, int32 Protocol = LWS_WRITE_TEXT);
-		/** The engine's close: lws_close_reason, then -1 from WRITEABLE once the outbox is empty (LwsWebSocket.cpp:515-530) */
+		/**
+		 * The engine's close: lws_close_reason, then -1 from WRITEABLE once the outbox is empty (LwsWebSocket.cpp:515-530);
+		 * queued before the open, it goes once the connection opens (as Write)
+		 */
 		void Close(int32 ConnId, int32 Code, const FString& Reason);
 
 		/** Game thread: pumps (game-thread tasks and the core ticker) until Done holds over the events, or Seconds pass */

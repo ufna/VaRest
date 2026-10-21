@@ -51,6 +51,18 @@ namespace VaRest::LwsProbe::VaRestLwsProbePrivate
 	constexpr int64 MaxBytesPerEvent = 64 * 1024;
 	constexpr int64 MaxBytesPerRig = 64 * 1024 * 1024;
 
+	/**
+	 * After a fetch's deadline: cancels the request and pumps until its Canceled completion has run and the request is gone,
+	 * so a fetch that timed out is drained before its helper returns (every test drains what it opens). The callbacks get
+	 * Kind=Canceled, never inside Cancel() (VaRestClient.h:83-89). True when it drained.
+	 */
+	template <typename T>
+	bool CancelAndDrain(const FVaRestRequestHandle& Request, const TSharedRef<VaRest::Http::Testing::TTestOutcome<T>, ESPMode::ThreadSafe>& Outcome)
+	{
+		Request.Cancel();
+		return VaRest::Http::Testing::PumpUntil([&Request, &Outcome] { return Outcome->IsDone() && !Request.IsActive(); }, 5.0, true);
+	}
+
 	/** A UTF-8 copy for lws_client_connect_via_info, kept in Out */
 	const char* Utf8Copy(const FString& Text, TArray<ANSICHAR>& Out)
 	{
@@ -151,8 +163,9 @@ VaRest::LwsProbe::FRig::FRig(const FServer& InServer, FRigOptions InOptions)
 		break;
 	case ETls::SslModule:
 	{
-		// The engine's order (LwsWebSocketsManager.cpp:205-225). InitializeSsl succeeds only in monolithic builds
-		// (SslManager.cpp:26-55); elsewhere CreateSslContext returns null (:76-131) and LWS makes its own context
+		// The engine's order (LwsWebSocketsManager.cpp:205-225). InitializeSsl succeeds only in monolithic or merged-modules
+		// builds (SslManager.cpp:26-55, the guard at :33 is IS_MONOLITHIC || UE_MERGED_MODULES); elsewhere CreateSslContext
+		// returns null (:76-131) and LWS makes its own context
 		ISslManager& SslManager = FModuleManager::LoadModuleChecked<FSslModule>(TEXT("SSL")).GetSslManager();
 		if (SslManager.InitializeSsl())
 		{
@@ -449,8 +462,9 @@ VaRest::LwsProbe::FConn* VaRest::LwsProbe::FRig::FindConn(lws* Wsi, void* User)
 {
 	// The userdata first, over every connection, and a live wsi only when no connection owns the userdata: a freed wsi's
 	// address may be reused by the next connection (LWS 3.0 does: Probe.VaRest.Lws.Rig.SequentialConnections fails when
-	// the wsi is matched first), a FConn's never is. One pass with both tests would let an older connection whose stored
-	// wsi went stale win over the connection the userdata names
+	// a freed wsi is matched first), a FConn's never is. Clearing Wsi at WSI_DESTROY (and on a NULL connect) is what
+	// keeps a freed wsi from matching; the userdata-first order is defence in depth for a stored wsi that went stale
+	// without either, which one pass with both tests would let win over the connection the userdata names
 	void* WsiUser = Wsi ? lws_wsi_user(Wsi) : nullptr;
 	FScopeLock Lock(&ConnsLock);
 	for (const TUniquePtr<FConn>& Each : Conns)
@@ -589,6 +603,14 @@ int32 VaRest::LwsProbe::FRig::Handle(lws* Wsi, int32 Reason, void* User, void* I
 	{
 	case LWS_CALLBACK_CLIENT_APPEND_HANDSHAKE_HEADER:
 		return Conn ? AppendHeaders(*Conn, In, Len) : 0;
+	case LWS_CALLBACK_CLIENT_ESTABLISHED:
+		// A Write or Close queued during the handshake asked for WRITEABLE then, and LWS 3.0 drops that request: no
+		// WRITEABLE follows the open (Probe.VaRest.Lws.Rig.WriteBeforeOpen fails without this). So the open asks again
+		if (Conn && (Conn->Outbox.Num() > 0 || Conn->CloseCode != 0))
+		{
+			lws_callback_on_writable(Wsi);
+		}
+		return 0;
 	case LWS_CALLBACK_CLIENT_WRITEABLE:
 		return Conn ? WriteNext(*Conn, Wsi) : 0;
 	case LWS_CALLBACK_WS_PEER_INITIATED_CLOSE:
@@ -672,7 +694,7 @@ bool VaRest::LwsProbe::FRig::WaitEnded(int32 ConnId, double Seconds)
 	{
 		return All.ContainsByPredicate([ConnId](const FEvent& Each)
 		{
-			return Each.Conn == ConnId && (Each.Reason == LWS_CALLBACK_WSI_DESTROY || (Each.Reason == ConnectReturned && Each.Note == TEXT("null")));
+			return Each.Conn == ConnId && (Each.Reason == LWS_CALLBACK_WSI_DESTROY || (Each.Reason == ConnectReturned && Each.Note.Equals(TEXT("null"), ESearchCase::CaseSensitive)));
 		});
 	}, Seconds);
 }
@@ -840,7 +862,7 @@ bool VaRest::LwsProbe::Visit(FAutomationTestBase& Test, FRig& Rig, FConnectSpec 
 		return All.ContainsByPredicate([ConnId](const FEvent& Each)
 		{
 			return Each.Conn == ConnId && (Each.Reason == LWS_CALLBACK_CLIENT_ESTABLISHED || Each.Reason == LWS_CALLBACK_WSI_DESTROY
-				|| (Each.Reason == ConnectReturned && Each.Note == TEXT("null")));
+				|| (Each.Reason == ConnectReturned && Each.Note.Equals(TEXT("null"), ESearchCase::CaseSensitive)));
 		});
 	}, Seconds);
 	if (Opened(Rig.Events(ConnId)))
@@ -872,11 +894,17 @@ FVaRestJson VaRest::LwsProbe::FetchJournal(FAutomationTestBase& Test, const FSer
 	FVaRestClient Client = FVaRestClient::Make(Site.HttpBase);
 	Client.WithLogLevel(EVaRestLogLevel::None);
 	auto Outcome = MakeOutcome<FVaRestJson>();
-	Observe(Client.Get(FString::Printf(TEXT("/ws/journal?key=%s&connections=%d&wait_ms=%d"), *Key, Connections, WaitMs)), Outcome).Send();
-	const bool bDone = PumpUntil([Outcome] { return Outcome->IsDone(); }, WaitMs / 1000.0 + 15.0, true);
-	if (!bDone || Outcome->SuccessCalls.load() != 1 || !Outcome->Value.IsSet())
+	const FVaRestRequestHandle Request = Observe(Client.Get(FString::Printf(TEXT("/ws/journal?key=%s&connections=%d&wait_ms=%d"), *Key, Connections, WaitMs)), Outcome).Send();
+	const double Seconds = WaitMs / 1000.0 + 15.0;
+	if (!PumpUntil([Outcome] { return Outcome->IsDone(); }, Seconds, true))
 	{
-		Test.AddError(FString::Printf(TEXT("the journal of %s did not arrive: %s"), *Key, bDone ? *Outcome->Error.Describe() : TEXT("no answer")));
+		const bool bDrained = VaRestLwsProbePrivate::CancelAndDrain(Request, Outcome);
+		Test.AddError(FString::Printf(TEXT("the journal of %s did not arrive within %.0f s (canceled; drained: %s)"), *Key, Seconds, YesNo(bDrained)));
+		return FVaRestJson();
+	}
+	if (Outcome->SuccessCalls.load() != 1 || !Outcome->Value.IsSet())
+	{
+		Test.AddError(FString::Printf(TEXT("the journal of %s did not arrive: %s"), *Key, *Outcome->Error.Describe()));
 		return FVaRestJson();
 	}
 	return Outcome->Value.GetValue();
@@ -924,11 +952,16 @@ bool VaRest::LwsProbe::FetchBytes(FAutomationTestBase& Test, const FServer& Site
 	FVaRestClient Client = FVaRestClient::Make(Site.HttpBase);
 	Client.WithLogLevel(EVaRestLogLevel::None);
 	auto Outcome = MakeOutcome<TArray<uint8>>();
-	Observe(Client.Get<TArray<uint8>>(Path), Outcome).Send();
-	const bool bDone = PumpUntil([Outcome] { return Outcome->IsDone(); }, 20.0, true);
-	if (!bDone || Outcome->SuccessCalls.load() != 1 || !Outcome->Value.IsSet())
+	const FVaRestRequestHandle Request = Observe(Client.Get<TArray<uint8>>(Path), Outcome).Send();
+	if (!PumpUntil([Outcome] { return Outcome->IsDone(); }, 20.0, true))
 	{
-		Test.AddError(FString::Printf(TEXT("GET %s failed: %s"), *Path, bDone ? *Outcome->Error.Describe() : TEXT("no answer within 20 s")));
+		const bool bDrained = VaRestLwsProbePrivate::CancelAndDrain(Request, Outcome);
+		Test.AddError(FString::Printf(TEXT("GET %s failed: no answer within 20 s (canceled; drained: %s)"), *Path, YesNo(bDrained)));
+		return false;
+	}
+	if (Outcome->SuccessCalls.load() != 1 || !Outcome->Value.IsSet())
+	{
+		Test.AddError(FString::Printf(TEXT("GET %s failed: %s"), *Path, *Outcome->Error.Describe()));
 		return false;
 	}
 	Out = Outcome->Value.GetValue();
