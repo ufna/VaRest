@@ -627,8 +627,12 @@ bool FVaRestHttpTransportUploadReadTest::RunTest(const FString& Parameters)
 	{
 		return false;
 	}
+	// Task 14 review M1: each path's warning names its request (IN-16)
+	VaRest::Http::Testing::FLogCapture Capture;
 	TSharedRef<FDone, ESPMode::ThreadSafe> Plain = MakeShared<FDone, ESPMode::ThreadSafe>();
-	if (!TestTrue(TEXT("the default path completes"), SendAndWait(PutSegments(Part, PartBytes.Num(), Target, false), Plain)))
+	FVaRestTransportRequest PlainRequest = PutSegments(Part, PartBytes.Num(), Target, false);
+	PlainRequest.RequestId = 9001;
+	if (!TestTrue(TEXT("the default path completes"), SendAndWait(MoveTemp(PlainRequest), Plain)))
 	{
 		return false;
 	}
@@ -637,12 +641,16 @@ bool FVaRestHttpTransportUploadReadTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("... with no body"), Plain->Result.Body.Num(), 0);
 
 	TSharedRef<FDone, ESPMode::ThreadSafe> Counted = MakeShared<FDone, ESPMode::ThreadSafe>();
-	if (!TestTrue(TEXT("the counting path completes"), SendAndWait(PutSegments(Part, PartBytes.Num(), Target, true), Counted)))
+	FVaRestTransportRequest CountedRequest = PutSegments(Part, PartBytes.Num(), Target, true);
+	CountedRequest.RequestId = 9002;
+	if (!TestTrue(TEXT("the counting path completes"), SendAndWait(MoveTemp(CountedRequest), Counted)))
 	{
 		return false;
 	}
 	TestTrue(TEXT("counting path (FCountingUpload around the stream): UploadReadFailed"),
 		Counted->Result.Failure == EVaRestTransportFailure::Other && Counted->Result.FailureDetail == FName(TEXT("UploadReadFailed")));
+	TestEqual(TEXT("IN-16: the default path's warning carries #<RequestId>"), Capture.Count(TEXT("#9001 VaRest: upload file part.bin could not be read")), 1);
+	TestEqual(TEXT("... and the counting path's"), Capture.Count(TEXT("#9002 VaRest: upload file part.bin could not be read")), 1);
 
 	IFileManager::Get().DeleteDirectory(*Dir, false, true);
 	return true;

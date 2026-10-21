@@ -96,7 +96,8 @@ private:
 class VARESTHTTP_API FVaRestSegmentStream final : public FArchive
 {
 public:
-	explicit FVaRestSegmentStream(TArray<FVaRestBodySegment> InSegments);
+	/** InRequestId: the request it uploads, for the warning's #id (IN-16); 0 when there is none */
+	explicit FVaRestSegmentStream(TArray<FVaRestBodySegment> InSegments, uint64 InRequestId = 0);
 	virtual ~FVaRestSegmentStream() override;
 
 	virtual void Serialize(void* Data, int64 Length) override;
@@ -120,6 +121,7 @@ private:
 	void FailRead();
 
 	TArray<FVaRestBodySegment> Segments;
+	uint64 RequestId = 0;
 	int64 Total = 0;
 	int64 Position = 0;
 	int32 OpenIndex = INDEX_NONE;

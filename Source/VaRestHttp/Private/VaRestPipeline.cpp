@@ -345,8 +345,9 @@ namespace VaRest::Http::PipelinePrivate
 			{
 				// Review I3: a header a stage set (or a missing or empty Content-Type with a body, review N-5) never reaches
 				// the transport. Review N-I1: "missing or empty Content-Type with a body" is this line's own; the tests expect it.
+				// The name is escaped: a stage's CR LF must not end this line either (task 14 review, Critical 1).
 				UE_LOG(LogVaRestHttp, Error, TEXT("#%llu VaRest: header \"%s\" is not a token, holds CR, LF or NUL, or is a missing or empty Content-Type with a body; the request fails with Kind=Config"),
-					Ex.RequestId, *BadName);
+					Ex.RequestId, *EscapeForLog(BadName));
 				FVaRestAttemptOutcome Refused;
 				Refused.Failure = EVaRestTransportFailure::Other;
 				Refused.FailureDetail = TEXT("InvalidHeader");
@@ -531,7 +532,7 @@ bool VaRest::Http::FClientState::Resolve(FVaRestExchange& Exchange, FString& Out
 	{
 		// Spec 3.2: "A body on GET is dropped with a warning (v1 rule)"; the engine would refuse the request
 		// (HttpRequestCommon.cpp:764-768: "An HTTP Get request cannot contain a payload")
-		UE_LOG(LogVaRestHttp, Warning, TEXT("#%llu VaRest: GET %s has a body; it is dropped (spec 3.2)"), Exchange.RequestId, *Cfg.Redactor->RedactUrl(Exchange.Url));
+		UE_LOG(LogVaRestHttp, Warning, TEXT("#%llu VaRest: GET %s has a body; it is dropped (spec 3.2)"), Exchange.RequestId, *EscapeForLog(Cfg.Redactor->RedactUrl(Exchange.Url)));
 		Exchange.Body = FVaRestRequestBody();
 	}
 	if (!Exchange.Body.IsEmpty() && !Exchange.RequestHeaders.Contains(TEXT("Content-Type")))

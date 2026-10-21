@@ -35,6 +35,8 @@ public:
 	 * never match there. That holds for a JSON key too, which may legally contain them: only the built-in rules cover it.
 	 */
 	void AddKey(FStringView Key);
+	/** False for a key AddKey refuses (one holding '?', ';', '#', '=' or '&'); logs nothing, so a caller can check once where a key enters */
+	static bool IsAcceptableKey(FStringView Key);
 
 	bool ShouldRedact(FUtf8StringView Key, EVaRestRedactKeyKind Kind) const;
 	bool ShouldRedact(FStringView Key, EVaRestRedactKeyKind Kind) const;

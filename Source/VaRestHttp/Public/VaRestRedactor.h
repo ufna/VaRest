@@ -42,6 +42,8 @@ public:
 	double NextExpiry(double Now) const;
 	/** Forgets the previous values expired at Now (within ExpirySlack) */
 	void Prune(double Now);
+	/** Moves every pending expiry by Delta seconds: the client's clock changed, and a new clock counts from its own zero */
+	void Rebase(double Delta);
 
 private:
 	struct FPrevious
@@ -71,6 +73,8 @@ public:
 	const FVaRestRedactRules& GetRules() const { return Rules; }
 	/** The secrets as passed to the constructor (not the expanded wire forms) */
 	const TArray<FString>& GetSecrets() const { return InputSecrets; }
+	/** The UTF-8 size of the longest form scrubbed (0 without secrets): how far past a cap a scrub may need to read */
+	int32 GetMaxNeedleBytes() const { return MaxNeedleBytes; }
 
 	/** Userinfo becomes ***; values of secret query and fragment keys become *** (keys matched percent-decoded); then the scrub */
 	FString RedactUrl(FStringView Url) const;
@@ -97,7 +101,12 @@ public:
 	 */
 	FVaRestTraceExcerpt RedactBody(FStringView ContentType, TConstArrayView<uint8> Prefix, int64 TotalBytes, int32 Cap) const;
 
-	/** A multipart request body (a negative Cap is 0): one line per part; a text part's value by its name's rules, then scrubbed; binary as a descriptor */
+	/**
+	 * A multipart request body (a negative Cap is 0): one line per part; a text part's value by its name's rules, then
+	 * scrubbed; binary as a descriptor. A text part is read up to Cap + GetMaxNeedleBytes(); one cut there, or given with
+	 * fewer Bytes than its Size (a caller's capped copy), loses the tail that begins a known secret, and the excerpt is
+	 * truncated.
+	 */
 	FVaRestTraceExcerpt DescribeMultipart(TConstArrayView<FVaRestMultipartPart> Parts, int64 TotalBytes, int32 Cap) const;
 
 	/** A streamed file upload: its path (relative to the project when inside it), size and type */
@@ -123,4 +132,5 @@ private:
 	/** What is scrubbed, longest first: each secret of at least MinBytes and its wire forms (percent, form, lower-case hex, JSON-escaped) */
 	TArray<FString> Secrets;
 	TArray<TArray<uint8>> SecretsUtf8;
+	int32 MaxNeedleBytes = 0;
 };

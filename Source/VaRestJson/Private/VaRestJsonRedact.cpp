@@ -180,6 +180,24 @@ namespace VaRest::Json::RedactPrivate
 		/** The next value belongs to a redacted key */
 		bool bSkipValue = false;
 	};
+
+	/**
+	 * The first of '?', ';', '#', '=' and '&' in Key, else 0. URL and form redaction start a candidate key after '?', ';'
+	 * and '#' and end it at '=' or '&'; a key holding one of these could never be matched there, and the linear candidate
+	 * scan (VaRestRedactor.cpp) relies on exact keys being free of them.
+	 */
+	TCHAR FindKeySeparator(FStringView Key)
+	{
+		for (const TCHAR Separator : { TEXT('?'), TEXT(';'), TEXT('#'), TEXT('='), TEXT('&') })
+		{
+			int32 Found = INDEX_NONE;
+			if (Key.FindChar(Separator, Found))
+			{
+				return Separator;
+			}
+		}
+		return 0;
+	}
 }
 
 void FVaRestRedactRules::Normalize(FUtf8StringView Key, TArray<UTF8CHAR, TInlineAllocator<64>>& Out)
@@ -195,18 +213,17 @@ void FVaRestRedactRules::Normalize(FUtf8StringView Key, TArray<UTF8CHAR, TInline
 	}
 }
 
+bool FVaRestRedactRules::IsAcceptableKey(FStringView Key)
+{
+	return VaRest::Json::RedactPrivate::FindKeySeparator(Key) == 0;
+}
+
 void FVaRestRedactRules::AddKey(FStringView Key)
 {
-	// URL and form redaction start a candidate key after '?', ';' and '#' and end it at '=' or '&'; a key holding one of these
-	// could never be matched there, and the linear candidate scan (VaRestRedactor.cpp) relies on exact keys being free of them
-	for (const TCHAR Separator : { TEXT('?'), TEXT(';'), TEXT('#'), TEXT('='), TEXT('&') })
+	if (const TCHAR Separator = VaRest::Json::RedactPrivate::FindKeySeparator(Key))
 	{
-		int32 Found = INDEX_NONE;
-		if (Key.FindChar(Separator, Found))
-		{
-			UE_LOG(LogVaRestJson, Warning, TEXT("FVaRestRedactRules::AddKey: ignored the key '%s', which contains '%c' (a key cannot hold a URL or form separator)"), *FString(Key), Separator);
-			return;
-		}
+		UE_LOG(LogVaRestJson, Warning, TEXT("FVaRestRedactRules::AddKey: ignored the key '%s', which contains '%c' (a key cannot hold a URL or form separator)"), *FString(Key), Separator);
+		return;
 	}
 	VaRest::Json::FUtf8Scratch Scratch;
 	VaRest::Json::RedactPrivate::FKeyBuffer Normalized;

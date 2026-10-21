@@ -178,6 +178,19 @@ void VaRest::Http::FClientState::ClearSecrets()
 	EditConfig([](FClientConfig&) {});
 }
 
+void VaRest::Http::FClientState::SetClock(const TSharedRef<IVaRestClock, ESPMode::ThreadSafe>& NewClock)
+{
+	check(IsInGameThread());
+	// Task 14 review M6: an expiry is a time on the clock it was set with. Left as it is, the old clock's timer would prune at
+	// its deadline read on the new clock, and GetActive would compare old times with new ones: a rotated value could stop
+	// being scrubbed before its 10 minutes. Each keeps the time it had left.
+	const TSharedRef<const FClientConfig, ESPMode::ThreadSafe> Current = GetConfig();
+	Current->Clock->ClearTimer(SecretExpiryTimer);
+	Secrets.Rebase(NewClock->Now() - Current->Clock->Now());
+	EditConfig([&NewClock](FClientConfig& Edited) { Edited.Clock = NewClock; });
+	ScheduleSecretExpiry();
+}
+
 void VaRest::Http::FClientState::ScheduleSecretExpiry()
 {
 	const TSharedRef<const FClientConfig, ESPMode::ThreadSafe> Current = GetConfig();

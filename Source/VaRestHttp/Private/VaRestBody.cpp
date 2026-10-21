@@ -253,8 +253,9 @@ TArray<FVaRestBodySegment> FVaRestMultipart::Encode() const
 	return Segments;
 }
 
-FVaRestSegmentStream::FVaRestSegmentStream(TArray<FVaRestBodySegment> InSegments)
+FVaRestSegmentStream::FVaRestSegmentStream(TArray<FVaRestBodySegment> InSegments, uint64 InRequestId)
 	: Segments(MoveTemp(InSegments))
+	, RequestId(InRequestId)
 {
 	SetIsLoading(true);
 	SetIsPersistent(false);
@@ -337,8 +338,18 @@ void FVaRestSegmentStream::Serialize(void* Data, int64 Length)
 			if (!bWarned)
 			{
 				bWarned = true;
-				// The file name only: a full local path is not for logs (review M4)
-				UE_LOG(LogVaRestHttp, Warning, TEXT("VaRest: upload file %s could not be read at byte %lld (missing, or its size changed since the body was built); sending zeros"), *FPaths::GetCleanFilename(Segment.FilePath), Offset);
+				// The file name only: a full local path is not for logs (review M4). The request's #id when there is one
+				// (IN-16, task 14 review M1).
+				const FString Shown = VaRest::Http::EscapeForLog(FPaths::GetCleanFilename(Segment.FilePath));
+				if (RequestId != 0)
+				{
+					UE_LOG(LogVaRestHttp, Warning, TEXT("#%llu VaRest: upload file %s could not be read at byte %lld (missing, or its size changed since the body was built); sending zeros"),
+						RequestId, *Shown, Offset);
+				}
+				else
+				{
+					UE_LOG(LogVaRestHttp, Warning, TEXT("VaRest: upload file %s could not be read at byte %lld (missing, or its size changed since the body was built); sending zeros"), *Shown, Offset);
+				}
 			}
 		}
 		Out += Count;

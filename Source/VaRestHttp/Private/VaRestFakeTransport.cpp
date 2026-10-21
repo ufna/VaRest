@@ -126,7 +126,7 @@ TArray<uint8> FVaRestFakeTransport::ReadBody(int32 Index) const
 	}
 	else if (Request.BodySegments.Num() > 0)
 	{
-		FVaRestSegmentStream Stream(Request.BodySegments);
+		FVaRestSegmentStream Stream(Request.BodySegments, Request.RequestId);
 		Out.SetNumUninitialized(Stream.TotalSize());
 		Stream.Serialize(Out.GetData(), Out.Num());
 	}

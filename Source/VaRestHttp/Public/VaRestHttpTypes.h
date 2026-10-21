@@ -22,7 +22,10 @@ UENUM(BlueprintType)
 enum class EVaRestLogLevel : uint8
 {
 	None,
-	/** Verb, redacted URL, status, milliseconds, bytes */
+	/**
+	 * Verb, redacted URL, status, milliseconds, bytes. The milliseconds are the attempt's from its limiter grant; a wait in
+	 * the queue (spec 4.6) is shown apart, as "N ms queued", when it reaches a millisecond.
+	 */
 	Basic,
 	/** Basic plus the redacted request and response headers */
 	Headers,

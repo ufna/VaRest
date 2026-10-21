@@ -25,6 +25,8 @@ namespace VaRest::Http::Testing
 		 * pin taken on another thread (IsActive, Cancel) may make this count; a request sent and completed without one never does
 		 */
 		std::atomic<int32> ExchangesDestroyedOffGameThread{ 0 };
+		/** Bytes body logging copied on the game thread (task 14 review M7: at most the cap per body, Inspector 7) */
+		std::atomic<int64> LogBodyBytesCopied{ 0 };
 	};
 	VARESTHTTP_API FTestCounters& Counters();
 }

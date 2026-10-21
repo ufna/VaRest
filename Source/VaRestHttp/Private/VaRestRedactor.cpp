@@ -262,6 +262,14 @@ void FVaRestSecretSet::Prune(double Now)
 	Previous.RemoveAll([Now](const FPrevious& Old) { return Old.ExpiresAt <= Now + ExpirySlack; });
 }
 
+void FVaRestSecretSet::Rebase(double Delta)
+{
+	for (FPrevious& Old : Previous)
+	{
+		Old.ExpiresAt += Delta;
+	}
+}
+
 FVaRestRedactor::FVaRestRedactor(FVaRestRedactRules InRules, TArray<FString> InSecrets)
 	: Rules(MoveTemp(InRules))
 	, InputSecrets(InSecrets)
@@ -297,6 +305,7 @@ FVaRestRedactor::FVaRestRedactor(FVaRestRedactRules InRules, TArray<FString> InS
 	for (const FString& Needle : Secrets)
 	{
 		SecretsUtf8.Add(ToUtf8(Needle));
+		MaxNeedleBytes = FMath::Max(MaxNeedleBytes, SecretsUtf8.Last().Num());
 	}
 }
 
@@ -769,11 +778,7 @@ FVaRestTraceExcerpt FVaRestRedactor::DescribeMultipart(TConstArrayView<FVaRestMu
 	Excerpt.TotalBytes = TotalBytes;
 	const int32 CapBytes = FMath::Max(Cap, 0);
 	// Review M6: nothing past the cap plus the longest needle can reach the excerpt, so a large text part is read no further
-	int32 Reach = CapBytes;
-	for (const TArray<uint8>& Needle : SecretsUtf8)
-	{
-		Reach = FMath::Max(Reach, CapBytes + Needle.Num());
-	}
+	const int32 Reach = CapBytes + MaxNeedleBytes;
 	FString Text;
 	for (const FVaRestMultipartPart& Part : Parts)
 	{
@@ -789,7 +794,24 @@ FVaRestTraceExcerpt FVaRestRedactor::DescribeMultipart(TConstArrayView<FVaRestMu
 		{
 			const bool bSecret = Rules.ShouldRedact(FStringView(Part.Name), EVaRestRedactKeyKind::Part);
 			Excerpt.bRedacted |= bSecret;
-			Text += FString::Printf(TEXT("part \"%s\": %s"), *Part.Name, bSecret ? TEXT("***") : *ToText(TConstArrayView<uint8>(Part.Bytes).Left(Reach)));
+			FString Value(TEXT("***"));
+			if (!bSecret)
+			{
+				TArray<uint8> Head(Part.Bytes.GetData(), FMath::Min(Part.Bytes.Num(), Reach));
+				if (Part.Bytes.Num() > Head.Num() || Head.Num() < Part.Size)
+				{
+					// Task 14 fix round 1: the part is cut, here or by the caller (the log stage copies at most the cap plus the
+					// longest needle). A known secret the cut split in two matches no needle, and the scrubs before it shorten
+					// the text, so its front could land inside the cap: scrubbed first, then the tail that begins a needle is
+					// dropped, as RedactBody does for a cut body (review I1).
+					Excerpt.bRedacted |= ScrubUtf8(Head);
+					Excerpt.bRedacted |= TrimNeedleTail(Head);
+					Excerpt.bTruncated = true;
+					Excerpt.StopReason = TEXT("cap");
+				}
+				Value = ToText(Head);
+			}
+			Text += FString::Printf(TEXT("part \"%s\": %s"), *Part.Name, *Value);
 		}
 		else
 		{

@@ -17,7 +17,40 @@ namespace VaRest::Http::ClientPrivate
 		if (BaseUrl.Contains(TEXT("#")))
 		{
 			UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: the base URL \"%s\" has a fragment; a base URL may carry a query but not a fragment, so this client's requests fail with Kind=Config"),
-				*FVaRestRedactor().RedactUrl(BaseUrl));
+				*EscapeForLog(FVaRestRedactor().RedactUrl(BaseUrl)));
+		}
+	}
+
+	/** Two keys the rules treat as one: equal after FVaRestRedactRules::Normalize */
+	bool SameRedactKey(const FString& A, const FString& B)
+	{
+		const FTCHARToUTF8 AUtf8(*A);
+		const FTCHARToUTF8 BUtf8(*B);
+		TArray<UTF8CHAR, TInlineAllocator<64>> ANormal;
+		TArray<UTF8CHAR, TInlineAllocator<64>> BNormal;
+		FVaRestRedactRules::Normalize(FUtf8StringView(reinterpret_cast<const UTF8CHAR*>(AUtf8.Get()), AUtf8.Length()), ANormal);
+		FVaRestRedactRules::Normalize(FUtf8StringView(reinterpret_cast<const UTF8CHAR*>(BUtf8.Get()), BUtf8.Length()), BNormal);
+		return ANormal == BNormal;
+	}
+
+	/**
+	 * Task 14 review M4: a key is checked and de-duplicated once, where it enters. Publish adds every stored key to new rules
+	 * on each edit (a header, a log level, each SetSecretValue), so a refused key stored there would warn every time.
+	 */
+	void AppendRedactKeys(TArray<FString>& Into, TConstArrayView<FString> Keys)
+	{
+		for (const FString& Key : Keys)
+		{
+			if (!FVaRestRedactRules::IsAcceptableKey(Key))
+			{
+				UE_LOG(LogVaRestHttp, Warning, TEXT("VaRest: the redaction key \"%s\" holds '?', ';', '#', '=' or '&', on which URL and form redaction split keys; it is ignored"),
+					*EscapeForLog(Key));
+				continue;
+			}
+			if (!Into.ContainsByPredicate([&Key](const FString& Known) { return SameRedactKey(Known, Key); }))
+			{
+				Into.Add(Key);
+			}
 		}
 	}
 }
@@ -42,7 +75,7 @@ VaRest::Http::FRequestSpec::~FRequestSpec()
 	{
 		// Spec 3.2: "In non-Shipping builds a builder destroyed unsent also logs an error naming the URL" -- redacted like every log line
 		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: a %s request to %s was built but never sent (Send() is missing)"),
-			*Verb, *ConfigAtBuild->Redactor->RedactUrl(JoinUrl(ConfigAtBuild->BaseUrl, Path)));
+			*EscapeForLog(Verb), *EscapeForLog(ConfigAtBuild->Redactor->RedactUrl(JoinUrl(ConfigAtBuild->BaseUrl, Path))));
 	}
 #endif
 }
@@ -61,7 +94,7 @@ FVaRestRequestHandle VaRest::Http::SendRequest(TUniquePtr<FRequestSpec>&& Spec, 
 	Spec->bSent = true;
 	if (!Spec->State.IsValid())
 	{
-		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: Send() on an empty FVaRestClient (make one with FVaRestClient::Make); the %s request is dropped"), *Spec->Verb);
+		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: Send() on an empty FVaRestClient (make one with FVaRestClient::Make); the %s request is dropped"), *EscapeForLog(Spec->Verb));
 		return FVaRestRequestHandle();
 	}
 	// A TSharedPtr, so that the worker path can move it into the Enter task (review I-1; a TSharedRef "move" copies,
@@ -164,7 +197,7 @@ FVaRestClient FVaRestClient::Make(FStringView BaseUrl)
 	Initial.Timeout = FMath::Max(0.f, Settings->Timeout);
 	Initial.ActivityTimeout = FMath::Max(0.f, Settings->ActivityTimeout);
 	Initial.MaxJsonBytes = FMath::Max<int64>(0, Settings->MaxJsonResponseBytes);
-	Initial.RedactKeys = Settings->RedactKeys;
+	VaRest::Http::ClientPrivate::AppendRedactKeys(Initial.RedactKeys, Settings->RedactKeys);
 	Initial.Transport = VaRest::Http::GetDefaultTransport();
 	Initial.Clock = FVaRestRealClock::Get();
 	VaRest::Http::ClientPrivate::WarnIfFragment(Initial.BaseUrl);
@@ -221,7 +254,7 @@ FVaRestClient& FVaRestClient::WithHeader(FStringView Name, FStringView Value)
 	{
 		// Decision 11; no request to fail here, so the header is refused and the error logged
 		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: invalid default header \"%s\" (not a token, or the value holds a control character); not set"),
-			*FString(Name).ReplaceCharWithEscapedChar());
+			*VaRest::Http::EscapeForLog(Name));
 		return *this;
 	}
 	if (State.IsValid())
@@ -262,7 +295,7 @@ FVaRestClient& FVaRestClient::WithClock(TSharedRef<IVaRestClock, ESPMode::Thread
 {
 	if (State.IsValid())
 	{
-		State->EditConfig([&Clock](VaRest::Http::FClientConfig& Edited) { Edited.Clock = Clock; });
+		State->SetClock(Clock);
 	}
 	return *this;
 }
@@ -311,7 +344,7 @@ FVaRestClient& FVaRestClient::WithRedactedKeys(TConstArrayView<FString> Keys)
 {
 	if (State.IsValid())
 	{
-		State->EditConfig([Keys](VaRest::Http::FClientConfig& Edited) { Edited.RedactKeys.Append(Keys.GetData(), Keys.Num()); });
+		State->EditConfig([Keys](VaRest::Http::FClientConfig& Edited) { VaRest::Http::ClientPrivate::AppendRedactKeys(Edited.RedactKeys, Keys); });
 	}
 	return *this;
 }

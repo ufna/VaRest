@@ -182,7 +182,7 @@ namespace VaRest::Http::HttpTransportPrivate
 			}
 			else if (Request.BodySegments.Num() > 0)
 			{
-				Counted = MakeShared<FCountingUpload, ESPMode::ThreadSafe>(MakeShared<FVaRestSegmentStream, ESPMode::ThreadSafe>(MoveTemp(Request.BodySegments)),
+				Counted = MakeShared<FCountingUpload, ESPMode::ThreadSafe>(MakeShared<FVaRestSegmentStream, ESPMode::ThreadSafe>(MoveTemp(Request.BodySegments), Request.RequestId),
 					Request.Probe, Request.Clock, Request.bReportStatusTime);
 			}
 			else
@@ -205,7 +205,7 @@ namespace VaRest::Http::HttpTransportPrivate
 				FileSegment.FilePath = MoveTemp(Request.BodyFile);
 				FileSegment.FileSize = UploadTotal;
 			}
-			const TSharedRef<FVaRestSegmentStream, ESPMode::ThreadSafe> SegmentStream = MakeShared<FVaRestSegmentStream, ESPMode::ThreadSafe>(MoveTemp(Segments));
+			const TSharedRef<FVaRestSegmentStream, ESPMode::ThreadSafe> SegmentStream = MakeShared<FVaRestSegmentStream, ESPMode::ThreadSafe>(MoveTemp(Segments), Request.RequestId);
 			Completion->SegmentUpload = SegmentStream;
 			bBodyAccepted = Http->SetContentFromStream(SegmentStream);
 		}

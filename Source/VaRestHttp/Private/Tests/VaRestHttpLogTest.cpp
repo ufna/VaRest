@@ -2,9 +2,14 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
+#include "HAL/FileManager.h"
 #include "HAL/IConsoleManager.h"
 #include "Misc/AutomationTest.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
 #include "VaRestClient.h"
+#include "VaRestClientState.h"
+#include "VaRestHttpLog.h"
 #include "VaRestHttpTesting.h"
 
 namespace VaRest::Http::LogTestPrivate
@@ -19,6 +24,11 @@ namespace VaRest::Http::LogTestPrivate
 		return FString::Printf(TEXT("#%llu "), Handle.GetId());
 	}
 
+	TArray<uint8> BytesOf(const char* Text)
+	{
+		return TArray<uint8>(reinterpret_cast<const uint8*>(Text), FCStringAnsi::Strlen(Text));
+	}
+
 	/** Sends and waits for the callbacks and the body lines */
 	template <typename T>
 	FVaRestRequestHandle Run(VaRest::Http::Testing::FTestRig& Rig, TVaRestRequest<T>&& Request)
@@ -29,6 +39,48 @@ namespace VaRest::Http::LogTestPrivate
 		VaRest::Http::Testing::FlushRedactionPipe();
 		return Handle;
 	}
+
+	/**
+	 * Review M9: VaRest.LogLevel at -1 (each client's own level) for the test, whatever a ConsoleVariables.ini set.
+	 * TGuardConsoleVariable restores the previous value when it goes (IConsoleManager.h:1404-1448).
+	 */
+	struct FLevelIsolation
+	{
+		TGuardConsoleVariable<int32> Guard{ TEXT("VaRest.LogLevel"), -1 };
+	};
+
+	/** LogVaRestHttp's runtime verbosity while it lives (review M2) */
+	struct FScopedVerbosity
+	{
+		explicit FScopedVerbosity(ELogVerbosity::Type Verbosity)
+			: Previous(LogVaRestHttp.GetVerbosity())
+		{
+			LogVaRestHttp.SetVerbosity(Verbosity);
+		}
+		~FScopedVerbosity()
+		{
+			LogVaRestHttp.SetVerbosity(Previous);
+		}
+		const ELogVerbosity::Type Previous;
+	};
+
+	/** What the log stage's line would have to resist: a line break, then a whole forged line (review C1) */
+	const TCHAR* const Forgery = TEXT("a\r\nFAKE #999 GET http://evil -> 200");
+
+	/** A PerAttempt stage that adds a header whose name and value hold CR LF to a request to .../forged */
+	class FForger final : public IVaRestStage
+	{
+	public:
+		virtual FName GetStageName() const override { return TEXT("Forger"); }
+		virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) override
+		{
+			if (Exchange->GetUrl().EndsWith(TEXT("/forged")))
+			{
+				Exchange->GetAttemptHeaders().Add(TEXT("X-Bad\r\nFAKE"), Forgery);
+			}
+			Next.Proceed(Exchange, MoveTemp(OnOutcome));
+		}
+	};
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpLogLevelsTest, "VaRest.Http.Log.Levels",
@@ -38,6 +90,7 @@ bool FVaRestHttpLogLevelsTest::RunTest(const FString& Parameters)
 {
 	using namespace VaRest::Http::Testing;
 	using namespace VaRest::Http::LogTestPrivate;
+	FLevelIsolation Isolation;
 	FTestRig Rig;
 	FLogCapture Capture;
 
@@ -67,15 +120,17 @@ bool FVaRestHttpLogBodyTest::RunTest(const FString& Parameters)
 {
 	using namespace VaRest::Http::Testing;
 	using namespace VaRest::Http::LogTestPrivate;
+	FLevelIsolation Isolation;
 	FTestRig Rig;
 	FLogCapture Capture;
 	Rig.Client.WithLogLevel(EVaRestLogLevel::Body);
-	FString Large = TEXT("{\"blob\":\"");
-	for (int32 i = 0; i < 10000; ++i)
+	// Review M7: many short values, so the excerpt of a cut body ends within one value of the cap
+	FString Large = TEXT("{\"items\":[");
+	for (int32 i = 0; i < 2000; ++i)
 	{
-		Large.AppendChar(TEXT('a' + i % 26));
+		Large += i == 0 ? TEXT("\"abcd\"") : TEXT(",\"abcd\"");
 	}
-	Large += TEXT("\"}");
+	Large += TEXT("]}");
 	FTCHARToUTF8 LargeUtf8(*Large);
 	Rig.Fake->Enqueue(Json(200, R"({"token":"tok","ok":true})"));
 	Rig.Fake->Enqueue(FVaRestFakeResponse::Json(200, FUtf8StringView(reinterpret_cast<const UTF8CHAR*>(LargeUtf8.Get()), LargeUtf8.Length())));
@@ -83,11 +138,30 @@ bool FVaRestHttpLogBodyTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("the request body, JSON keys redacted"), Capture.Contains(Id(Small) + TEXT("> body (json, ")) && Capture.Contains(TEXT("{\"user\":\"neo\",\"password\":\"***\"}")));
 	TestTrue(TEXT("the response body, JSON keys redacted"), Capture.Contains(Id(Small) + TEXT("< body (json, ")) && Capture.Contains(TEXT("{\"token\":\"***\",\"ok\":true}")));
 
+	const int64 BeforeBig = Counters().LogBodyBytesCopied.load();
 	const FVaRestRequestHandle Big = Run(Rig, Rig.Client.Get(TEXT("/big")));
+	TestEqual(TEXT("the game thread copied exactly the cap of the large body (Inspector 7)"), Counters().LogBodyBytesCopied.load() - BeforeBig, static_cast<int64>(VaRest::Http::LogBodyCap));
 	const TArray<FString> Lines = Capture.GetLines();
 	const FString* BodyLine = Lines.FindByPredicate([&Big](const FString& Line) { return Line.Contains(Id(Big) + TEXT("< body")); });
-	TestTrue(TEXT("a large body is logged"), BodyLine != nullptr);
-	TestTrue(TEXT("... truncated to 4 KiB (spec 4.5)"), BodyLine && BodyLine->Contains(TEXT("truncated")) && BodyLine->Len() < 4096 + 200);
+	if (!TestTrue(TEXT("a large body is logged"), BodyLine != nullptr))
+	{
+		return false;
+	}
+	TestTrue(TEXT("... marked truncated"), BodyLine->Contains(TEXT(", truncated): ")));
+	const int32 ExcerptAt = BodyLine->Find(TEXT("): "));
+	const int32 ExcerptLen = ExcerptAt == INDEX_NONE ? 0 : BodyLine->Len() - ExcerptAt - 3;
+	TestTrue(FString::Printf(TEXT("... to 4 KiB (spec 4.5): the excerpt is %d characters"), ExcerptLen), ExcerptLen > VaRest::Http::LogBodyCap - 64 && ExcerptLen <= VaRest::Http::LogBodyCap);
+
+	// Review M3: multipart fields are copied up to the cap (plus the longest needle; this client has no secret) in all
+	FString Huge;
+	for (int32 i = 0; i < 20000; ++i)
+	{
+		Huge.AppendChar(TEXT('x'));
+	}
+	const int64 BeforeParts = Counters().LogBodyBytesCopied.load();
+	const FVaRestRequestHandle Parts = Run(Rig, Rig.Client.Post(TEXT("/parts")).Body(FVaRestMultipart().AddField(TEXT("small"), TEXT("s")).AddField(TEXT("huge"), Huge).AddField(TEXT("after"), TEXT("a"))));
+	TestEqual(TEXT("multipart: the cap copied for the fields, then the 2-byte response"), Counters().LogBodyBytesCopied.load() - BeforeParts, static_cast<int64>(VaRest::Http::LogBodyCap) + 2);
+	TestTrue(TEXT("... and the excerpt shows the parts, truncated"), Capture.Contains(Id(Parts) + TEXT("> body (multipart, ")) && Capture.Contains(TEXT(", truncated): part \"small\": s\\npart \"huge\": xxx")));
 	return true;
 }
 
@@ -98,6 +172,7 @@ bool FVaRestHttpLogCvarTest::RunTest(const FString& Parameters)
 {
 	using namespace VaRest::Http::Testing;
 	using namespace VaRest::Http::LogTestPrivate;
+	FLevelIsolation Isolation;
 	FTestRig Rig;
 	FLogCapture Capture;
 	Rig.Client.WithLogLevel(EVaRestLogLevel::Basic);
@@ -126,6 +201,7 @@ bool FVaRestHttpLogCanariesTest::RunTest(const FString& Parameters)
 {
 	using namespace VaRest::Http::Testing;
 	using namespace VaRest::Http::LogTestPrivate;
+	FLevelIsolation Isolation;
 	FTestRig Rig;
 	FLogCapture Capture;
 	AddExpectedMessagePlain(TEXT("-> 500"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
@@ -144,6 +220,26 @@ bool FVaRestHttpLogCanariesTest::RunTest(const FString& Parameters)
 		.Body(FVaRestJson::Object().Set(TEXT("password"), TEXT("canary-password")).Set(TEXT("playerPin"), TEXT("canary-pin")).Set(TEXT("note"), TEXT("hi"))));
 	Run(Rig, Rig.Client.Get<FString>(TEXT("/echo")));
 
+	// Review M8: the Inspector 10.1 positions the log stage routes itself -- a multipart text part and a file part, a
+	// session and an API key header, X-Amz-Signature, a binary response, URL userinfo, a form field, a password nested in
+	// an array and camelCase token keys, and a streamed file upload
+	Rig.Fake->Enqueue(FVaRestFakeResponse::Bytes(200, BytesOf("\x0a\x08password\x12\x0e" "canary-protobuf"), TEXT("application/x-protobuf")));
+	Run(Rig, Rig.Client.Post<void>(TEXT("/parts?X-Amz-Signature=canary-amz&X-Amz-Date=1"))
+		.Header(TEXT("X-Api-Key"), TEXT("canary-apikey"))
+		.Header(TEXT("X-Session-Id"), TEXT("canary-session"))
+		.Body(FVaRestMultipart().AddField(TEXT("password"), TEXT("canary-mp-password")).AddField(TEXT("note"), TEXT("hi"))
+			.AddBytes(TEXT("avatar"), TEXT("a.bin"), TEXT("application/octet-stream"), BytesOf("canary-mp-file"))));
+	Rig.Client.WithBaseUrl(TEXT("https://neo:canary-userinfo@api.test"));
+	Rig.Fake->Enqueue(Json(200, R"({"items":[{"password":"canary-nested"}],"accessToken":"canary-access","refreshToken":"canary-rt","clientSecret":"canary-cs"})"));
+	Run(Rig, Rig.Client.Post(TEXT("/form")).Body(FVaRestForm().Add(TEXT("user"), TEXT("neo")).Add(TEXT("password"), TEXT("canary-form"))));
+	const FString Upload = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir() / TEXT("VaRestLogTest") / TEXT("upload.bin"));
+	if (!TestTrue(TEXT("the upload file is written"), FFileHelper::SaveStringToFile(TEXT("canary-file-content"), *Upload)))
+	{
+		return false;
+	}
+	Run(Rig, Rig.Client.Put(TEXT("/file")).BodyFile(Upload));
+	IFileManager::Get().DeleteDirectory(*FPaths::GetPath(Upload), false, true);
+
 	int32 Leaks = 0;
 	for (const FString& Line : Capture.GetLines())
 	{
@@ -157,6 +253,9 @@ bool FVaRestHttpLogCanariesTest::RunTest(const FString& Parameters)
 	// the known-secret scrub in a path, a 5xx JSON body, a Location header, a Set-Cookie, a text/plain body
 	TestEqual(TEXT("no canary in any log line at Body level"), Leaks, 0);
 	TestTrue(TEXT("... and the lines were written"), Capture.Contains(TEXT("< body (json")) && Capture.Contains(TEXT("< body (text")));
+	TestTrue(TEXT("... the multipart, binary, form and stream ones too"), Capture.Contains(TEXT("> body (multipart")) && Capture.Contains(TEXT("< body (binary"))
+		&& Capture.Contains(TEXT("> body (form")) && Capture.Contains(TEXT("> body (stream")));
+	TestTrue(TEXT("... with the userinfo as ***"), Capture.Contains(TEXT("POST https://***@api.test/form -> 200")));
 	return true;
 }
 
@@ -167,6 +266,7 @@ bool FVaRestHttpLogIdTest::RunTest(const FString& Parameters)
 {
 	using namespace VaRest::Http::Testing;
 	using namespace VaRest::Http::LogTestPrivate;
+	FLevelIsolation Isolation;
 	FTestRig Rig;
 	FLogCapture Capture;
 	// Registered before the line is logged: an expected message is matched as it arrives
@@ -189,6 +289,168 @@ bool FVaRestHttpLogIdTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpLogForgedLinesTest, "VaRest.Http.Log.NoForgedLines",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpLogForgedLinesTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::LogTestPrivate;
+	// Review C1: UE writes a message as one block and one terminator (OutputDeviceHelper.cpp:117-138), so a raw CR LF in a
+	// value would start a physical line with no timestamp, category or #id -- a forged one, or an IN-16 gap
+	FLevelIsolation Isolation;
+	FTestRig Rig;
+	FLogCapture Capture;
+	AddExpectedErrorPlain(TEXT("header \"X-Bad\\r\\nFAKE\" is not a token"), EAutomationExpectedErrorFlags::Contains, 1);
+	AddExpectedMessagePlain(TEXT("-> Other InvalidHeader"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
+	Rig.Client.WithLogLevel(EVaRestLogLevel::Body).Use(MakeShared<FForger, ESPMode::ThreadSafe>(), EVaRestStageSlot::PerAttempt);
+
+	FVaRestFakeResponse Echoed = FVaRestFakeResponse::Text(200, Forgery);
+	Echoed.Headers.Add(TEXT("X-Note"), Forgery);
+	Rig.Fake->Enqueue(Echoed);
+	const FVaRestRequestHandle Echo = Run(Rig, Rig.Client.Get<FString>(TEXT("/text")));
+	const FVaRestRequestHandle Parts = Run(Rig, Rig.Client.Post(TEXT("/parts")).Body(FVaRestMultipart().AddField(TEXT("a"), TEXT("1")).AddField(TEXT("b"), Forgery)));
+	const FVaRestRequestHandle Forged = Run(Rig, Rig.Client.Get(TEXT("/forged")));
+
+	const FString Ids[] = { Id(Echo), Id(Parts), Id(Forged) };
+	int32 Lines = 0;
+	int32 Raw = 0;
+	int32 Untagged = 0;
+	for (const FString& Line : Capture.GetLines())
+	{
+		if (!Line.StartsWith(TEXT("LogVaRestHttp: ")))
+		{
+			continue;
+		}
+		++Lines;
+		int32 At = INDEX_NONE;
+		if (Line.FindChar(TEXT('\r'), At) || Line.FindChar(TEXT('\n'), At))
+		{
+			++Raw;
+			AddInfo(FString::Printf(TEXT("raw line break: %s"), *Line.ReplaceCharWithEscapedChar()));
+		}
+		const FString Message = Line.RightChop(FCString::Strlen(TEXT("LogVaRestHttp: ")));
+		bool bTagged = false;
+		for (const FString& Tag : Ids)
+		{
+			bTagged |= Message.StartsWith(Tag, ESearchCase::CaseSensitive);
+		}
+		if (!bTagged)
+		{
+			++Untagged;
+			AddInfo(FString::Printf(TEXT("untagged: %s"), *Line.ReplaceCharWithEscapedChar()));
+		}
+	}
+	TestTrue(TEXT("the three requests wrote their lines"), Lines >= 12);
+	TestEqual(TEXT("no raw CR or LF in any line"), Raw, 0);
+	TestEqual(TEXT("IN-16: every line starts with its request's #<RequestId>"), Untagged, 0);
+	TestTrue(TEXT("a text body, escaped"), Capture.Contains(Id(Echo) + TEXT("< body (text, ")) && Capture.Contains(TEXT("): a\\r\\nFAKE #999 GET http://evil -> 200")));
+	TestTrue(TEXT("a response header value, escaped"), Capture.Contains(Id(Echo) + TEXT("<   X-Note: a\\r\\nFAKE #999 GET http://evil -> 200")));
+	TestTrue(TEXT("multipart parts on one line"), Capture.Contains(Id(Parts) + TEXT("> body (multipart, ")) && Capture.Contains(TEXT("): part \"a\": 1\\npart \"b\": a\\r\\nFAKE #999")));
+	TestTrue(TEXT("a stage's header name and value, escaped"), Capture.Contains(Id(Forged) + TEXT(">   X-Bad\\r\\nFAKE: a\\r\\nFAKE #999")));
+	TestEqualSensitive(TEXT("a backslash is escaped too, so no escape can be forged"), VaRest::Http::EscapeForLog(TEXT("a\\r\tb\x1b\x7f\x85\x2028***")),
+		FString(TEXT("a\\\\r\tb\\x1B\\x7F\\x85\\u2028***")));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpLogVerbosityTest, "VaRest.Http.Log.CategoryVerbosity",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpLogVerbosityTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::LogTestPrivate;
+	// Review M2: LogVaRestHttp below Log drops the stage's Log lines, so nothing is redacted or copied for them
+	FLevelIsolation Isolation;
+	FTestRig Rig;
+	FLogCapture Capture;
+	AddExpectedMessagePlain(TEXT("-> 404"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
+	Rig.Client.WithLogLevel(EVaRestLogLevel::Body);
+	FVaRestRequestHandle Quiet;
+	FVaRestRequestHandle Missing;
+	int64 Redactions = 0;
+	int64 Copied = 0;
+	{
+		FScopedVerbosity Warnings(ELogVerbosity::Warning);
+		const uint64 RedactionsBefore = FVaRestTrace::Counters().RedactorCalls.load();
+		const int64 CopiedBefore = Counters().LogBodyBytesCopied.load();
+		Quiet = Run(Rig, Rig.Client.Post(TEXT("/quiet?token=abc")).Header(TEXT("Authorization"), TEXT("Bearer abc")).Body(FVaRestJson::Object().Set(TEXT("a"), 1)));
+		Redactions = static_cast<int64>(FVaRestTrace::Counters().RedactorCalls.load() - RedactionsBefore);
+		Copied = Counters().LogBodyBytesCopied.load() - CopiedBefore;
+		Rig.Fake->Enqueue(Json(404, R"({"error":"x"})"));
+		Missing = Run(Rig, Rig.Client.Get(TEXT("/gone?token=abc")));
+	}
+	TestEqual(TEXT("a 200 at Body level, the category at Warning: no redactor call"), Redactions, static_cast<int64>(0));
+	TestEqual(TEXT("... no body copied"), Copied, static_cast<int64>(0));
+	TestEqual(TEXT("... no line"), Capture.Count(Id(Quiet)), 0);
+	TestEqual(TEXT("a 404 still writes its Warning line, alone"), Capture.Count(Id(Missing)), 1);
+	TestTrue(TEXT("... with the redacted URL"), Capture.Contains(Id(Missing) + TEXT("GET https://api.test/gone?token=*** -> 404")));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpLogKeysOnceTest, "VaRest.Http.Log.RedactedKeysOnce",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpLogKeysOnceTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::LogTestPrivate;
+	// Review M4: a key is checked and de-duplicated where it enters, not on each of the republishes that follow
+	FLevelIsolation Isolation;
+	FTestRig Rig;
+	FLogCapture Capture;
+	AddExpectedMessagePlain(TEXT("the redaction key \"pin=1\" holds"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
+	const int32 Before = Rig.Client.GetStateInternal()->GetConfig()->RedactKeys.Num();
+	const TArray<FString> Keys = { TEXT("pin=1"), TEXT("player_pin"), TEXT("playerPin"), TEXT("Player-Pin") };
+	Rig.Client.WithRedactedKeys(Keys);
+	const TArray<FString> Again = { TEXT("player_pin") };
+	Rig.Client.WithRedactedKeys(Again);
+	TestEqual(TEXT("one key kept for the spellings of one, the refused one dropped"), Rig.Client.GetStateInternal()->GetConfig()->RedactKeys.Num(), Before + 1);
+	// Each of these publishes again
+	Rig.Client.WithLogLevel(EVaRestLogLevel::Body);
+	Rig.Client.SetSecretValue(TEXT("bearer"), TEXT("token-abcdefgh"));
+	Rig.Client.WithHeader(TEXT("X-A"), TEXT("1"));
+	const FVaRestRequestHandle Handle = Run(Rig, Rig.Client.Post(TEXT("/k")).Body(FVaRestJson::Object().Set(TEXT("playerPin"), TEXT("1234")).Set(TEXT("note"), TEXT("hi"))));
+	TestTrue(TEXT("the kept key redacts"), Capture.Contains(Id(Handle) + TEXT("> body (json, ")) && Capture.Contains(TEXT("{\"playerPin\":\"***\",\"note\":\"hi\"}")));
+	TestEqual(TEXT("the refused key warned once"), Capture.Count(TEXT("the redaction key")), 1);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpLogQueueTest, "VaRest.Http.Log.QueueWait",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpLogQueueTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::LogTestPrivate;
+	// Review M5: a Basic line's milliseconds are the attempt's own, from its limiter grant; the queue wait is shown apart
+	FLevelIsolation Isolation;
+	FTestRig Rig;
+	FLogCapture Capture;
+	Rig.Client.WithLogLevel(EVaRestLogLevel::Basic).WithMaxConcurrent(1);
+	Rig.Fake->Enqueue(FVaRestFakeResponse::Manual());
+	FVaRestFakeResponse Later = Json(200, "{}");
+	Later.Delay = 0.5;
+	Rig.Fake->Enqueue(Later);
+	auto FirstDone = MakeOutcome<FVaRestJson>();
+	auto SecondDone = MakeOutcome<FVaRestJson>();
+	const FVaRestRequestHandle First = Observe(Rig.Client.Get(TEXT("/first")), FirstDone).Send();
+	const FVaRestRequestHandle Second = Observe(Rig.Client.Get(TEXT("/second")), SecondDone).Send();
+	TestEqual(TEXT("the second request queues"), Rig.Fake->NumCalls(), 1);
+	Rig.Clock->Advance(2.0);
+	if (Rig.Fake->NumCalls() > 0)
+	{
+		Rig.Fake->Complete(0, Json(200, "{}"));
+	}
+	TestTrue(TEXT("the first completes"), Rig.Wait(FirstDone));
+	TestTrue(TEXT("... and the second reaches the transport"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 2; }));
+	Rig.Clock->Advance(0.5);
+	TestTrue(TEXT("the second completes"), Rig.Wait(SecondDone));
+	TestTrue(TEXT("no wait: the attempt's 2000 ms, nothing queued"), Capture.Contains(Id(First) + TEXT("GET https://api.test/first -> 200 (2000 ms, 2 B down")));
+	TestTrue(TEXT("queued: its own 500 ms, the 2000 ms queued apart"), Capture.Contains(Id(Second) + TEXT("GET https://api.test/second -> 200 (500 ms, 2000 ms queued, 2 B down")));
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpLogRotationTest, "VaRest.Http.Log.SecretRotation",
 	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
 
@@ -196,6 +458,7 @@ bool FVaRestHttpLogRotationTest::RunTest(const FString& Parameters)
 {
 	using namespace VaRest::Http::Testing;
 	using namespace VaRest::Http::LogTestPrivate;
+	FLevelIsolation Isolation;
 	FTestRig Rig;
 	FLogCapture Capture;
 	Rig.Client.WithLogLevel(EVaRestLogLevel::Basic);
@@ -223,6 +486,7 @@ bool FVaRestHttpLogExpiryOffGridTest::RunTest(const FString& Parameters)
 	// Reviews N-2, N-I3: rotated at 532.979068556 s, the old value expires at 1132.9790685560001 in doubles, while the
 	// clock, in whole nanoseconds, fires the expiry timer at 1132.979068556 -- one ulp early. About one rotation instant
 	// in ten does this; SecretRotation rotates at 0, where the sums are exact.
+	FLevelIsolation Isolation;
 	FTestRig Rig;
 	FLogCapture Capture;
 	Rig.Client.WithLogLevel(EVaRestLogLevel::Basic);
@@ -234,6 +498,38 @@ bool FVaRestHttpLogExpiryOffGridTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("the expiry fired once and left nothing armed"), Rig.Clock->NumPendingTimers(), 0);
 	const FVaRestRequestHandle Expired = Run(Rig, Rig.Client.Get(TEXT("/p/token-one-abcdefgh")));
 	TestTrue(TEXT("... and the expired value is no longer scrubbed"), Capture.Contains(Id(Expired) + TEXT("GET https://api.test/p/token-one-abcdefgh ")));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpLogExpiryClockTest, "VaRest.Http.Log.SecretExpiryClockSwitch",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpLogExpiryClockTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::LogTestPrivate;
+	// Review M6: WithClock after a rotation. The old value expires at 600 on the rig's clock; the new clock is already at
+	// 1000, so without the rebase the value would be expired at once there, and the old clock's timer would still fire.
+	FLevelIsolation Isolation;
+	FTestRig Rig;
+	FLogCapture Capture;
+	Rig.Client.WithLogLevel(EVaRestLogLevel::Basic);
+	Rig.Client.SetSecretValue(TEXT("bearer"), TEXT("token-one-abcdefgh"));
+	Rig.Client.SetSecretValue(TEXT("bearer"), TEXT("token-two-abcdefgh"));
+	const TSharedRef<FVaRestVirtualClock, ESPMode::ThreadSafe> Later = MakeShared<FVaRestVirtualClock, ESPMode::ThreadSafe>();
+	Later->Advance(1000.0);
+	Rig.Client.WithClock(Later);
+	TestEqual(TEXT("the old clock's expiry timer is cleared"), Rig.Clock->NumPendingTimers(), 0);
+	TestEqual(TEXT("... and one is armed on the new clock"), Later->NumPendingTimers(), 1);
+	const FVaRestRequestHandle Moved = Run(Rig, Rig.Client.Get(TEXT("/p/token-one-abcdefgh")));
+	TestTrue(TEXT("the rotated value is still scrubbed on the new clock"), Capture.Contains(Id(Moved) + TEXT("GET https://api.test/p/*** ")));
+	Later->Advance(599.0);
+	const FVaRestRequestHandle Kept = Run(Rig, Rig.Client.Get(TEXT("/p/token-one-abcdefgh")));
+	TestTrue(TEXT("... for the time it had left"), Capture.Contains(Id(Kept) + TEXT("GET https://api.test/p/*** ")));
+	Later->Advance(1.0);
+	TestEqual(TEXT("its expiry fired on the new clock"), Later->NumPendingTimers(), 0);
+	const FVaRestRequestHandle Expired = Run(Rig, Rig.Client.Get(TEXT("/p/token-one-abcdefgh")));
+	TestTrue(TEXT("... and then it is no longer scrubbed"), Capture.Contains(Id(Expired) + TEXT("GET https://api.test/p/token-one-abcdefgh ")));
 	return true;
 }
 

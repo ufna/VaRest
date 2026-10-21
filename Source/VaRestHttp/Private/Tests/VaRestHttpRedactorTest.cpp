@@ -303,6 +303,50 @@ bool FVaRestHttpRedactPartsTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpRedactPartCutTest, "VaRest.Http.Redactor.MultipartCut",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpRedactPartCutTest::RunTest(const FString& Parameters)
+{
+	// Task 14 fix round 1: a text part read only up to the cap plus the longest needle, or copied short by the log stage
+	// (review M3), can end in the front of a known secret. The scrubs before it shorten the text, so that front can land
+	// inside the cap; it must be dropped, as RedactBody drops a cut body's tail.
+	const FString Secret(TEXT("SECRET-abcdefghijklmnop")); // 23 bytes; its percent, form and JSON forms are the same
+	const FVaRestRedactor Redactor(FVaRestRedactRules(), { Secret });
+	TestEqual(TEXT("the longest needle"), Redactor.GetMaxNeedleBytes(), 23);
+	auto Field = [](const FString& Value, int32 Kept)
+	{
+		FVaRestMultipartPart Part;
+		Part.Name = TEXT("f");
+		Part.bField = true;
+		const FTCHARToUTF8 Utf8(*Value);
+		Part.Size = Utf8.Length();
+		Part.Bytes.Append(reinterpret_cast<const uint8*>(Utf8.Get()), FMath::Min(Kept, Utf8.Length()));
+		return Part;
+	};
+
+	// Cut by the reach (64 + 23 = 87 bytes), 10 bytes into the third copy; the first two become ******, 40 bytes fewer
+	const FString Long = Secret + Secret + FString::ChrN(31, TEXT('x')) + Secret;
+	const TArray<FVaRestMultipartPart> LongParts = { Field(Long, MAX_int32) };
+	const FVaRestTraceExcerpt Reached = Redactor.DescribeMultipart(LongParts, Long.Len(), 64);
+	TestFalse(TEXT("a part cut at the reach keeps no front of a secret"), Reached.ToText().Contains(TEXT("SECRET")));
+	TestTrue(TEXT("... and is truncated"), Reached.bTruncated);
+	TestTrue(TEXT("... the rest is there"), Reached.ToText().StartsWith(TEXT("part \"f\": ******xxx")));
+
+	// A caller's copy cut 10 bytes into the second copy: Bytes shorter than Size
+	const FString Short = Secret + TEXT("xx") + Secret;
+	const TArray<FVaRestMultipartPart> CopiedParts = { Field(Short, 35) };
+	const FVaRestTraceExcerpt Copied = Redactor.DescribeMultipart(CopiedParts, Short.Len(), 4096);
+	TestEqualSensitive(TEXT("a part copied short keeps no front of a secret"), Copied.ToText(), FString(TEXT("part \"f\": ***xx")));
+	TestTrue(TEXT("... and is truncated"), Copied.bTruncated);
+
+	const TArray<FVaRestMultipartPart> WholeParts = { Field(Short, MAX_int32) };
+	const FVaRestTraceExcerpt Whole = Redactor.DescribeMultipart(WholeParts, Short.Len(), 4096);
+	TestEqualSensitive(TEXT("a whole part is scrubbed as before"), Whole.ToText(), FString(TEXT("part \"f\": ***xx***")));
+	TestFalse(TEXT("... and not truncated"), Whole.bTruncated);
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpSecretSetTest, "VaRest.Http.Redactor.SecretSet",
 	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
 

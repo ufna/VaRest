@@ -63,6 +63,8 @@ namespace VaRest::Http
 		/** Game thread: layer 3's known values (Inspector 2.2); publishes a new redactor */
 		void SetSecret(FName Slot, const FString& Value);
 		void ClearSecrets();
+		/** Game thread: WithClock. Pending secret expiries move to the new clock's time, and their timer with them (review M6). */
+		void SetClock(const TSharedRef<IVaRestClock, ESPMode::ThreadSafe>& NewClock);
 
 		/** Every live client (game thread): the trace snapshot, engine shutdown */
 		static void ForEachLive(TFunctionRef<void(FClientState&)> Visit);

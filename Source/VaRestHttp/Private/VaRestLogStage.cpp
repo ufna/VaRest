@@ -4,6 +4,7 @@
 #include "Tasks/Pipe.h"
 #include "VaRestClientState.h"
 #include "VaRestHttpLog.h"
+#include "VaRestHttpTesting.h"
 #include "VaRestRedactionPipe.h"
 
 namespace VaRest::Http::LogStagePrivate
@@ -16,11 +17,23 @@ namespace VaRest::Http::LogStagePrivate
 
 	using FRedactorRef = TSharedRef<const FVaRestRedactor, ESPMode::ThreadSafe>;
 
+	bool NeedsEscape(TCHAR Char)
+	{
+		const uint32 Code = static_cast<uint32>(Char);
+		return (Code < 0x20 && Code != '\t') || Code == '\\' || (Code >= 0x7F && Code <= 0x9F) || Code == 0x2028 || Code == 0x2029;
+	}
+
+	/** The URL as a line shows it: redacted, then escaped */
+	FString ShownUrl(const FVaRestExchange& Ex, const FRedactorRef& Redactor)
+	{
+		return EscapeForLog(Redactor->RedactUrl(Ex.Url));
+	}
+
 	void LogHeaders(uint64 RequestId, const TCHAR* Direction, const FVaRestHeaders& Redacted)
 	{
 		for (const FVaRestHeaders::FPair& Pair : Redacted)
 		{
-			UE_LOG(LogVaRestHttp, Log, TEXT("#%llu %s   %s: %s"), RequestId, Direction, *Pair.Key, *Pair.Value);
+			UE_LOG(LogVaRestHttp, Log, TEXT("#%llu %s   %s: %s"), RequestId, Direction, *EscapeForLog(Pair.Key), *EscapeForLog(Pair.Value));
 		}
 	}
 
@@ -39,11 +52,17 @@ namespace VaRest::Http::LogStagePrivate
 		}
 	}
 
-	/** On the redaction pipe */
+	/** Game thread: what body logging copied there (Inspector 7: "at most ... up to the cap"); tests read it (review M7) */
+	void CountCopied(int64 Bytes)
+	{
+		Testing::Counters().LogBodyBytesCopied += Bytes;
+	}
+
+	/** On the redaction pipe. A multipart excerpt is one line per part, and a text body may hold any byte: escaped, so it stays one line. */
 	void WriteExcerpt(uint64 RequestId, const TCHAR* Direction, const FVaRestTraceExcerpt& Excerpt)
 	{
 		UE_LOG(LogVaRestHttp, Log, TEXT("#%llu %s body (%s, %lld B%s): %s"), RequestId, Direction, KindName(Excerpt.Kind), Excerpt.TotalBytes,
-			Excerpt.bTruncated ? TEXT(", truncated") : TEXT(""), *Excerpt.ToText());
+			Excerpt.bTruncated ? TEXT(", truncated") : TEXT(""), *EscapeForLog(Excerpt.ToText()));
 	}
 
 	/** Copies at most LogBodyCap bytes here (game thread, one memcpy); redacts and writes on the redaction pipe (Inspector 7) */
@@ -55,10 +74,38 @@ namespace VaRest::Http::LogStagePrivate
 			return;
 		}
 		TArray<uint8> Head(Bytes.GetData(), FMath::Min(Bytes.Num(), LogBodyCap));
+		CountCopied(Head.Num());
 		Pipe->Launch(TEXT("VaRest.LogBody"), [RequestId, Direction, Redactor, Type = MoveTemp(ContentType), Prefix = MoveTemp(Head), TotalBytes]
 		{
 			WriteExcerpt(RequestId, Direction, Redactor->RedactBody(Type, Prefix, TotalBytes, LogBodyCap));
 		});
+	}
+
+	/**
+	 * Review M3: the multipart descriptors with their field bytes cut to what DescribeMultipart can read (the cap plus the
+	 * longest needle), all parts together. A cut field keeps its Size: that is how DescribeMultipart knows to drop a known
+	 * secret the cut split in two.
+	 */
+	TArray<FVaRestMultipartPart> CopyPartsForLog(TConstArrayView<FVaRestMultipartPart> Parts, const FVaRestRedactor& Redactor)
+	{
+		int64 Budget = static_cast<int64>(LogBodyCap) + Redactor.GetMaxNeedleBytes();
+		TArray<FVaRestMultipartPart> Copies;
+		Copies.Reserve(Parts.Num());
+		for (const FVaRestMultipartPart& Part : Parts)
+		{
+			FVaRestMultipartPart& Copied = Copies.AddDefaulted_GetRef();
+			Copied.Name = Part.Name;
+			Copied.FileName = Part.FileName;
+			Copied.ContentType = Part.ContentType;
+			Copied.FilePath = Part.FilePath;
+			Copied.Size = Part.Size;
+			Copied.bField = Part.bField;
+			const int32 Take = static_cast<int32>(FMath::Min<int64>(Part.Bytes.Num(), Budget));
+			Copied.Bytes.Append(Part.Bytes.GetData(), Take);
+			Budget -= Take;
+			CountCopied(Take);
+		}
+		return Copies;
 	}
 
 	void LogRequestBody(const FVaRestExchange& Ex, const FRedactorRef& Redactor)
@@ -83,9 +130,9 @@ namespace VaRest::Http::LogStagePrivate
 		}
 		else if (Upload.Kind == EVaRestBodyKind::Multipart)
 		{
-			Pipe->Launch(TEXT("VaRest.LogBody"), [RequestId, Redactor, Parts = Upload.PartDescriptors, Total = Upload.ContentLength]
+			Pipe->Launch(TEXT("VaRest.LogBody"), [RequestId, Redactor, Capped = CopyPartsForLog(Upload.PartDescriptors, *Redactor), Total = Upload.ContentLength]
 			{
-				WriteExcerpt(RequestId, TEXT(">"), Redactor->DescribeMultipart(Parts, Total, LogBodyCap));
+				WriteExcerpt(RequestId, TEXT(">"), Redactor->DescribeMultipart(Capped, Total, LogBodyCap));
 			});
 		}
 		else
@@ -97,31 +144,54 @@ namespace VaRest::Http::LogStagePrivate
 	}
 #endif
 
-	void LogOutcome(const FVaRestExchange& Ex, const FRedactorRef& Redactor, const FString& RedactedUrl, EVaRestLogLevel Level, double StartedAt, const FVaRestAttemptOutcome& Outcome)
+	/** Url: the shown URL when the request line built it, else empty and built here, only for a line that is written */
+	void LogOutcome(const FVaRestExchange& Ex, const FRedactorRef& Redactor, FString& Url, EVaRestLogLevel Level, double StartedAt, const FVaRestAttemptOutcome& Outcome)
 	{
-		const double Ms = (Ex.Config->Clock->Now() - StartedAt) * 1000.0;
-		if (Outcome.Failure == EVaRestTransportFailure::Canceled)
+		// Review M5: the attempt's own time, from the limiter's grant; a wait in the queue (IN-2's LimiterWait, measured on
+		// this exchange's clock) is shown apart, and only when it rounds to a millisecond or more
+		const double QueuedMs = Ex.LimiterWait * 1000.0;
+		const double Ms = FMath::Max(0.0, (Ex.Config->Clock->Now() - StartedAt) * 1000.0 - QueuedMs);
+		const FString Queued = QueuedMs >= 0.5 ? FString::Printf(TEXT(", %.0f ms queued"), QueuedMs) : FString();
+		const bool bCanceled = Outcome.Failure == EVaRestTransportFailure::Canceled;
+		const bool bWarning = Outcome.IsTransportFailure() ? !bCanceled : Outcome.Status >= 400;
+		// Review M2: a line the category drops is not built; a Warning line can be active when Log is not
+		if (bWarning ? UE_LOG_ACTIVE(LogVaRestHttp, Warning) : UE_LOG_ACTIVE(LogVaRestHttp, Log))
 		{
-			UE_LOG(LogVaRestHttp, Log, TEXT("#%llu %s %s -> canceled (%.0f ms)"), Ex.RequestId, *Ex.Verb, *RedactedUrl, Ms);
+			if (Url.IsEmpty())
+			{
+				Url = ShownUrl(Ex, Redactor);
+			}
+			const FString ShownVerb = EscapeForLog(Ex.Verb);
+			if (bCanceled)
+			{
+				UE_LOG(LogVaRestHttp, Log, TEXT("#%llu %s %s -> canceled (%.0f ms%s)"), Ex.RequestId, *ShownVerb, *Url, Ms, *Queued);
+			}
+			else if (Outcome.IsTransportFailure())
+			{
+				UE_LOG(LogVaRestHttp, Warning, TEXT("#%llu %s %s -> %s %s (%.0f ms%s)"), Ex.RequestId, *ShownVerb, *Url, LexToString(Outcome.Failure),
+					*EscapeForLog(Outcome.FailureDetail.ToString()), Ms, *Queued);
+			}
+			else if (Outcome.Status >= 400)
+			{
+				UE_LOG(LogVaRestHttp, Warning, TEXT("#%llu %s %s -> %d (%.0f ms%s, %lld B down, %lld B up)"), Ex.RequestId, *ShownVerb, *Url, Outcome.Status, Ms, *Queued,
+					Outcome.BytesDown, Outcome.BytesUp);
+			}
+			else
+			{
+				UE_LOG(LogVaRestHttp, Log, TEXT("#%llu %s %s -> %d (%.0f ms%s, %lld B down, %lld B up)"), Ex.RequestId, *ShownVerb, *Url, Outcome.Status, Ms, *Queued,
+					Outcome.BytesDown, Outcome.BytesUp);
+			}
 		}
-		else if (Outcome.IsTransportFailure())
+		if (Outcome.IsTransportFailure() || !UE_LOG_ACTIVE(LogVaRestHttp, Log))
 		{
-			UE_LOG(LogVaRestHttp, Warning, TEXT("#%llu %s %s -> %s %s (%.0f ms)"), Ex.RequestId, *Ex.Verb, *RedactedUrl, LexToString(Outcome.Failure), *Outcome.FailureDetail.ToString(), Ms);
+			return;
 		}
-		else if (Outcome.Status >= 400)
-		{
-			UE_LOG(LogVaRestHttp, Warning, TEXT("#%llu %s %s -> %d (%.0f ms, %lld B down, %lld B up)"), Ex.RequestId, *Ex.Verb, *RedactedUrl, Outcome.Status, Ms, Outcome.BytesDown, Outcome.BytesUp);
-		}
-		else
-		{
-			UE_LOG(LogVaRestHttp, Log, TEXT("#%llu %s %s -> %d (%.0f ms, %lld B down, %lld B up)"), Ex.RequestId, *Ex.Verb, *RedactedUrl, Outcome.Status, Ms, Outcome.BytesDown, Outcome.BytesUp);
-		}
-		if (Level >= EVaRestLogLevel::Headers && !Outcome.IsTransportFailure())
+		if (Level >= EVaRestLogLevel::Headers)
 		{
 			LogHeaders(Ex.RequestId, TEXT("<"), Redactor->RedactHeaders(Outcome.Headers));
 		}
 #if !UE_BUILD_SHIPPING
-		if (Level >= EVaRestLogLevel::Body && !Outcome.IsTransportFailure())
+		if (Level >= EVaRestLogLevel::Body)
 		{
 			if (Outcome.bBodyInFile)
 			{
@@ -149,28 +219,34 @@ namespace VaRest::Http::LogStagePrivate
 #else
 			FVaRestExchange& Ex = *Exchange;
 			const EVaRestLogLevel Level = Ex.LogLevel;
-			if (Level == EVaRestLogLevel::None)
+			// Review M2: with the category below Log (-LogCmds="LogVaRestHttp Warning"), the header and body lines are dropped,
+			// so nothing is redacted or copied for them. UE_LOG_ACTIVE tests the compiled-in and the runtime verbosity
+			// (LogMacros.h:242-262), as UE_LOG itself does (:355).
+			const bool bLogActive = UE_LOG_ACTIVE(LogVaRestHttp, Log);
+			if (Level == EVaRestLogLevel::None || (!bLogActive && !UE_LOG_ACTIVE(LogVaRestHttp, Warning)))
 			{
 				Next.Proceed(Exchange, MoveTemp(OnOutcome));
 				return;
 			}
-			// URLs and headers are redacted here, on the game thread; bodies only on the redaction pipe (Inspector 7)
+			// URLs and headers are redacted here, on the game thread; bodies only on the redaction pipe (Inspector 7). Every
+			// value is escaped after it is redacted (review C1).
 			const FRedactorRef Redactor = Ex.Config->Redactor.ToSharedRef();
-			FString Redacted = Redactor->RedactUrl(Ex.Url);
-			if (Level >= EVaRestLogLevel::Headers)
+			FString Shown;
+			if (bLogActive && Level >= EVaRestLogLevel::Headers)
 			{
-				UE_LOG(LogVaRestHttp, Log, TEXT("#%llu > %s %s (attempt %d)"), Ex.RequestId, *Ex.Verb, *Redacted, Ex.Attempt);
+				Shown = ShownUrl(Ex, Redactor);
+				UE_LOG(LogVaRestHttp, Log, TEXT("#%llu > %s %s (attempt %d)"), Ex.RequestId, *EscapeForLog(Ex.Verb), *Shown, Ex.Attempt);
 				LogHeaders(Ex.RequestId, TEXT(">"), Redactor->RedactHeaders(Ex.AttemptHeaders));
 			}
 #if !UE_BUILD_SHIPPING
-			if (Level >= EVaRestLogLevel::Body)
+			if (bLogActive && Level >= EVaRestLogLevel::Body)
 			{
 				// Before the transport stage, which moves the bytes into the engine request (decision 12)
 				LogRequestBody(Ex, Redactor);
 			}
 #endif
 			const double StartedAt = Ex.Config->Clock->Now();
-			Next.Proceed(Exchange, [Exchange, Redactor, Line = MoveTemp(Redacted), Level, StartedAt, Done = MoveTemp(OnOutcome)](FVaRestAttemptOutcome&& Outcome) mutable
+			Next.Proceed(Exchange, [Exchange, Redactor, Line = MoveTemp(Shown), Level, StartedAt, Done = MoveTemp(OnOutcome)](FVaRestAttemptOutcome&& Outcome) mutable
 			{
 				LogOutcome(*Exchange, Redactor, Line, Level, StartedAt, Outcome);
 				Done(MoveTemp(Outcome));
@@ -178,6 +254,52 @@ namespace VaRest::Http::LogStagePrivate
 #endif
 		}
 	};
+}
+
+FString VaRest::Http::EscapeForLog(FStringView Text)
+{
+	using namespace LogStagePrivate;
+	int32 First = 0;
+	while (First < Text.Len() && !NeedsEscape(Text[First]))
+	{
+		++First;
+	}
+	if (First == Text.Len())
+	{
+		return FString(Text);
+	}
+	FString Out;
+	Out.Reserve(Text.Len() + 16);
+	Out.Append(Text.GetData(), First);
+	for (int32 i = First; i < Text.Len(); ++i)
+	{
+		const TCHAR Char = Text[i];
+		if (!NeedsEscape(Char))
+		{
+			Out.AppendChar(Char);
+		}
+		else if (Char == TEXT('\\'))
+		{
+			Out += TEXT("\\\\");
+		}
+		else if (Char == TEXT('\r'))
+		{
+			Out += TEXT("\\r");
+		}
+		else if (Char == TEXT('\n'))
+		{
+			Out += TEXT("\\n");
+		}
+		else if (static_cast<uint32>(Char) <= 0xFF)
+		{
+			Out.Appendf(TEXT("\\x%02X"), static_cast<uint32>(Char));
+		}
+		else
+		{
+			Out.Appendf(TEXT("\\u%04X"), static_cast<uint32>(Char));
+		}
+	}
+	return Out;
 }
 
 FVaRestStageRef VaRest::Http::MakeLogStage()
