@@ -5,6 +5,8 @@
 #include "CoreMinimal.h"
 #include "Misc/OutputDevice.h"
 #include "Templates/Function.h"
+#include "VaRestClient.h"
+#include "VaRestFakeTransport.h"
 
 #include <atomic>
 
@@ -68,6 +70,95 @@ namespace VaRest::Http::Testing
 		TArray<FString> Lines;
 	};
 
-	// Task 8 appends TTestOutcome, MakeOutcome, Observe and FTestRig here, inside this block
+	/** What a request's callbacks did; shared, so a test that times out leaves no dangling reference */
+	template <typename T>
+	struct TTestOutcome
+	{
+		std::atomic<int32> SuccessCalls{ 0 };
+		std::atomic<int32> ErrorCalls{ 0 };
+		std::atomic<int32> CompleteCalls{ 0 };
+		std::atomic<bool> bAllOnGameThread{ true };
+		TOptional<T> Value;
+		FVaRestError Error;
+		FVaRestResponse Response;
+
+		bool IsDone() const { return CompleteCalls.load() > 0; }
+	};
+
+	template <>
+	struct TTestOutcome<void>
+	{
+		std::atomic<int32> SuccessCalls{ 0 };
+		std::atomic<int32> ErrorCalls{ 0 };
+		std::atomic<int32> CompleteCalls{ 0 };
+		std::atomic<bool> bAllOnGameThread{ true };
+		FVaRestError Error;
+		FVaRestResponse Response;
+
+		bool IsDone() const { return CompleteCalls.load() > 0; }
+	};
+
+	template <typename T>
+	TSharedRef<TTestOutcome<T>, ESPMode::ThreadSafe> MakeOutcome()
+	{
+		return MakeShared<TTestOutcome<T>, ESPMode::ThreadSafe>();
+	}
+
+	/** Wires OnSuccess, OnError and OnComplete into Outcome. OnComplete is counted last, after the value and error are stored. */
+	template <typename T>
+	TVaRestRequest<T> Observe(TVaRestRequest<T>&& Request, const TSharedRef<TTestOutcome<T>, ESPMode::ThreadSafe>& Outcome)
+	{
+		auto Tracked = [Outcome](const FVaRestError& Error)
+		{
+			Outcome->bAllOnGameThread = Outcome->bAllOnGameThread.load() && IsInGameThread();
+			Outcome->Error = Error;
+			++Outcome->ErrorCalls;
+		};
+		auto Completed = [Outcome](const TVaRestResult<T>& Result)
+		{
+			Outcome->bAllOnGameThread = Outcome->bAllOnGameThread.load() && IsInGameThread();
+			Outcome->Response = Result.Response;
+			++Outcome->CompleteCalls;
+		};
+		if constexpr (std::is_void_v<T>)
+		{
+			return MoveTemp(Request)
+				.OnSuccess([Outcome](const FVaRestResponse&)
+				{
+					Outcome->bAllOnGameThread = Outcome->bAllOnGameThread.load() && IsInGameThread();
+					++Outcome->SuccessCalls;
+				})
+				.OnError(MoveTemp(Tracked))
+				.OnComplete(MoveTemp(Completed));
+		}
+		else
+		{
+			return MoveTemp(Request)
+				.OnSuccess([Outcome](const T& Result, const FVaRestResponse&)
+				{
+					Outcome->bAllOnGameThread = Outcome->bAllOnGameThread.load() && IsInGameThread();
+					Outcome->Value = Result;
+					++Outcome->SuccessCalls;
+				})
+				.OnError(MoveTemp(Tracked))
+				.OnComplete(MoveTemp(Completed));
+		}
+	}
+
+	/** A client on the fake transport and the virtual clock (spec 7.1). Game thread. */
+	struct VARESTHTTP_API FTestRig
+	{
+		explicit FTestRig(FStringView BaseUrl = TEXTVIEW("https://api.test"));
+
+		TSharedRef<FVaRestVirtualClock, ESPMode::ThreadSafe> Clock;
+		TSharedRef<FVaRestFakeTransport, ESPMode::ThreadSafe> Fake;
+		FVaRestClient Client;
+
+		template <typename T>
+		bool Wait(const TSharedRef<TTestOutcome<T>, ESPMode::ThreadSafe>& Outcome, double TimeoutSeconds = 5.0) const
+		{
+			return PumpUntil([&Outcome] { return Outcome->IsDone(); }, TimeoutSeconds);
+		}
+	};
 }
 #endif // WITH_DEV_AUTOMATION_TESTS

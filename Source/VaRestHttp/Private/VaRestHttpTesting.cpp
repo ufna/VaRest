@@ -108,4 +108,12 @@ TArray<FString> VaRest::Http::Testing::FLogCapture::GetLines() const
 	FScopeLock ScopeLock(&Lock);
 	return Lines;
 }
+
+VaRest::Http::Testing::FTestRig::FTestRig(FStringView BaseUrl)
+	: Clock(MakeShared<FVaRestVirtualClock, ESPMode::ThreadSafe>())
+	, Fake(MakeShared<FVaRestFakeTransport, ESPMode::ThreadSafe>(Clock))
+	, Client(FVaRestClient::Make(BaseUrl))
+{
+	Client.WithTransport(Fake).WithClock(Clock);
+}
 #endif // WITH_DEV_AUTOMATION_TESTS
