@@ -278,6 +278,12 @@ bool FVaRestSegmentStream::Close()
 	return !IsError();
 }
 
+void FVaRestSegmentStream::FailRead()
+{
+	SetError();
+	bReadFailed = true;
+}
+
 bool FVaRestSegmentStream::ReadFileSegment(int32 Index, int64 Offset, uint8* Out, int64 Count)
 {
 	if (OpenIndex != Index)
@@ -314,7 +320,7 @@ void FVaRestSegmentStream::Serialize(void* Data, int64 Length)
 		{
 			// Past the end: the caller asked for more than TotalSize()
 			FMemory::Memzero(Out, Length);
-			SetError();
+			FailRead();
 			return;
 		}
 		const FVaRestBodySegment& Segment = Segments[Index];
@@ -327,12 +333,12 @@ void FVaRestSegmentStream::Serialize(void* Data, int64 Length)
 		else if (!ReadFileSegment(Index, Offset, Out, Count))
 		{
 			FMemory::Memzero(Out, Count);
-			SetError();
+			FailRead();
 			if (!bWarned)
 			{
 				bWarned = true;
 				// The file name only: a full local path is not for logs (review M4)
-				UE_LOG(LogVaRestHttp, Warning, TEXT("VaRest: multipart file %s could not be read at byte %lld (missing, or its size changed since it was added); sending zeros"), *FPaths::GetCleanFilename(Segment.FilePath), Offset);
+				UE_LOG(LogVaRestHttp, Warning, TEXT("VaRest: upload file %s could not be read at byte %lld (missing, or its size changed since the body was built); sending zeros"), *FPaths::GetCleanFilename(Segment.FilePath), Offset);
 			}
 		}
 		Out += Count;

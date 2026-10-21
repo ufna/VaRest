@@ -36,7 +36,12 @@ struct FVaRestTransportRequest
 	FVaRestHeaders Headers;
 	/** In-memory body, moved into IHttpRequest::SetContent(TArray<uint8>&&) (spec 2.4) */
 	TArray<uint8> Body;
-	/** A file streamed with IHttpRequest::SetContentAsStreamedFile */
+	/**
+	 * A file streamed while uploading, through a one-segment FVaRestSegmentStream and IHttpRequest::SetContentFromStream.
+	 * Probe->UploadTotal must be its size when the body was built: Start fails a file that is missing or unreadable
+	 * (BodyFileMissing) or no longer that size (UploadReadFailed) before connecting, and a change while it uploads fails it
+	 * with UploadReadFailed (task 7 review M-1).
+	 */
 	FString BodyFile;
 	/** Multipart with file parts, streamed with IHttpRequest::SetContentFromStream */
 	TArray<FVaRestBodySegment> BodySegments;
@@ -51,8 +56,8 @@ struct FVaRestTransportRequest
 	FString ResponseFile;
 	/**
 	 * The result's JSON cap (MaxJsonBytes, decision 20); 0 for results that are not JSON or have no cap. The body sink
-	 * stops the transfer once more arrived (Failure Other, detail ResponseTooLarge) and reserves at most
-	 * max(MaxBodyBytes, 8 MiB) + 1 up front, so a lying Content-Length costs nothing (reviews M-6, M13).
+	 * stops the transfer once more arrived (Failure Other, detail ResponseTooLarge) and reserves at most MaxBodyBytes + 1
+	 * up front (8 MiB + 1 without a cap), so a lying Content-Length costs no more than the cap (reviews M-6, M13, M-3).
 	 */
 	int64 MaxBodyBytes = 0;
 	/** Bind progress reporting (a progress callback or trace metadata) */
@@ -82,7 +87,10 @@ struct FVaRestTransportResult
 	/**
 	 * The transport's own reason: LexToString(EHttpFailureReason), "ActivityTimeout", and VaRest's "ResponseTooLarge"
 	 * (MaxBodyBytes), "ResponseFileWriteFailed", "ResponseBodyRejected", "BodyRejected", "InvalidHeader",
-	 * "TransportDropped" (the transport never called back)
+	 * "TransportDropped" (the transport never called back), "UploadReadFailed" (the body could not be read while it was
+	 * sent, or a BodyFile changed size since it was built), "BodyFileMissing" (a BodyFile missing or unreadable at Start:
+	 * nothing was sent). BodyRejected, InvalidHeader, UploadReadFailed and BodyFileMissing describe the request itself
+	 * (Kind=Config, not retryable).
 	 */
 	FName FailureDetail;
 	int64 BytesUp = 0;

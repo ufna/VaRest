@@ -2,9 +2,12 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
+#include "GenericPlatform/GenericPlatformFile.h"
 #include "HAL/FileManager.h"
 #include "HAL/IConsoleManager.h"
+#include "HAL/PlatformFileManager.h"
 #include "Misc/AutomationTest.h"
+#include "Misc/ConfigCacheIni.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "VaRestBodySink.h"
@@ -12,6 +15,7 @@
 #include "VaRestHttpTesting.h"
 #include "VaRestHttpTransportInternal.h"
 #include "VaRestTransport.h"
+#include "VaRestUrl.h"
 
 namespace VaRest::Http::TransportTestPrivate
 {
@@ -52,17 +56,71 @@ namespace VaRest::Http::TransportTestPrivate
 		FString Previous;
 	};
 
-	/** Starts Request on the FHttpModule transport and pumps until it completes; Done holds the result only when this returns true */
-	bool SendAndWait(FVaRestTransportRequest&& Request, const TSharedRef<FDone, ESPMode::ThreadSafe>& Done, double TimeoutSeconds = 10.0)
+	/**
+	 * Sets [HTTP.Curl] bAllowSeekFunction in GEngineIni for a scope. CurlMayRewindBodies reads it per request; the engine's
+	 * curl keeps its own copy, read at init and on config updates (CurlHttpManager.cpp:304, :502-511), so curl itself is
+	 * unchanged.
+	 */
+	struct FCurlSeekConfigGuard
 	{
-		VaRest::Http::GetDefaultTransport()->Start(MoveTemp(Request), [Done](FVaRestTransportResult&& Result)
+		explicit FCurlSeekConfigGuard(bool bAllow)
+		{
+			GConfig->GetBool(TEXT("HTTP.Curl"), TEXT("bAllowSeekFunction"), bPrevious, GEngineIni);
+			GConfig->SetBool(TEXT("HTTP.Curl"), TEXT("bAllowSeekFunction"), bAllow, GEngineIni);
+		}
+		~FCurlSeekConfigGuard()
+		{
+			GConfig->SetBool(TEXT("HTTP.Curl"), TEXT("bAllowSeekFunction"), bPrevious, GEngineIni);
+		}
+		UE_NONCOPYABLE(FCurlSeekConfigGuard);
+
+		bool bPrevious = false;
+	};
+
+	FVaRestTransportComplete Into(const TSharedRef<FDone, ESPMode::ThreadSafe>& Done)
+	{
+		return [Done](FVaRestTransportResult&& Result)
 		{
 			Done->bOnGameThread = IsInGameThread();
 			Done->Result = MoveTemp(Result);
 			++Done->Calls;
 			Done->bDone = true;
-		});
-		return VaRest::Http::Testing::PumpUntil([Done] { return Done->bDone.load(); }, TimeoutSeconds);
+		};
+	}
+
+	/** Every test drains what it sends: a call the wait gave up on is canceled and waited for once more */
+	void Drain(const TSharedRef<IVaRestTransportCall, ESPMode::ThreadSafe>& Call, const TSharedRef<FDone, ESPMode::ThreadSafe>& Done)
+	{
+		if (!Done->bDone.load())
+		{
+			Call->Cancel();
+			VaRest::Http::Testing::PumpUntil([Done] { return Done->bDone.load(); }, 5.0);
+		}
+	}
+
+	/** Starts Request on the FHttpModule transport and pumps until it completes; Done holds the result only when this returns true */
+	bool SendAndWait(FVaRestTransportRequest&& Request, const TSharedRef<FDone, ESPMode::ThreadSafe>& Done, double TimeoutSeconds = 10.0)
+	{
+		const TSharedRef<IVaRestTransportCall, ESPMode::ThreadSafe> Call = VaRest::Http::GetDefaultTransport()->Start(MoveTemp(Request), Into(Done));
+		if (VaRest::Http::Testing::PumpUntil([Done] { return Done->bDone.load(); }, TimeoutSeconds))
+		{
+			return true;
+		}
+		Drain(Call, Done);
+		return false;
+	}
+
+	/** True when Request completed before Start returned: it never reached the engine. Otherwise waits for it and drains it. */
+	bool CompletesInsideStart(FVaRestTransportRequest&& Request, const TSharedRef<FDone, ESPMode::ThreadSafe>& Done)
+	{
+		const TSharedRef<IVaRestTransportCall, ESPMode::ThreadSafe> Call = VaRest::Http::GetDefaultTransport()->Start(MoveTemp(Request), Into(Done));
+		if (Done->bDone.load())
+		{
+			return true;
+		}
+		VaRest::Http::Testing::PumpUntil([Done] { return Done->bDone.load(); }, 10.0);
+		Drain(Call, Done);
+		return false;
 	}
 
 	/**
@@ -73,7 +131,16 @@ namespace VaRest::Http::TransportTestPrivate
 	 */
 	FString FileUrl(const FString& Path)
 	{
-		return TEXT("file://") + FPaths::ConvertRelativePathToFull(Path);
+		// Each segment percent-encoded (task 7 review M-8): libcurl rejects a URL holding a space, and reads '#' and '%'
+		TArray<FString> Segments;
+		FPaths::ConvertRelativePathToFull(Path).ParseIntoArray(Segments, TEXT("/"), /*InCullEmpty*/ true);
+		FString Url = TEXT("file://");
+		for (const FString& Segment : Segments)
+		{
+			Url += TEXT("/");
+			Url += VaRest::Http::PercentEncode(Segment);
+		}
+		return Url;
 	}
 
 	FVaRestTransportRequest GetFile(const FString& Path)
@@ -102,6 +169,34 @@ namespace VaRest::Http::TransportTestPrivate
 		Request.bProgressCallback = bCounted;
 		Request.bReportProgress = bCounted;
 		return Request;
+	}
+
+	/** A streamed file upload whose body was built when File had BuiltSize bytes */
+	FVaRestTransportRequest PutFile(const FString& File, int64 BuiltSize, const FString& Target, bool bCounted)
+	{
+		FVaRestTransportRequest Request;
+		Request.Verb = TEXT("PUT");
+		Request.Url = FileUrl(Target);
+		Request.BodyFile = File;
+		Request.Probe->UploadTotal = BuiltSize;
+		Request.bProgressCallback = bCounted;
+		Request.bReportProgress = bCounted;
+		return Request;
+	}
+
+	/** Truncates Path to zero bytes in place: an open reader keeps its handle and finds the bytes gone */
+	void TruncateInPlace(const FString& Path)
+	{
+		TUniquePtr<IFileHandle> Truncated(FPlatformFileManager::Get().GetPlatformFile().OpenWrite(*Path, /*bAppend*/ false));
+	}
+
+	/** An absolute test directory, emptied; its name holds a space, so every file:// URL needs encoding (review M-8) */
+	FString FreshDir(const TCHAR* Name)
+	{
+		const FString Dir = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir() / TEXT("VaRestTests") / Name);
+		IFileManager::Get().DeleteDirectory(*Dir, false, true);
+		IFileManager::Get().MakeDirectory(*Dir, true);
+		return Dir;
 	}
 }
 
@@ -153,10 +248,21 @@ bool FVaRestHttpMemorySinkTest::RunTest(const FString& Parameters)
 	// Review M13: a JSON result's cap stops the transfer instead of receiving the whole body first
 	FBodySink Capped(300);
 	TestTrue(TEXT("within the cap"), Capped.Write(Chunk.GetData(), Chunk.Num(), 1024));
-	TestTrue(TEXT("the reserve follows Content-Length under the 8 MiB cap"), Capped.GetCapacityInternal() >= 1025
-		&& Capped.GetCapacityInternal() <= static_cast<int64>(FMemory::QuantizeSize(1025)));
+	// Task 7 review M-3: no byte past the cap is kept, so the cap bounds the reserve, below 8 MiB too
+	TestTrue(TEXT("a Content-Length over the JSON cap reserves the cap + 1"), Capped.GetCapacityInternal() >= 301
+		&& Capped.GetCapacityInternal() <= static_cast<int64>(FMemory::QuantizeSize(301)));
 	TestFalse(TEXT("past the cap the write fails"), Capped.Write(Chunk.GetData(), Chunk.Num(), -1));
 	TestTrue(TEXT("... and says why"), Capped.IsTooLarge() && Capped.HasError());
+
+	FBodySink Roomy(5000);
+	TestTrue(TEXT("under its JSON cap"), Roomy.Write(Chunk.GetData(), Chunk.Num(), 1024));
+	TestTrue(TEXT("the reserve follows a Content-Length under the JSON cap"), Roomy.GetCapacityInternal() >= 1025
+		&& Roomy.GetCapacityInternal() <= static_cast<int64>(FMemory::QuantizeSize(1025)));
+
+	FBodySink SmallCapLiar(1000);
+	SmallCapLiar.Write(Chunk.GetData(), Chunk.Num(), 2000000000);
+	TestTrue(TEXT("a lying Content-Length under a small JSON cap reserves the cap + 1, not 8 MiB (review M-3)"),
+		SmallCapLiar.GetCapacityInternal() <= static_cast<int64>(FMemory::QuantizeSize(1001)));
 
 	FBodySink Empty;
 	TArray<uint8> Nothing = Empty.TakeBytes();
@@ -290,14 +396,7 @@ bool FVaRestHttpTransportThreadTest::RunTest(const FString& Parameters)
 	Request.Verb = TEXT("GET");
 	Request.Url = TEXT("http://127.0.0.1:1/"); // port 1: nothing listens, the connection is refused at once
 	Request.Timeout = 10.f;
-	VaRest::Http::GetDefaultTransport()->Start(MoveTemp(Request), [Done](FVaRestTransportResult&& Result)
-	{
-		Done->bOnGameThread = IsInGameThread();
-		Done->Result = MoveTemp(Result);
-		++Done->Calls;
-		Done->bDone = true;
-	});
-	TestTrue(TEXT("completes"), VaRest::Http::Testing::PumpUntil([Done] { return Done->bDone.load(); }, 15.0));
+	TestTrue(TEXT("completes"), SendAndWait(MoveTemp(Request), Done, 15.0));
 	// Spec 9 risk: HTTP-thread completion per backend. This is the Linux (curl) check; docs/dev/http-thread-completion.md lists the others.
 	TestFalse(TEXT("CompleteOnHttpThread: the completion runs on the HTTP thread, not the game thread"), Done->bOnGameThread);
 	TestTrue(TEXT("a refused connection is a Connection failure"), Done->Result.Failure == EVaRestTransportFailure::Connection);
@@ -319,14 +418,7 @@ bool FVaRestHttpTransportRefusedTest::RunTest(const FString& Parameters)
 	TSharedRef<FDone, ESPMode::ThreadSafe> Done = MakeShared<FDone, ESPMode::ThreadSafe>();
 	FVaRestTransportRequest Request;
 	Request.Verb = TEXT("GET");
-	VaRest::Http::GetDefaultTransport()->Start(MoveTemp(Request), [Done](FVaRestTransportResult&& Result)
-	{
-		Done->bOnGameThread = IsInGameThread();
-		Done->Result = MoveTemp(Result);
-		++Done->Calls;
-		Done->bDone = true;
-	});
-	TestTrue(TEXT("a refused request still completes"), VaRest::Http::Testing::PumpUntil([Done] { return Done->bDone.load(); }, 5.0));
+	TestTrue(TEXT("a refused request still completes"), SendAndWait(MoveTemp(Request), Done, 5.0));
 	TestTrue(TEXT("... as a failure"), Done->Result.Failure != EVaRestTransportFailure::None);
 	VaRest::Http::Testing::PumpUntil([] { return false; }, 0.2);
 	TestEqual(TEXT("... exactly once"), Done->Calls.load(), 1);
@@ -350,13 +442,7 @@ bool FVaRestHttpTransportMockTest::RunTest(const FString& Parameters)
 	FVaRestTransportRequest Request;
 	Request.Verb = TEXT("GET");
 	Request.Url = TEXT("http://mock.varest.test/x");
-	VaRest::Http::GetDefaultTransport()->Start(MoveTemp(Request), [Done](FVaRestTransportResult&& Result)
-	{
-		Done->Result = MoveTemp(Result);
-		++Done->Calls;
-		Done->bDone = true;
-	});
-	TestTrue(TEXT("completes"), VaRest::Http::Testing::PumpUntil([Done] { return Done->bDone.load(); }, 5.0));
+	TestTrue(TEXT("completes"), SendAndWait(MoveTemp(Request), Done, 5.0));
 	const FString Body = FString::ConstructFromPtrSize(reinterpret_cast<const UTF8CHAR*>(Done->Result.Body.GetData()), Done->Result.Body.Num());
 	TestTrue(TEXT("the mocked status"), Done->Result.Status == 200 && Done->Result.Failure == EVaRestTransportFailure::None);
 	TestEqualSensitive(TEXT("the engine's payload is taken when the stream got nothing"), Body, FString(TEXT("{\"mocked\":true}")));
@@ -364,8 +450,73 @@ bool FVaRestHttpTransportMockTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpUploadStampGateTest, "VaRest.Http.Transport.UploadStampGate",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpUploadStampGateTest::RunTest(const FString& Parameters)
+{
+	using VaRest::Http::ShouldStampUploadFromProgress;
+	// Task 7 review I-1: when the engine's progress delegate may stamp UploadDoneAt (IN-3)
+	TestFalse(TEXT("no body: never -- the first progress call would qualify, after StatusAt"), ShouldStampUploadFromProgress(0, true));
+	TestTrue(TEXT("a body, where the backend reports upload progress itself (Apple)"), ShouldStampUploadFromProgress(100, true));
+	TestFalse(TEXT("a body on curl: its progress cannot see the upload end; FCountingUpload stamps, or nothing does"), ShouldStampUploadFromProgress(100, false));
+	TestFalse(TEXT("neither"), ShouldStampUploadFromProgress(0, false));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpDroppedCompletionTest, "VaRest.Http.Transport.DroppedCompletion",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpDroppedCompletionTest::RunTest(const FString& Parameters)
+{
+	using VaRest::Http::FBodySink;
+	using VaRest::Http::FHttpTransportCompletion;
+	// Review I-3, task 7 review M-6: what the engine's delegates share dies with the request; uncompleted, it still finishes it
+	struct FSeen
+	{
+		int32 Calls = 0;
+		FVaRestTransportResult Last;
+	};
+	const TSharedRef<FSeen, ESPMode::ThreadSafe> Seen = MakeShared<FSeen, ESPMode::ThreadSafe>();
+	auto Make = [Seen]()
+	{
+		return MakeShared<FHttpTransportCompletion, ESPMode::ThreadSafe>([Seen](FVaRestTransportResult&& Result)
+		{
+			++Seen->Calls;
+			Seen->Last = MoveTemp(Result);
+		}, MakeShared<FBodySink, ESPMode::ThreadSafe>(), MakeShared<FVaRestTransportProbe, ESPMode::ThreadSafe>(), nullptr);
+	};
+
+	{
+		const TSharedRef<FHttpTransportCompletion, ESPMode::ThreadSafe> Dropped = Make();
+		TestEqual(TEXT("nothing before it dies"), Seen->Calls, 0);
+	}
+	TestEqual(TEXT("destroyed without completing: exactly one call"), Seen->Calls, 1);
+	TestTrue(TEXT("... Failure Other, detail TransportDropped"),
+		Seen->Last.Failure == EVaRestTransportFailure::Other && Seen->Last.FailureDetail == FName(TEXT("TransportDropped")));
+
+	{
+		const TSharedRef<FHttpTransportCompletion, ESPMode::ThreadSafe> Completed = Make();
+		FVaRestTransportComplete First = Completed->Claim();
+		FVaRestTransportComplete Second = Completed->Claim();
+		TestTrue(TEXT("the first claim gets OnComplete"), static_cast<bool>(First));
+		TestFalse(TEXT("... a later one nothing"), static_cast<bool>(Second));
+		TestTrue(TEXT("... and the completion is done"), Completed->IsDone());
+		if (First)
+		{
+			FVaRestTransportResult Answered;
+			Answered.Status = 200;
+			First(MoveTemp(Answered));
+		}
+	}
+	TestEqual(TEXT("destroyed after completing: nothing more"), Seen->Calls, 2);
+	TestEqual(TEXT("... the one call was the completion"), Seen->Last.Status, 200);
+	return true;
+}
+
 #if PLATFORM_LINUX
-// libcurl backs FHttpModule on Linux (UnixPlatformHttp); these two use its file:// handler as a network-free peer
+// libcurl backs FHttpModule on Linux (UnixPlatformHttp); these use its file:// handler as a network-free peer, and POSIX
+// in-place truncation under an open reader
 // (TransportTestPrivate::FileUrl). The Task 16 test server covers the same paths over HTTP.
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpTransportSinkTest, "VaRest.Http.Transport.ReceivesThroughTheSink",
@@ -377,8 +528,8 @@ bool FVaRestHttpTransportSinkTest::RunTest(const FString& Parameters)
 	// The capped download ends in CURLE_WRITE_ERROR, which curl and the engine log as Warnings (CurlHttp.cpp:1346-1349, HttpRequestCommon.cpp:330-334)
 	AddExpectedMessagePlain(TEXT("libcurl"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, -1);
 	AddExpectedMessagePlain(TEXT("completed with reason"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, -1);
-	const FString Dir = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir() / TEXT("VaRestTests") / TEXT("transport-sink"));
-	IFileManager::Get().DeleteDirectory(*Dir, false, true);
+	TestEqual(TEXT("the file:// helper percent-encodes each segment (review M-8)"), FileUrl(TEXT("/tmp/a b/c#d%e")), FString(TEXT("file:///tmp/a%20b/c%23d%25e")));
+	const FString Dir = FreshDir(TEXT("transport sink"));
 	const FString Source = Dir / TEXT("body.bin");
 	TArray<uint8> Bytes;
 	Bytes.SetNumUninitialized(100000);
@@ -447,8 +598,7 @@ bool FVaRestHttpTransportUploadReadTest::RunTest(const FString& Parameters)
 	AddExpectedMessagePlain(TEXT("could not be read at byte"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 2);
 	AddExpectedMessagePlain(TEXT("libcurl"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, -1);
 	AddExpectedMessagePlain(TEXT("completed with reason"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, -1);
-	const FString Dir = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir() / TEXT("VaRestTests") / TEXT("transport-upload"));
-	IFileManager::Get().DeleteDirectory(*Dir, false, true);
+	const FString Dir = FreshDir(TEXT("transport upload"));
 	const FString Part = Dir / TEXT("part.bin");
 	const FString Target = Dir / TEXT("put.bin");
 	TArray<uint8> PartBytes;
@@ -497,6 +647,232 @@ bool FVaRestHttpTransportUploadReadTest::RunTest(const FString& Parameters)
 	IFileManager::Get().DeleteDirectory(*Dir, false, true);
 	return true;
 }
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpCountingUploadShrinksTest, "VaRest.Http.Transport.CountingUploadShrinks",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpCountingUploadShrinksTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::TransportTestPrivate;
+	// Task 7 review M-5: a counted file upload that shrinks while it is read fails once, as UploadReadFailed, with no reader log
+	// (without FILEREAD_Silent: FileManagerGeneric.cpp:858, or the Error at :875)
+	const FString Dir = FreshDir(TEXT("transport shrinks"));
+	const FString Path = Dir / TEXT("counted.bin");
+	TArray<uint8> Big;
+	Big.Init(7, 300000);
+	if (!TestTrue(TEXT("the upload file is written"), FFileHelper::SaveArrayToFile(Big, *Path)))
+	{
+		return false;
+	}
+	TSharedRef<FVaRestTransportProbe, ESPMode::ThreadSafe> Probe = MakeShared<FVaRestTransportProbe, ESPMode::ThreadSafe>();
+	VaRest::Http::FCountingUpload Upload(FString(Path), Big.Num(), Probe, nullptr, false);
+	uint8 Head[1000] = {};
+	Upload.Serialize(Head, 1000);
+	TestTrue(TEXT("the first read is the file's"), !Upload.HasReadFailed() && Head[0] == 7 && Head[999] == 7);
+
+	TruncateInPlace(Path);
+	VaRest::Http::Testing::FLogCapture Capture;
+	Upload.Seek(250000);
+	uint8 Tail[1000];
+	FMemory::Memset(Tail, 0xAA, sizeof(Tail));
+	Upload.Serialize(Tail, 1000);
+	TestTrue(TEXT("a file that shrank mid-upload fails the read"), Upload.HasReadFailed() && Upload.IsError());
+	TestTrue(TEXT("... zeroes in the engine's buffer"), Tail[0] == 0 && Tail[999] == 0);
+	TestEqual(TEXT("... and the reader logs nothing: UploadReadFailed says it once (review M-5)"), Capture.Count(TEXT("LogFileManager")), 0);
+	IFileManager::Get().DeleteDirectory(*Dir, false, true);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpBodyFileStreamTest, "VaRest.Http.Transport.BodyFileStreamChanges",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpBodyFileStreamTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::TransportTestPrivate;
+	// Task 7 review M-1: a BodyFile goes to the engine as one FVaRestSegmentStream segment of the size measured when its
+	// body was built. A change while it uploads -- shrunk under an open reader, or another size at the first read -- fails
+	// the read with HasReadFailed (task 7 review M-2), which the completion turns into UploadReadFailed.
+	AddExpectedMessagePlain(TEXT("could not be read at byte"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 2);
+	const FString Dir = FreshDir(TEXT("transport body stream"));
+	const FString Path = Dir / TEXT("upload.bin");
+	TArray<uint8> Big;
+	Big.Init(9, 300000);
+	if (!TestTrue(TEXT("the upload file is written"), FFileHelper::SaveArrayToFile(Big, *Path)))
+	{
+		return false;
+	}
+	auto OneSegment = [Path](int64 BuiltSize)
+	{
+		TArray<FVaRestBodySegment> Segments;
+		FVaRestBodySegment& FileSegment = Segments.AddDefaulted_GetRef();
+		FileSegment.FilePath = Path;
+		FileSegment.FileSize = BuiltSize;
+		return Segments;
+	};
+
+	FVaRestSegmentStream Shrinking(OneSegment(Big.Num()));
+	uint8 Head[1000] = {};
+	Shrinking.Serialize(Head, 1000);
+	TestTrue(TEXT("an intact file reads"), !Shrinking.HasReadFailed() && Head[0] == 9);
+	TruncateInPlace(Path);
+	Shrinking.Seek(250000);
+	uint8 Tail[1000];
+	FMemory::Memset(Tail, 0xAA, sizeof(Tail));
+	Shrinking.Serialize(Tail, 1000);
+	TestTrue(TEXT("shrunk under the open reader: HasReadFailed, zeroes"), Shrinking.HasReadFailed() && Tail[0] == 0 && Tail[999] == 0);
+
+	TArray<uint8> Grown;
+	Grown.Init(3, 300500);
+	FFileHelper::SaveArrayToFile(Grown, *Path);
+	FVaRestSegmentStream Replaced(OneSegment(Big.Num()));
+	uint8 First[16];
+	FMemory::Memset(First, 0xAA, sizeof(First));
+	Replaced.Serialize(First, 16);
+	TestTrue(TEXT("another size at the first read (grown or replaced): HasReadFailed, zeroes"), Replaced.HasReadFailed() && First[0] == 0);
+	IFileManager::Get().DeleteDirectory(*Dir, false, true);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpTransportBodyFileTest, "VaRest.Http.Transport.BodyFileUpload",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpTransportBodyFileTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::TransportTestPrivate;
+	// Task 7 review M-1: a BodyFile upload through the real transport. A PUT to file:// has no response, so even a sent
+	// body ends as Failure Other ("completed with reason") -- the target's bytes say what was sent.
+	AddExpectedMessagePlain(TEXT("libcurl"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, -1);
+	AddExpectedMessagePlain(TEXT("completed with reason"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, -1);
+	const FString Dir = FreshDir(TEXT("transport body file"));
+	const FString Source = Dir / TEXT("upload.bin");
+	TArray<uint8> Bytes;
+	Bytes.Init('u', 2000);
+	if (!TestTrue(TEXT("the upload file is written"), FFileHelper::SaveArrayToFile(Bytes, *Source)))
+	{
+		return false;
+	}
+	const FName Missing(TEXT("BodyFileMissing"));
+	const FName ReadFailed(TEXT("UploadReadFailed"));
+
+	for (const bool bCounted : { false, true })
+	{
+		const FString Target = Dir / (bCounted ? TEXT("counted.bin") : TEXT("plain.bin"));
+		const FString Path = bCounted ? TEXT("counted (FCountingUpload)") : TEXT("default (one-segment stream)");
+		TSharedRef<FDone, ESPMode::ThreadSafe> Sent = MakeShared<FDone, ESPMode::ThreadSafe>();
+		if (!TestTrue(FString::Printf(TEXT("%s: an intact file uploads"), *Path), SendAndWait(PutFile(Source, Bytes.Num(), Target, bCounted), Sent)))
+		{
+			return false;
+		}
+		TArray<uint8> OnDisk;
+		TestTrue(FString::Printf(TEXT("%s: the peer got the whole file"), *Path), FFileHelper::LoadFileToArray(OnDisk, *Target) && OnDisk == Bytes);
+		TestTrue(FString::Printf(TEXT("%s: ... and no read failed"), *Path), Sent->Result.FailureDetail != ReadFailed && Sent->Result.FailureDetail != Missing);
+
+		// Missing: fails inside Start, before ProcessRequest -- the stream would have sent zeroes
+		const FString Never = Dir / (bCounted ? TEXT("never counted.bin") : TEXT("never plain.bin"));
+		TSharedRef<FDone, ESPMode::ThreadSafe> Gone = MakeShared<FDone, ESPMode::ThreadSafe>();
+		TestTrue(FString::Printf(TEXT("%s: a missing file fails before connecting (inside Start)"), *Path),
+			CompletesInsideStart(PutFile(Dir / TEXT("no such file.bin"), Bytes.Num(), Never, bCounted), Gone));
+		TestTrue(FString::Printf(TEXT("%s: ... as BodyFileMissing"), *Path), Gone->Result.Failure == EVaRestTransportFailure::Other && Gone->Result.FailureDetail == Missing);
+		TestFalse(FString::Printf(TEXT("%s: ... and the peer saw nothing"), *Path), IFileManager::Get().FileExists(*Never));
+	}
+
+	// Another size than the body was built with: Content-Length came from the old file, so it fails before connecting
+	const FString Never = Dir / TEXT("never resized.bin");
+	TSharedRef<FDone, ESPMode::ThreadSafe> Resized = MakeShared<FDone, ESPMode::ThreadSafe>();
+	TestTrue(TEXT("a file whose size changed since its body was built fails before connecting"),
+		CompletesInsideStart(PutFile(Source, Bytes.Num() + 1, Never, false), Resized));
+	TestTrue(TEXT("... as UploadReadFailed"), Resized->Result.Failure == EVaRestTransportFailure::Other && Resized->Result.FailureDetail == ReadFailed);
+	TestFalse(TEXT("... and the peer saw nothing"), IFileManager::Get().FileExists(*Never));
+
+	IFileManager::Get().DeleteDirectory(*Dir, false, true);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpTransportTimesTest, "VaRest.Http.Transport.UploadTimesAndBytes",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpTransportTimesTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::TransportTestPrivate;
+	// Task 7 review I-1 (IN-3 UploadDoneAt never after StatusAt) and M-4 (BytesUp is what was seen sent)
+	AddExpectedMessagePlain(TEXT("libcurl"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, -1);
+	AddExpectedMessagePlain(TEXT("completed with reason"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, -1);
+	const FString Dir = FreshDir(TEXT("transport times"));
+	const FString Source = Dir / TEXT("body.bin");
+	const FString Part = Dir / TEXT("part.bin");
+	TArray<uint8> Body;
+	Body.Init('b', 50000);
+	TArray<uint8> PartBytes;
+	PartBytes.Init('p', 1000);
+	if (!TestTrue(TEXT("the files are written"), FFileHelper::SaveArrayToFile(Body, *Source) && FFileHelper::SaveArrayToFile(PartBytes, *Part)))
+	{
+		return false;
+	}
+	TSharedRef<FVaRestVirtualClock, ESPMode::ThreadSafe> Clock = MakeShared<FVaRestVirtualClock, ESPMode::ThreadSafe>();
+	Clock->Advance(5.0);
+
+	// A traced request without a body: curl's progress fires with the response bytes, after StatusAt
+	FVaRestTransportRequest Bodyless = GetFile(Source);
+	Bodyless.bReportProgress = true;
+	Bodyless.bReportStatusTime = true;
+	Bodyless.Clock = Clock;
+	const TSharedRef<FVaRestTransportProbe, ESPMode::ThreadSafe> BodylessProbe = Bodyless.Probe;
+	TSharedRef<FDone, ESPMode::ThreadSafe> Got = MakeShared<FDone, ESPMode::ThreadSafe>();
+	if (!TestTrue(TEXT("a traced download completes"), SendAndWait(MoveTemp(Bodyless), Got)))
+	{
+		return false;
+	}
+	TestEqual(TEXT("the progress delegate ran, with every response byte"), BodylessProbe->BytesReceived.load(), static_cast<int64>(Body.Num()));
+	TestTrue(TEXT("no body: UploadDoneAt is never stamped, so the Inspector merges Send into Wait (review I-1)"), BodylessProbe->UploadDoneAt.load() < 0.0);
+	TestEqual(TEXT("the transport end is stamped on the request's clock"), Got->Result.TransportDoneAt, 5.0);
+
+	{
+		// Trace metadata alone, with [HTTP.Curl] bAllowSeekFunction on: not counted (review N-9), progress bound
+		FCurlSeekConfigGuard Seek(true);
+		FVaRestTransportRequest Uncounted = PutSegments(Part, PartBytes.Num(), Dir / TEXT("put.bin"), false);
+		Uncounted.bReportProgress = true;
+		Uncounted.bReportStatusTime = true;
+		Uncounted.Clock = Clock;
+		const TSharedRef<FVaRestTransportProbe, ESPMode::ThreadSafe> UncountedProbe = Uncounted.Probe;
+		TSharedRef<FDone, ESPMode::ThreadSafe> Put = MakeShared<FDone, ESPMode::ThreadSafe>();
+		if (!TestTrue(TEXT("an uncounted traced upload completes"), SendAndWait(MoveTemp(Uncounted), Put)))
+		{
+			return false;
+		}
+		TestEqual(TEXT("curl's last progress call saw the whole body sent"), UncountedProbe->BytesSent.load(), static_cast<int64>(PartBytes.Num() + 5));
+		TestTrue(TEXT("... and stamped no UploadDoneAt: curl's progress cannot see the upload end (review I-1, N-9)"), UncountedProbe->UploadDoneAt.load() < 0.0);
+		TestEqual(TEXT("BytesUp is what progress saw sent (review M-4)"), Put->Result.BytesUp, static_cast<int64>(PartBytes.Num() + 5));
+
+		// The peer refuses before reading a byte: nothing was sent, whatever the body's size
+		FVaRestTransportRequest Refused = PutSegments(Part, PartBytes.Num(), Dir / TEXT("no such dir") / TEXT("put.bin"), false);
+		Refused.bReportProgress = true;
+		Refused.bReportStatusTime = true;
+		Refused.Clock = Clock;
+		const TSharedRef<FVaRestTransportProbe, ESPMode::ThreadSafe> RefusedProbe = Refused.Probe;
+		TSharedRef<FDone, ESPMode::ThreadSafe> Nothing = MakeShared<FDone, ESPMode::ThreadSafe>();
+		if (!TestTrue(TEXT("an upload the peer refuses completes"), SendAndWait(MoveTemp(Refused), Nothing)))
+		{
+			return false;
+		}
+		TestEqual(TEXT("nothing was read from the body"), RefusedProbe->BytesSent.load(), static_cast<int64>(0));
+		TestEqual(TEXT("BytesUp is 0, not the body's size (review M-4)"), Nothing->Result.BytesUp, static_cast<int64>(0));
+	}
+
+	// The positive control: a counted upload is stamped, by FCountingUpload, at the last byte read
+	FVaRestTransportRequest Counted = PutSegments(Part, PartBytes.Num(), Dir / TEXT("counted.bin"), true);
+	Counted.bReportStatusTime = true;
+	Counted.Clock = Clock;
+	const TSharedRef<FVaRestTransportProbe, ESPMode::ThreadSafe> CountedProbe = Counted.Probe;
+	TSharedRef<FDone, ESPMode::ThreadSafe> Stamped = MakeShared<FDone, ESPMode::ThreadSafe>();
+	if (!TestTrue(TEXT("a counted traced upload completes"), SendAndWait(MoveTemp(Counted), Stamped)))
+	{
+		return false;
+	}
+	TestEqual(TEXT("a counted upload is stamped when its last byte is read"), CountedProbe->UploadDoneAt.load(), 5.0);
+
+	IFileManager::Get().DeleteDirectory(*Dir, false, true);
+	return true;
+}
+
 #endif // PLATFORM_LINUX
 
 #endif

@@ -65,8 +65,9 @@ bool VaRest::Http::FBodySink::Write(const void* Data, int64 Length, int64 Conten
 	if (Bytes.Max() == 0 && ContentLength > 0)
 	{
 		// Content-Length + 1: the terminator ParseOwned appends fits without a reallocation (spec 2.1). Capped, because a
-		// Content-Length is a claim: 2000000000 would otherwise allocate 2 GB before a byte arrived (review M-6).
-		const int64 Claimed = FMath::Min(ContentLength, FMath::Max(MaxBytes, ReserveCap));
+		// Content-Length is a claim: 2000000000 would otherwise allocate 2 GB before a byte arrived (review M-6). With a
+		// JSON cap no byte past it is kept anyway, so the cap bounds the reserve too, below 8 MiB as well (task 7 review M-3).
+		const int64 Claimed = FMath::Min(ContentLength, MaxBytes > 0 ? MaxBytes : ReserveCap);
 		Bytes.Reserve(static_cast<int32>(FMath::Min<int64>(MAX_int32 - 1, FMath::Max(Claimed, NewNum)) + 1));
 	}
 	else if (NewNum + 1 > Bytes.Max())

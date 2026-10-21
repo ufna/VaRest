@@ -3,7 +3,9 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "HAL/PlatformTime.h"
 #include "Serialization/Archive.h"
+#include "VaRestBodySink.h"
 #include "VaRestTransport.h"
 
 #include <atomic>
@@ -15,6 +17,12 @@ namespace VaRest::Http
 	 * engine would still apply its own default (GetActivityTimeoutOrDefault -> [HTTP] HttpActivityTimeout = 30,
 	 * HttpRequestCommon.cpp:733-736, HttpModule.cpp:98), so .Timeout(60) against a server silent for 40 s would fail at 30 s
 	 * as a connection error. Spec 4.7: the request's total timeout governs. 0 = set none.
+	 *
+	 * Apple caps it (task 7 review M-9): NSURLSession's timeoutInterval is [HTTP] HttpConnectionTimeout (30 s,
+	 * BaseEngine.ini:40; AppleHttp.cpp:736-738), so silence there still ends at 30 s, and an activity timeout above it
+	 * logs "HttpConnectionTimeout can't be less than HttpActivityTimeout" as a Warning on every such request
+	 * (AppleHttp.cpp:740-748) -- .Timeout(60) without an activity timeout is one. docs/dev/http-thread-completion.md
+	 * (Task 17) records both.
 	 */
 	float EffectiveActivityTimeout(float TotalSeconds, float ActivitySeconds);
 
@@ -32,6 +40,17 @@ namespace VaRest::Http
 
 	/** [HTTP.Curl] bAllowSeekFunction, as the engine reads it (CurlHttpManager.cpp:304; re-read on config updates, :502-511). Game thread. */
 	bool CurlMayRewindBodies();
+
+	/**
+	 * Decision 29, task 7 review I-1: whether the engine's progress delegate stamps UploadDoneAt (IN-3). Only for a request
+	 * with a body -- with UploadTotal 0 the first progress call qualifies, and curl's first one comes with the first response
+	 * bytes (CurlHttp.cpp:453-467), after StatusAt, which would make the Inspector's Wait phase negative -- and only where
+	 * the backend reports upload progress itself (bBackendReportsUploadProgress: NSURLSession's didSendBodyData,
+	 * AppleHttp.cpp:161-168, so PLATFORM_APPLE). curl's progress cannot see the upload end (UploadCallback reports nothing,
+	 * CurlHttp.cpp:668-683), so on curl the stamp belongs to FCountingUpload alone: an uncounted curl upload (trace metadata
+	 * with [HTTP.Curl] bAllowSeekFunction on, review N-9) leaves UploadDoneAt at -1, and the Inspector merges Send into Wait.
+	 */
+	bool ShouldStampUploadFromProgress(int64 UploadTotal, bool bBackendReportsUploadProgress);
 
 	/**
 	 * Decision 29 (review I-2): an upload that reports progress while it goes. Under CompleteOnHttpThread curl calls the
@@ -99,5 +118,90 @@ namespace VaRest::Http
 		FClockPtr Clock;
 		bool bStamp = false;
 		std::atomic<bool> bReadFailed{ false };
+	};
+
+	/**
+	 * The state the engine delegates of one FHttpModule request share (task 7 review M-6: here, not in the .cpp, so its
+	 * fallback is unit-tested). Completes exactly once: the completion delegate, a failure before ProcessRequest and the
+	 * destructor all go through Claim().
+	 */
+	struct FHttpTransportCompletion
+	{
+		FHttpTransportCompletion(FVaRestTransportComplete&& InOnComplete, TSharedRef<FBodySink, ESPMode::ThreadSafe> InSink,
+			TSharedRef<FVaRestTransportProbe, ESPMode::ThreadSafe> InProbe, TSharedPtr<IVaRestClock, ESPMode::ThreadSafe> InClock)
+			: OnComplete(MoveTemp(InOnComplete))
+			, Sink(MoveTemp(InSink))
+			, Probe(MoveTemp(InProbe))
+			, Clock(MoveTemp(InClock))
+		{
+		}
+
+		/**
+		 * Review I-3: the engine does not always call back. FHttpManager::Shutdown calls Request->Shutdown() on every
+		 * outstanding request (HttpManager.cpp:164-169), which unbinds the delegates (HttpRequestImpl.cpp:32-38); with [HTTP]
+		 * bUseNullHttp, CreateRequest returns a request that never completes (HttpModule.cpp:377-380, NullHttp.cpp:142-149).
+		 * Either way this object dies with the request: finish it, with Failure Other, detail TransportDropped.
+		 *
+		 * Where it runs (task 7 review M-6): on the thread that drops the engine's last delegate. With NullHttp that is the
+		 * game thread at the end of Start, no engine lock held. At HTTP module shutdown it is the game thread inside
+		 * FHttpManager::Shutdown, holding FHttpManager::RequestLock (HttpManager.cpp:158-173) and the request's
+		 * ResponseBodyReceiveStreamCriticalSection: the stream delegate goes last (FHttpRequestCommon::Shutdown,
+		 * HttpRequestCommon.cpp:596-601; StopPassingReceivedData, :725-730). Both are recursive (FCriticalSection,
+		 * HAL/CriticalSection.h:53), so OnComplete may post work -- a task, an atomic -- and nothing else: it must not call
+		 * FHttpModule or any request (Shutdown is iterating the list that would change), block, wait for a thread that takes
+		 * either lock, or run user code. The core's OnComplete only posts a game-thread task (IVaRestTransport::Start), which
+		 * at shutdown never runs.
+		 */
+		~FHttpTransportCompletion()
+		{
+			if (FVaRestTransportComplete Last = Claim())
+			{
+				FVaRestTransportResult Dropped;
+				Dropped.Failure = EVaRestTransportFailure::Other;
+				Dropped.FailureDetail = TEXT("TransportDropped");
+				Last(MoveTemp(Dropped));
+			}
+		}
+
+		/** OnComplete for the first caller (any thread); an empty function for every later one */
+		FVaRestTransportComplete Claim()
+		{
+			return bDone.exchange(true) ? FVaRestTransportComplete() : MoveTemp(OnComplete);
+		}
+
+		bool IsDone() const { return bDone.load(); }
+
+		double Now() const
+		{
+			return Clock.IsValid() ? Clock->Now() : FPlatformTime::Seconds();
+		}
+
+		FVaRestTransportComplete OnComplete;
+		TSharedRef<FBodySink, ESPMode::ThreadSafe> Sink;
+		TSharedRef<FVaRestTransportProbe, ESPMode::ThreadSafe> Probe;
+		TSharedPtr<IVaRestClock, ESPMode::ThreadSafe> Clock;
+		/** The response named a Content-Encoding (set by the header delegate, read by the first body chunk; review M-16) */
+		std::atomic<bool> bEncodedBody{ false };
+		/** Stamp transport times (trace metadata, IN-11) */
+		bool bStamp = false;
+		/** The progress delegate stamps UploadDoneAt (ShouldStampUploadFromProgress, review I-1) */
+		bool bStampUploadFromProgress = false;
+		/** The progress delegate is bound: BytesUp is then what it saw sent (review M-18, task 7 review M-4) */
+		bool bProgressBound = false;
+		/**
+		 * Set when the body goes through FCountingUpload: BytesUp is then what was sent, not what was meant (review M-18),
+		 * and a failed read fails the request (review N-4). The engine's payload holds it too; it holds no completion.
+		 */
+		TSharedPtr<FCountingUpload, ESPMode::ThreadSafe> CountedUpload;
+		/**
+		 * Set when segments go to the engine as they are (multipart, or a BodyFile; not counted): the engine ignores the
+		 * stream's error (FillOutputBuffer, HttpRequestPayload.cpp:77-97), so a file that could not be read --
+		 * FVaRestSegmentStream sends zeroes and sets HasReadFailed -- fails the request like a counted one (Task 3 review M4).
+		 */
+		TSharedPtr<FVaRestSegmentStream, ESPMode::ThreadSafe> SegmentUpload;
+		int64 BytesUp = 0;
+
+	private:
+		std::atomic<bool> bDone{ false };
 	};
 }

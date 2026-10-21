@@ -13,9 +13,9 @@ namespace VaRest::Http
 	 * Receives a response body on the transport's thread (IHttpRequest::SetResponseBodyReceiveStreamDelegateV2,
 	 * IHttpRequest.h:273-284). In memory it reserves Content-Length + 1 on the first chunk, so FVaRestJson::ParseOwned
 	 * appends its terminator without reallocating (spec 2.1) -- the engine's own buffer is reserved at exactly
-	 * Content-Length (CurlHttp.cpp:631-633). The up-front reserve is capped at max(MaxBytes, ReserveCap) + 1 and the
-	 * buffer grows past it, always keeping Num + 1 <= Max (reviews M-6, M13). With MaxBytes (a JSON result's cap) the
-	 * write that passes it fails, which stops the transfer (IHttpRequest.cpp:36-44).
+	 * Content-Length (CurlHttp.cpp:631-633). The up-front reserve is capped at MaxBytes + 1 with a JSON cap, else at
+	 * ReserveCap + 1, and the buffer grows past it, always keeping Num + 1 <= Max (reviews M-6, M13, task 7 M-3). With
+	 * MaxBytes (a JSON result's cap) the write that passes it fails, which stops the transfer (IHttpRequest.cpp:36-44).
 	 *
 	 * For SaveTo it writes a file instead, created with its directory on the first byte. Those writes run on the HTTP
 	 * thread, as the engine's own SetResponseBodyReceiveStream to a file archive does (decision 31): a slow disk stalls
@@ -30,7 +30,7 @@ namespace VaRest::Http
 	class FBodySink
 	{
 	public:
-		/** The up-front reserve without a larger JSON cap: 8 MiB */
+		/** The up-front reserve without a JSON cap: 8 MiB */
 		static constexpr int64 ReserveCap = 8 * 1024 * 1024;
 
 		FBodySink() = default;

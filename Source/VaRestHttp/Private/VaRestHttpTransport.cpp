@@ -2,7 +2,9 @@
 
 #include "VaRestTransport.h"
 
+#include "GenericPlatform/GenericPlatformFile.h"
 #include "HAL/FileManager.h"
+#include "HAL/PlatformFileManager.h"
 #include "HAL/PlatformTime.h"
 #include "HttpModule.h"
 #include "Interfaces/IHttpRequest.h"
@@ -54,68 +56,22 @@ namespace VaRest::Http::HttpTransportPrivate
 		}
 	}
 
-	/** Shared by the engine delegates of one request; completes exactly once */
-	struct FCompletion
+	/**
+	 * Task 7 review M-1: a BodyFile's size as one open read handle sees it, on the game thread before ProcessRequest; -1
+	 * when it cannot be opened. The engine's own SetContentAsStreamedFile path opened the file at the same point
+	 * (ProcessRequest -> PreProcess -> SetupRequest -> OpenRequestPayloadDefaultImpl, HttpRequestCommon.cpp:180-201,
+	 * :752-762; HttpRequestPayload.cpp:99-115), and Apple's stats it there too (AppleHttp.cpp:604-610).
+	 */
+	int64 MeasureReadableFile(const FString& Path)
 	{
-		FCompletion(FVaRestTransportComplete&& InOnComplete, TSharedRef<FBodySink, ESPMode::ThreadSafe> InSink,
-			TSharedRef<FVaRestTransportProbe, ESPMode::ThreadSafe> InProbe, TSharedPtr<IVaRestClock, ESPMode::ThreadSafe> InClock)
-			: OnComplete(MoveTemp(InOnComplete))
-			, Sink(MoveTemp(InSink))
-			, Probe(MoveTemp(InProbe))
-			, Clock(MoveTemp(InClock))
-		{
-		}
-
-		/**
-		 * Review I-3: the engine does not always call back. FHttpManager::Shutdown calls Request->Shutdown() on every
-		 * outstanding request (HttpManager.cpp:164-169), which unbinds the delegates (HttpRequestImpl.cpp:32-38); with [HTTP]
-		 * bUseNullHttp, CreateRequest returns a request that never completes (HttpModule.cpp:377-380, NullHttp.cpp:142-149).
-		 * Either way this object dies with the request: finish it. At shutdown the posted game-thread task never runs, which
-		 * is harmless.
-		 */
-		~FCompletion()
-		{
-			if (!bDone.exchange(true) && OnComplete)
-			{
-				FVaRestTransportResult Dropped;
-				Dropped.Failure = EVaRestTransportFailure::Other;
-				Dropped.FailureDetail = TEXT("TransportDropped");
-				OnComplete(MoveTemp(Dropped)); // only posts a game-thread task
-			}
-		}
-
-		double Now() const
-		{
-			return Clock.IsValid() ? Clock->Now() : FPlatformTime::Seconds();
-		}
-
-		FVaRestTransportComplete OnComplete;
-		TSharedRef<FBodySink, ESPMode::ThreadSafe> Sink;
-		TSharedRef<FVaRestTransportProbe, ESPMode::ThreadSafe> Probe;
-		TSharedPtr<IVaRestClock, ESPMode::ThreadSafe> Clock;
-		std::atomic<bool> bDone{ false };
-		/** The response named a Content-Encoding (set by the header delegate, read by the first body chunk; review M-16) */
-		std::atomic<bool> bEncodedBody{ false };
-		/** Stamp transport times (trace metadata, IN-11) */
-		bool bStamp = false;
-		/**
-		 * Set when the body goes through FCountingUpload: BytesUp is then what was sent, not what was meant (review M-18),
-		 * and a failed read fails the request (review N-4). The engine's payload holds it too; it holds no completion.
-		 */
-		TSharedPtr<FCountingUpload, ESPMode::ThreadSafe> CountedUpload;
-		/**
-		 * Set when multipart segments go to the engine as they are (not counted): the engine ignores the stream's error flag
-		 * (FillOutputBuffer, HttpRequestPayload.cpp:77-97), so a file part that could not be read -- FVaRestSegmentStream
-		 * sends zeroes and sets the flag -- fails the request here like a counted one (Task 3 review M4).
-		 */
-		TSharedPtr<FVaRestSegmentStream, ESPMode::ThreadSafe> SegmentUpload;
-		int64 BytesUp = 0;
-	};
+		const TUniquePtr<IFileHandle> Handle(FPlatformFileManager::Get().GetPlatformFile().OpenRead(*Path));
+		return Handle.IsValid() ? Handle->Size() : -1;
+	}
 
 	class FCall final : public IVaRestTransportCall
 	{
 	public:
-		FCall(TWeakPtr<IHttpRequest, ESPMode::ThreadSafe> InRequest, TWeakPtr<FCompletion, ESPMode::ThreadSafe> InCompletion)
+		FCall(TWeakPtr<IHttpRequest, ESPMode::ThreadSafe> InRequest, TWeakPtr<FHttpTransportCompletion, ESPMode::ThreadSafe> InCompletion)
 			: Request(MoveTemp(InRequest))
 			, Completion(MoveTemp(InCompletion))
 		{
@@ -127,8 +83,8 @@ namespace VaRest::Http::HttpTransportPrivate
 			// Review M-5: a request already finished on the HTTP thread is left alone. For one that ended by an abort
 			// (a timeout), curl's AbortRequest would run FinishRequestNotInHttpManager a second time (CurlHttp.cpp:1194-1209,
 			// HttpRequestCommon.cpp:224-237): the engine's finish, stats and logs twice.
-			const TSharedPtr<FCompletion, ESPMode::ThreadSafe> Done = Completion.Pin();
-			if (!Done.IsValid() || Done->bDone.load())
+			const TSharedPtr<FHttpTransportCompletion, ESPMode::ThreadSafe> Done = Completion.Pin();
+			if (!Done.IsValid() || Done->IsDone())
 			{
 				return;
 			}
@@ -141,8 +97,25 @@ namespace VaRest::Http::HttpTransportPrivate
 
 	private:
 		TWeakPtr<IHttpRequest, ESPMode::ThreadSafe> Request;
-		TWeakPtr<FCompletion, ESPMode::ThreadSafe> Completion;
+		TWeakPtr<FHttpTransportCompletion, ESPMode::ThreadSafe> Completion;
 	};
+
+	/**
+	 * Completes a request that never reaches the engine: no connection, nothing sent. On the calling (game) thread, before
+	 * Start returns, which IVaRestTransport::Start allows.
+	 */
+	TSharedRef<IVaRestTransportCall, ESPMode::ThreadSafe> FailBeforeConnect(const TSharedRef<IHttpRequest, ESPMode::ThreadSafe>& Http,
+		const TSharedRef<FHttpTransportCompletion, ESPMode::ThreadSafe>& Completion, FName Detail)
+	{
+		if (FVaRestTransportComplete Callback = Completion->Claim())
+		{
+			FVaRestTransportResult Result;
+			Result.Failure = EVaRestTransportFailure::Other;
+			Result.FailureDetail = Detail;
+			Callback(MoveTemp(Result));
+		}
+		return MakeShared<FCall, ESPMode::ThreadSafe>(TWeakPtr<IHttpRequest, ESPMode::ThreadSafe>(Http), Completion);
+	}
 
 	class FHttpModuleTransport final : public IVaRestTransport
 	{
@@ -172,13 +145,33 @@ namespace VaRest::Http::HttpTransportPrivate
 		const TSharedRef<FBodySink, ESPMode::ThreadSafe> Sink = Request.ResponseFile.IsEmpty()
 			? MakeShared<FBodySink, ESPMode::ThreadSafe>(Request.MaxBodyBytes)
 			: MakeShared<FBodySink, ESPMode::ThreadSafe>(Request.ResponseFile, Request.MaxBodyBytes);
-		const TSharedRef<FCompletion, ESPMode::ThreadSafe> Completion = MakeShared<FCompletion, ESPMode::ThreadSafe>(MoveTemp(OnComplete), Sink, Request.Probe, Request.Clock);
+		const TSharedRef<FHttpTransportCompletion, ESPMode::ThreadSafe> Completion = MakeShared<FHttpTransportCompletion, ESPMode::ThreadSafe>(MoveTemp(OnComplete), Sink, Request.Probe, Request.Clock);
+		const int64 UploadTotal = Request.Probe->UploadTotal.load();
 		Completion->bStamp = Request.bReportStatusTime;
-		Completion->BytesUp = Request.Probe->UploadTotal.load();
+		Completion->bStampUploadFromProgress = Request.bReportStatusTime && ShouldStampUploadFromProgress(UploadTotal, PLATFORM_APPLE != 0);
+		Completion->bProgressBound = Request.bReportProgress;
+		Completion->BytesUp = UploadTotal;
+
+		if (!Request.BodyFile.IsEmpty())
+		{
+			// Task 7 review M-1: never send a file that is not the body that was built. Missing or unreadable: fail before
+			// connecting (the stream would send zeroes). Another size: UploadTotal, the Content-Length, came from the old one.
+			// A change after this is caught by the reader's own size check and read errors (UploadReadFailed).
+			const int64 OnDisk = MeasureReadableFile(Request.BodyFile);
+			if (OnDisk < 0)
+			{
+				return FailBeforeConnect(Http, Completion, TEXT("BodyFileMissing"));
+			}
+			if (OnDisk != UploadTotal)
+			{
+				return FailBeforeConnect(Http, Completion, TEXT("UploadReadFailed"));
+			}
+		}
 
 		bool bBodyAccepted = true;
-		const int64 UploadTotal = Request.Probe->UploadTotal.load();
-		if (ShouldCountUpload(UploadTotal, Request.bProgressCallback, Request.bReportProgress, CurlMayRewindBodies()))
+		// Task 7 review M-10: the config lookup only when its answer can matter (an uncounted, traced body on curl)
+		const bool bCurlMayRewind = !PLATFORM_APPLE && UploadTotal > 0 && !Request.bProgressCallback && Request.bReportProgress && CurlMayRewindBodies();
+		if (ShouldCountUpload(UploadTotal, Request.bProgressCallback, Request.bReportProgress, bCurlMayRewind))
 		{
 			// Decision 29: counted as curl reads it (FCountingUpload), on curl only and only when asked (reviews N-1, N-9).
 			// The default path stays SetContent(TArray&&).
@@ -199,15 +192,20 @@ namespace VaRest::Http::HttpTransportPrivate
 			Completion->CountedUpload = Counted;
 			bBodyAccepted = Http->SetContentFromStream(Counted.ToSharedRef());
 		}
-		else if (!Request.BodyFile.IsEmpty())
-		{
-			bBodyAccepted = Http->SetContentAsStreamedFile(Request.BodyFile);
-		}
-		else if (Request.BodySegments.Num() > 0)
+		else if (!Request.BodyFile.IsEmpty() || Request.BodySegments.Num() > 0)
 		{
 			// Serialize runs on the HTTP thread (IHttpRequest.h:250-257); the stream owns its segments. The completion keeps
-			// it too, to see its error flag, which the engine ignores (Task 3 review M4)
-			const TSharedRef<FVaRestSegmentStream, ESPMode::ThreadSafe> SegmentStream = MakeShared<FVaRestSegmentStream, ESPMode::ThreadSafe>(MoveTemp(Request.BodySegments));
+			// it too, to see a failed read, which the engine ignores (Task 3 review M4). A BodyFile is one segment of the size
+			// measured above, not SetContentAsStreamedFile: the engine's reader sends stale bytes when the file shrinks
+			// mid-upload and the request succeeds (task 7 review M-1). Neither path is seekable on curl (CurlHttp.cpp:368-392).
+			TArray<FVaRestBodySegment> Segments = MoveTemp(Request.BodySegments);
+			if (!Request.BodyFile.IsEmpty())
+			{
+				FVaRestBodySegment& FileSegment = Segments.AddDefaulted_GetRef();
+				FileSegment.FilePath = MoveTemp(Request.BodyFile);
+				FileSegment.FileSize = UploadTotal;
+			}
+			const TSharedRef<FVaRestSegmentStream, ESPMode::ThreadSafe> SegmentStream = MakeShared<FVaRestSegmentStream, ESPMode::ThreadSafe>(MoveTemp(Segments));
 			Completion->SegmentUpload = SegmentStream;
 			bBodyAccepted = Http->SetContentFromStream(SegmentStream);
 		}
@@ -218,18 +216,14 @@ namespace VaRest::Http::HttpTransportPrivate
 		}
 		if (!bBodyAccepted)
 		{
-			Completion->bDone = true;
-			FVaRestTransportResult Result;
-			Result.Failure = EVaRestTransportFailure::Other;
-			Result.FailureDetail = TEXT("BodyRejected");
-			FVaRestTransportComplete Callback = MoveTemp(Completion->OnComplete);
-			Callback(MoveTemp(Result));
-			return MakeShared<FCall, ESPMode::ThreadSafe>(TWeakPtr<IHttpRequest, ESPMode::ThreadSafe>(Http), Completion);
+			return FailBeforeConnect(Http, Completion, TEXT("BodyRejected"));
 		}
 		if (Request.Timeout > 0.f)
 		{
 			Http->SetTimeout(Request.Timeout);
 		}
+		// Decision 30. On Apple the connection timeout still caps silence at 30 s, with a Warning per request above it
+		// (EffectiveActivityTimeout, task 7 review M-9)
 		const float Activity = EffectiveActivityTimeout(Request.Timeout, Request.ActivityTimeout);
 		if (Activity > 0.f)
 		{
@@ -289,7 +283,9 @@ namespace VaRest::Http::HttpTransportPrivate
 				FVaRestTransportProbe& Probe = *Completion->Probe;
 				AtomicMax(Probe.BytesSent, static_cast<int64>(Sent));
 				Probe.BytesReceived = static_cast<int64>(Received);
-				if (Completion->bStamp && Probe.UploadDoneAt.load() < 0.0 && static_cast<int64>(Sent) >= Probe.UploadTotal.load())
+				// Review I-1: only with a body, and only where this delegate sees the upload end (Apple); a counted curl upload
+				// is stamped by FCountingUpload, an uncounted one stays -1 (ShouldStampUploadFromProgress)
+				if (Completion->bStampUploadFromProgress && Probe.UploadDoneAt.load() < 0.0 && static_cast<int64>(Sent) >= Probe.UploadTotal.load())
 				{
 					Probe.UploadDoneAt = Completion->Now();
 				}
@@ -310,7 +306,8 @@ namespace VaRest::Http::HttpTransportPrivate
 		Http->OnProcessRequestComplete().BindLambda([Completion](FHttpRequestPtr Req, FHttpResponsePtr Resp, bool bSucceeded)
 		{
 			// The HTTP thread. Read what the engine holds, take the body from our sink, hand the result on: no parsing here.
-			if (Completion->bDone.exchange(true))
+			FVaRestTransportComplete Callback = Completion->Claim();
+			if (!Callback)
 			{
 				return;
 			}
@@ -368,31 +365,34 @@ namespace VaRest::Http::HttpTransportPrivate
 			}
 			// Review N-4, Task 3 review M4: the engine sent zeroes where the body could not be read (FillOutputBuffer ignores
 			// the archive's error, HttpRequestPayload.cpp:86-96): whatever the server answered, this request did not send its
-			// body. On curl the archive is read on this thread, from curl's read callback (CurlHttp.cpp:668-683), before
-			// the finish that calls this (HttpThread.cpp:452-461). On Apple NSURLSession reads it on a worker thread
-			// (AppleHttp.cpp:402-421) and completes the task only after the body is sent.
+			// body. Both flags are atomics, so reading them here is never a data race (task 7 review M-2). Seeing a failed
+			// read needs the read to happen before this: on curl it does, the read callback (CurlHttp.cpp:668-683) and this
+			// finish (HttpThread.cpp:452-461) run on the HTTP thread in that order. On Apple NSURLSession reads the stream on
+			// a worker thread (AppleHttp.cpp:402-421); with a response body, its delivery reaches TakeBytes above through the
+			// sink mutex, and without one only NSURLSession's own, undocumented ordering puts the read before
+			// didCompleteWithError (AppleHttp.cpp:220-233): a bodyless response there may miss the flag.
 			const bool bCountedReadFailed = Completion->CountedUpload.IsValid() && Completion->CountedUpload->HasReadFailed();
-			const bool bSegmentReadFailed = Completion->SegmentUpload.IsValid() && Completion->SegmentUpload->IsError();
+			const bool bSegmentReadFailed = Completion->SegmentUpload.IsValid() && Completion->SegmentUpload->HasReadFailed();
 			if (bCountedReadFailed || bSegmentReadFailed)
 			{
 				Result.Failure = EVaRestTransportFailure::Other;
 				Result.FailureDetail = TEXT("UploadReadFailed");
 				Result.Body.Empty();
 			}
-			// Review M-18: with a counted upload, what was sent; otherwise the body's size
-			Result.BytesUp = Completion->CountedUpload.IsValid() ? Completion->Probe->BytesSent.load() : Completion->BytesUp;
+			// Review M-18 (task 7 review M-4): what was sent when anything watched it -- the counting archive, or the progress
+			// delegate, whose last call precedes this (curl: CurlHttp.cpp:1274) -- otherwise the body's size
+			Result.BytesUp = Completion->CountedUpload.IsValid() || Completion->bProgressBound ? Completion->Probe->BytesSent.load() : Completion->BytesUp;
 			Result.BytesDown = Received.Num();
 			if (Completion->bStamp)
 			{
 				Result.TransportDoneAt = Completion->Now();
 			}
-			FVaRestTransportComplete Callback = MoveTemp(Completion->OnComplete);
 			Callback(MoveTemp(Result));
 		});
 
 		// The completion delegate runs even when ProcessRequest refuses to start ("always called when the request completes
 		// or on error", IHttpRequest.h:351): the refusal arrives there as a failure, so the return value adds nothing.
-		// When the engine drops it instead, ~FCompletion finishes the request (review I-3).
+		// When the engine drops it instead, ~FHttpTransportCompletion finishes the request (review I-3).
 		Http->ProcessRequest();
 		return MakeShared<FCall, ESPMode::ThreadSafe>(WeakHttp, Completion);
 	}
@@ -416,6 +416,11 @@ bool VaRest::Http::ShouldCountUpload(int64 UploadTotal, bool bProgressCallback, 
 	// Review N-9: the trace must never change an outcome -- metadata alone counts only a body curl could not rewind anyway
 	return bProgressCallback || (bReportProgress && !bCurlMayRewind);
 #endif
+}
+
+bool VaRest::Http::ShouldStampUploadFromProgress(int64 UploadTotal, bool bBackendReportsUploadProgress)
+{
+	return UploadTotal > 0 && bBackendReportsUploadProgress;
 }
 
 bool VaRest::Http::CurlMayRewindBodies()
@@ -483,7 +488,9 @@ void VaRest::Http::FCountingUpload::Serialize(void* Data, int64 Length)
 		if (!File.IsValid())
 		{
 			// On the reading thread (the HTTP thread for curl): never disk IO on the game thread
-			File.Reset(IFileManager::Get().CreateFileReader(*FilePath));
+			// Silent (task 7 review M-5): a file that shrinks mid-upload makes the reader log a Warning or an Error
+			// (FileManagerGeneric.cpp:808, :858, :868, :875); the failure is reported once, as UploadReadFailed
+			File.Reset(IFileManager::Get().CreateFileReader(*FilePath, FILEREAD_Silent));
 			if (File.IsValid() && File->TotalSize() != Total)
 			{
 				// Review N-4: the file changed since its size became the Content-Length; sending it would disagree
@@ -536,6 +543,8 @@ void VaRest::Http::FCountingUpload::Count(int64 Length)
 
 TSharedRef<IVaRestTransport, ESPMode::ThreadSafe> VaRest::Http::GetDefaultTransport()
 {
-	static TSharedRef<IVaRestTransport, ESPMode::ThreadSafe> Instance = MakeShared<HttpTransportPrivate::FHttpModuleTransport, ESPMode::ThreadSafe>();
-	return Instance;
+	// Leaked: nothing in VaRestHttp runs at static destruction (review I-4, task 7 review M-7)
+	static TSharedRef<IVaRestTransport, ESPMode::ThreadSafe>* const Instance =
+		new TSharedRef<IVaRestTransport, ESPMode::ThreadSafe>(MakeShared<HttpTransportPrivate::FHttpModuleTransport, ESPMode::ThreadSafe>());
+	return *Instance;
 }

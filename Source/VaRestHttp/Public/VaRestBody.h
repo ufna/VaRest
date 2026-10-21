@@ -6,6 +6,8 @@
 #include "Serialization/Archive.h"
 #include "Templates/ValueOrError.h"
 
+#include <atomic>
+
 class IFileHandle;
 
 /** application/x-www-form-urlencoded fields, in order (spec 3.2). Ref-qualified like FVaRestJson::Set. */
@@ -87,9 +89,9 @@ private:
 
 /**
  * An FArchive over body segments, for IHttpRequest::SetContentFromStream, whose Serialize "will be called from another
- * thread other than the game thread" (IHttpRequest.h:250-257). The engine seeks to what it has sent and reads on
- * (HttpRequestPayload.cpp:77-96). A file that shrank since its part was added reads as zeros, with the error flag set
- * and one warning.
+ * thread other than the game thread" (IHttpRequest.h:250-257): a multipart body, or the one file of a streamed upload.
+ * The engine seeks to what it has sent and reads on (HttpRequestPayload.cpp:77-96). A file that shrank or grew since its
+ * segment was measured reads as zeros, with the error flag set, HasReadFailed() set and one warning.
  */
 class VARESTHTTP_API FVaRestSegmentStream final : public FArchive
 {
@@ -102,10 +104,20 @@ public:
 	virtual int64 Tell() override { return Position; }
 	virtual int64 TotalSize() override { return Total; }
 	virtual bool Close() override;
-	virtual FString GetArchiveName() const override { return TEXT("VaRest multipart body"); }
+	virtual FString GetArchiveName() const override { return TEXT("VaRest body segments"); }
+
+	/**
+	 * A read failed and zeroes were served in its place. The engine ignores the archive's error flag
+	 * (HttpRequestPayload.cpp:86-96), so the transport checks this one instead. Any thread: the reader may be another
+	 * thread than the one that checks (Apple reads an upload stream on an NSURLSession worker, AppleHttp.cpp:402-421),
+	 * and FArchive's own flag is a plain bitfield (review M-2).
+	 */
+	bool HasReadFailed() const { return bReadFailed.load(); }
 
 private:
 	bool ReadFileSegment(int32 Index, int64 Offset, uint8* Out, int64 Count);
+	/** SetError for the engine, and the atomic for HasReadFailed */
+	void FailRead();
 
 	TArray<FVaRestBodySegment> Segments;
 	int64 Total = 0;
@@ -113,6 +125,7 @@ private:
 	int32 OpenIndex = INDEX_NONE;
 	TUniquePtr<IFileHandle> OpenFile;
 	bool bWarned = false;
+	std::atomic<bool> bReadFailed{ false };
 };
 
 /** What a body is, for logs and traces (Inspector IN-1 Body.Kind) */
