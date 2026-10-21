@@ -12,8 +12,6 @@
 #include "VaRestTrace.h"
 #include "VaRestTransport.h"
 
-#include <atomic>
-
 class FVaRestExchange;
 class IVaRestStage;
 
@@ -21,6 +19,8 @@ namespace VaRest::Http
 {
 	class FClientState;
 	struct FClientConfig;
+	struct FExchangeState;
+	struct FExchangeAccess;
 }
 
 /** What one attempt produced, travelling back up the chain (spec 4) */
@@ -99,13 +99,17 @@ enum class EVaRestExchangePhase : uint8
 };
 
 /**
- * One logical request moving through a client's stages (spec 4). Game thread, except where marked. Stages use the
- * accessors; the fields below them are VaRestHttp's own and not a stable API.
+ * One logical request moving through a client's stages (spec 4). Game thread, except where marked. A stage reads the
+ * request through the accessors below. The one change it may make is to GetAttemptHeaders(), from a PerAttempt stage
+ * (request signing). Replacing the body is not supported in 2.0: its length and Content-Type were fixed when the request
+ * was built, and the transport, the progress totals and the trace rely on them (final review I1). A stage that needs it,
+ * to compress or encrypt, is an M4 design question. The rest of an exchange is VaRestHttp's own state, in a Private header.
  */
 class VARESTHTTP_API FVaRestExchange : public TSharedFromThis<FVaRestExchange, ESPMode::ThreadSafe>
 {
 public:
-	FVaRestExchange() = default;
+	/** Out of line (VaRestPipeline.cpp), with the accessors: the state it makes is complete only in VaRestHttp */
+	FVaRestExchange();
 	/**
 	 * Out of line (VaRestPipeline.cpp). Off the game thread it sends its State and Config there to die (review I-1
 	 * backstop): with them go the client state, custom stages, the transport and the clock, whose destructors may clear
@@ -116,99 +120,36 @@ public:
 	FVaRestExchange& operator=(const FVaRestExchange&) = delete;
 
 	// ---- for stages
-	uint64 GetRequestId() const { return RequestId; }
-	uint64 GetClientId() const { return ClientId; }
-	const FString& GetVerb() const { return Verb; }
+	uint64 GetRequestId() const;
+	uint64 GetClientId() const;
+	const FString& GetVerb() const;
 	/** Base URL + expanded path + query */
-	const FString& GetUrl() const { return Url; }
+	const FString& GetUrl() const;
 	/** The path before {param} substitution, without the query (Inspector IN-1) */
-	const FString& GetPathTemplate() const { return PathTemplate; }
-	FName GetTag() const { return Tag; }
-	EVaRestPriority GetPriority() const { return Priority; }
-	bool IsIdempotent() const { return bIdempotent; }
+	const FString& GetPathTemplate() const;
+	FName GetTag() const;
+	EVaRestPriority GetPriority() const;
+	bool IsIdempotent() const;
 	/** Client defaults, then the request's own */
-	const FVaRestHeaders& GetRequestHeaders() const { return RequestHeaders; }
+	const FVaRestHeaders& GetRequestHeaders() const;
 	/** A fresh copy of GetRequestHeaders() for each attempt; PerAttempt stages may edit it */
-	FVaRestHeaders& GetAttemptHeaders() { return AttemptHeaders; }
-	const FVaRestHeaders& GetAttemptHeaders() const { return AttemptHeaders; }
-	const FVaRestRequestBody& GetBody() const { return Body; }
+	FVaRestHeaders& GetAttemptHeaders();
+	const FVaRestHeaders& GetAttemptHeaders() const;
+	const FVaRestRequestBody& GetBody() const;
 	/** 0 before the attempt boundary, then 1, 2... */
-	int32 GetAttempt() const { return Attempt; }
+	int32 GetAttempt() const;
 	/** Any thread */
-	bool IsCancelRequested() const { return bCancelRequested.load(); }
+	bool IsCancelRequested() const;
 	/**
 	 * Any thread: the callbacks have been delivered (or dropped). With OnHttpThread(), true once the result is handed to the
 	 * worker; the callbacks may still be running.
 	 */
-	bool IsDone() const { return bDone.load(); }
+	bool IsDone() const;
 
-	// ---- VaRestHttp internals. Set by Send on the sending thread, read on the game thread after the hop:
-	uint64 RequestId = 0;
-	uint64 ClientId = 0;
-	TSharedPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> State;
-	FString Verb;
-	FString RawPath;
-	TArray<TPair<FString, FString>> PathParams;
-	TArray<TPair<FString, FString>> Query;
-	FVaRestHeaders OwnHeaders;
-	FVaRestRequestBody Body;
-	FString BuildError;
-	FName Tag;
-	EVaRestPriority Priority = EVaRestPriority::Normal;
-	bool bIdempotent = false;
-	bool bKeepBody = false;
-	bool bOnHttpThread = false;
-	FString SaveTo;
-	TOptional<float> TimeoutOverride;
-	TOptional<float> ActivityTimeoutOverride;
-	TOptional<int64> MaxJsonBytesOverride;
-	EVaRestJsonNaming Naming = EVaRestJsonNaming::CamelCase;
-	bool bStrictDecode = false;
-	TWeakObjectPtr<const UObject> Owner;
-	bool bHasOwner = false;
-	const char* SourceFile = "";
-	uint32 SourceLine = 0;
-	/** Send ran on the game thread, so Enter runs inside it and the Blueprint stack is the caller's (IN-15) */
-	bool bSentOnGameThread = false;
-	FVaRestTraceInitiator Initiator;
-	TUniquePtr<VaRest::Http::IResultHandler> Handler;
-	/** Spec 3.1, decision 27: the configuration snapshot, taken by Send on the sending thread (Enter fills it only for an exchange made another way) */
-	TSharedPtr<const VaRest::Http::FClientConfig, ESPMode::ThreadSafe> Config;
+private:
+	/** Defined in VaRestExchangeState.h (Private): only VaRestHttp's own code reaches Impl */
+	friend struct VaRest::Http::FExchangeAccess;
 
-	// Resolved on entry (game thread):
-	FString Url;
-	FString PathTemplate;
-	FVaRestHeaders RequestHeaders;
-	float Timeout = 0.f;
-	float ActivityTimeout = 0.f;
-	int64 MaxJsonBytes = 0;
-	FVaRestJsonConvertOptions DecodeOptions;
-	EVaRestLogLevel LogLevel = EVaRestLogLevel::Basic;
-	double StartedAt = 0.0;
-	FDateTime StartUtc;
-
-	// The current attempt (game thread):
-	int32 Attempt = 0;
-	double AttemptStartedAt = 0.0;
-	double LimiterWait = 0.0;
-	FVaRestHeaders AttemptHeaders;
-	FString TempFile;
-	TSharedPtr<IVaRestTransportCall, ESPMode::ThreadSafe> TransportCall;
-	TSharedPtr<FVaRestTransportProbe, ESPMode::ThreadSafe> Probe;
-	FVaRestTimerHandle ProgressTimer;
-	FVaRestProgress LastProgress;
-	bool bInLimiterQueue = false;
-
-	// Life (game thread, except the atomics):
-	EVaRestExchangePhase Phase = EVaRestExchangePhase::Created;
-	EVaRestCancelReason CancelReason = EVaRestCancelReason::None;
-	/** Complete ran: nothing else is delivered */
-	bool bFinished = false;
-	/**
-	 * Inside Enter or Cancel() on this exchange: Complete defers the callbacks (decision 3). The scope is taken in Enter, so
-	 * a game-thread Send() is covered, and so is the Enter task of a request sent from another thread (one extra hop).
-	 */
-	int32 ApiDepth = 0;
-	std::atomic<bool> bCancelRequested{ false };
-	std::atomic<bool> bDone{ false };
+	/** Never null between the constructor and the destructor */
+	TUniquePtr<VaRest::Http::FExchangeState> Impl;
 };

@@ -7,6 +7,7 @@
 #include "Tasks/Task.h"
 #include "UObject/StrongObjectPtr.h"
 #include "VaRestDecode.h"
+#include "VaRestExchangeState.h"
 #include "VaRestHttpLog.h"
 #include "VaRestHttpTesting.h"
 #include "VaRestTracePoints.h"
@@ -33,7 +34,7 @@ namespace VaRest::Http::PipelinePrivate
 	 */
 	struct FApiScope
 	{
-		explicit FApiScope(FVaRestExchange& InExchange)
+		explicit FApiScope(FExchangeState& InExchange)
 			: Exchange(InExchange)
 		{
 			++Exchange.ApiDepth;
@@ -42,7 +43,7 @@ namespace VaRest::Http::PipelinePrivate
 		{
 			--Exchange.ApiDepth;
 		}
-		FVaRestExchange& Exchange;
+		FExchangeState& Exchange;
 	};
 
 	EVaRestErrorKind KindFor(EVaRestTransportFailure Failure, FName Detail)
@@ -81,7 +82,7 @@ namespace VaRest::Http::PipelinePrivate
 	 * HttpRequestPayload.cpp:64-69), so a stage that removes it would trip a check in a dev build (review N-5). True and
 	 * the first bad name in OutName when one is bad, a missing Content-Type included.
 	 */
-	bool FindBadHeader(const FVaRestExchange& Ex, FString& OutName)
+	bool FindBadHeader(const FExchangeState& Ex, FString& OutName)
 	{
 		for (const FVaRestHeaders::FPair& Pair : Ex.AttemptHeaders)
 		{
@@ -141,7 +142,7 @@ namespace VaRest::Http::PipelinePrivate
 			}
 			OnGameThread(TEXT("VaRest.AttemptDone"), [Target = MoveTemp(Held), Callback = MoveTemp(Outcome), Moved = MoveTemp(Result)]() mutable
 			{
-				Target->State->OnAttemptDone(Target.ToSharedRef(), MoveTemp(Moved), MoveTemp(Callback));
+				Internals(*Target).State->OnAttemptDone(Target.ToSharedRef(), MoveTemp(Moved), MoveTemp(Callback));
 			});
 		}
 
@@ -150,13 +151,13 @@ namespace VaRest::Http::PipelinePrivate
 		FVaRestOutcomeCallback Outcome;
 	};
 
-	bool IsOwnerGone(const FVaRestExchange& Ex)
+	bool IsOwnerGone(const FExchangeState& Ex)
 	{
 		// IsValid() is false for an object marked as garbage, not only for one collected (WeakObjectPtr.h:290)
 		return Ex.bHasOwner && !Ex.Owner.IsValid();
 	}
 
-	void MarkOwnerGone(FVaRestExchange& Ex)
+	void MarkOwnerGone(FExchangeState& Ex)
 	{
 		// Silence wins over an earlier User cancel (review C-2); Shutdown is silent too, and stays
 		if (Ex.CancelReason != EVaRestCancelReason::Shutdown)
@@ -170,7 +171,7 @@ namespace VaRest::Http::PipelinePrivate
 	constexpr double ProgressInterval = 0.1;
 
 	/** Game thread: calls OnProgress when the probe changed since the last call */
-	void DeliverProgress(FVaRestExchange& Ex)
+	void DeliverProgress(FExchangeState& Ex)
 	{
 		// No progress for a request being canceled, whose owner is gone, or at shutdown (spec 3.2: no callbacks; review C-1).
 		// The last call comes from OnAttemptDone after Task 11's owner check only marks it: without this, OnProgress
@@ -199,27 +200,28 @@ namespace VaRest::Http::PipelinePrivate
 
 	void ScheduleProgress(const FVaRestExchangeRef& Exchange)
 	{
-		if (!Exchange->TransportCall.IsValid() || Exchange->IsCancelRequested())
+		FExchangeState& Ex = Internals(*Exchange);
+		if (!Ex.TransportCall.IsValid() || Exchange->IsCancelRequested())
 		{
 			// Review M-3: the timer stops once the attempt is canceled -- an OnProgress that called Cancel() included; the
 			// transport's Canceled answer is on its way, and OnAttemptDone delivers nothing for it
 			return;
 		}
 		const TWeakPtr<FVaRestExchange, ESPMode::ThreadSafe> Weak = Exchange;
-		Exchange->ProgressTimer = Exchange->Config->Clock->SetTimer(ProgressInterval, [Weak]
+		Ex.ProgressTimer = Ex.Config->Clock->SetTimer(ProgressInterval, [Weak]
 		{
 			const TSharedPtr<FVaRestExchange, ESPMode::ThreadSafe> Pinned = Weak.Pin();
-			if (!Pinned.IsValid() || !Pinned->TransportCall.IsValid())
+			if (!Pinned.IsValid() || !Internals(*Pinned).TransportCall.IsValid())
 			{
 				return;
 			}
-			if (IsOwnerGone(*Pinned))
+			if (IsOwnerGone(Internals(*Pinned)))
 			{
 				// Spec 3.2: an owner gone mid-download stops it now rather than at the end
-				Pinned->State->Cancel(Pinned.ToSharedRef(), EVaRestCancelReason::OwnerGone);
+				Internals(*Pinned).State->Cancel(Pinned.ToSharedRef(), EVaRestCancelReason::OwnerGone);
 				return;
 			}
-			DeliverProgress(*Pinned);
+			DeliverProgress(Internals(*Pinned));
 			ScheduleProgress(Pinned.ToSharedRef());
 		});
 	}
@@ -228,7 +230,7 @@ namespace VaRest::Http::PipelinePrivate
 	 * Background thread (the restore-the-bug runs put it on the game thread): spec 1's "parsing, decoding ... run on
 	 * UE::Tasks". Ex is read only through its atomic cancel flag, which any thread may read.
 	 */
-	void RunDecode(IResultHandler& Handler, FFinish& Finish, const FVaRestExchange& Ex)
+	void RunDecode(IResultHandler& Handler, FFinish& Finish, const FExchangeState& Ex)
 	{
 #if !UE_BUILD_SHIPPING
 		if (IsInGameThread())
@@ -280,7 +282,7 @@ namespace VaRest::Http::PipelinePrivate
 
 		virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) override
 		{
-			FVaRestExchange& Ex = *Exchange;
+			FExchangeState& Ex = Internals(*Exchange);
 			++Ex.Attempt;
 			Ex.AttemptStartedAt = Ex.Config->Clock->Now();
 			Ex.AttemptHeaders = Ex.RequestHeaders;
@@ -297,7 +299,7 @@ namespace VaRest::Http::PipelinePrivate
 
 		virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) override
 		{
-			FVaRestExchange& Ex = *Exchange;
+			FExchangeState& Ex = Internals(*Exchange);
 			// One of the two closures below runs, exactly once: the grant or the abort
 			TSharedRef<FVaRestOutcomeCallback, ESPMode::ThreadSafe> Outcome = MakeShared<FVaRestOutcomeCallback, ESPMode::ThreadSafe>(MoveTemp(OnOutcome));
 			// Inspector IN-2: both ends of the wait on this exchange's own clock (review Minor 3). The grant comes from
@@ -307,18 +309,19 @@ namespace VaRest::Http::PipelinePrivate
 			Ex.State->GetLimiter().Acquire(Ex.RequestId, Ex.Priority,
 				[Exchange, Next, Outcome, EnqueuedAt]()
 				{
-					Exchange->bInLimiterQueue = false;
-					Exchange->LimiterWait = Exchange->Config->Clock->Now() - EnqueuedAt;
+					FExchangeState& Granted = Internals(*Exchange);
+					Granted.bInLimiterQueue = false;
+					Granted.LimiterWait = Granted.Config->Clock->Now() - EnqueuedAt;
 					Next.Proceed(Exchange, [Exchange, Outcome](FVaRestAttemptOutcome&& Result)
 					{
 						// The slot is freed before the outcome goes further up: a stage that re-issues queues again
-						Exchange->State->GetLimiter().Release();
+						Internals(*Exchange).State->GetLimiter().Release();
 						(*Outcome)(MoveTemp(Result));
 					});
 				},
 				[Exchange, Outcome]()
 				{
-					Exchange->bInLimiterQueue = false;
+					Internals(*Exchange).bInLimiterQueue = false;
 					(*Outcome)(FVaRestAttemptOutcome::Canceled());
 				});
 		}
@@ -332,7 +335,7 @@ namespace VaRest::Http::PipelinePrivate
 
 		virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) override
 		{
-			FVaRestExchange& Ex = *Exchange;
+			FExchangeState& Ex = Internals(*Exchange);
 			if (IsOwnerGone(Ex))
 			{
 				// Spec 3.2: "owner gone -> no callbacks, no further retries": no attempt starts for it
@@ -444,20 +447,42 @@ FVaRestExchange::~FVaRestExchange()
 	// The pipeline's own references die on the game thread (review I-1); only a pin taken elsewhere may be the last
 	++VaRest::Http::Testing::Counters().ExchangesDestroyedOffGameThread;
 #endif
-	if (State.IsValid() || Config.IsValid() || Handler.IsValid())
+	VaRest::Http::FExchangeState& Ex = *Impl;
+	if (Ex.State.IsValid() || Ex.Config.IsValid() || Ex.Handler.IsValid())
 	{
 		// Review I-1 backstop: a pin taken on another thread (IsActive, Cancel) can be the last reference. The handler goes
 		// too: it holds the user's callbacks and their captures (null by now in every path but a shutdown that never ran
 		// the Enter task; task 8 review, minor 4).
 		VaRest::Http::PipelinePrivate::OnGameThread(TEXT("VaRest.ReleaseExchange"),
-			[DoomedState = MoveTemp(State), DoomedConfig = MoveTemp(Config), DoomedHandler = MoveTemp(Handler)] {});
+			[DoomedState = MoveTemp(Ex.State), DoomedConfig = MoveTemp(Ex.Config), DoomedHandler = MoveTemp(Ex.Handler)] {});
 	}
 }
+
+FVaRestExchange::FVaRestExchange()
+	: Impl(MakeUnique<VaRest::Http::FExchangeState>())
+{
+}
+
+uint64 FVaRestExchange::GetRequestId() const { return Impl->RequestId; }
+uint64 FVaRestExchange::GetClientId() const { return Impl->ClientId; }
+const FString& FVaRestExchange::GetVerb() const { return Impl->Verb; }
+const FString& FVaRestExchange::GetUrl() const { return Impl->Url; }
+const FString& FVaRestExchange::GetPathTemplate() const { return Impl->PathTemplate; }
+FName FVaRestExchange::GetTag() const { return Impl->Tag; }
+EVaRestPriority FVaRestExchange::GetPriority() const { return Impl->Priority; }
+bool FVaRestExchange::IsIdempotent() const { return Impl->bIdempotent; }
+const FVaRestHeaders& FVaRestExchange::GetRequestHeaders() const { return Impl->RequestHeaders; }
+FVaRestHeaders& FVaRestExchange::GetAttemptHeaders() { return Impl->AttemptHeaders; }
+const FVaRestHeaders& FVaRestExchange::GetAttemptHeaders() const { return Impl->AttemptHeaders; }
+const FVaRestRequestBody& FVaRestExchange::GetBody() const { return Impl->Body; }
+int32 FVaRestExchange::GetAttempt() const { return Impl->Attempt; }
+bool FVaRestExchange::IsCancelRequested() const { return Impl->bCancelRequested.load(); }
+bool FVaRestExchange::IsDone() const { return Impl->bDone.load(); }
 
 void FVaRestStageNext::Proceed(const FVaRestExchangeRef& Exchange, FVaRestOutcomeCallback&& OnOutcome) const
 {
 	check(IsInGameThread());
-	if (Exchange->bFinished || Exchange->IsCancelRequested())
+	if (VaRest::Http::Internals(*Exchange).bFinished || Exchange->IsCancelRequested())
 	{
 		OnOutcome(FVaRestAttemptOutcome::Canceled());
 		return;
@@ -481,7 +506,7 @@ FVaRestStageRef VaRest::Http::MakeTransportStage()
 	return MakeShared<PipelinePrivate::FTransportStage, ESPMode::ThreadSafe>();
 }
 
-VaRest::Http::FFinish VaRest::Http::FClientState::MakeFinish(const FVaRestExchange& Exchange) const
+VaRest::Http::FFinish VaRest::Http::FClientState::MakeFinish(const FExchangeState& Exchange) const
 {
 	FFinish Finish;
 	Finish.Response.RequestId = Exchange.RequestId;
@@ -495,7 +520,7 @@ VaRest::Http::FFinish VaRest::Http::FClientState::MakeFinish(const FVaRestExchan
 	return Finish;
 }
 
-bool VaRest::Http::FClientState::Resolve(FVaRestExchange& Exchange, FString& OutError) const
+bool VaRest::Http::FClientState::Resolve(FExchangeState& Exchange, FString& OutError) const
 {
 	const FClientConfig& Cfg = *Exchange.Config;
 	if (Cfg.BaseUrl.Contains(TEXT("#")))
@@ -578,7 +603,7 @@ void VaRest::Http::FClientState::Enter(const FVaRestExchangeRef& Exchange)
 {
 	using namespace PipelinePrivate;
 	check(IsInGameThread());
-	FVaRestExchange& Ex = *Exchange;
+	FExchangeState& Ex = Internals(*Exchange);
 	FApiScope Scope(Ex);
 	// Spec 3.1: "A request snapshots the configuration at Send()" -- SendRequest took it (decision 27); an exchange made
 	// any other way gets one here
@@ -625,7 +650,7 @@ void VaRest::Http::FClientState::Enter(const FVaRestExchangeRef& Exchange)
 	}
 	FVaRestStageNext(Ex.Config->Chain.ToSharedRef(), 0).Proceed(Exchange, [Exchange](FVaRestAttemptOutcome&& Outcome)
 	{
-		Exchange->State->OnChainDone(Exchange, MoveTemp(Outcome));
+		Internals(*Exchange).State->OnChainDone(Exchange, MoveTemp(Outcome));
 	});
 }
 
@@ -633,7 +658,7 @@ void VaRest::Http::FClientState::OnAttemptDone(const FVaRestExchangeRef& Exchang
 {
 	using namespace PipelinePrivate;
 	check(IsInGameThread());
-	FVaRestExchange& Ex = *Exchange;
+	FExchangeState& Ex = Internals(*Exchange);
 	Ex.TransportCall.Reset();
 	if (IsOwnerGone(Ex))
 	{
@@ -667,7 +692,7 @@ void VaRest::Http::FClientState::OnChainDone(const FVaRestExchangeRef& Exchange,
 {
 	using namespace PipelinePrivate;
 	check(IsInGameThread());
-	FVaRestExchange& Ex = *Exchange;
+	FExchangeState& Ex = Internals(*Exchange);
 	if (Ex.bFinished || Ex.Phase != EVaRestExchangePhase::InChain)
 	{
 		// Finished, or a second outcome while the first is being decoded (a stage that reported twice): ignored (review C-3).
@@ -751,11 +776,12 @@ void VaRest::Http::FClientState::OnChainDone(const FVaRestExchangeRef& Exchange,
 	UE::Tasks::Launch(TEXT("VaRest.Decode"), [Held = TSharedPtr<FVaRestExchange, ESPMode::ThreadSafe>(Exchange), Decoder = MoveTemp(Handler), Pending = MoveTemp(Finish)]() mutable
 	{
 		// Spec 1: "Parsing, decoding, cache disk IO ... run on UE::Tasks background tasks"
-		RunDecode(*Decoder, Pending, *Held);
+		RunDecode(*Decoder, Pending, Internals(*Held));
 		OnGameThread(TEXT("VaRest.Deliver"), [Target = MoveTemp(Held), Delivered = MoveTemp(Decoder), Done = MoveTemp(Pending)]() mutable
 		{
-			Target->Handler = MoveTemp(Delivered);
-			Target->State->Complete(Target.ToSharedRef(), MoveTemp(Done));
+			FExchangeState& Returned = Internals(*Target);
+			Returned.Handler = MoveTemp(Delivered);
+			Returned.State->Complete(Target.ToSharedRef(), MoveTemp(Done));
 		});
 	});
 }
@@ -764,7 +790,7 @@ void VaRest::Http::FClientState::Complete(const FVaRestExchangeRef& Exchange, FF
 {
 	using namespace PipelinePrivate;
 	check(IsInGameThread());
-	FVaRestExchange& Ex = *Exchange;
+	FExchangeState& Ex = Internals(*Exchange);
 	if (Ex.bFinished)
 	{
 		return;
@@ -780,7 +806,7 @@ void VaRest::Http::FClientState::Complete(const FVaRestExchangeRef& Exchange, FF
 		// Decision 3: never inside Send() or Cancel(); the callbacks run from a later game-thread task
 		OnGameThread(TEXT("VaRest.Complete"), [Exchange, Pending = MoveTemp(Finish)]() mutable
 		{
-			Exchange->State->Complete(Exchange, MoveTemp(Pending));
+			Internals(*Exchange).State->Complete(Exchange, MoveTemp(Pending));
 		});
 		return;
 	}
@@ -865,7 +891,7 @@ void VaRest::Http::FClientState::Cancel(const FVaRestExchangeRef& Exchange, EVaR
 {
 	using namespace PipelinePrivate;
 	check(IsInGameThread());
-	FVaRestExchange& Ex = *Exchange;
+	FExchangeState& Ex = Internals(*Exchange);
 	if (Ex.bFinished)
 	{
 		return;

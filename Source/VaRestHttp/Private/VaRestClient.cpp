@@ -100,7 +100,7 @@ FVaRestRequestHandle VaRest::Http::SendRequest(TUniquePtr<FRequestSpec>&& Spec, 
 	// A TSharedPtr, so that the worker path can move it into the Enter task (review I-1; a TSharedRef "move" copies,
 	// SharedPointer.h:354-361): this thread then holds no reference that could be the last one
 	TSharedPtr<FVaRestExchange, ESPMode::ThreadSafe> Created = MakeShared<FVaRestExchange, ESPMode::ThreadSafe>();
-	FVaRestExchange& Ex = *Created;
+	FExchangeState& Ex = Internals(*Created);
 	Ex.RequestId = FVaRestTrace::NewRequestId(); // IN-10: assigned at creation, whatever the trace mask
 	Ex.ClientId = Spec->State->GetClientId();
 	// Spec 3.1, verbatim: "A request snapshots the configuration at Send()" -- here, on the sending thread, under the
@@ -149,7 +149,7 @@ FVaRestRequestHandle VaRest::Http::SendRequest(TUniquePtr<FRequestSpec>&& Spec, 
 		UE::Tasks::Launch(TEXT("VaRest.Enter"), [Moved = MoveTemp(Created), Built = MoveTemp(Spec->ConfigAtBuild)]
 		{
 			const FVaRestExchangeRef Entering = Moved.ToSharedRef();
-			Entering->State->Enter(Entering);
+			Internals(*Entering).State->Enter(Entering);
 		}, UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
 	}
 	return Handle;
@@ -157,7 +157,7 @@ FVaRestRequestHandle VaRest::Http::SendRequest(TUniquePtr<FRequestSpec>&& Spec, 
 
 FVaRestRequestHandle::FVaRestRequestHandle(const FVaRestExchangeRef& InExchange)
 	: Exchange(InExchange)
-	, Id(InExchange->RequestId)
+	, Id(InExchange->GetRequestId())
 {
 }
 
@@ -176,13 +176,13 @@ void FVaRestRequestHandle::Cancel() const
 	}
 	if (IsInGameThread())
 	{
-		Pinned->State->Cancel(Pinned.ToSharedRef(), EVaRestCancelReason::User);
+		VaRest::Http::Internals(*Pinned).State->Cancel(Pinned.ToSharedRef(), EVaRestCancelReason::User);
 		return;
 	}
 	// Any thread: the flag now (a decode in flight sees it), the rest where the control plane lives (spec 1). The pin is
 	// moved into the task, so this thread never drops the last reference (review I-1).
-	Pinned->bCancelRequested = true;
-	UE::Tasks::Launch(TEXT("VaRest.Cancel"), [Target = MoveTemp(Pinned)] { Target->State->Cancel(Target.ToSharedRef(), EVaRestCancelReason::User); },
+	VaRest::Http::Internals(*Pinned).bCancelRequested = true;
+	UE::Tasks::Launch(TEXT("VaRest.Cancel"), [Target = MoveTemp(Pinned)] { VaRest::Http::Internals(*Target).State->Cancel(Target.ToSharedRef(), EVaRestCancelReason::User); },
 		UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
 }
 

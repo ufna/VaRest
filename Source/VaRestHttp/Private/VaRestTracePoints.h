@@ -5,12 +5,12 @@
 #include "CoreMinimal.h"
 #include "VaRestTrace.h"
 
-class FVaRestExchange;
 struct FVaRestTransportResult;
 
 namespace VaRest::Http
 {
 	struct FClientConfig;
+	struct FExchangeState;
 	struct FFinish;
 
 	/**
@@ -20,13 +20,13 @@ namespace VaRest::Http
 	namespace TracePoints
 	{
 		/** IN-1, on entry after Resolve. Reads the initiator (IN-15) and StartUtc into the exchange for the snapshot. */
-		void Started(FVaRestExchange& Ex);
+		void Started(FExchangeState& Ex);
 		/** IN-2, immediately before the transport starts */
-		void AttemptDispatched(const FVaRestExchange& Ex);
+		void AttemptDispatched(const FExchangeState& Ex);
 		/** IN-3, when the transport's result is back on the game thread */
-		void AttemptEnded(const FVaRestExchange& Ex, const FVaRestTransportResult& Result);
+		void AttemptEnded(const FExchangeState& Ex, const FVaRestTransportResult& Result);
 		/** IN-5, before any callback */
-		void Completed(const FVaRestExchange& Ex, const FFinish& Finish);
+		void Completed(const FExchangeState& Ex, const FFinish& Finish);
 		/** IN-8. Any thread; the event is emitted on the game thread. */
 		void Client(uint64 ClientId, const FClientConfig& Config, bool bCreated);
 		/** IN-12: every live client and in-flight request; the module registers it with FVaRestTrace::OnBuildSnapshot */

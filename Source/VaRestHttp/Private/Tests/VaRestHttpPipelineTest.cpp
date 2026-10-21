@@ -98,7 +98,7 @@ namespace VaRest::Http::PipelineTestPrivate
 	/** One configuration edit that sets X-A and X-B to Gen together: a request that sees X-A != X-B saw half an edit */
 	void EditGeneration(const FVaRestClient& Client, int32 Gen)
 	{
-		Client.GetStateInternal()->EditConfig([Gen](FClientConfig& Edited)
+		VaRest::Http::FClientAccess::State(Client)->EditConfig([Gen](FClientConfig& Edited)
 		{
 			Edited.DefaultHeaders.Set(TEXT("X-A"), LexToString(Gen));
 			Edited.DefaultHeaders.Set(TEXT("X-B"), LexToString(Gen));
@@ -367,7 +367,7 @@ bool FVaRestHttpPipelineDroppedTest::RunTest(const FString& Parameters)
 	auto Outcome = MakeOutcome<FVaRestJson>();
 	Observe(Rig.Client.Get(TEXT("/slow")), Outcome).Send(); // on the game thread, and no handle pinned anywhere
 	PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 1; });
-	TWeakPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> WeakState = Rig.Client.GetStateInternal();
+	TWeakPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> WeakState = VaRest::Http::FClientAccess::State(Rig.Client);
 	Rig.Client = FVaRestClient(); // the last handle
 	TestTrue(TEXT("spec 3.2: the in-flight exchange keeps the client state alive"), WeakState.IsValid());
 	const int32 OffBefore = Counters().ClientStatesDestroyedOffGameThread.load();
@@ -424,7 +424,7 @@ bool FVaRestHttpPipelineConfigRaceTest::RunTest(const FString& Parameters)
 	// One edit changes two headers together: a request that ever sees X-A != X-B saw half an edit
 	auto EditBoth = [&Rig](int32 Gen)
 	{
-		Rig.Client.GetStateInternal()->EditConfig([Gen](VaRest::Http::FClientConfig& Edited)
+		VaRest::Http::FClientAccess::State(Rig.Client)->EditConfig([Gen](VaRest::Http::FClientConfig& Edited)
 		{
 			Edited.DefaultHeaders.Set(TEXT("X-A"), LexToString(Gen));
 			Edited.DefaultHeaders.Set(TEXT("X-B"), LexToString(Gen));

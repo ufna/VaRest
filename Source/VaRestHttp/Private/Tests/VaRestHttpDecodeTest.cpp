@@ -13,6 +13,7 @@
 #include "UObject/UObjectGlobals.h"
 #include "VaRestClient.h"
 #include "VaRestDecode.h"
+#include "VaRestExchangeState.h"
 #include "VaRestHttpSettings.h"
 #include "VaRestHttpTesting.h"
 
@@ -353,7 +354,7 @@ bool FVaRestHttpSaveToErrorTest::RunTest(const FString& Parameters)
 		{
 			if (Outcome.IsTransportFailure())
 			{
-				FFileHelper::SaveStringToFile(TEXT("partial"), *Exchange->TempFile);
+				FFileHelper::SaveStringToFile(TEXT("partial"), *VaRest::Http::Internals(*Exchange).TempFile);
 			}
 			Done(MoveTemp(Outcome));
 		});
@@ -438,7 +439,7 @@ bool FVaRestHttpSaveToLostFileTest::RunTest(const FString& Parameters)
 	{
 		Next.Proceed(Exchange, [Exchange, Done = MoveTemp(OnOutcome)](FVaRestAttemptOutcome&& Outcome) mutable
 		{
-			IFileManager::Get().Delete(*Exchange->TempFile, false, false, true);
+			IFileManager::Get().Delete(*VaRest::Http::Internals(*Exchange).TempFile, false, false, true);
 			Done(MoveTemp(Outcome));
 		});
 	}), EVaRestStageSlot::PerAttempt);

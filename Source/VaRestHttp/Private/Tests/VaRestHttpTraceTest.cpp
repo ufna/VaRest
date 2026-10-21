@@ -518,7 +518,7 @@ bool FVaRestHttpTraceClientOffThreadTest::RunTest(const FString& Parameters)
 	FVaRestTrace::AddSink(Sink); // before Make: the snapshot's walk holds no pin on the client below
 	FVaRestClient Doomed = FVaRestClient::Make(TEXT("https://worker.test"));
 	const uint64 Id = Doomed.GetId();
-	const TWeakPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> Weak = Doomed.GetStateInternal();
+	const TWeakPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> Weak = VaRest::Http::FClientAccess::State(Doomed);
 	const int32 OffBefore = Counters().ClientStatesDestroyedOffGameThread.load();
 	const UE::Tasks::FTask Dropping = UE::Tasks::Launch(TEXT("VaRest.Test.DropClient"), [Last = MoveTemp(Doomed)]() mutable
 	{
@@ -551,7 +551,7 @@ bool FVaRestHttpTraceGhostTest::RunTest(const FString& Parameters)
 	FVaRestTrace::FScopedSinkIsolation Isolation;
 	FVaRestClient Doomed = FVaRestClient::Make(TEXT("https://ghost.test"));
 	const uint64 Id = Doomed.GetId();
-	TSharedPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> Held = Doomed.GetStateInternal();
+	TSharedPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> Held = VaRest::Http::FClientAccess::State(Doomed);
 	const TWeakPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> Weak = Held;
 	Doomed = FVaRestClient();
 	VaRest::Http::FClientState::ForEachLive([&Held, Id](VaRest::Http::FClientState& State)
@@ -569,7 +569,7 @@ bool FVaRestHttpTraceGhostTest::RunTest(const FString& Parameters)
 	const uint64 SecondId = Second.GetId();
 	// Shared, not a stack local the hook captures by reference (the standing test rule)
 	using FStateHolder = TSharedPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe>;
-	const TSharedRef<FStateHolder, ESPMode::ThreadSafe> SecondHeld = MakeShared<FStateHolder, ESPMode::ThreadSafe>(Second.GetStateInternal());
+	const TSharedRef<FStateHolder, ESPMode::ThreadSafe> SecondHeld = MakeShared<FStateHolder, ESPMode::ThreadSafe>(VaRest::Http::FClientAccess::State(Second));
 	const TWeakPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> SecondWeak = *SecondHeld;
 	Second = FVaRestClient();
 	const FSinkRef Sink = MakeSink(EVaRestTraceDetail::Metadata);

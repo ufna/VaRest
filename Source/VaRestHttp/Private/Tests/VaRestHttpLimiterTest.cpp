@@ -199,7 +199,7 @@ bool FVaRestHttpLimiterCancelTest::RunTest(const FString& Parameters)
 	FTestRig Rig;
 	Rig.Client.WithMaxConcurrent(1);
 	Rig.Fake->SetResponder([](const FVaRestTransportRequest&) { return FVaRestFakeResponse::Manual(); });
-	const VaRest::Http::FLimiter& Slots = Rig.Client.GetStateInternal()->GetLimiter();
+	const VaRest::Http::FLimiter& Slots = VaRest::Http::FClientAccess::State(Rig.Client)->GetLimiter();
 	auto A = MakeOutcome<FVaRestJson>();
 	auto B = MakeOutcome<FVaRestJson>();
 	Observe(Rig.Client.Get(TEXT("/a")), A).Send();
@@ -345,7 +345,7 @@ bool FVaRestHttpLimiterExitsTest::RunTest(const FString& Parameters)
 	// Completions post their game-thread task inside Complete(), Cancel() and Advance(), so the order below is fixed
 	Rig.Fake->bCompleteOnWorker = false;
 	Rig.Fake->SetResponder([](const FVaRestTransportRequest&) { return FVaRestFakeResponse::Manual(); });
-	const VaRest::Http::FLimiter& Slots = Rig.Client.GetStateInternal()->GetLimiter();
+	const VaRest::Http::FLimiter& Slots = VaRest::Http::FClientAccess::State(Rig.Client)->GetLimiter();
 	auto Drain = [this, &Rig]
 	{
 		Rig.Client.CancelAll();
@@ -370,10 +370,10 @@ bool FVaRestHttpLimiterExitsTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("cancel: the next one finishes"), Rig.Wait(AfterCancel));
 
 	// Timed out at the transport (the fake's total timeout on the virtual clock, as the HTTP transport's)
-	Rig.Client.GetStateInternal()->EditConfig([](VaRest::Http::FClientConfig& Edited) { Edited.Timeout = 1.f; });
+	VaRest::Http::FClientAccess::State(Rig.Client)->EditConfig([](VaRest::Http::FClientConfig& Edited) { Edited.Timeout = 1.f; });
 	auto TimedOut = MakeOutcome<FVaRestJson>();
 	Observe(Rig.Client.Get(TEXT("/time-out")), TimedOut).Send();
-	Rig.Client.GetStateInternal()->EditConfig([](VaRest::Http::FClientConfig& Edited) { Edited.Timeout = 0.f; });
+	VaRest::Http::FClientAccess::State(Rig.Client)->EditConfig([](VaRest::Http::FClientConfig& Edited) { Edited.Timeout = 0.f; });
 	auto AfterTimeout = MakeOutcome<FVaRestJson>();
 	Observe(Rig.Client.Get(TEXT("/after-timeout")), AfterTimeout).Send();
 	PumpUntil([] { return false; }, 0.02);
@@ -423,7 +423,7 @@ bool FVaRestHttpLimiterExitsTest::RunTest(const FString& Parameters)
 	{
 		return Drain();
 	}
-	FlaggedExchange->bCancelRequested = true;
+	VaRest::Http::Internals(*FlaggedExchange).bCancelRequested = true;
 	TestEqual(TEXT("flagged: setting the flag takes nothing out of the queue"), Slots.NumQueued(), 2);
 	CompleteOldest(Rig);
 	TestTrue(TEXT("flagged: finishes as Canceled"), Rig.Wait(Flagged) && Flagged->Error.Kind == EVaRestErrorKind::Canceled);
@@ -432,7 +432,7 @@ bool FVaRestHttpLimiterExitsTest::RunTest(const FString& Parameters)
 		return Drain();
 	}
 	TestEqual(TEXT("... and the flagged one never reached the transport"), NewestPath(Rig), FString(TEXT("/after-flagged")));
-	TestTrue(TEXT("... it was granted: out of the queue, past the attempt boundary"), !FlaggedExchange->bInLimiterQueue && FlaggedExchange->Attempt == 1);
+	TestTrue(TEXT("... it was granted: out of the queue, past the attempt boundary"), !VaRest::Http::Internals(*FlaggedExchange).bInLimiterQueue && FlaggedExchange->GetAttempt() == 1);
 	CompleteOldest(Rig);
 	TestTrue(TEXT("flagged: the holder and the next one finish"), Rig.Wait(Holder2) && Rig.Wait(AfterFlagged));
 
@@ -468,7 +468,7 @@ bool FVaRestHttpLimiterShutdownTest::RunTest(const FString& Parameters)
 	FTestRig Rig;
 	Rig.Client.WithMaxConcurrent(1);
 	Rig.Fake->SetResponder([](const FVaRestTransportRequest&) { return FVaRestFakeResponse::Manual(); });
-	const VaRest::Http::FLimiter& Slots = Rig.Client.GetStateInternal()->GetLimiter();
+	const VaRest::Http::FLimiter& Slots = VaRest::Http::FClientAccess::State(Rig.Client)->GetLimiter();
 	auto A = MakeOutcome<FVaRestJson>();
 	auto High = MakeOutcome<FVaRestJson>();
 	auto Low = MakeOutcome<FVaRestJson>();
@@ -522,8 +522,8 @@ bool FVaRestHttpLimiterWaitTest::RunTest(const FString& Parameters)
 	if (TestTrue(TEXT("B is granted"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 2; }))
 		&& TestTrue(TEXT("the probe saw both"), AExchange.IsValid() && BExchange.IsValid()))
 	{
-		TestEqual(TEXT("a grant at once waited nothing"), AExchange->LimiterWait, 0.0);
-		TestEqual(TEXT("B waited 3 s on its own clock"), BExchange->LimiterWait, 3.0);
+		TestEqual(TEXT("a grant at once waited nothing"), VaRest::Http::Internals(*AExchange).LimiterWait, 0.0);
+		TestEqual(TEXT("B waited 3 s on its own clock"), VaRest::Http::Internals(*BExchange).LimiterWait, 3.0);
 	}
 	CompleteOldest(Rig);
 	TestTrue(TEXT("both finish"), Rig.Wait(A) && Rig.Wait(B));

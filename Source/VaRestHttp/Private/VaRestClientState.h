@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "Misc/ScopeRWLock.h"
 #include "VaRestClient.h"
+#include "VaRestExchangeState.h"
 #include "VaRestLimiter.h"
 #include "VaRestRedactor.h"
 #include "VaRestStage.h"
@@ -70,11 +71,11 @@ namespace VaRest::Http
 		/** Every live client (game thread): the trace snapshot, engine shutdown */
 		static void ForEachLive(TFunctionRef<void(FClientState&)> Visit);
 		/** Game thread: the trace snapshot (IN-12) */
-		void ForEachInFlight(TFunctionRef<void(FVaRestExchange&)> Visit) const
+		void ForEachInFlight(TFunctionRef<void(FExchangeState&)> Visit) const
 		{
 			for (const TPair<uint64, FVaRestExchangeRef>& Pair : InFlight)
 			{
-				Visit(*Pair.Value);
+				Visit(Internals(*Pair.Value));
 			}
 		}
 
@@ -98,10 +99,10 @@ namespace VaRest::Http
 #endif
 
 	private:
-		bool Resolve(FVaRestExchange& Exchange, FString& OutError) const;
+		bool Resolve(FExchangeState& Exchange, FString& OutError) const;
 		void OnChainDone(const FVaRestExchangeRef& Exchange, FVaRestAttemptOutcome&& Outcome);
 		void Complete(const FVaRestExchangeRef& Exchange, FFinish&& Finish);
-		FFinish MakeFinish(const FVaRestExchange& Exchange) const;
+		FFinish MakeFinish(const FExchangeState& Exchange) const;
 		void Publish(const TSharedRef<FClientConfig, ESPMode::ThreadSafe>& Next);
 		/** Publishes again when the next rotated-out value expires */
 		void ScheduleSecretExpiry();
@@ -123,6 +124,15 @@ namespace VaRest::Http
 		FVaRestTimerHandle SecretExpiryTimer;
 	};
 
+	/**
+	 * The one friend of FVaRestClient: a client's state for VaRestHttp's own code and its tests, never for a module outside
+	 * it (final review I1)
+	 */
+	struct FClientAccess
+	{
+		static TSharedPtr<FClientState, ESPMode::ThreadSafe> State(const FVaRestClient& Client) { return Client.GetStateInternal(); }
+	};
+
 	/** The chain's built-in stages (VaRestPipeline.cpp) */
 	FVaRestStageRef MakeAttemptBoundaryStage();
 	FVaRestStageRef MakeLimiterStage();
@@ -130,7 +140,7 @@ namespace VaRest::Http
 	/** Spec 4.5, per attempt (VaRestLogStage.cpp) */
 	FVaRestStageRef MakeLogStage();
 	/** The Basic line (a Warning) of a request refused before the chain, with Kind=Config: a builder error or Resolve's */
-	void LogConfigError(const FVaRestExchange& Ex, FStringView Message);
+	void LogConfigError(const FExchangeState& Ex, FStringView Message);
 	/** The cvar VaRest.LogLevel when it is 0..3, else the client's level */
 	EVaRestLogLevel EffectiveLogLevel(EVaRestLogLevel ClientLevel);
 	/** Spec 4.5: "Logged bodies are truncated to 4 KiB" */

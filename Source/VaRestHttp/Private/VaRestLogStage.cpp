@@ -109,7 +109,7 @@ namespace VaRest::Http::LogStagePrivate
 		return Copies;
 	}
 
-	void LogRequestBody(const FVaRestExchange& Ex, const FRedactorRef& Redactor)
+	void LogRequestBody(const FExchangeState& Ex, const FRedactorRef& Redactor)
 	{
 		const FVaRestRequestBody& Upload = Ex.Body;
 		if (Upload.IsEmpty())
@@ -146,7 +146,7 @@ namespace VaRest::Http::LogStagePrivate
 #endif
 
 	/** Url: the shown URL when the request line built it, else empty and built here, only for a line that is written */
-	void LogOutcome(const FVaRestExchange& Ex, const FRedactorRef& Redactor, FString& Url, EVaRestLogLevel Level, double StartedAt, const FVaRestAttemptOutcome& Outcome)
+	void LogOutcome(const FExchangeState& Ex, const FRedactorRef& Redactor, FString& Url, EVaRestLogLevel Level, double StartedAt, const FVaRestAttemptOutcome& Outcome)
 	{
 		// Review M5: the attempt's own time, from the limiter's grant; a wait in the queue (IN-2's LimiterWait, measured on
 		// this exchange's clock) is shown apart, and only when it rounds to a millisecond or more
@@ -218,7 +218,7 @@ namespace VaRest::Http::LogStagePrivate
 			// UE_LOG writes nothing here (LogMacros.h:184-194): nothing to redact a URL or a header for
 			Next.Proceed(Exchange, MoveTemp(OnOutcome));
 #else
-			FVaRestExchange& Ex = *Exchange;
+			FExchangeState& Ex = Internals(*Exchange);
 			const EVaRestLogLevel Level = Ex.LogLevel;
 			// Review M2: with the category below Log (-LogCmds="LogVaRestHttp Warning"), the header and body lines are dropped,
 			// so nothing is redacted or copied for them. UE_LOG_ACTIVE tests the compiled-in and the runtime verbosity
@@ -249,7 +249,7 @@ namespace VaRest::Http::LogStagePrivate
 			const double StartedAt = Ex.Config->Clock->Now();
 			Next.Proceed(Exchange, [Exchange, Redactor, Line = MoveTemp(Shown), Level, StartedAt, Done = MoveTemp(OnOutcome)](FVaRestAttemptOutcome&& Outcome) mutable
 			{
-				LogOutcome(*Exchange, Redactor, Line, Level, StartedAt, Outcome);
+				LogOutcome(Internals(*Exchange), Redactor, Line, Level, StartedAt, Outcome);
 				Done(MoveTemp(Outcome));
 			});
 #endif
@@ -303,7 +303,7 @@ FString VaRest::Http::EscapeForLog(FStringView Text)
 	return Out;
 }
 
-void VaRest::Http::LogConfigError(const FVaRestExchange& Ex, FStringView Message)
+void VaRest::Http::LogConfigError(const FExchangeState& Ex, FStringView Message)
 {
 	// Task 14 fix round 2: a builder error or a URL Resolve refused (spec 3.3, Kind=Config) never enters the chain, so the
 	// log stage never sees it. A Warning, as every failure but a cancel; the URL as the error carries it, redacted, then escaped.

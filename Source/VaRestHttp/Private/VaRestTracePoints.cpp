@@ -32,7 +32,7 @@ namespace VaRest::Http::TracePointsPrivate
 	 * What Started and a snapshot entry share. Inspector 2.2 layer 3 scrubs "every captured string", so the strings that
 	 * are no URL and no header (the verb, the content type) are value-scrubbed too.
 	 */
-	FVaRestTraceStarted Describe(const FVaRestExchange& Ex)
+	FVaRestTraceStarted Describe(const FExchangeState& Ex)
 	{
 		const FClientConfig& Cfg = *Ex.Config;
 		const FVaRestRedactor& Redactor = *Cfg.Redactor;
@@ -115,7 +115,7 @@ namespace VaRest::Http::TracePointsPrivate
 	}
 }
 
-void VaRest::Http::TracePoints::Started(FVaRestExchange& Ex)
+void VaRest::Http::TracePoints::Started(FExchangeState& Ex)
 {
 	using namespace TracePointsPrivate;
 	if (FVaRestTrace::Detail() == EVaRestTraceDetail::None)
@@ -150,7 +150,7 @@ void VaRest::Http::TracePoints::Started(FVaRestExchange& Ex)
 	FVaRestTrace::Emit(EVaRestTraceKind::Started, Ex.StartedAt, FVaRestTracePayload(TInPlaceType<FVaRestTraceStarted>(), MoveTemp(Payload)));
 }
 
-void VaRest::Http::TracePoints::AttemptDispatched(const FVaRestExchange& Ex)
+void VaRest::Http::TracePoints::AttemptDispatched(const FExchangeState& Ex)
 {
 	if (FVaRestTrace::Detail() == EVaRestTraceDetail::None)
 	{
@@ -169,7 +169,7 @@ void VaRest::Http::TracePoints::AttemptDispatched(const FVaRestExchange& Ex)
 	FVaRestTrace::Emit(EVaRestTraceKind::AttemptDispatched, Ex.Config->Clock->Now(), FVaRestTracePayload(TInPlaceType<FVaRestTraceAttemptDispatched>(), MoveTemp(Payload)));
 }
 
-void VaRest::Http::TracePoints::AttemptEnded(const FVaRestExchange& Ex, const FVaRestTransportResult& Result)
+void VaRest::Http::TracePoints::AttemptEnded(const FExchangeState& Ex, const FVaRestTransportResult& Result)
 {
 	if (FVaRestTrace::Detail() == EVaRestTraceDetail::None)
 	{
@@ -202,7 +202,7 @@ void VaRest::Http::TracePoints::AttemptEnded(const FVaRestExchange& Ex, const FV
 	FVaRestTrace::Emit(EVaRestTraceKind::AttemptEnded, Ex.Config->Clock->Now(), FVaRestTracePayload(TInPlaceType<FVaRestTraceAttemptEnded>(), MoveTemp(Payload)));
 }
 
-void VaRest::Http::TracePoints::Completed(const FVaRestExchange& Ex, const FFinish& Finish)
+void VaRest::Http::TracePoints::Completed(const FExchangeState& Ex, const FFinish& Finish)
 {
 	if (FVaRestTrace::Detail() == EVaRestTraceDetail::None)
 	{
@@ -274,7 +274,7 @@ void VaRest::Http::TracePoints::ContributeSnapshot(FVaRestTraceSnapshot& Snapsho
 		Entry.ClientId = State.GetClientId();
 		Entry.ScopeId = FVaRestTrace::ProcessScopeId;
 		Entry.DisplayName = DisplayNameOf(*Current);
-		State.ForEachInFlight([&Snapshot](FVaRestExchange& Ex)
+		State.ForEachInFlight([&Snapshot](FExchangeState& Ex)
 		{
 			if (Ex.Phase == EVaRestExchangePhase::Done || !Ex.Config.IsValid())
 			{

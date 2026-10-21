@@ -15,10 +15,13 @@
 
 #include <type_traits>
 
+class FVaRestClient;
 class FVaRestRequestHandle;
 
 namespace VaRest::Http
 {
+	struct FClientAccess;
+
 	/** What a TVaRestRequest collects; Send moves it into an exchange */
 	struct VARESTHTTP_API FRequestSpec
 	{
@@ -98,11 +101,6 @@ template <typename T>
 class [[nodiscard]] TVaRestRequest
 {
 public:
-	explicit TVaRestRequest(TUniquePtr<VaRest::Http::FRequestSpec>&& InSpec)
-		: Spec(MoveTemp(InSpec))
-	{
-	}
-
 	TVaRestRequest(TVaRestRequest&&) = default;
 	TVaRestRequest& operator=(TVaRestRequest&&) = default;
 	TVaRestRequest(const TVaRestRequest&) = delete;
@@ -448,6 +446,14 @@ public:
 	}
 
 private:
+	/** Only Request<T>, which gives the spec a TResultHandler<T>: Handler() casts to that type (final review I1) */
+	friend class FVaRestClient;
+
+	explicit TVaRestRequest(TUniquePtr<VaRest::Http::FRequestSpec>&& InSpec)
+		: Spec(MoveTemp(InSpec))
+	{
+	}
+
 	VaRest::Http::TResultHandler<T>& Handler()
 	{
 		return static_cast<VaRest::Http::TResultHandler<T>&>(*Spec->Handler);
@@ -552,10 +558,12 @@ public:
 		return TVaRestRequest<T>(MoveTemp(NewSpec));
 	}
 
-	/** VaRestHttp and its tests; not a stable API */
+private:
+	/** Defined in VaRestClientState.h (Private): VaRestHttp and its tests reach the state through it */
+	friend struct VaRest::Http::FClientAccess;
+
 	TSharedPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> GetStateInternal() const { return State; }
 
-private:
 	explicit FVaRestClient(TSharedPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> InState)
 		: State(MoveTemp(InState))
 	{
