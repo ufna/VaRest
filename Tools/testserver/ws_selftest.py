@@ -375,9 +375,13 @@ class ScenarioTest(WsTestBase):
         with self.assertRaises(EOFError):
             client.message()
         self.assertEqual(len(self.of(self.ended(key), "fin")), 1)
-        client = self.connect("/ws/drop?rst=1")
-        with self.assertRaises((EOFError, ConnectionResetError)):
-            client.message()
+        # Raw recv on the socket: FIN reads as b"", only RST raises ECONNRESET
+        client = self.connect("/ws/drop?rst=1&key=" + key + "r")
+        with self.assertRaises(ConnectionResetError):
+            client.sock.recv(1)
+        self.assertEqual(len(self.of(self.ended(key + "r"), "rst")), 1)
+        client = self.connect("/ws/drop?rst=0")
+        self.assertEqual(client.sock.recv(1), b"")
 
     def test_silent_answers_nothing(self):
         key = uuid.uuid4().hex
@@ -519,6 +523,65 @@ class ScenarioTest(WsTestBase):
         client.close()
         self.assertEqual(client.message()[0], "close")
         self.assertEqual([event.get("text") for event in self.of(self.ended(key), "message")], ["a", "b"])
+
+    def test_protocol_error_after_our_close_is_not_an_eof(self):
+        # The client's bytes after our close declare a 126-byte PING and send none of it: the journal must say so, not "eof"
+        bad_header = bytes([0x80 | ws.OP_PING, 0x80 | 126]) + struct.pack("!H", 126)
+        for route in ("/ws/close/1000", "/ws/silent", "/ws/noecho"):
+            key = uuid.uuid4().hex
+            client = self.connect(route + "?key=" + key)
+            if route == "/ws/close/1000":
+                self.assertEqual(client.message()[0], "close")
+            else:
+                client.close()
+                time.sleep(0.1)
+            client.sock.sendall(bad_header)
+            journal = self.ended(key)
+            self.assertEqual(self.of(journal, "eof"), [], route)
+            self.assertEqual([event["code"] for event in self.of(journal, "protocol_error")], [1002], route)
+            client.shutdown()
+
+    def test_serverping_stops_with_the_connection(self):
+        # The pinger sleeps interval_ms between PINGs; it must leave with the connection, not after count x interval
+        key = uuid.uuid4().hex
+        client = self.connect("/ws/serverping?count=10&interval_ms=5000&size=4&key=" + key)
+        self.assertEqual(client.message()[0], "ping")
+        client.close()
+        self.assertEqual(client.message()[0], "close")
+        self.ended(key)
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline and any(thread.name == "ws-serverping" and thread.is_alive() for thread in threading.enumerate()):
+            time.sleep(0.02)
+        self.assertEqual([thread for thread in threading.enumerate() if thread.name == "ws-serverping" and thread.is_alive()], [])
+
+    def test_flaky_keys_are_bounded(self):
+        saved = ws.MAX_KEYS
+        ws.MAX_KEYS = 2
+        try:
+            with ws.JOURNAL_LOCK:
+                ws.WS_STATE["flaky"].clear()
+            for name in ("a", "b", "c"):
+                self.connect("/ws/flaky?n=1&key=" + uuid.uuid4().hex + name + "&flakykey=" + name)
+            self.assertLessEqual(len(ws.WS_STATE["flaky"]), 2)
+        finally:
+            ws.MAX_KEYS = saved
+
+    def test_protocol_select_must_be_a_token(self):
+        for bad in ("%E2%82%AC", "a%20b", "a%2Cb", "a%0D%0Ab"):
+            self.assertEqual(self.connect("/ws/protocol?select=" + bad).status, 400, bad)
+        self.assertEqual(self.connect("/ws/protocol?select=chat.v2%2B1").headers.get("sec-websocket-protocol"), "chat.v2+1")
+
+    def test_flood_journals_a_start_and_a_failed_write(self):
+        key = uuid.uuid4().hex
+        client = self.connect("/ws/flood?bytes=%d&chunk=65536&key=%s" % (ws.MAX_MESSAGE, key))
+        client.message()
+        client.shutdown()
+        journal = self.ended(key)
+        self.assertEqual(len(self.of(journal, "flood_start")), 1)
+        failed = self.of(journal, "flood_error")[0]
+        self.assertGreater(failed["bytes"], 0)
+        self.assertLess(failed["bytes"], ws.MAX_MESSAGE)
+        self.assertEqual(self.of(journal, "flood"), [])
 
     def test_flood(self):
         key = uuid.uuid4().hex

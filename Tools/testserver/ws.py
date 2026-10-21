@@ -342,8 +342,11 @@ class WsConn:
                 if op == OP_CLOSE:
                     self.journal.add("close", **close_fields(payload))
                     return
-        except (EOFError, ProtocolError):
+        except EOFError:
             self.journal.add("eof")
+        except ProtocolError as error:
+            # Not an end of TCP: the client sent a header we refuse (the client may still be there)
+            self.journal.add("protocol_error", code=error.code, reason=str(error))
         except socket.timeout:
             self.journal.add("timeout")
         except OSError as error:
@@ -355,8 +358,11 @@ class WsConn:
         try:
             while True:
                 self.read_frame()
-        except (EOFError, ProtocolError):
+        except EOFError:
             self.journal.add("eof")
+        except ProtocolError as error:
+            # Not an end of TCP: the client sent a header we refuse (the client may still be there)
+            self.journal.add("protocol_error", code=error.code, reason=str(error))
         except socket.timeout:
             self.journal.add("timeout")
         except OSError as error:
@@ -594,21 +600,30 @@ def ws_serverping(h, match, journal):
     unsolicited = server.query_int(h, "unsolicited", 0, 1)
     conn = accept(h, journal)
 
+    # Set when the connection ends: the pinger neither outlives it (it waits on this, not sleeps) nor sends after our close
+    stop = threading.Event()
+
     def pinger():
         try:
             if unsolicited:
                 conn.send_frame(OP_PONG, b"unsolicited")
             for index in range(count):
-                if index:
-                    time.sleep(interval)
+                if index and stop.wait(interval):
+                    return
+                if stop.is_set() or conn.sent_close:
+                    return
                 conn.send_frame(OP_PING, (b"ping-%d" % index).ljust(size, b"."))
-            time.sleep(interval)
+            if stop.wait(interval) or conn.sent_close:
+                return
             conn.send_message("text", b"pings-done")
         except OSError:
             pass
 
-    threading.Thread(target=pinger, daemon=True).start()
-    echo(conn)
+    threading.Thread(target=pinger, name="ws-serverping", daemon=True).start()
+    try:
+        echo(conn)
+    finally:
+        stop.set()
 
 
 def ws_fragment(h, match, journal):
@@ -672,10 +687,14 @@ def ws_headers(h, match, journal):
     echo(conn)
 
 
+TOKEN = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
+
+
 def ws_protocol(h, match, journal):
     selected = h.query.get("select", [""])[0]
-    if "\r" in selected or "\n" in selected:
-        raise server.Refused(400, "select holds a line break")
+    # RFC 6455 4.2.2: a subprotocol is one token (RFC 2616 2.2); that also keeps line breaks and non-latin-1 out of the header
+    if selected and not TOKEN.fullmatch(selected):
+        raise server.Refused(400, "select is not an RFC 6455 token", value=selected)
     echo(accept(h, journal, protocol=selected or None))
 
 
@@ -696,6 +715,9 @@ def ws_flaky(h, match, journal):
     name = h.query.get("key", ["default"])[0]
     with server.LOCK:
         seen = WS_STATE["flaky"].get(name, 0)
+        # Bounded like the journals: the oldest key is forgotten (a request-controlled count)
+        if name not in WS_STATE["flaky"] and len(WS_STATE["flaky"]) >= MAX_KEYS:
+            WS_STATE["flaky"].pop(next(iter(WS_STATE["flaky"])))
         WS_STATE["flaky"][name] = seen + 1
     if seen < failures:
         drop_before_status(h, journal)
@@ -775,10 +797,17 @@ def ws_flood(h, match, journal):
     conn = accept(h, journal)
     block = random.Random(7).randbytes(chunk)
     sent, longest, blocked, started = 0, 0.0, 0, time.monotonic()
+    # Before the first write: a write that blocks for good or breaks still leaves evidence of what was attempted
+    journal.add("flood_start", bytes=total, chunk=chunk)
     while sent < total:
         piece = block[:min(chunk, total - sent)]
         before = time.monotonic()
-        conn.send_frame(OP_BINARY, piece, journal=False)
+        try:
+            conn.send_frame(OP_BINARY, piece, journal=False)
+        except OSError as error:
+            journal.add("flood_error", text=repr(error), bytes=sent, chunk=chunk, longest_write_s=round(longest, 4),
+                        writes_over_100ms=blocked, seconds=round(time.monotonic() - started, 4))
+            return
         took = time.monotonic() - before
         longest = max(longest, took)
         blocked += 1 if took > 0.1 else 0
