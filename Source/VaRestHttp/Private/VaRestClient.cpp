@@ -136,6 +136,7 @@ FVaRestRequestHandle VaRest::Http::SendRequest(TUniquePtr<FRequestSpec>&& Spec, 
 	FVaRestRequestHandle Handle(Created.ToSharedRef());
 	if (IsInGameThread())
 	{
+		Ex.bSentOnGameThread = true;
 		Ex.State->Enter(Created.ToSharedRef());
 	}
 	else

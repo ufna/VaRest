@@ -168,6 +168,8 @@ public:
 	bool bHasOwner = false;
 	const char* SourceFile = "";
 	uint32 SourceLine = 0;
+	/** Send ran on the game thread, so Enter runs inside it and the Blueprint stack is the caller's (IN-15) */
+	bool bSentOnGameThread = false;
 	FVaRestTraceInitiator Initiator;
 	TUniquePtr<VaRest::Http::IResultHandler> Handler;
 	/** Spec 3.1, decision 27: the configuration snapshot, taken by Send on the sending thread (Enter fills it only for an exchange made another way) */

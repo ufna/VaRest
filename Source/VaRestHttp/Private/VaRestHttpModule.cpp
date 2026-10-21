@@ -5,6 +5,8 @@
 #include "VaRestClientState.h"
 #include "VaRestHttpLog.h"
 #include "VaRestRedactionPipe.h"
+#include "VaRestTrace.h"
+#include "VaRestTracePoints.h"
 
 DEFINE_LOG_CATEGORY(LogVaRestHttp);
 
@@ -23,16 +25,21 @@ public:
 		// (AutomationCommandline.cpp:504; on Linux a forced RequestExit is _exit, UnixPlatformMisc.cpp:350), so neither
 		// this hook nor ShutdownModule runs there.
 		PreExitHandle = FCoreDelegates::OnEnginePreExit.AddStatic(&VaRest::Http::FClientState::CancelForShutdown);
+		// IN-12: a sink that attaches late learns the live clients and in-flight requests. OnBuildSnapshot and the live-client
+		// registry it walks are leaked singletons (review I-4), so neither runs anything at static destruction.
+		SnapshotHandle = FVaRestTrace::OnBuildSnapshot().AddStatic(&VaRest::Http::TracePoints::ContributeSnapshot);
 	}
 
 	virtual void ShutdownModule() override
 	{
+		FVaRestTrace::OnBuildSnapshot().Remove(SnapshotHandle);
 		FCoreDelegates::OnEnginePreExit.Remove(PreExitHandle);
 		VaRest::Http::StopRedactionPipe();
 	}
 
 private:
 	FDelegateHandle PreExitHandle;
+	FDelegateHandle SnapshotHandle;
 };
 
 IMPLEMENT_MODULE(FVaRestHttpModule, VaRestHttp);

@@ -5,6 +5,7 @@
 #include "Misc/ScopeLock.h"
 #include "Tasks/Task.h"
 #include "VaRestHttpTesting.h"
+#include "VaRestTracePoints.h"
 
 namespace VaRest::Http::ClientStatePrivate
 {
@@ -34,6 +35,10 @@ VaRest::Http::FClientState::FClientState(uint64 InClientId, FClientConfig&& InCo
 
 VaRest::Http::FClientState::~FClientState()
 {
+	// IN-8. Off the game thread only when a game's own thread dropped the last FVaRestClient (the core hands its
+	// references to the game thread, review I-1); the event still goes out on the game thread. First, while Config is
+	// still here: the backstop below moves it away.
+	TracePoints::Client(ClientId, *Config, false);
 	if (!IsInGameThread())
 	{
 #if !UE_BUILD_SHIPPING
@@ -54,9 +59,14 @@ TSharedRef<VaRest::Http::FClientState, ESPMode::ThreadSafe> VaRest::Http::FClien
 	check(IsInGameThread());
 	TSharedRef<FClientState, ESPMode::ThreadSafe> Created = MakeShared<FClientState, ESPMode::ThreadSafe>(FVaRestTrace::NewClientId(), MoveTemp(InConfig));
 	Created->EditConfig([](FClientConfig&) {});
-	ClientStatePrivate::FLiveRegistry& Registry = ClientStatePrivate::Live();
-	FScopeLock Lock(&Registry.Lock);
-	Registry.States.Add(Created);
+	{
+		ClientStatePrivate::FLiveRegistry& Registry = ClientStatePrivate::Live();
+		FScopeLock Lock(&Registry.Lock);
+		Registry.States.Add(Created);
+	}
+	// IN-8, once the state is live (a sink added from this event's OnEvent finds it in its snapshot) and outside the lock:
+	// a sink's code runs here
+	TracePoints::Client(Created->GetClientId(), *Created->GetConfig(), true);
 	return Created;
 }
 
@@ -69,9 +79,15 @@ TSharedRef<const VaRest::Http::FClientConfig, ESPMode::ThreadSafe> VaRest::Http:
 void VaRest::Http::FClientState::EditConfig(TFunctionRef<void(FClientConfig&)> Edit)
 {
 	check(IsInGameThread());
-	TSharedRef<FClientConfig, ESPMode::ThreadSafe> Next = MakeShared<FClientConfig, ESPMode::ThreadSafe>(*GetConfig());
+	const TSharedRef<const FClientConfig, ESPMode::ThreadSafe> Previous = GetConfig();
+	TSharedRef<FClientConfig, ESPMode::ThreadSafe> Next = MakeShared<FClientConfig, ESPMode::ThreadSafe>(*Previous);
 	Edit(*Next);
 	Publish(Next);
+	if (!Next->DisplayName.Equals(Previous->DisplayName, ESearchCase::CaseSensitive))
+	{
+		// Decision 23: IN-8 has Created and Destroyed only; a rename is Created again for the same id (a store updates the row)
+		TracePoints::Client(ClientId, *Next, true);
+	}
 }
 
 void VaRest::Http::FClientState::Publish(const TSharedRef<FClientConfig, ESPMode::ThreadSafe>& Next)

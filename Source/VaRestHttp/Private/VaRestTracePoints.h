@@ -1,0 +1,35 @@
+// Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
+
+#pragma once
+
+#include "CoreMinimal.h"
+#include "VaRestTrace.h"
+
+class FVaRestExchange;
+struct FVaRestTransportResult;
+
+namespace VaRest::Http
+{
+	struct FClientConfig;
+	struct FFinish;
+
+	/**
+	 * Inspector 9.1's trace points. Game thread. Each starts with the one relaxed load of the mask and builds nothing
+	 * when it is 0 (IN-11); every string in a payload comes through the client's redactor (Inspector 2.2, ruling R1).
+	 */
+	namespace TracePoints
+	{
+		/** IN-1, on entry after Resolve. Reads the initiator (IN-15) and StartUtc into the exchange for the snapshot. */
+		void Started(FVaRestExchange& Ex);
+		/** IN-2, immediately before the transport starts */
+		void AttemptDispatched(const FVaRestExchange& Ex);
+		/** IN-3, when the transport's result is back on the game thread */
+		void AttemptEnded(const FVaRestExchange& Ex, const FVaRestTransportResult& Result);
+		/** IN-5, before any callback */
+		void Completed(const FVaRestExchange& Ex, const FFinish& Finish);
+		/** IN-8. Any thread; the event is emitted on the game thread. */
+		void Client(uint64 ClientId, const FClientConfig& Config, bool bCreated);
+		/** IN-12: every live client and in-flight request; the module registers it with FVaRestTrace::OnBuildSnapshot */
+		void ContributeSnapshot(FVaRestTraceSnapshot& Snapshot);
+	}
+}

@@ -9,6 +9,7 @@
 #include "VaRestDecode.h"
 #include "VaRestHttpLog.h"
 #include "VaRestHttpTesting.h"
+#include "VaRestTracePoints.h"
 #include "VaRestUrl.h"
 
 namespace VaRest::Http::PipelinePrivate
@@ -403,6 +404,16 @@ namespace VaRest::Http::PipelinePrivate
 			Request.bProgressCallback = Request.bReportProgress;
 			Ex.LastProgress = FVaRestProgress();
 			const bool bWantsProgress = Request.bReportProgress;
+			// IN-11: the transport's timing delegates are bound only when a sink wants metadata at dispatch. UploadDoneAt needs
+			// the progress binding too: curl stamps it from the counted upload, Apple from the progress delegate (Task 7). The
+			// callback's own flags were taken above, so no progress timer runs and curl is not told a callback asked.
+			if (FVaRestTrace::Wants(EVaRestTraceDetail::Metadata))
+			{
+				Request.bReportStatusTime = true;
+				Request.bReportProgress = true;
+			}
+			// IN-2: on the game thread, immediately before the transport starts
+			TracePoints::AttemptDispatched(Ex);
 			Ex.TransportCall = Cfg.Transport->Start(MoveTemp(Request), [Guard = FCompletionGuard(Exchange, MoveTemp(OnOutcome))](FVaRestTransportResult&& Result) mutable
 			{
 				Guard.Deliver(MoveTemp(Result));
@@ -591,13 +602,18 @@ void VaRest::Http::FClientState::Enter(const FVaRestExchangeRef& Exchange)
 	}
 	if (Ex.IsCancelRequested())
 	{
-		// Canceled before it reached the game thread, its owner is already gone, or the engine is exiting: no transport call
+		// Canceled before it reached the game thread, its owner is already gone, or the engine is exiting: no transport call.
+		// Still Started and Completed for a sink (Inspector 2.3: the record is sealed, not missing).
+		TracePoints::Started(Ex);
 		Complete(Exchange, MakeFinish(Ex));
 		return;
 	}
 
 	FString Problem;
-	if (!Ex.BuildError.IsEmpty() || !Resolve(Ex, Problem))
+	const bool bResolved = Ex.BuildError.IsEmpty() && Resolve(Ex, Problem);
+	// IN-1, after Resolve: a sink sees the URL and the headers the request goes out with
+	TracePoints::Started(Ex);
+	if (!bResolved)
 	{
 		FFinish Finish = MakeFinish(Ex);
 		Finish.Error.Kind = EVaRestErrorKind::Config;
@@ -623,6 +639,12 @@ void VaRest::Http::FClientState::OnAttemptDone(const FVaRestExchangeRef& Exchang
 	{
 		// Seen as canceled by every stage the outcome passes on its way up (M4's retry stops here)
 		MarkOwnerGone(Ex);
+	}
+	if (!Ex.bFinished)
+	{
+		// IN-3, "when the outcome re-enters the stage chain". After Completed (a cancel finished the request while the
+		// answer was queued) the record is sealed (Inspector 2.3), so a late attempt is not reported.
+		TracePoints::AttemptEnded(Ex, Result);
 	}
 	Ex.Config->Clock->ClearTimer(Ex.ProgressTimer);
 	// The final counts, so a caller sees 100% even when the transfer was quicker than one tick (decision 8)
@@ -802,6 +824,8 @@ void VaRest::Http::FClientState::Complete(const FVaRestExchangeRef& Exchange, FF
 
 	Ex.bDone = true;
 	InFlight.Remove(Ex.RequestId);
+	// IN-5: before any callback, OnHttpThread ones included, and also when none will run (owner gone, shutdown)
+	TracePoints::Completed(Ex, Finish);
 	TUniquePtr<IResultHandler> Handler = MoveTemp(Ex.Handler);
 	// Spec 3.2: owner gone -> no callbacks; nor at engine exit (decision 2)
 	const bool bSilent = Ex.CancelReason == EVaRestCancelReason::OwnerGone || Ex.CancelReason == EVaRestCancelReason::Shutdown;

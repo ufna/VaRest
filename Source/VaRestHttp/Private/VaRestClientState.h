@@ -68,6 +68,14 @@ namespace VaRest::Http
 
 		/** Every live client (game thread): the trace snapshot, engine shutdown */
 		static void ForEachLive(TFunctionRef<void(FClientState&)> Visit);
+		/** Game thread: the trace snapshot (IN-12) */
+		void ForEachInFlight(TFunctionRef<void(FVaRestExchange&)> Visit) const
+		{
+			for (const TPair<uint64, FVaRestExchangeRef>& Pair : InFlight)
+			{
+				Visit(*Pair.Value);
+			}
+		}
 
 		/**
 		 * Game thread. The first reason wins, except that a silent one (OwnerGone, Shutdown) overrides User: callbacks
