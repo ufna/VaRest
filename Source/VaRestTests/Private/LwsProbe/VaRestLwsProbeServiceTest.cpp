@@ -30,10 +30,17 @@ namespace VaRest::LwsProbe::VaRestLwsProbeServiceTestPrivate
 
 	struct FRoundTrip
 	{
+		bool bReady = false;      // the rig's context and service thread exist
 		bool bEstablished = false;
 		bool bEchoed = false;
 		bool bEnded = false;
+		bool bWakeQueued = false; // the wake was queued: only after the open
 		double WakeMs = -1.0;
+
+		bool Completed() const
+		{
+			return bEstablished && bEchoed && bEnded;
+		}
 	};
 
 	/** Connect, a wake while the service thread waits, an echo, a close: every step goes through the command queue */
@@ -43,7 +50,8 @@ namespace VaRest::LwsProbe::VaRestLwsProbeServiceTestPrivate
 		FRigOptions Options;
 		Options.bCommandsInsideCallback = bInsideCallback;
 		FRig Rig(Site, MoveTemp(Options));
-		if (!Rig.IsReady())
+		Out.bReady = Rig.IsReady();
+		if (!Out.bReady)
 		{
 			return Out;
 		}
@@ -56,6 +64,7 @@ namespace VaRest::LwsProbe::VaRestLwsProbeServiceTestPrivate
 			// The service thread parks in its 10 s wait (FRigOptions::ServiceTimeoutMs) before the wake is timed
 			FPlatformProcess::Sleep(0.2f);
 			const double Queued = FPlatformTime::Seconds();
+			Out.bWakeQueued = true;
 			Rig.Exec(TEXT("wake"), [](FRig&) {});
 			FEvent Ran;
 			if (Rig.WaitReason(0, CommandRan) && Rig.Find(0, CommandRan, Ran, TEXT("wake")))
@@ -76,13 +85,22 @@ namespace VaRest::LwsProbe::VaRestLwsProbeServiceTestPrivate
 		return Out;
 	}
 
+	/** The wake in ms to the microsecond (it is tens of microseconds, review minor 2), or why there is none */
+	FString DescribeWake(const FRoundTrip& Trip)
+	{
+		return Trip.WakeMs >= 0.0 ? FString::Printf(TEXT("%.3f ms"), Trip.WakeMs)
+			: Trip.bWakeQueued ? FString(TEXT("the wake did not run within 15 s"))
+			: FString(TEXT("not measured: the connection did not open"));
+	}
+
 	FString Describe(const FRoundTrip& Trip)
 	{
-		return FString::Printf(TEXT("established=%s echoed=%s ended=%s, wake %.1f ms"), YesNo(Trip.bEstablished), YesNo(Trip.bEchoed), YesNo(Trip.bEnded), Trip.WakeMs);
+		return FString::Printf(TEXT("established=%s echoed=%s ended=%s, wake %s"), YesNo(Trip.bEstablished), YesNo(Trip.bEchoed), YesNo(Trip.bEnded), *DescribeWake(Trip));
 	}
 
 	struct FHang
 	{
+		bool bReady = false; // the rig's context and service thread exist
 		bool bEnded = false;
 		double Seconds = -1.0;
 		FString Error;
@@ -101,7 +119,8 @@ namespace VaRest::LwsProbe::VaRestLwsProbeServiceTestPrivate
 		Options.TimeoutSecs = TimeoutSecs;
 		Options.ServiceTimeoutMs = ShortWaitMs;
 		FRig Rig(Site, MoveTemp(Options));
-		if (!Rig.IsReady())
+		Out.bReady = Rig.IsReady();
+		if (!Out.bReady)
 		{
 			return Out;
 		}
@@ -126,8 +145,27 @@ namespace VaRest::LwsProbe::VaRestLwsProbeServiceTestPrivate
 
 	FString Describe(const FHang& Run, double WaitSeconds)
 	{
-		return Run.bEnded ? FString::Printf(TEXT("%.1f s, then \"%s\" (%s)"), Run.Seconds, *Run.Error, *Run.Sequence)
-			: FString::Printf(TEXT("still pending after %.0f s (%s)"), WaitSeconds, *Run.Sequence);
+		if (!Run.bEnded)
+		{
+			return FString::Printf(TEXT("still pending after %.0f s (%s)"), WaitSeconds, *Run.Sequence);
+		}
+		// An end seen without both events to time it (review minor 4)
+		const FString Time = Run.Seconds >= 0.0 ? FString::Printf(TEXT("%.1f s"), Run.Seconds) : FString(TEXT("not timed"));
+		return FString::Printf(TEXT("%s, then \"%s\" (%s)"), *Time, *Run.Error, *Run.Sequence);
+	}
+
+	/**
+	 * Whether the TCP connect completed and the upgrade went out. APPEND_HANDSHAKE_HEADER is enough: LWS compiles the
+	 * handshake only to write it to the socket (client.c.o lws_client_socket_service: lws_generate_client_handshake at
+	 * 0x3d2, its one call, then lws_ssl_capable_write at 0x40e); the later reasons are there for an attempt that got further
+	 */
+	bool TcpConnected(const TArray<FEvent>& Seen)
+	{
+		return Seen.ContainsByPredicate([](const FEvent& Each)
+		{
+			return Each.Reason == LWS_CALLBACK_CLIENT_APPEND_HANDSHAKE_HEADER || Each.Reason == LWS_CALLBACK_CLIENT_FILTER_PRE_ESTABLISH
+				|| Each.Reason == LWS_CALLBACK_CLIENT_ESTABLISHED || Each.Reason == LWS_CALLBACK_CLIENT_RECEIVE;
+		});
 	}
 
 	/** TEST-NET-1 (RFC 5737): never assigned, so a SYN to it usually goes unanswered */
@@ -138,18 +176,12 @@ namespace VaRest::LwsProbe::VaRestLwsProbeServiceTestPrivate
 	/**
 	 * A blackhole fact. Recorded with the measured time only when the connect really hung; unverified when it did not
 	 * black-hole here, so Task 11 never applies a value that measured something else (controller ruling, Task 5). Read
-	 * from the rig's events: APPEND_HANDSHAKE_HEADER means the TCP connect completed, because LWS compiles the handshake
-	 * only to write it to the socket (client.c.o lws_client_socket_service: lws_generate_client_handshake at 0x3d2, its
-	 * one call, then lws_ssl_capable_write at 0x40e). A transparent proxy accepts every connect that way
+	 * from the rig's events (TcpConnected): a transparent proxy completes every connect
 	 */
 	void BlackholeFact(FAutomationTestBase& Test, const TCHAR* Id, const FHang& Run, double WaitSeconds, const FString& Spec, const FString& Evidence)
 	{
 		const bool bNullConnect = ConnectResult(Run.Seen).Equals(TEXT("null"), ESearchCase::CaseSensitive);
-		const bool bConnected = Run.Seen.ContainsByPredicate([](const FEvent& Each)
-		{
-			return Each.Reason == LWS_CALLBACK_CLIENT_APPEND_HANDSHAKE_HEADER || Each.Reason == LWS_CALLBACK_CLIENT_FILTER_PRE_ESTABLISH
-				|| Each.Reason == LWS_CALLBACK_CLIENT_ESTABLISHED || Each.Reason == LWS_CALLBACK_CLIENT_RECEIVE;
-		});
+		const bool bConnected = TcpConnected(Run.Seen);
 		// Seconds stays negative when an end was seen but not timed: that measured nothing either
 		const bool bAtOnce = Run.bEnded && Run.Seconds < AtOnceSeconds;
 		if (!bNullConnect && !bConnected && !bAtOnce)
@@ -293,14 +325,26 @@ bool FVaRestLwsProbeCommandsTest::RunTest(const FString& Parameters)
 	}
 	const FRoundTrip Inside = RoundTrip(Site, true);
 	const FRoundTrip Between = RoundTrip(Site, false);
+	// The harness invariants (WS W0 decision 3, Task 5 review minor 1): both rigs started, and the round trip ran under at
+	// least one placement (Step 3's control: if neither carries it, the rig or the server is broken, and no fact is
+	// believed). Which placement carries it is the library outcome the facts record: a red test for the inside one alone
+	// would hide the "differs" the passport turns into its method text (plan Task 10, the flipped placement)
+	if (!TestTrue(TEXT("both probe contexts and service threads exist"), Inside.bReady && Between.bReady)
+		|| !TestTrue(TEXT("the echo round trip ran under at least one command placement"), Inside.Completed() || Between.Completed()))
+	{
+		return false;
+	}
 	NoteOutcome(*this, TEXT("both round trips ended"), Inside.bEnded && Between.bEnded);
-	Fact(*this, TEXT("svc.commands_inside_wait_cancelled"), AgreesIf(Inside.bEstablished && Inside.bEchoed && Inside.bEnded), Describe(Inside),
+	Fact(*this, TEXT("svc.commands_inside_wait_cancelled"), AgreesIf(Inside.Completed()), Describe(Inside),
 		TEXT("WebSocket spec 2.1: the service thread drains commands (connect, send, close) in LWS_CALLBACK_EVENT_WAIT_CANCELLED"),
 		TEXT("lws_client_connect_via_info, lws_callback_on_writable and the close all called inside EVENT_WAIT_CANCELLED"));
 	Fact(*this, TEXT("svc.commands_between_service_calls"), EVerdict::Recorded, Describe(Between),
 		TEXT("none: the engine starts sockets between lws_service calls (LwsWebSocketsManager.cpp:485-509)"),
 		TEXT("the same round trip with the commands drained before each lws_service"));
-	Fact(*this, TEXT("svc.cancel_wake_ms"), AgreesIf(Inside.WakeMs >= 0.0 && Inside.WakeMs < 100.0), FString::Printf(TEXT("%.1f ms"), Inside.WakeMs),
+	// Queued and never run is the library's answer (differs); never queued, because the inside connection did not open,
+	// measured nothing (unverified)
+	const EVerdict WakeVerdict = !Inside.bWakeQueued ? EVerdict::Unverified : AgreesIf(Inside.WakeMs >= 0.0 && Inside.WakeMs < 100.0);
+	Fact(*this, TEXT("svc.cancel_wake_ms"), WakeVerdict, DescribeWake(Inside),
 		TEXT("T13: lws_cancel_service wakes the service loop (libwebsockets.h:3704-3716)"),
 		TEXT("a command queued while lws_service waited (10 s), timed until it ran in EVENT_WAIT_CANCELLED"));
 	return true;
@@ -360,19 +404,23 @@ bool FVaRestLwsProbeTimerAndKillTest::RunTest(const FString& Parameters)
 		TEXT("the control for svc.kill_async_ms: the same kill with a 100 ms wait"));
 	Fact(*this, TEXT("svc.kill_async_sequence"), EVerdict::Recorded, Long.Sequence.IsEmpty() ? FString(TEXT("not measured")) : Long.Sequence,
 		TEXT("none"), TEXT("the callbacks after the kill command (the long-wait connection)"));
-	FString CloseFrame = TEXT("not measured: the killed connection did not run");
-	if (!Long.Key.IsEmpty())
+	// The journal speaks for a killed connection only when the kill ran (review minor 5): the same gate as the latency
+	const TCHAR* const CloseFrameEvidence = TEXT("the server's journal of the killed connection");
+	if (!Long.KillNote.Equals(TEXT("kill"), ESearchCase::CaseSensitive))
 	{
-		const FVaRestJson Journal = FetchJournal(*this, Site, Long.Key);
-		if (!TestTrue(TEXT("the server's journal arrived"), Journal.IsValid()))
-		{
-			return false;
-		}
-		CloseFrame = !Journal[TEXT("ended")].AsBool() ? FString(TEXT("the server still held the connection 5 s after the kill"))
-			: JournalEvents(Journal, TEXT("close")).Num() > 0 ? FString(TEXT("a close frame reached the server"))
-			: FString(TEXT("no close frame: the TCP connection just ended"));
+		Fact(*this, TEXT("svc.kill_async_close_frame"), EVerdict::Unverified, FString::Printf(TEXT("the kill did not run (%s)"), *Describe(Long, LongWaitMs)),
+			TEXT("none"), CloseFrameEvidence);
+		return true;
 	}
-	Fact(*this, TEXT("svc.kill_async_close_frame"), EVerdict::Recorded, CloseFrame, TEXT("none"), TEXT("the server's journal of the killed connection"));
+	const FVaRestJson Journal = FetchJournal(*this, Site, Long.Key);
+	if (!TestTrue(TEXT("the server's journal arrived"), Journal.IsValid()))
+	{
+		return false;
+	}
+	const FString CloseFrame = !Journal[TEXT("ended")].AsBool() ? FString(TEXT("the server still held the connection 5 s after the kill"))
+		: JournalEvents(Journal, TEXT("close")).Num() > 0 ? FString(TEXT("a close frame reached the server"))
+		: FString(TEXT("no close frame: the TCP connection just ended"));
+	Fact(*this, TEXT("svc.kill_async_close_frame"), EVerdict::Recorded, CloseFrame, TEXT("none"), CloseFrameEvidence);
 	return true;
 }
 
@@ -389,6 +437,12 @@ bool FVaRestLwsProbeDefaultHandshakeTimeoutTest::RunTest(const FString& Paramete
 		return false;
 	}
 	const FHang Run = Hang(Site, 0, FString(), 0, 45.0);
+	// The precondition, as for timeout.configured_secs: a handshake that never reached /ws/hang times nothing
+	if (!TestTrue(TEXT("the probe's context and service thread exist"), Run.bReady)
+		|| !TestTrue(TEXT("the TCP connect to /ws/hang completed and the upgrade went out"), TcpConnected(Run.Seen)))
+	{
+		return false;
+	}
 	NoteOutcome(*this, TEXT("the unanswered upgrade ended within 45 s"), Run.bEnded);
 	Fact(*this, TEXT("timeout.default_secs"), EVerdict::Recorded, Describe(Run, 45.0),
 		TEXT("WebSocket spec 0.3 (inferred from 4.3): LWS's default timeout_secs"),
@@ -409,6 +463,15 @@ bool FVaRestLwsProbeConfiguredHandshakeTimeoutTest::RunTest(const FString& Param
 		return false;
 	}
 	const FHang Run = Hang(Site, 3, FString(), 0, 20.0);
+	// The precondition (Task 5 review minor 1), so a harness failure is a red test and never "differs": the rig started
+	// with the configured timeout (the context is made with it, VaRestLwsProbe.cpp:154; libwebsockets.h has no getter
+	// for timeout_secs, only the field at :2791) and the attempt ran -- the TCP connect to /ws/hang completed and the
+	// upgrade went out, so what follows is the handshake wait. Whether LWS then ends it in time is the fact
+	if (!TestTrue(TEXT("the probe's context and service thread exist, timeout_secs 3"), Run.bReady)
+		|| !TestTrue(TEXT("the TCP connect to /ws/hang completed and the upgrade went out"), TcpConnected(Run.Seen)))
+	{
+		return false;
+	}
 	NoteOutcome(*this, TEXT("the unanswered upgrade ended within 20 s"), Run.bEnded);
 	Fact(*this, TEXT("timeout.configured_secs"), AgreesIf(Run.bEnded && Run.Seconds >= 2.5 && Run.Seconds <= 5.0), Describe(Run, 20.0),
 		TEXT("lws_context_creation_info::timeout_secs bounds the handshake (libwebsockets.h:2791-2795; it is context-wide)"),
@@ -456,12 +519,21 @@ bool FVaRestLwsProbeBlackholeTest::RunTest(const FString& Parameters)
 	// A SYN to BlackholeAddress usually goes unanswered. A host without a route fails at once instead, and one behind a
 	// transparent proxy completes the connect: both facts then read unverified (BlackholeFact)
 	const FHang Configured = Hang(Site, 5, BlackholeAddress, 80, 40.0);
+	// A rig that never started would read as a hang that never ended
+	if (!TestTrue(TEXT("the probe's context and service thread exist (timeout_secs 5)"), Configured.bReady))
+	{
+		return false;
+	}
 	NoteOutcome(*this, TEXT("the connect to TEST-NET-1 with timeout_secs 5 ended within 40 s"), Configured.bEnded);
 	BlackholeFact(*this, TEXT("timeout.tcp_connect_blackhole"), Configured, 40.0,
 		TEXT("WebSocket spec 2.2: whether a set timeout_secs bounds a TCP connect that is never answered"),
 		TEXT("timeout_secs = 5; TCP to 192.0.2.1:80; lws_service waiting up to 100 ms"));
 	// WebSocket spec 16.4: "default timeout_secs (blackhole address)" -- LWS's default against the kernel's SYN retries
 	const FHang Default = Hang(Site, 0, BlackholeAddress, 80, 60.0);
+	if (!TestTrue(TEXT("the probe's context and service thread exist (timeout_secs 0)"), Default.bReady))
+	{
+		return false;
+	}
 	NoteOutcome(*this, TEXT("the connect to TEST-NET-1 with LWS's default timeout ended within 60 s"), Default.bEnded);
 	BlackholeFact(*this, TEXT("timeout.default_secs_blackhole"), Default, 60.0,
 		TEXT("WebSocket spec 0.3 (inferred from 4.3) and 16.4: LWS's default timeout_secs, on a blackhole address"),
