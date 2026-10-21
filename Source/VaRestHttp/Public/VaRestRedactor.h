@@ -1,0 +1,109 @@
+// Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
+
+#pragma once
+
+#include "CoreMinimal.h"
+#include "VaRestBody.h"
+#include "VaRestHttpTypes.h"
+#include "VaRestJsonRedact.h"
+#include "VaRestTrace.h"
+
+/**
+ * A client's known secret values (Inspector 2.2 layer 3, IN-13): the current value per slot (bearer and refresh tokens,
+ * the API key, Basic credentials, session headers) and, after a rotation, the previous values for PreviousLifetime
+ * seconds, at most MaxPrevious of them (Inspector D21). Game thread; the client copies GetActive() into each redactor it
+ * builds, so a published redactor never changes (copy-on-write).
+ */
+class VARESTHTTP_API FVaRestSecretSet
+{
+public:
+	/** Shorter values are not scrubbed: they would match ordinary text */
+	static constexpr int32 MinBytes = 8;
+	static constexpr int32 MaxPrevious = 4;
+	static constexpr double PreviousLifetime = 600.0;
+
+	/** Sets Slot's value; the value it replaces stays known until Now + PreviousLifetime. An empty Value only retires the old one. */
+	void Set(FName Slot, const FString& Value, double Now);
+	/** Logout: forgets every value, the previous ones included (Inspector 12: "cleared on logout") */
+	void ClearAll();
+	/** The values to scrub at Now: current ones and unexpired previous ones of at least MinBytes UTF-8 bytes, longest first */
+	TArray<FString> GetActive(double Now) const;
+	/**
+	 * Expiries are doubles and clocks round (the virtual clock to whole nanoseconds), so a timer armed for ExpiresAt can
+	 * fire a hair before it: a value within ExpirySlack of Now counts as expired in NextExpiry and Prune (reviews N-2,
+	 * N-I3). The expiry timer also prunes at the deadline it was armed for (Task 14); this is the second guard.
+	 */
+	static constexpr double ExpirySlack = 1e-6;
+
+	/**
+	 * When the next previous value still pending at Now expires; negative when none will. Values already expired at Now
+	 * do not count: a timer re-armed for one would be due at once, forever (review C1).
+	 */
+	double NextExpiry(double Now) const;
+	/** Forgets the previous values expired at Now (within ExpirySlack) */
+	void Prune(double Now);
+
+private:
+	struct FPrevious
+	{
+		FString Value;
+		double ExpiresAt = 0.0;
+	};
+
+	TMap<FName, FString> Current;
+	TArray<FPrevious> Previous;
+};
+
+/**
+ * The core redactor (Inspector 2.2, IN-13; WebSocket spec 19 item 3): URLs, headers and body excerpts, for logs and traces
+ * alike. Immutable once built: a client publishes a new one when its rules or secrets change, and any thread may use a
+ * published one. Bodies are never redacted on the game thread (Inspector 7): RedactBody and Describe* run on a background
+ * task (VaRest::Http::GetRedactionPipe). What stays uncovered, as documented there: a secret that is not a known value and
+ * sits in a path segment, in a text body under no key, or in opt-in binary.
+ */
+class VARESTHTTP_API FVaRestRedactor
+{
+public:
+	FVaRestRedactor() = default;
+	FVaRestRedactor(FVaRestRedactRules InRules, TArray<FString> InSecrets);
+
+	const FVaRestRedactRules& GetRules() const { return Rules; }
+	const TArray<FString>& GetSecrets() const { return Secrets; }
+
+	/** Userinfo becomes ***; values of secret query and fragment keys become *** (keys matched percent-decoded); then the scrub */
+	FString RedactUrl(FStringView Url) const;
+
+	/** *** for a secret header name; Location and Content-Location are redacted as URLs; every other value is scrubbed */
+	FString RedactHeaderValue(FStringView Name, FStringView Value) const;
+
+	/** Every header through RedactHeaderValue; names and order kept */
+	FVaRestHeaders RedactHeaders(const FVaRestHeaders& In) const;
+
+	/** Every known secret value replaced by *** */
+	FString ScrubText(FStringView Text) const;
+
+	/**
+	 * An excerpt of at most Cap bytes of a body whose first bytes are Prefix and whose size is TotalBytes. JSON (by type,
+	 * or sniffed: any text type or none, and '{' or '[' first) through VaRest::Json::RedactPrefix; a form pair by pair,
+	 * dropping a pair the cap may have cut; other text up to the cap, cut at a character boundary; anything else a
+	 * descriptor (size, type, and the SHA-256 prefix when Prefix is the whole body). Then the value scrub.
+	 */
+	FVaRestTraceExcerpt RedactBody(FStringView ContentType, TConstArrayView<uint8> Prefix, int64 TotalBytes, int32 Cap) const;
+
+	/** A multipart request body: one line per part; a text part's value by its name's rules, then scrubbed; binary as a descriptor */
+	FVaRestTraceExcerpt DescribeMultipart(TConstArrayView<FVaRestMultipartPart> Parts, int64 TotalBytes, int32 Cap) const;
+
+	/** A streamed file upload: its path (relative to the project when inside it), size and type */
+	FVaRestTraceExcerpt DescribeStream(FStringView FilePath, FStringView ContentType, int64 TotalBytes) const;
+
+private:
+	FString RedactUrlUncounted(FStringView Url) const;
+	void AppendRedactedPairs(FStringView Pairs, EVaRestRedactKeyKind Kind, FString& Out) const;
+	bool ScrubInPlace(FString& Text) const;
+	bool ScrubUtf8(TArray<uint8>& Utf8) const;
+
+	FVaRestRedactRules Rules;
+	/** Longest first */
+	TArray<FString> Secrets;
+	TArray<TArray<uint8>> SecretsUtf8;
+};
