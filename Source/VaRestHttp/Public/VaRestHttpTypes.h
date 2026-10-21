@@ -105,6 +105,12 @@ enum class EVaRestCancelReason : uint8
 /**
  * HTTP headers in order. Names compare ignoring case (RFC 9110 5.1) and may repeat (Set-Cookie). Not thread-safe: copy
  * it to hand it to another thread.
+ *
+ * What the engine's curl transport does with repeats (final review M2; collecting each response header apart is carried
+ * to M4): a response never repeats a name, because curl folds every repeat into the first, joined with ", "
+ * (CurlHttp.cpp:519-530), so two Set-Cookie headers arrive as one value, which the comma in an Expires date keeps from
+ * being split back. Repeats a stage Add()s to a request go out joined with ", " as well (VaRestHttpTransport.cpp:139-150),
+ * which is wrong for Cookie ("; "): set that one once.
  */
 class VARESTHTTP_API FVaRestHeaders
 {
@@ -160,7 +166,12 @@ struct VARESTHTTP_API FVaRestError
 	UPROPERTY(BlueprintReadOnly, Category = "VaRest|Http")
 	FVaRestJson Body;
 
-	/** The first 4 KiB of a body that is not JSON, as text */
+	/**
+	 * Up to the first 4 KiB of the response body, as text, when Body cannot hold it (final review M4): an error body that
+	 * is not JSON; the prefix of a JSON body with a syntax error, copied before the in-place parse (decision 26); the prefix
+	 * of a body refused for its size (over MaxJsonBytes) or its Content-Type before parsing; and the unparsed prefix of a
+	 * SaveTo() error body read back from its temp file when the whole body is over 4 KiB.
+	 */
 	UPROPERTY(BlueprintReadOnly, Category = "VaRest|Http")
 	FString RawBody;
 
@@ -201,7 +212,11 @@ struct FVaRestProgress
 	int64 BytesReceived = 0;
 	/** The request body's size; 0 without one */
 	int64 UploadTotal = 0;
-	/** The response's Content-Length; -1 when it is unknown (chunked) */
+	/**
+	 * The response's Content-Length; -1 when it is unknown: a chunked response, an encoded (compressed) one whose
+	 * Content-Length counts other bytes, and once more bytes arrived than it said (review M-16), so a percentage never
+	 * passes 100%
+	 */
 	int64 DownloadTotal = -1;
 
 	bool operator==(const FVaRestProgress& Other) const = default;
@@ -213,6 +228,7 @@ struct FVaRestResponse
 	uint64 RequestId = 0;
 	/** 0 when there was no response */
 	int32 Status = 0;
+	/** On curl a header name appears once: repeats arrive joined with ", " (CurlHttp.cpp:519-530; see FVaRestHeaders) */
 	FVaRestHeaders Headers;
 	FString EffectiveUrl;
 	FString ContentType;

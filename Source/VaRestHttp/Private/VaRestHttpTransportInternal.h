@@ -21,7 +21,7 @@ namespace VaRest::Http
 	 * Apple caps it (task 7 review M-9): NSURLSession's timeoutInterval is [HTTP] HttpConnectionTimeout (30 s,
 	 * BaseEngine.ini:40; AppleHttp.cpp:736-738), so silence there still ends at 30 s, and an activity timeout above it
 	 * logs "HttpConnectionTimeout can't be less than HttpActivityTimeout" as a Warning on every such request
-	 * (AppleHttp.cpp:740-748) -- .Timeout(60) without an activity timeout is one. docs/dev/http-thread-completion.md
+	 * (AppleHttp.cpp:740-749) -- .Timeout(60) without an activity timeout is one. docs/dev/http-thread-completion.md
 	 * (Task 17) records both.
 	 */
 	float EffectiveActivityTimeout(float TotalSeconds, float ActivitySeconds);

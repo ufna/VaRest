@@ -408,7 +408,7 @@ bool FVaRestHttpLimiterExitsTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("refused: the holder and the next one finish"), Rig.Wait(Holder) && Rig.Wait(AfterRefused));
 
 	// Flagged while queued, with no game-thread Cancel() behind it -- the state a worker's Cancel() leaves until its hop
-	// runs (VaRestClient.cpp:150). Only the grant can see it: Proceed answers Canceled there, and no Abort can, since
+	// runs (VaRestClient.cpp:239). Only the grant can see it: Proceed answers Canceled there, and no Abort can, since
 	// only FClientState::Cancel calls one. Nothing here depends on the order of game-thread tasks (review Minor 6).
 	auto Holder2 = MakeOutcome<FVaRestJson>();
 	Observe(Rig.Client.Get(TEXT("/hold-2")), Holder2).Send();

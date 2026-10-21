@@ -129,7 +129,7 @@ void VaRest::Http::FClientState::Publish(const TSharedRef<FClientConfig, ESPMode
 	Next->bMayReissue = bReissue;
 
 	FVaRestRedactRules Rules;
-	for (const FString& Key : Next->RedactKeys)
+	for (const FString& Key : Next->RedactedKeys)
 	{
 		Rules.AddKey(Key);
 	}

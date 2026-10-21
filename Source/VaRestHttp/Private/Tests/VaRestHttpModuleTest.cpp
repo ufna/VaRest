@@ -23,7 +23,7 @@ bool FVaRestHttpModuleLoadsTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("default max concurrent is 16 (spec 4.6)"), Settings->MaxConcurrent, 16);
 	TestEqual(TEXT("total timeout 0: the engine default"), Settings->Timeout, 0.f);
 	TestEqual(TEXT("activity timeout 0: the engine default"), Settings->ActivityTimeout, 0.f);
-	TestEqual(TEXT("JSON responses are capped at 32 MiB by default (controller ruling, M2 final review rec. 4)"), Settings->MaxJsonResponseBytes, 32ll * 1024 * 1024);
+	TestEqual(TEXT("JSON responses are capped at 32 MiB by default (controller ruling, M2 final review rec. 4)"), Settings->MaxJsonBytes, 32ll * 1024 * 1024);
 	TestEqual(TEXT("Project Settings > Plugins"), Settings->GetCategoryName(), FName(TEXT("Plugins")));
 	return true;
 }

@@ -696,15 +696,15 @@ bool FVaRestHttpSizeCapSourcesTest::RunTest(const FString& Parameters)
 
 	// The project setting is a client's default, read by FVaRestClient::Make
 	UVaRestHttpSettings* Settings = GetMutableDefault<UVaRestHttpSettings>();
-	const int64 Configured = Settings->MaxJsonResponseBytes;
-	Settings->MaxJsonResponseBytes = 16;
+	const int64 Configured = Settings->MaxJsonBytes;
+	Settings->MaxJsonBytes = 16;
 	FTestRig FromSettings;
-	Settings->MaxJsonResponseBytes = Configured;
+	Settings->MaxJsonBytes = Configured;
 	FromSettings.Fake->SetResponder([Big](const FVaRestTransportRequest&) { return Json(200, Big); });
 	auto Capped = MakeOutcome<FVaRestJson>();
 	Observe(FromSettings.Client.Get(TEXT("/big")), Capped).Send();
 	TestTrue(TEXT("completes"), FromSettings.Wait(Capped));
-	TestTrue(TEXT("UVaRestHttpSettings::MaxJsonResponseBytes caps a client"), Capped->Error.Kind == EVaRestErrorKind::Decode && Capped->Error.Message.Contains(TEXT("MaxJsonBytes")));
+	TestTrue(TEXT("UVaRestHttpSettings::MaxJsonBytes caps a client"), Capped->Error.Kind == EVaRestErrorKind::Decode && Capped->Error.Message.Contains(TEXT("MaxJsonBytes")));
 	TestEqual(TEXT("... and reaches the transport"), FromSettings.Fake->GetCall(0).Request.MaxBodyBytes, static_cast<int64>(16));
 
 	// A body the transport did not stop (a stage's answer): the parser refuses it, keeping the bytes (spec 3.2)

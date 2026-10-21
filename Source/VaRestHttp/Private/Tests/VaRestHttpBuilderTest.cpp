@@ -401,15 +401,15 @@ bool FVaRestHttpBuilderUnsentTest::RunTest(const FString& Parameters)
 	AddExpectedErrorPlain(TEXT("was built but never sent"), EAutomationExpectedErrorFlags::Contains, 1);
 	{
 		// [[nodiscard]] already warns at compile time for a temporary (spec 3.2); a named builder dropped unsent logs at run time
-		TVaRestRequest<FVaRestJson> Forgotten = Rig.Client.Get(TEXT("/never?token=canary-unsent"));
+		TVaRestRequest<FVaRestJson> Forgotten = Rig.Client.Get(TEXT("/never?token=canary-unsent")).Query(TEXT("api_key"), TEXT("canary-query")).Query(TEXT("page"), 2);
 	}
 	{
 		TVaRestRequest<FVaRestJson> Sent = Rig.Client.Get(TEXT("/sent"));
 		MoveTemp(Sent).Send(); // the moved-from builder logs nothing
 	}
 	VaRest::Http::Testing::PumpUntil([&Rig] { return Rig.Client.GetInFlightCount() == 0 && Rig.Fake->NumCalls() == 1; });
-	TestTrue(TEXT("the error names the URL"), Capture.Contains(TEXT("https://api.test/never?token=***")));
-	TestFalse(TEXT("... redacted"), Capture.Contains(TEXT("canary-unsent")));
+	TestTrue(TEXT("the error names the URL, its Query() pairs included (task 9 review minor 2)"), Capture.Contains(TEXT("https://api.test/never?token=***&api_key=***&page=2 ")));
+	TestFalse(TEXT("... redacted"), Capture.Contains(TEXT("canary-unsent")) || Capture.Contains(TEXT("canary-query")));
 	return true;
 }
 

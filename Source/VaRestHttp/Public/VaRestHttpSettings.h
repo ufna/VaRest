@@ -30,7 +30,7 @@ public:
 	 * client is made (FVaRestClient::Make): an edit in the editor reaches clients made afterwards (review M20).
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Logging")
-	TArray<FString> RedactKeys;
+	TArray<FString> RedactedKeys;
 
 	/** Requests one client runs at once; the rest wait in a priority queue (spec 4.6) */
 	UPROPERTY(config, EditAnywhere, Category = "Requests", meta = (ClampMin = "1"))
@@ -56,5 +56,5 @@ public:
 	 * FVaRestClient::WithMaxJsonBytes; per request: MaxJsonBytes().
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Requests", meta = (ClampMin = "0"))
-	int64 MaxJsonResponseBytes = 32 * 1024 * 1024;
+	int64 MaxJsonBytes = 32 * 1024 * 1024;
 };

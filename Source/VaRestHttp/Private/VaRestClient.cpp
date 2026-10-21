@@ -123,9 +123,12 @@ VaRest::Http::FRequestSpec::~FRequestSpec()
 #if !UE_BUILD_SHIPPING
 	if (!bSent && ConfigAtBuild.IsValid())
 	{
-		// Spec 3.2: "In non-Shipping builds a builder destroyed unsent also logs an error naming the URL" -- redacted like every log line
+		// Spec 3.2: "In non-Shipping builds a builder destroyed unsent also logs an error naming the URL" -- redacted like every
+		// log line, with its Query() pairs (task 9 review minor 2); the path template is shown as written
+		FString Unsent = JoinUrl(ConfigAtBuild->BaseUrl, Path);
+		AppendQuery(Unsent, Query);
 		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: a %s request to %s was built but never sent (Send() is missing)"),
-			*EscapeForLog(Verb), *EscapeForLog(ConfigAtBuild->Redactor->RedactUrl(JoinUrl(ConfigAtBuild->BaseUrl, Path))));
+			*EscapeForLog(Verb), *EscapeForLog(ConfigAtBuild->Redactor->RedactUrl(Unsent)));
 	}
 #endif
 }
@@ -249,8 +252,8 @@ FVaRestClient FVaRestClient::Make(FStringView BaseUrl)
 	Initial.MaxConcurrent = FMath::Max(1, Settings->MaxConcurrent);
 	Initial.Timeout = FMath::Max(0.f, Settings->Timeout);
 	Initial.ActivityTimeout = FMath::Max(0.f, Settings->ActivityTimeout);
-	Initial.MaxJsonBytes = FMath::Max<int64>(0, Settings->MaxJsonResponseBytes);
-	VaRest::Http::ClientPrivate::AppendRedactKeys(Initial.RedactKeys, Settings->RedactKeys);
+	Initial.MaxJsonBytes = FMath::Max<int64>(0, Settings->MaxJsonBytes);
+	VaRest::Http::ClientPrivate::AppendRedactKeys(Initial.RedactedKeys, Settings->RedactedKeys);
 	Initial.Transport = VaRest::Http::GetDefaultTransport();
 	Initial.Clock = FVaRestRealClock::Get();
 	VaRest::Http::ClientPrivate::WarnIfFragment(Initial.BaseUrl);
@@ -397,7 +400,7 @@ FVaRestClient& FVaRestClient::WithRedactedKeys(TConstArrayView<FString> Keys)
 {
 	if (State.IsValid())
 	{
-		State->EditConfig([Keys](VaRest::Http::FClientConfig& Edited) { VaRest::Http::ClientPrivate::AppendRedactKeys(Edited.RedactKeys, Keys); });
+		State->EditConfig([Keys](VaRest::Http::FClientConfig& Edited) { VaRest::Http::ClientPrivate::AppendRedactKeys(Edited.RedactedKeys, Keys); });
 	}
 	return *this;
 }

@@ -25,8 +25,8 @@ namespace VaRest::Http
 		float Timeout = 0.f;
 		float ActivityTimeout = 0.f;
 		int64 MaxJsonBytes = 32 * 1024 * 1024;
-		/** The project's (UVaRestHttpSettings::RedactKeys) and this client's additions */
-		TArray<FString> RedactKeys;
+		/** The project's (UVaRestHttpSettings::RedactedKeys) and this client's additions (WithRedactedKeys) */
+		TArray<FString> RedactedKeys;
 		TArray<TPair<FVaRestStageRef, EVaRestStageSlot>> CustomStages;
 		TSharedPtr<IVaRestTransport, ESPMode::ThreadSafe> Transport;
 		TSharedPtr<IVaRestClock, ESPMode::ThreadSafe> Clock;

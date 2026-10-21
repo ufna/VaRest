@@ -50,7 +50,7 @@ HttpConnectionTimeout`, 30 s by default, `BaseEngine.ini:40`), and it bounds sil
 sets. A `.Timeout(60)` against a server silent for 40 s therefore fails at about 30 s on Mac and iOS, as a connection
 error. On curl VaRest sets the engine's activity timeout to the total timeout when no activity timeout is given
 (decision 30, `EffectiveActivityTimeout`), so there the total governs. On Apple that same activity timeout, whenever it
-is above `HttpConnectionTimeout`, makes the engine log a Warning on every such request (`AppleHttp.cpp:740-748`):
+is above `HttpConnectionTimeout`, makes the engine log a Warning on every such request (`AppleHttp.cpp:740-749`):
 "HttpConnectionTimeout can't be less than HttpActivityTimeout, otherwise requests may complete unexpectedly with
 ConnectionError after %.2f(HttpConnectionTimeout) seconds without activity, instead of intended %.2f(HttpActivityTimeout)
 seconds". `.Timeout(60)` without an activity timeout is one such request (task 7 review M-9). A game that needs long
@@ -92,7 +92,7 @@ What M3 knows but could not run, in the order the release pass should check it.
 1. **`SaveTo` replace is not atomic.** `MoveFileW` without flags does not replace an existing file
    (`WindowsPlatformFile.cpp:1216-1219`), so on Windows only `MoveIntoPlace` moves the old file aside to a unique
    `.bak`, moves the new one in, then deletes the `.bak` (`VaRestDecode.cpp:175-202`, `PLATFORM_WINDOWS` at `:256`;
-   documented on `SaveTo`, `VaRestClient.h:301-304`). A crash between the two moves leaves the old file only as that
+   documented on `SaveTo`, `VaRestClient.h:315-318`). A crash between the two moves leaves the old file only as that
    `.bak`. Every other platform makes one `rename()`, which replaces atomically. Check `VaRest.Integration.Http.SaveTo`
    and `VaRest.Http.Decode.SaveTo*` on Win64, onto an existing destination.
 2. curl as on Linux; the checklist below covers the rest.
@@ -131,11 +131,16 @@ VaRest.Http.CompleteOnGameThread=1
 ```
 
 The transport then asks for `CompleteOnGameThread` (read when each request starts). The completion code is the same;
-it runs from the HTTP manager's game-thread tick instead (`HttpManager.cpp:536-544`), and still only moves the body into
+it runs from the HTTP manager's game-thread tick instead (`HttpManager.cpp:537-544`), and still only moves the body into
 a task, so decoding stays off the game thread (spec §9's fallback). `VaRest.Http.Transport.GameThreadFallback` covers the
 switch. Under the fallback the engine also moves the header, status-code and progress delegates to the game thread
 (`CurlHttp.cpp:532-539`, `:1212-1219`; `AppleHttp.cpp:852-858`, `:871-881`; `HttpRequestCommon.cpp:629-640`), while body chunks still arrive on the
 receiving thread. So a response's first chunk can come before VaRest learns of a `Content-Encoding` (review M-16): the
 sink then reserves by the compressed `Content-Length` (harmless, it grows) and progress reports that compressed length as
-the download total; trace times are those of the game-thread tick. File a bead with the failing test and the platform,
-and add the row above.
+the download total; trace times are those of the game-thread tick. Under the fallback a `SaveTo` download's
+`CloseFile()` (the temp file's flush and close, `VaRestHttpTransport.cpp:355-363`), and the file write of an engine mock
+response (`:338-344`), run in that completion on the game thread: a small disk IO there, in fallback mode only. A request
+the engine refuses before it starts is then finished synchronously inside `ProcessRequest` on the game thread
+(`FinishRequestNotInHttpManager`, `HttpRequestCommon.cpp:226-231`), not on the HTTP thread; the pipeline's completion
+already hops to a game-thread task, so nothing is delivered inside `Send()`. File a bead with the failing test and the
+platform, and add the row above.

@@ -318,7 +318,8 @@ namespace VaRest::Http::HttpTransportPrivate
 
 		Http->OnProcessRequestComplete().BindLambda([Completion](FHttpRequestPtr Req, FHttpResponsePtr Resp, bool bSucceeded)
 		{
-			// The HTTP thread. Read what the engine holds, take the body from our sink, hand the result on: no parsing here.
+			// The HTTP thread (the game thread under the spec 9 fallback). Read what the engine holds, take the body from our
+			// sink, hand the result on: no parsing here.
 			FVaRestTransportComplete Callback = Completion->Claim();
 			if (!Callback)
 			{

@@ -96,7 +96,8 @@ private:
 /**
  * Spec 3.2: one request, built fluently. Every method returns the builder by value (a moved handle, cheap), so the
  * class-level [[nodiscard]] makes a forgotten Send() a compile warning; the methods are && so a builder is used once.
- * Any thread.
+ * Any thread. A body (Body(), BodyFile()) goes on the wire only for the verbs the transport uploads: see
+ * FVaRestClient::Request.
  */
 template <typename T>
 class [[nodiscard]] TVaRestRequest
@@ -208,7 +209,8 @@ public:
 
 	/**
 	 * A USTRUCT, encoded straight to UTF-8 bytes (spec 2.4) with the naming policy known now: the request's Naming(),
-	 * else the client's. Call Naming() first; after a struct body it fails the request.
+	 * else the client's as it was when this builder was made (Get(), Post(), Request()): a WithNaming() on the client after
+	 * that does not reach this body (task 9 review minor 3). Call Naming() first; after a struct body it fails the request.
 	 */
 	template <typename StructType>
 		requires (VaRest::Json::bHasScriptStruct<StructType> && !std::is_same_v<StructType, FVaRestJson>)
@@ -251,7 +253,12 @@ public:
 		return MoveTemp(*this);
 	}
 
-	/** A file streamed while uploading (IHttpRequest::SetContentAsStreamedFile). Its size is read now; a missing file fails the request. */
+	/**
+	 * A file streamed while uploading, as one segment of an FVaRestSegmentStream handed to IHttpRequest::SetContentFromStream
+	 * (VaRestHttpTransport.cpp:202-217; the counting archive when OnProgress is bound, decision 29), not
+	 * SetContentAsStreamedFile, whose reader sends stale bytes when the file shrinks mid-upload (task 7 review M-1). Its
+	 * size is read now and checked again at the start; a missing file fails the request with Kind=Config.
+	 */
 	TVaRestRequest BodyFile(FStringView FilePath, FStringView ContentType = TEXTVIEW("application/octet-stream")) &&
 	{
 		TValueOrError<FVaRestRequestBody, FString> Built = FVaRestRequestBody::FromFile(FilePath, ContentType);
@@ -335,7 +342,10 @@ public:
 		return MoveTemp(*this);
 	}
 
-	/** The JSON size cap for this request (decision 20); 0 = none */
+	/**
+	 * The JSON size cap for this request (decision 20), replacing the client's; 0 = no cap at all. Mind the neighbour
+	 * (final review M6): here 0 lifts the client's limit, while Timeout(0) keeps the client's timeout.
+	 */
 	TVaRestRequest MaxJsonBytes(int64 Bytes) &&
 	{
 		Spec->MaxJsonBytes = FMath::Max<int64>(0, Bytes);
@@ -343,9 +353,11 @@ public:
 	}
 
 	/**
-	 * Spec 4.7, per attempt: a value above 0 replaces the client's (0 keeps it). With a total and no activity timeout the
-	 * transport bounds silence by the total too, so the engine's 30 s idle default never fires first (decision 30); on Mac
-	 * and iOS the engine's connection timeout still caps silence (docs/dev/http-thread-completion.md).
+	 * Spec 4.7, per attempt: a value above 0 replaces the client's; 0 (or less) keeps the client's -- unlike MaxJsonBytes(0),
+	 * which lifts the client's cap (final review M6). There is no "no timeout" for one request: to let one long download
+	 * outlive the client's total, pass a larger total here. With a total and no activity timeout the transport bounds
+	 * silence by the total too, so the engine's 30 s idle default never fires first (decision 30); on Mac and iOS the
+	 * engine's connection timeout still caps silence (docs/dev/http-thread-completion.md).
 	 */
 	TVaRestRequest Timeout(float TotalSeconds, float ActivitySeconds = 0.f) &&
 	{
@@ -361,8 +373,10 @@ public:
 	}
 
 	/**
-	 * (const FVaRestProgress&): on the game thread, at most every 100 ms while bytes move, and once when the attempt ends
-	 * (decision 8). On curl backends an upload with OnProgress is read through a counting archive (decision 29), which curl
+	 * (const FVaRestProgress&): on the game thread, at most every 100 ms while bytes move, and a last call when the attempt
+	 * ends if the counts moved since the previous one (decision 8) -- none after Cancel(), with the owner gone or at engine
+	 * exit, and none for an attempt that changed nothing. It is not an end signal: use OnComplete for that (task 13 review
+	 * M4). On curl backends an upload with OnProgress is read through a counting archive (decision 29), which curl
 	 * cannot rewind: with [HTTP.Curl] bAllowSeekFunction on, a 307/308 redirect or an auth replay that must resend the body
 	 * fails (with the engine default, off, curl rewinds no body at all, so nothing changes). Mac and iOS are not affected.
 	 */
@@ -511,7 +525,7 @@ public:
 	FVaRestClient& WithTransport(TSharedRef<IVaRestTransport, ESPMode::ThreadSafe> Transport);
 	/** Requests already sent keep the clock they started with; a rotated secret value keeps the time it has left (SetSecretValue) */
 	FVaRestClient& WithClock(TSharedRef<IVaRestClock, ESPMode::ThreadSafe> Clock);
-	/** The largest response body parsed as JSON (decision 20); 0 = none. Default: UVaRestHttpSettings::MaxJsonResponseBytes (32 MiB). */
+	/** The largest response body parsed as JSON (decision 20); 0 = none. Default: UVaRestHttpSettings::MaxJsonBytes (32 MiB). */
 	FVaRestClient& WithMaxJsonBytes(int64 Bytes);
 	/**
 	 * Spec 4.6: requests at once (at least 1); the rest wait in a queue, Highest first and first come, first served within a
@@ -567,6 +581,13 @@ public:
 	 * with Kind=Config and nothing is sent (final review I3). T defaults to FVaRestJson (spec 3.2). An empty client gives
 	 * a builder whose Send() logs an error, sends nothing and delivers Kind=Config to OnError and OnComplete from a later
 	 * game-thread tick (final review M7; decision 3).
+	 *
+	 * A body is sent only with POST, PUT, PATCH and DELETE on the engine's curl transport (Linux, Windows, Android): only
+	 * those attach curl's read function (CurlHttp.cpp:941-968, :979-988, :995-1001). GET drops its body with a Warning
+	 * (spec 3.2). With HEAD (CURLOPT_NOBODY, :975-978) and any other verb -- OPTIONS, QUERY, PROPFIND, sent as
+	 * CURLOPT_CUSTOMREQUEST only, :990-993 -- the body is not sent, while its Content-Type header is, and
+	 * FVaRestResponse::BytesUp still counts it unless progress is watched (VaRestHttpTransport.cpp:398). Final review M1;
+	 * refusing or warning there is carried to M4.
 	 */
 	template <typename T = FVaRestJson>
 	TVaRestRequest<T> Request(FStringView Verb, FStringView Path) const

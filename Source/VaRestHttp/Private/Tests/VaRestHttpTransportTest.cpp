@@ -898,7 +898,7 @@ bool FVaRestHttpTransportFallbackTest::RunTest(const FString& Parameters)
 	Request.Url = TEXT("http://127.0.0.1:1/"); // port 1: nothing listens, the connection is refused at once
 	Request.Timeout = 10.f;
 	const TSharedRef<IVaRestTransportCall, ESPMode::ThreadSafe> Call = VaRest::Http::GetDefaultTransport()->Start(MoveTemp(Request), Into(Done));
-	// A game-thread completion comes from the HTTP manager's tick (HttpManager.cpp:536-544), so the core ticker is ticked
+	// A game-thread completion comes from the HTTP manager's tick (HttpManager.cpp:537-544), so the core ticker is ticked
 	const bool bCompleted = VaRest::Http::Testing::PumpUntil([Done] { return Done->bDone.load(); }, 15.0, true);
 	if (!bCompleted)
 	{

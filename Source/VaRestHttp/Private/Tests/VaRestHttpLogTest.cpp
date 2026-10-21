@@ -421,12 +421,12 @@ bool FVaRestHttpLogKeysOnceTest::RunTest(const FString& Parameters)
 	FTestRig Rig;
 	FLogCapture Capture;
 	AddExpectedMessagePlain(TEXT("the redaction key \"pin=1\" holds"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
-	const int32 Before = VaRest::Http::FClientAccess::State(Rig.Client)->GetConfig()->RedactKeys.Num();
+	const int32 Before = VaRest::Http::FClientAccess::State(Rig.Client)->GetConfig()->RedactedKeys.Num();
 	const TArray<FString> Keys = { TEXT("pin=1"), TEXT("player_pin"), TEXT("playerPin"), TEXT("Player-Pin") };
 	Rig.Client.WithRedactedKeys(Keys);
 	const TArray<FString> Again = { TEXT("player_pin") };
 	Rig.Client.WithRedactedKeys(Again);
-	TestEqual(TEXT("one key kept for the spellings of one, the refused one dropped"), VaRest::Http::FClientAccess::State(Rig.Client)->GetConfig()->RedactKeys.Num(), Before + 1);
+	TestEqual(TEXT("one key kept for the spellings of one, the refused one dropped"), VaRest::Http::FClientAccess::State(Rig.Client)->GetConfig()->RedactedKeys.Num(), Before + 1);
 	// Each of these publishes again
 	Rig.Client.WithLogLevel(EVaRestLogLevel::Body);
 	Rig.Client.SetSecretValue(TEXT("bearer"), TEXT("token-abcdefgh"));

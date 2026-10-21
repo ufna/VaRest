@@ -151,7 +151,7 @@ struct VARESTHTTP_API FVaRestRequestBody
 	FString ContentType;
 	/** Json, Text, Form, Binary, and Multipart without file parts */
 	TArray<uint8> Bytes;
-	/** Stream: the file uploaded with SetContentAsStreamedFile */
+	/** Stream: the file uploaded, one segment of an FVaRestSegmentStream through SetContentFromStream (not SetContentAsStreamedFile) */
 	FString FilePath;
 	/** Multipart with file parts: uploaded with SetContentFromStream */
 	TArray<FVaRestBodySegment> Segments;

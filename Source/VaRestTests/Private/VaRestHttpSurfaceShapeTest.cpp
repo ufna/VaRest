@@ -26,6 +26,9 @@ namespace VaRestTestsSurfaceShapePrivate
 	template <typename T>
 	concept CReachesClientState = requires(const T& Client) { Client.GetStateInternal(); };
 
+	// Clang only: MSVC's access checking inside requires-expressions is unverified on this project, and a false positive here
+	// would break the Windows editor build (wave A concern 1); clang 20 is proven both ways by restore-the-bug (fix-wave-a-report)
+#if defined(__clang__)
 	static_assert(CEditsAttemptHeaders<FVaRestExchange>, "the control: a stage edits the attempt's headers (the one supported mutation)");
 	static_assert(!CReachesHandler<FVaRestExchange>, "FVaRestExchange: no Handler outside VaRestHttp");
 	static_assert(!CReachesBodyBytes<FVaRestExchange>, "FVaRestExchange: the body is read through GetBody() only");
@@ -35,4 +38,5 @@ namespace VaRestTestsSurfaceShapePrivate
 	static_assert(std::is_move_constructible_v<TVaRestRequest<FVaRestJson>> && std::is_move_assignable_v<TVaRestRequest<FVaRestJson>>,
 		"TVaRestRequest: the builder still moves");
 	static_assert(!CReachesClientState<FVaRestClient>, "FVaRestClient: its state is private (VaRest::Http::FClientAccess only)");
+#endif
 }
