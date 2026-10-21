@@ -15,7 +15,7 @@ namespace VaRest::Json
 	{
 		const UTF8CHAR* Data;
 		uint32 Len;
-		/** HashKey of the bytes; set for object keys, 0 otherwise */
+		/** HashKey of the bytes (per-process seeded; not collision-proof, see HashKey); set for object keys, 0 otherwise */
 		uint32 Hash;
 
 		FUtf8StringView View() const { return FUtf8StringView(Data, Len); }
@@ -89,8 +89,10 @@ namespace VaRest::Json
 	uint64 GetHashSeed();
 
 	/**
-	 * Seeded per process (VaRest-sj2): with a fixed hash and linear probing, keys crafted to collide make every index build
-	 * O(n^2), and a dedicated server parses client JSON. The hash is never persisted, so the seed costs nothing.
+	 * Seeded per process (VaRest-sj2). The seed stops an attacker predicting which slot a key takes under a known, unseeded
+	 * hash. It does NOT stop seed-independent multicollisions: CityHash64WithSeed is HashLen16(CityHash64(s, len) - k2, seed)
+	 * (Runtime/Core/Private/Hash/CityHash.cpp:430-440), so the seed is applied after the unseeded 64-bit hash of the whole key,
+	 * and keys with equal CityHash64 collide in every process. A keyed hash is bead VaRest-sj2 (M7).
 	 */
 	inline uint32 HashKey(FUtf8StringView Key)
 	{

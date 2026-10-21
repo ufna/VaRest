@@ -311,8 +311,8 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonDocHashSeededTest, "VaRest.Json.Docu
 
 bool FVaRestJsonDocHashSeededTest::RunTest(const FString& Parameters)
 {
-	// VaRest-sj2: with the unseeded CityHash32 and linear probing, keys crafted to collide make every index build O(n^2)
-	// (a dedicated server parsing client JSON). The hash is never persisted, so a per-process seed costs nothing.
+	// VaRest-sj2: a per-process seed stops slot prediction against the unseeded CityHash32. It does not stop CityHash64
+	// multicollisions (the seed is applied after the unseeded hash, CityHash.cpp:430-440): a keyed hash is VaRest-sj2 (M7).
 	const FUtf8StringView Key(UTF8TEXT("player_id"));
 	const uint32 Seeded = VaRest::Json::HashKey(Key);
 	TestEqual(TEXT("stable within the process"), VaRest::Json::HashKey(Key), Seeded);

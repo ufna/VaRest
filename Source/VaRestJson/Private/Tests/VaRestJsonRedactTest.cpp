@@ -89,12 +89,15 @@ bool FVaRestJsonRedactWholeTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("nothing to redact"), R.bRedacted);
 
 	const FString Escaped = Redact(V(R"({"password":"x","t":"a\"b\\c\n"})"), true, R);
-	TestEqualSensitive(TEXT("keys are matched unescaped; strings are re-escaped"), Escaped, FString(TEXT(R"({"password":"***","t":"a\"b\\c\n"})")));
+	TestEqualSensitive(TEXT("strings are re-escaped"), Escaped, FString(TEXT(R"({"password":"***","t":"a\"b\\c\n"})")));
+	// RapidJSON unescapes a key before handler.Key (reader.h:1005-1067): an escaped spelling must still match
+	const FString EscapedKey = Redact(V(R"({"pass\u0077ord":"x","api\u005fkey":"y"})"), true, R);
+	TestEqualSensitive(TEXT("keys are matched unescaped"), EscapedKey, FString(TEXT(R"({"password":"***","api_key":"***"})")));
 
 	TestEqualSensitive(TEXT("a whole input's final number is complete"), Redact(V("42"), true, R), FString(TEXT("42")));
 	TestTrue(TEXT("... Complete"), R.StopReason == EVaRestRedactStop::Complete);
 
-	// The parser skips a UTF-8 BOM (VaRestJsonReader.cpp, BomLength); the excerpt does too (review M5)
+	// The parser skips a UTF-8 BOM (VaRestJsonReader.cpp:39-42); the excerpt does too (review M5)
 	TestEqualSensitive(TEXT("a leading BOM is skipped"), Redact(V("\xEF\xBB\xBF{\"password\":\"x\"}"), true, R), FString(TEXT(R"({"password":"***"})")));
 	TestTrue(TEXT("... and the excerpt is complete"), R.StopReason == EVaRestRedactStop::Complete);
 
@@ -162,10 +165,37 @@ bool FVaRestJsonRedactCutTest::RunTest(const FString& Parameters)
 	TestEqualSensitive(TEXT("a cut literal is not written"), InLiteral, FString(TEXT(R"({"a":)")));
 	TestTrue(TEXT("... Cap, not a parse error"), R.StopReason == EVaRestRedactStop::Cap);
 
+	const FString InContainer = Redact(V(R"({"token":{"a":"canary-3)"), false, R);
+	TestEqualSensitive(TEXT("cap inside a redacted container: ***, no canary"), InContainer, FString(TEXT(R"({"token":"***")")));
+	TestTrue(TEXT("... Cap, with no error text"), R.StopReason == EVaRestRedactStop::Cap && R.Error.IsEmpty() && R.ErrorOffset == -1);
+
+	// A cut inside an escape: RapidJSON reports these at the backslash, bytes before the end (reader.h:1011, :919, :1031)
+	TestEqualSensitive(TEXT("cut inside a \\u escape"), Redact(V(R"({"a":"x\u00)"), false, R), FString(TEXT(R"({"a":)")));
+	TestTrue(TEXT("... is a cut"), R.StopReason == EVaRestRedactStop::Cap && R.Error.IsEmpty() && R.ErrorOffset == -1);
+	Redact(V(R"({"a":"\ud83d\ude)"), false, R);
+	TestTrue(TEXT("cut inside a surrogate pair is a cut"), R.StopReason == EVaRestRedactStop::Cap && R.Error.IsEmpty());
+	Redact(V(R"({"a":"\ud83d)"), false, R);
+	TestTrue(TEXT("cut between the surrogates is a cut"), R.StopReason == EVaRestRedactStop::Cap);
+	Redact(V(R"({"a":"x\u00)"), true, R);
+	TestTrue(TEXT("the same input as a whole body is a parse error"), R.StopReason == EVaRestRedactStop::ParseError && !R.Error.IsEmpty());
+	Redact(V(R"({"a":"\ud83d\ude)"), true, R);
+	TestTrue(TEXT("... also inside a surrogate pair"), R.StopReason == EVaRestRedactStop::ParseError);
+	Redact(V(R"({"a":1,})"), false, R);
+	TestTrue(TEXT("a syntax error at the last byte of a cut input is still a parse error"), R.StopReason == EVaRestRedactStop::ParseError);
+
+	// The colon is written only when the input holds it
+	TestEqualSensitive(TEXT("cut after a key, before its colon: no colon"), Redact(V(R"({"a":1,"b")"), false, R), FString(TEXT(R"({"a":1,"b")")));
+	TestEqualSensitive(TEXT("... with whitespace after the key"), Redact(V("{\"a\" "), false, R), FString(TEXT(R"({"a")")));
+	TestEqualSensitive(TEXT("a missing colon is not papered over"), Redact(V(R"({"a" 1})"), true, R), FString(TEXT(R"({"a")")));
+	TestTrue(TEXT("... and is a parse error"), R.StopReason == EVaRestRedactStop::ParseError);
+	TestEqualSensitive(TEXT("pretty: a cut after the colon"), Redact(V(R"({"a":12)"), false, R, EVaRestJsonFormat::Pretty), FString(TEXT("{\n  \"a\": ")));
+
 	TArray<uint8> CutChar = { '{', '"', 'a', '"', ':', '"', 0xD0 };
 	TArray<uint8> Out;
 	R = VaRest::Json::RedactPrefix(FUtf8StringView(reinterpret_cast<const UTF8CHAR*>(CutChar.GetData()), CutChar.Num()), FVaRestRedactRules(), EVaRestJsonFormat::Condensed, Out, false);
 	TestTrue(TEXT("a cap inside a multi-byte character is a cut, not an encoding error"), R.StopReason == EVaRestRedactStop::Cap);
+	TestEqualSensitive(TEXT("... and the cut character is not written"),
+		FString::ConstructFromPtrSize(reinterpret_cast<const UTF8CHAR*>(Out.GetData()), Out.Num()), FString(TEXT(R"({"a":)")));
 	return true;
 }
 

@@ -28,7 +28,7 @@ enum class EVaRestRedactKeyKind : uint8
 class VARESTJSON_API FVaRestRedactRules
 {
 public:
-	/** An exact key, normalised like every key: a client's auth token path or header name, a project addition */
+	/** An exact key, normalised like every key: a key name (for a token path, its last segment: normalisation removes '.', so a whole path never matches), a header name, a project addition */
 	void AddKey(FStringView Key);
 
 	bool ShouldRedact(FUtf8StringView Key, EVaRestRedactKeyKind Kind) const;

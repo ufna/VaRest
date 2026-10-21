@@ -49,7 +49,7 @@ namespace VaRest::Json::RedactPrivate
 
 		bool Null() { return Scalar([this] { Writer.Null(); }); }
 		bool Bool(bool bValue) { return Scalar([this, bValue] { Writer.Bool(bValue); }); }
-		// kParseNumbersAsStringsFlag sends every number to RawNumber; these complete the handler concept (reader.h:173-196)
+		// kParseNumbersAsStringsFlag sends every number to RawNumber; these complete the handler concept (reader.h:169-187)
 		bool Int(int Value) { return Scalar([this, Value] { Writer.Int(Value); }); }
 		bool Uint(unsigned Value) { return Scalar([this, Value] { Writer.Uint(Value); }); }
 		bool Int64(int64_t Value) { return Scalar([this, Value] { Writer.Int64(Value); }); }
@@ -91,6 +91,8 @@ namespace VaRest::Json::RedactPrivate
 			else
 			{
 				bValuePending = true;
+				// The reader calls Key when the key string closes, before it reads the colon (reader.h:2045-2055)
+				KeyEnd = Stream.Tell();
 			}
 			return true;
 		}
@@ -105,6 +107,8 @@ namespace VaRest::Json::RedactPrivate
 		bool bTooDeep = false;
 		/** A key was written and its value has not been (RapidJSON's writer emits the ':' only with the value) */
 		bool bValuePending = false;
+		/** Where the pending key ended in the input: its colon, if the input has one, is after this */
+		size_t KeyEnd = 0;
 
 	private:
 		template <typename FuncType>
@@ -266,7 +270,7 @@ FVaRestRedactResult VaRest::Json::RedactPrefix(FUtf8StringView Prefix, const FVa
 	TArray<uint8>& Out, bool bWholeInput)
 {
 	using namespace RedactPrivate;
-	// The document parser skips a UTF-8 BOM (VaRestJsonReader.cpp, BomLength); so does the excerpt, or a body with one
+	// The document parser skips a UTF-8 BOM (VaRestJsonReader.cpp:39-42, used at :53); so does the excerpt, or a body with one
 	// would excerpt as "parse error at byte 0". Offsets below stay relative to the input as given.
 	const int32 Bom = Prefix.StartsWith(FUtf8StringView(reinterpret_cast<const UTF8CHAR*>("\xEF\xBB\xBF"), 3)) ? 3 : 0;
 	Prefix.RightChopInline(Bom);
@@ -282,6 +286,7 @@ FVaRestRedactResult VaRest::Json::RedactPrefix(FUtf8StringView Prefix, const FVa
 	bool bStoppedAtCut = false;
 	bool bTooDeep = false;
 	bool bValuePending = false;
+	size_t KeyEnd = 0;
 
 	auto Run = [&](auto& Writer)
 	{
@@ -291,6 +296,7 @@ FVaRestRedactResult VaRest::Json::RedactPrefix(FUtf8StringView Prefix, const FVa
 		bStoppedAtCut = Handler.bStoppedAtCut;
 		bTooDeep = Handler.bTooDeep;
 		bValuePending = Handler.bValuePending;
+		KeyEnd = Handler.KeyEnd;
 	};
 	if (Format == EVaRestJsonFormat::Pretty)
 	{
@@ -310,14 +316,26 @@ FVaRestRedactResult VaRest::Json::RedactPrefix(FUtf8StringView Prefix, const FVa
 	{
 		return Result;
 	}
+	// The reader stopped here: the end of the input for a cut, the offending byte for a syntax error
+	const size_t StopAt = Stream.Tell();
+	const bool bAtEnd = StopAt == Stream.size_;
 	if (bValuePending)
 	{
-		// The input ended between a key and its value: the writer defers the ':' to the value (writer.h Prefix), so write it
-		// here -- the output then ends at the last complete token, the key and its colon
-		Out.Add(':');
-		if (Format == EVaRestJsonFormat::Pretty)
+		// The input stopped after a key. The writer defers the ':' to the value (writer.h:479-487; pretty:
+		// prettywriter.h:231-233), so write it here, but only when the input holds it: the output then ends at the last
+		// complete token, the key and its colon, and a missing colon is not papered over.
+		size_t Pos = KeyEnd;
+		while (Pos < StopAt && (Prefix[Pos] == ' ' || Prefix[Pos] == '\t' || Prefix[Pos] == '\n' || Prefix[Pos] == '\r'))
 		{
-			Out.Add(' ');
+			++Pos;
+		}
+		if (Pos < StopAt && Prefix[Pos] == ':')
+		{
+			Out.Add(':');
+			if (Format == EVaRestJsonFormat::Pretty)
+			{
+				Out.Add(' ');
+			}
 		}
 	}
 	const int64 Offset = static_cast<int64>(Parsed.Offset()) + Bom;
@@ -328,11 +346,12 @@ FVaRestRedactResult VaRest::Json::RedactPrefix(FUtf8StringView Prefix, const FVa
 		Result.ErrorOffset = Offset;
 		return Result;
 	}
-	// A cut input runs out mid-token. RapidJSON reports that at the end of the input -- or, inside a multi-byte
-	// character, at its first byte, up to 3 bytes before the end (kParseErrorStringInvalidEncoding). So a genuine
-	// syntax error within the last 4 bytes of a cut input is reported as Cap too: the excerpt is the same (it ends at
-	// the last complete token) and only the stop reason is less precise (review M4).
-	if (!bWholeInput && (bStoppedAtCut || Offset - Bom + 4 >= Prefix.Len()))
+	// A cut input runs out mid-token, so the reader stops with the stream exhausted: MemoryStream::Take does not advance
+	// past the end (memorystream.h:46) and string, escape, UTF-8, literal and number errors all Peek or Take the end. A
+	// syntax error leaves Tell() on the offending byte. Deciding by the error offset instead misses escapes: RapidJSON
+	// reports a bad \u escape or surrogate pair at the escape's backslash (reader.h:1011, :919, :1031), many bytes before
+	// the end of a valid cut.
+	if (!bWholeInput && (bStoppedAtCut || bAtEnd))
 	{
 		Result.StopReason = EVaRestRedactStop::Cap;
 		return Result;
