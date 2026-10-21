@@ -304,7 +304,7 @@ struct FVaRestTraceClient
 	bool bCreated = true;
 	uint64 ClientId = 0;
 	uint64 ScopeId = 0;
-	/** The asset path (M5), WithName, or the base URL */
+	/** The asset path (M5), WithName (value-scrubbed), or the current base URL (URL-redacted) */
 	FString DisplayName;
 };
 
@@ -330,6 +330,10 @@ struct FVaRestTraceSnapshot
 	TArray<FVaRestTraceStarted> InFlight;
 };
 
+/**
+ * Remove a sink (RemoveSink) before the module that owns it shuts down: one still registered at static destruction is
+ * called from there, for the Client{Destroyed} of a global FVaRestClient dying late (task 15 review M9).
+ */
 class IVaRestTraceSink
 {
 public:

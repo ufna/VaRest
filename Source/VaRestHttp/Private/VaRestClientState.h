@@ -15,6 +15,7 @@ namespace VaRest::Http
 	struct FClientConfig
 	{
 		FString BaseUrl;
+		/** WithName's text; empty: the client is named by its current BaseUrl (IN-8), which the trace URL-redacts */
 		FString DisplayName;
 		FVaRestHeaders DefaultHeaders;
 		EVaRestJsonNaming Naming = EVaRestJsonNaming::CamelCase;

@@ -2,8 +2,12 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
+#include "HAL/PlatformProcess.h"
+#include "HAL/PlatformTime.h"
 #include "Misc/AutomationTest.h"
+#include "Misc/ScopeExit.h"
 #include "Misc/ScopeLock.h"
+#include "Tasks/Task.h"
 #include "UObject/Package.h"
 #include "VaRestClient.h"
 #include "VaRestClientState.h"
@@ -109,6 +113,26 @@ namespace VaRest::Http::TraceTestPrivate
 		TArray<FVaRestTraceEvent> Events;
 	};
 
+	/**
+	 * Task 15 review m3: a PerAttempt stage that answers its attempt itself while the transport still runs, so the
+	 * transport's answer comes back after Completed. It counts the late answers it swallows.
+	 */
+	class FEarlyAnswerStage final : public IVaRestStage
+	{
+	public:
+		virtual FName GetStageName() const override { return TEXT("EarlyAnswer"); }
+
+		virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) override
+		{
+			Next.Proceed(Exchange, [Swallowed = LateAnswers](FVaRestAttemptOutcome&&) { ++*Swallowed; });
+			FVaRestAttemptOutcome Early;
+			Early.Status = 204;
+			OnOutcome(MoveTemp(Early));
+		}
+
+		TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> LateAnswers = MakeShared<std::atomic<int32>, ESPMode::ThreadSafe>(0);
+	};
+
 	using FSinkRef = TSharedRef<FRecordingSink, ESPMode::ThreadSafe>;
 
 	FSinkRef MakeSink(EVaRestTraceDetail Flags)
@@ -130,6 +154,12 @@ bool FVaRestHttpTraceSuccessTest::RunTest(const FString& Parameters)
 	FTestRig Rig;
 	UObject* Owner = NewObject<UVaRestHttpSettings>(GetTransientPackage(), NAME_None, RF_Transient);
 	Rig.Clock->Advance(5.0);
+	// Task 15 review M2: the response's own secrets -- a cookie, an echoed credential, a redirect carrying a code
+	FVaRestFakeResponse Answer = FVaRestFakeResponse::Json(200, FUtf8StringView(UTF8TEXT("{}")));
+	Answer.Headers.Set(TEXT("Set-Cookie"), TEXT("s=abc"));
+	Answer.Headers.Set(TEXT("Authorization"), TEXT("Bearer abc"));
+	Answer.Headers.Set(TEXT("Location"), TEXT("https://api.test/next?code=abc&page=2"));
+	Rig.Fake->Enqueue(MoveTemp(Answer));
 
 	auto Outcome = MakeOutcome<FVaRestJson>();
 	const FVaRestRequestHandle Handle = Observe(Rig.Client.Post(TEXT("/items/{id}?token=abc"))
@@ -162,8 +192,8 @@ bool FVaRestHttpTraceSuccessTest::RunTest(const FString& Parameters)
 		&& EnumHasAnyFlags(Started.Flags, EVaRestTraceRequestFlags::Idempotent));
 	TestEqualSensitive(TEXT("... the headers as built, redacted"), Started.Headers.Get(TEXT("Authorization")), FString(TEXT("***")));
 	TestTrue(TEXT("... the body's type, size and kind"), Started.Body.Kind == EVaRestBodyKind::Json && Started.Body.Bytes == 9
-		&& Started.Body.ContentType.StartsWith(TEXT("application/json")));
-	TestTrue(TEXT("IN-15: the C++ call site"), Started.Initiator.SourceFile.Contains(TEXT("VaRestHttpTraceTest.cpp")) && Started.Initiator.SourceLine > 0);
+		&& Started.Body.ContentType.StartsWith(TEXT("application/json"), ESearchCase::CaseSensitive));
+	TestTrue(TEXT("IN-15: the C++ call site"), Started.Initiator.SourceFile.Contains(TEXT("VaRestHttpTraceTest.cpp"), ESearchCase::CaseSensitive) && Started.Initiator.SourceLine > 0);
 	TestEqualSensitive(TEXT("IN-15: the owner's path"), Started.Initiator.OwnerPath, Owner->GetPathName());
 	TestTrue(TEXT("... no Blueprint frame for a C++ caller"), Started.Initiator.ScriptFunction.IsEmpty() && Started.Initiator.ScriptCodeOffset == INDEX_NONE);
 	TestTrue(TEXT("... StartUtc is set"), Started.StartUtc.GetTicks() > 0);
@@ -173,12 +203,15 @@ bool FVaRestHttpTraceSuccessTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("IN-2: attempt 1, its start, no limiter wait"), Dispatched.Attempt == 1 && Dispatched.AttemptStart == 5.0 && Dispatched.LimiterWait == 0.0);
 	TestEqualSensitive(TEXT("... the final headers, redacted"), Dispatched.Headers.Get(TEXT("Authorization")), FString(TEXT("***")));
 	TestTrue(TEXT("... with the idempotency key, which is not a secret"), Dispatched.Headers.Contains(TEXT("Idempotency-Key"))
-		&& !Dispatched.Headers.Get(TEXT("Idempotency-Key")).Equals(TEXT("***")));
+		&& !Dispatched.Headers.Get(TEXT("Idempotency-Key")).Equals(TEXT("***"), ESearchCase::CaseSensitive));
 
 	const FVaRestTraceAttemptEnded& Ended = Events[2].Payload.Get<FVaRestTraceAttemptEnded>();
 	TestTrue(TEXT("IN-3: status, sizes, no failure"), Ended.Attempt == 1 && Ended.Status == 200 && Ended.BytesDown == 2 && Ended.Failure == EVaRestTransportFailure::None);
 	TestEqualSensitive(TEXT("... the effective URL, redacted"), Ended.EffectiveUrl, FString(TEXT("https://api.test/items/7?token=***")));
 	TestEqualSensitive(TEXT("... the response headers"), Ended.Headers.Get(TEXT("Content-Type")), FString(TEXT("application/json")));
+	TestEqualSensitive(TEXT("... redacted: a cookie"), Ended.Headers.Get(TEXT("Set-Cookie")), FString(TEXT("***")));
+	TestEqualSensitive(TEXT("... a credential"), Ended.Headers.Get(TEXT("Authorization")), FString(TEXT("***")));
+	TestEqualSensitive(TEXT("... a Location as a URL (Inspector 2.2 layer 5)"), Ended.Headers.Get(TEXT("Location")), FString(TEXT("https://api.test/next?code=***&page=2")));
 	TestTrue(TEXT("... the transport's timestamps (delegates bound under IN-11)"), Ended.UploadDoneAt >= 0.0 && Ended.StatusAt >= 0.0 && Ended.TransportDoneAt >= 0.0);
 
 	const FVaRestTraceCompleted& Completed = Events[3].Payload.Get<FVaRestTraceCompleted>();
@@ -207,7 +240,10 @@ bool FVaRestHttpTraceFailuresTest::RunTest(const FString& Parameters)
 	Rig.Wait(NotFound);
 
 	auto Broken = MakeOutcome<FVaRestJson>();
-	const FVaRestRequestHandle Bad = Observe(Rig.Client.Get(TEXT("/u/secret-value-123456/{id")), Broken).Send();
+	// An owner whose name holds the known value: the initiator is value-scrubbed like every captured string (Inspector 2.2 layer 3)
+	UObject* Named = NewObject<UVaRestHttpSettings>(GetTransientPackage(),
+		MakeUniqueObjectName(GetTransientPackage(), UVaRestHttpSettings::StaticClass(), FName(TEXT("Owner_secret-value-123456"))), RF_Transient);
+	const FVaRestRequestHandle Bad = Observe(Rig.Client.Get(TEXT("/u/secret-value-123456/{id")).Owner(Named), Broken).Send();
 	Rig.Wait(Broken);
 
 	Rig.Fake->Enqueue(FVaRestFakeResponse::Manual());
@@ -233,9 +269,12 @@ bool FVaRestHttpTraceFailuresTest::RunTest(const FString& Parameters)
 	{
 		const FVaRestTraceCompleted& Done = Config[1].Payload.Get<FVaRestTraceCompleted>();
 		TestTrue(TEXT("... Completed{Error, Config}"), Done.Outcome == EVaRestTraceOutcome::Error && Done.Error.Kind == EVaRestErrorKind::Config);
-		TestTrue(TEXT("... its message value-scrubbed (Inspector 2.2: FVaRestError Message)"), Done.Error.Message.Contains(TEXT("***"))
-			&& !Done.Error.Message.Contains(TEXT("secret-value-123456")));
-		TestFalse(TEXT("... and the URL of Started too"), Config[0].Payload.Get<FVaRestTraceStarted>().Url.Contains(TEXT("secret-value-123456")));
+		TestTrue(TEXT("... its message value-scrubbed (Inspector 2.2: FVaRestError Message)"), Done.Error.Message.Contains(TEXT("***"), ESearchCase::CaseSensitive)
+			&& !Done.Error.Message.Contains(TEXT("secret-value-123456"), ESearchCase::CaseSensitive));
+		const FVaRestTraceStarted& Refused = Config[0].Payload.Get<FVaRestTraceStarted>();
+		TestFalse(TEXT("... and the URL of Started too"), Refused.Url.Contains(TEXT("secret-value-123456"), ESearchCase::CaseSensitive));
+		TestTrue(TEXT("... and the owner's path"), Refused.Initiator.OwnerPath.Contains(TEXT("Owner_***"), ESearchCase::CaseSensitive)
+			&& !Refused.Initiator.OwnerPath.Contains(TEXT("secret-value-123456"), ESearchCase::CaseSensitive));
 	}
 
 	const TArray<FVaRestTraceEvent> Cancel = Sink->For(Canceled.GetId());
@@ -256,7 +295,11 @@ bool FVaRestHttpTraceZeroCostTest::RunTest(const FString& Parameters)
 {
 	using namespace VaRest::Http::Testing;
 	using namespace VaRest::Http::TraceTestPrivate;
-	FVaRestTrace::FScopedSinkIsolation Isolation; // no sink: the mask is 0
+	FVaRestTrace::FScopedSinkIsolation Isolation;
+	// Task 15 review M4: a sink that asks for nothing. The mask stays 0, but the list is not empty, so a trace point past a
+	// missing gate would deliver to it, and Emit counts EventsBuilt only for a delivered event (VaRestTrace.cpp, Emit).
+	const FSinkRef Deaf = MakeSink(EVaRestTraceDetail::None);
+	FVaRestTrace::AddSink(Deaf);
 	FTestRig Rig;
 	// "TraceCounters", not "Counters": Testing::Counters() is in scope (review M18)
 	const FVaRestTraceCounters& TraceCounters = FVaRestTrace::Counters();
@@ -274,8 +317,16 @@ bool FVaRestHttpTraceZeroCostTest::RunTest(const FString& Parameters)
 		Handles.Add(Observe(Rig.Client.Get(TEXT("/n?token=x")).Header(TEXT("Authorization"), TEXT("Bearer x")), Outcomes.Last()).Send());
 	}
 	TestTrue(TEXT("all complete"), PumpUntil([&Outcomes] { return !Outcomes.ContainsByPredicate([](const TSharedRef<TTestOutcome<FVaRestJson>, ESPMode::ThreadSafe>& Each) { return !Each->IsDone(); }); }, 30.0));
+	{
+		// The client trace point too: made, renamed, re-based and destroyed with the mask at 0 (review M4)
+		FVaRestClient Passing = FVaRestClient::Make(TEXT("https://user:pw@passing.test"));
+		Passing.WithBaseUrl(TEXT("https://other.test")).WithName(TEXT("Passing"));
+	}
+	PumpUntil([] { return false; }, 0.05);
+	FVaRestTrace::RemoveSink(Deaf);
 	// Inspector 3.1 item 6: counted, not timed
-	TestEqual(TEXT("IN-11: no event is built without a sink"), TraceCounters.EventsBuilt.load(), static_cast<uint64>(0));
+	TestEqual(TEXT("IN-11: no event is built without a sink that asks for one"), TraceCounters.EventsBuilt.load(), static_cast<uint64>(0));
+	TestEqual(TEXT("... none reaches a sink that asks for nothing"), Deaf->Events.Num(), 0);
 	TestEqual(TEXT("... no redactor call"), TraceCounters.RedactorCalls.load(), static_cast<uint64>(0));
 	TestEqual(TEXT("... no transport delegate bound"), TraceCounters.DelegateBinds.load(), static_cast<uint64>(0));
 	TestEqual(TEXT("... no trace-point cycles"), TraceCounters.TraceCycles.load(), static_cast<uint64>(0));
@@ -319,11 +370,11 @@ bool FVaRestHttpTraceLateAttachTest::RunTest(const FString& Parameters)
 		const uint64 ClientId = Rig.Client.GetId();
 		const uint64 RequestId = Handle.GetId();
 		const FVaRestTraceClient* Client = Snapshot.Clients.FindByPredicate([ClientId](const FVaRestTraceClient& Each) { return Each.ClientId == ClientId; });
-		TestTrue(TEXT("IN-12: the live client"), Client && Client->DisplayName == TEXT("https://api.test") && Client->ScopeId == FVaRestTrace::ProcessScopeId);
+		TestTrue(TEXT("IN-12: the live client"), Client && Client->DisplayName.Equals(TEXT("https://api.test"), ESearchCase::CaseSensitive) && Client->ScopeId == FVaRestTrace::ProcessScopeId);
 		const FVaRestTraceStarted* Entry = Snapshot.InFlight.FindByPredicate([RequestId](const FVaRestTraceStarted& Each) { return Each.RequestId == RequestId; });
 		TestTrue(TEXT("... the in-flight request as Started{Partial}"), Entry && EnumHasAnyFlags(Entry->Flags, EVaRestTraceRequestFlags::Partial));
-		TestTrue(TEXT("... with its verb, redacted URL, template, attempt and start time (Inspector 2.3)"), Entry && Entry->Verb == TEXT("GET")
-			&& Entry->Url.Equals(TEXT("https://api.test/slow?token=***"), ESearchCase::CaseSensitive) && Entry->PathTemplate == TEXT("/slow")
+		TestTrue(TEXT("... with its verb, redacted URL, template, attempt and start time (Inspector 2.3)"), Entry && Entry->Verb.Equals(TEXT("GET"), ESearchCase::CaseSensitive)
+			&& Entry->Url.Equals(TEXT("https://api.test/slow?token=***"), ESearchCase::CaseSensitive) && Entry->PathTemplate.Equals(TEXT("/slow"), ESearchCase::CaseSensitive)
 			&& Entry->CurrentAttempt == 1 && Entry->StartedAt >= 0.0);
 	}
 	Rig.Fake->Complete(0, FVaRestFakeResponse::Json(200, FUtf8StringView(UTF8TEXT("{}"))));
@@ -381,21 +432,110 @@ bool FVaRestHttpTraceClientsTest::RunTest(const FString& Parameters)
 	{
 		FVaRestClient Client = FVaRestClient::Make(TEXT("https://user:pw@temp.test"));
 		Id = Client.GetId();
+		Client.WithBaseUrl(TEXT("https://user:pw@moved.test")); // unnamed: the new base renames it (task 15 review M5)
 		Client.WithName(TEXT("Temp"));
 		Client.WithName(TEXT("Temp")); // unchanged: no event
+		Client.WithBaseUrl(TEXT("https://third.test")); // named: the name stays, no event
 	}
 	FVaRestTrace::RemoveSink(Sink);
 	const TArray<FVaRestTraceClient> Seen = Sink->ClientEvents(Id);
-	TestEqual(TEXT("created, renamed, destroyed"), Seen.Num(), 3);
-	if (Seen.Num() != 3)
+	TestEqual(TEXT("created, re-based, renamed, destroyed"), Seen.Num(), 4);
+	if (Seen.Num() != 4)
 	{
 		return false;
 	}
 	TestTrue(TEXT("IN-8: Created, named by the base URL, redacted"), Seen[0].bCreated && Seen[0].DisplayName.Equals(TEXT("https://***@temp.test"), ESearchCase::CaseSensitive)
 		&& Seen[0].ScopeId == FVaRestTrace::ProcessScopeId);
-	TestTrue(TEXT("decision 23: a rename is Created again for the same id"), Seen[1].bCreated && Seen[1].DisplayName == TEXT("Temp"));
-	TestTrue(TEXT("Destroyed when the last reference goes"), !Seen[2].bCreated);
+	TestTrue(TEXT("decision 23: an unnamed client's new base URL is Created again, redacted"), Seen[1].bCreated
+		&& Seen[1].DisplayName.Equals(TEXT("https://***@moved.test"), ESearchCase::CaseSensitive));
+	TestTrue(TEXT("decision 23: a rename is Created again for the same id"), Seen[2].bCreated && Seen[2].DisplayName.Equals(TEXT("Temp"), ESearchCase::CaseSensitive));
+	TestTrue(TEXT("Destroyed when the last reference goes"), !Seen[3].bCreated);
 	TestTrue(TEXT("on the game thread"), Sink->bAllOnGameThread.load());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpTraceClientNamesTest, "VaRest.Http.Trace.ClientNames",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpTraceClientNamesTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::TraceTestPrivate;
+	// Task 15 review I1: an unnamed client is named by its base URL, which Make does not validate. Whatever its shape,
+	// it is URL-redacted -- in Client{Created} and in a late sink's snapshot alike.
+	FVaRestTrace::FScopedSinkIsolation Isolation;
+	const FSinkRef Sink = MakeSink(EVaRestTraceDetail::Metadata);
+	FVaRestTrace::AddSink(Sink);
+	const TCHAR* const Bases[] = { TEXT("user:pw@host/x"), TEXT("host/v1?api_key=SECRET"), TEXT("ftp://u:p@h/x"), TEXT("https://u:p@h/x?token=T") };
+	const TCHAR* const Leaks[] = { TEXT("pw"), TEXT("SECRET"), TEXT("p@"), TEXT("T") };
+	TArray<FVaRestClient> Clients;
+	for (const TCHAR* Base : Bases)
+	{
+		Clients.Add(FVaRestClient::Make(Base));
+	}
+	const FSinkRef Late = MakeSink(EVaRestTraceDetail::Metadata);
+	FVaRestTrace::AddSink(Late);
+	FVaRestTrace::RemoveSink(Late);
+	FVaRestTrace::RemoveSink(Sink);
+
+	const auto Clean = [Leaks](const FString& Name)
+	{
+		for (const TCHAR* Leak : Leaks)
+		{
+			if (Name.Contains(Leak, ESearchCase::CaseSensitive))
+			{
+				return false;
+			}
+		}
+		return Name.Contains(TEXT("***"), ESearchCase::CaseSensitive);
+	};
+	TestEqual(TEXT("one snapshot for the late sink"), Late->Snapshots.Num(), 1);
+	for (int32 Index = 0; Index < Clients.Num(); ++Index)
+	{
+		const uint64 ClientId = Clients[Index].GetId();
+		const TArray<FVaRestTraceClient> Seen = Sink->ClientEvents(ClientId);
+		const FString Created = Seen.Num() == 1 ? Seen[0].DisplayName : FString();
+		TestTrue(FString::Printf(TEXT("Client{Created} for \"%s\" is redacted: \"%s\""), Bases[Index], *Created), Seen.Num() == 1 && Clean(Created));
+		const FVaRestTraceClient* Listed = Late->Snapshots.Num() == 1
+			? Late->Snapshots[0].Clients.FindByPredicate([ClientId](const FVaRestTraceClient& Each) { return Each.ClientId == ClientId; })
+			: nullptr;
+		const FString InSnapshot = Listed ? Listed->DisplayName : FString();
+		TestTrue(FString::Printf(TEXT("... and its snapshot entry: \"%s\""), *InSnapshot), Listed != nullptr && Clean(InSnapshot));
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpTraceClientOffThreadTest, "VaRest.Http.Trace.ClientDestroyedOffGameThread",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpTraceClientOffThreadTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::TraceTestPrivate;
+	// Task 15 review m1: a game's own worker drops the last FVaRestClient. The state dies there; its Client{Destroyed} is
+	// emitted from a game-thread task (Inspector 9: nothing is emitted off the game thread).
+	FVaRestTrace::FScopedSinkIsolation Isolation;
+	const FSinkRef Sink = MakeSink(EVaRestTraceDetail::Metadata);
+	FVaRestTrace::AddSink(Sink); // before Make: the snapshot's walk holds no pin on the client below
+	FVaRestClient Doomed = FVaRestClient::Make(TEXT("https://worker.test"));
+	const uint64 Id = Doomed.GetId();
+	const TWeakPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> Weak = Doomed.GetStateInternal();
+	const int32 OffBefore = Counters().ClientStatesDestroyedOffGameThread.load();
+	const UE::Tasks::FTask Dropping = UE::Tasks::Launch(TEXT("VaRest.Test.DropClient"), [Last = MoveTemp(Doomed)]() mutable
+	{
+		Last = FVaRestClient();
+	});
+	// Not Wait(): it "tries to retract the task and execute it in-place" (Task.h:66-67), which would run it here, on the game thread
+	const double Deadline = FPlatformTime::Seconds() + 5.0;
+	while (!Dropping.IsCompleted() && FPlatformTime::Seconds() < Deadline)
+	{
+		FPlatformProcess::Sleep(0.001f);
+	}
+	TestTrue(TEXT("the worker dropped the last handle"), Dropping.IsCompleted());
+	TestEqual(TEXT("... and the state died there"), Counters().ClientStatesDestroyedOffGameThread.load() - OffBefore, 1);
+	TestTrue(TEXT("Client{Destroyed} arrives"), PumpUntil([Sink, Id] { return Sink->ClientEvents(Id).ContainsByPredicate([](const FVaRestTraceClient& Each) { return !Each.bCreated; }); }));
+	FVaRestTrace::RemoveSink(Sink);
+	TestFalse(TEXT("... for a state that is gone"), Weak.IsValid());
+	TestTrue(TEXT("... on the game thread (Inspector 9)"), Sink->bAllOnGameThread.load());
 	return true;
 }
 
@@ -456,8 +596,8 @@ bool FVaRestHttpTraceSilentTest::RunTest(const FString& Parameters)
 {
 	using namespace VaRest::Http::Testing;
 	using namespace VaRest::Http::TraceTestPrivate;
-	// Spec 3.2: an owner gone means no callbacks; Inspector 2.3: the record is still sealed. Completed goes out before the
-	// silent return (IN-5: "before any callback", and also when none runs).
+	// Spec 3.2: an owner gone, or the engine exiting, means no callbacks; Inspector 2.3: the record is still sealed.
+	// Completed goes out before the silent return (IN-5: "before any callback", and also when none runs).
 	FVaRestTrace::FScopedSinkIsolation Isolation;
 	const FSinkRef Sink = MakeSink(EVaRestTraceDetail::Metadata);
 	FVaRestTrace::AddSink(Sink);
@@ -477,9 +617,20 @@ bool FVaRestHttpTraceSilentTest::RunTest(const FString& Parameters)
 	auto Never = MakeOutcome<FVaRestJson>();
 	const FVaRestRequestHandle AtEntry = Observe(Rig.Client.Get(TEXT("/gone")).Owner(GoneOwner), Never).Send();
 	TestTrue(TEXT("... and so does one whose owner was gone before entry"), PumpUntil([&AtEntry] { return !AtEntry.IsActive(); }));
+
+	// Task 15 review m7: engine exit. CancelForShutdown() is process-wide, as the OnEnginePreExit hook calls it: in a headless
+	// run nothing else is in flight; until the reset, every Send() anywhere completes silently (task 11 review, minor 6).
+	Rig.Fake->Enqueue(FVaRestFakeResponse::Manual());
+	auto Exiting = MakeOutcome<FVaRestJson>();
+	const FVaRestRequestHandle AtExit = Observe(Rig.Client.Get(TEXT("/exiting")), Exiting).Send();
+	PumpUntil([&Rig] { return Rig.Fake->NumInFlight() == 1; });
+	VaRest::Http::FClientState::CancelForShutdown();
+	// Review N-6: the editor goes on, so every later test must send again -- also when this test returns early
+	ON_SCOPE_EXIT { VaRest::Http::FClientState::ResetShutdownInternal(); };
+	TestTrue(TEXT("... and so does one the engine exit canceled"), PumpUntil([&AtExit] { return !AtExit.IsActive(); }));
 	PumpUntil([] { return false; }, 0.05);
 	FVaRestTrace::RemoveSink(Sink);
-	TestEqual(TEXT("spec 3.2: no callbacks"), Owned->CompleteCalls.load() + Never->CompleteCalls.load(), 0);
+	TestEqual(TEXT("spec 3.2: no callbacks"), Owned->CompleteCalls.load() + Never->CompleteCalls.load() + Exiting->CompleteCalls.load(), 0);
 	TestEqual(TEXT("... and nothing is left in flight"), Rig.Client.GetInFlightCount(), 0);
 
 	const TArray<FVaRestTraceEvent> InTransport = Sink->For(Running.GetId());
@@ -496,6 +647,42 @@ bool FVaRestHttpTraceSilentTest::RunTest(const FString& Parameters)
 		const FVaRestTraceCompleted& Done = BeforeEntry[1].Payload.Get<FVaRestTraceCompleted>();
 		TestTrue(TEXT("... Completed{Canceled, OwnerGone} too"), Done.Outcome == EVaRestTraceOutcome::Canceled && Done.CancelReason == EVaRestCancelReason::OwnerGone);
 	}
+	const TArray<FVaRestTraceEvent> Shutdown = Sink->For(AtExit.GetId());
+	TestEqualSensitive(TEXT("engine exit mid-attempt: sealed too"), KindsOf(Shutdown), FString(TEXT("Started,Dispatched,Ended,Completed")));
+	if (Shutdown.Num() == 4)
+	{
+		const FVaRestTraceCompleted& Done = Shutdown[3].Payload.Get<FVaRestTraceCompleted>();
+		TestTrue(TEXT("... Completed{Canceled, Shutdown}"), Done.Outcome == EVaRestTraceOutcome::Canceled && Done.CancelReason == EVaRestCancelReason::Shutdown);
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpTraceLateAttemptTest, "VaRest.Http.Trace.LateAttemptSealed",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpTraceLateAttemptTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::TraceTestPrivate;
+	// Decision 24 (task 15 review m3): an attempt whose answer comes back after Completed is not reported -- the record is
+	// sealed (Inspector 2.3). A stage answers the attempt itself while the transport still runs; the transport answers later.
+	FVaRestTrace::FScopedSinkIsolation Isolation;
+	const FSinkRef Sink = MakeSink(EVaRestTraceDetail::Metadata);
+	FVaRestTrace::AddSink(Sink);
+	FTestRig Rig;
+	const TSharedRef<FEarlyAnswerStage, ESPMode::ThreadSafe> Stage = MakeShared<FEarlyAnswerStage, ESPMode::ThreadSafe>();
+	Rig.Client.Use(Stage, EVaRestStageSlot::PerAttempt);
+	Rig.Fake->Enqueue(FVaRestFakeResponse::Manual());
+	auto Outcome = MakeOutcome<FVaRestJson>();
+	const FVaRestRequestHandle Handle = Observe(Rig.Client.Get(TEXT("/early")), Outcome).Send();
+	TestTrue(TEXT("the stage's answer completes the request"), Rig.Wait(Outcome));
+	TestEqual(TEXT("... while the transport call still runs"), Rig.Fake->NumInFlight(), 1);
+	Rig.Fake->Complete(0, FVaRestFakeResponse::Json(200, FUtf8StringView(UTF8TEXT("{}"))));
+	const TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> Late = Stage->LateAnswers;
+	TestTrue(TEXT("the transport's answer comes back after Completed"), PumpUntil([Late] { return Late->load() == 1; }));
+	FVaRestTrace::RemoveSink(Sink);
+	TestEqualSensitive(TEXT("decision 24: no AttemptEnded after Completed"), KindsOf(Sink->For(Handle.GetId())), FString(TEXT("Started,Dispatched,Completed")));
+	TestEqual(TEXT("... and the success was delivered once"), Outcome->SuccessCalls.load(), 1);
 	return true;
 }
 

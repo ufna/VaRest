@@ -25,6 +25,13 @@ namespace VaRest::Http::ClientStatePrivate
 		static FLiveRegistry* Registry = new FLiveRegistry();
 		return *Registry;
 	}
+
+	/** IN-8's name comes from WithName, or, without one, from the base URL: a new base renames an unnamed client (review M5) */
+	bool TraceNameChanged(const FClientConfig& Before, const FClientConfig& After)
+	{
+		return !After.DisplayName.Equals(Before.DisplayName, ESearchCase::CaseSensitive)
+			|| (After.DisplayName.IsEmpty() && !After.BaseUrl.Equals(Before.BaseUrl, ESearchCase::CaseSensitive));
+	}
 }
 
 VaRest::Http::FClientState::FClientState(uint64 InClientId, FClientConfig&& InConfig)
@@ -83,7 +90,8 @@ void VaRest::Http::FClientState::EditConfig(TFunctionRef<void(FClientConfig&)> E
 	TSharedRef<FClientConfig, ESPMode::ThreadSafe> Next = MakeShared<FClientConfig, ESPMode::ThreadSafe>(*Previous);
 	Edit(*Next);
 	Publish(Next);
-	if (!Next->DisplayName.Equals(Previous->DisplayName, ESearchCase::CaseSensitive))
+	// Trace-only work, so behind the mask (task 15 review M8): a sink attached later learns the name from its snapshot
+	if (FVaRestTrace::Detail() != EVaRestTraceDetail::None && ClientStatePrivate::TraceNameChanged(*Previous, *Next))
 	{
 		// Decision 23: IN-8 has Created and Destroyed only; a rename is Created again for the same id (a store updates the row)
 		TracePoints::Client(ClientId, *Next, true);

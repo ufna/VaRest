@@ -192,7 +192,7 @@ FVaRestClient FVaRestClient::Make(FStringView BaseUrl)
 	const UVaRestHttpSettings* Settings = GetDefault<UVaRestHttpSettings>();
 	VaRest::Http::FClientConfig Initial;
 	Initial.BaseUrl = FString(BaseUrl.TrimStartAndEnd());
-	Initial.DisplayName = Initial.BaseUrl;
+	// No DisplayName: until WithName, the client is named by its base URL, whichever one it has then (IN-8)
 	Initial.LogLevel = Settings->LogLevel;
 	Initial.MaxConcurrent = FMath::Max(1, Settings->MaxConcurrent);
 	Initial.Timeout = FMath::Max(0.f, Settings->Timeout);

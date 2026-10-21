@@ -12,14 +12,20 @@
 
 namespace VaRest::Http::TracePointsPrivate
 {
-	/** A name or a base URL; Make uses the base URL, which may carry userinfo (Inspector 2.2 layer 5) */
+	/**
+	 * IN-8's name, redacted by where it came from, not by its shape (task 15 review I1). A WithName name is the game's own
+	 * text: the value scrub. An unnamed client is named by its current base URL, which Make does not validate, so it goes
+	 * through RedactUrl whatever it looks like: userinfo and secret query values come out of any scheme and of a scheme-less
+	 * "user:pw@host/x" too (any RFC 3986 scheme, VaRestRedactor.cpp:525-539; scheme-less userinfo, :566-585, review M3;
+	 * the query, :602-607; Inspector 2.2 layer 5, decision 23).
+	 */
 	FString DisplayNameOf(const FClientConfig& Config)
 	{
 		if (!Config.Redactor.IsValid())
 		{
 			return FString();
 		}
-		return IsAbsoluteHttpUrl(Config.DisplayName) ? Config.Redactor->RedactUrl(Config.DisplayName) : Config.Redactor->ScrubText(Config.DisplayName);
+		return Config.DisplayName.IsEmpty() ? Config.Redactor->RedactUrl(Config.BaseUrl) : Config.Redactor->ScrubText(Config.DisplayName);
 	}
 
 	/**

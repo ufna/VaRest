@@ -482,6 +482,7 @@ public:
 	void CancelAll(FName InTag = NAME_None);
 
 	// ---- configuration (game thread)
+	/** The name traces show (Inspector IN-8). Without one, or after WithName(""), the client is named by its base URL. */
 	FVaRestClient& WithName(FStringView DisplayName);
 	FVaRestClient& WithBaseUrl(FStringView BaseUrl);
 	FVaRestClient& WithHeader(FStringView Name, FStringView Value);
