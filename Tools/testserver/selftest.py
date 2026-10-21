@@ -317,6 +317,13 @@ class ServerTest(unittest.TestCase):
         self.assertTrue(received.startswith(b"HTTP/1.1 101 "))
         self.assertTrue(received.endswith(b"echo:ping\n"))
 
+    def test_plugin_route(self):
+        # WebSocket spec 16.3: a plug-in's HTTP route (ws.py serves /ws/journal this way) is matched like a built-in one
+        server.register_route(("GET",), r"/plugin/hello", lambda h, match: h.send_json(200, {"hello": h.query.get("who", [""])[0]}))
+        status, _, value = self.call_json("GET", "/plugin/hello?who=ws")
+        self.assertEqual((status, value), (200, {"hello": "ws"}))
+        self.assertEqual(self.call("POST", "/plugin/hello")[0], 404)
+
 
 class LifecycleTest(unittest.TestCase):
     def test_ready_file_and_parent_watch(self):

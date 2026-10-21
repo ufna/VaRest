@@ -48,9 +48,10 @@ not an integer or is out of its range 400 ({"error", "name", ...}); each closes 
   GET  /envelope/ok, /envelope/err            {"ok": true, "data": {...}} / {"ok": false, "code", "message"}
 
 Plug-ins (WebSocket spec 16.3): each module named in PLUGINS that sits next to this file is imported at start
-and may call register_upgrade(token, handler). A request whose Upgrade header names that token goes to
-handler(request_handler) instead of a route; the handler answers 101, takes over request_handler.connection,
-rfile and wfile, and sets request_handler.close_connection. STATE and its lock are shared with plug-ins.
+and may call register_upgrade(token, handler) and register_route(methods, pattern, route). A request whose Upgrade
+header names that token goes to handler(request_handler) instead of a route; the handler answers 101, takes over
+request_handler.connection, rfile and wfile, and sets request_handler.close_connection. A registered route is matched
+before the built-in ones. STATE and its lock are shared with plug-ins.
 """
 
 import argparse
@@ -110,6 +111,12 @@ class Refused(Exception):
 def register_upgrade(token, handler):
     """WebSocket spec 16.3: ws.py registers "websocket" here"""
     _UPGRADES[token.strip().lower()] = handler
+
+
+def register_route(methods, pattern, route):
+    """WebSocket spec 16.3: an HTTP route of a plug-in (ws.py: /ws/journal), matched before the built-in routes; methods
+    is a tuple of verbs or ANY, route(h, match) as the built-in ones"""
+    ROUTES.insert(0, (methods, re.compile(pattern), route))
 
 
 def decode_text(data):
