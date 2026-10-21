@@ -31,8 +31,24 @@ namespace VaRest::Http::TracePrivate
 
 	// Trivially destructible: safe as statics
 	std::atomic<uint64> NextSeq{ 1 };
-	std::atomic<uint64> NextRequest{ 1 };
-	std::atomic<uint64> NextClient{ 1 };
+	// Counters start at 0 and ids are fetch_add + 1, so 0 can never be handed out (IN-10)
+	std::atomic<uint64> NextRequest{ 0 };
+	std::atomic<uint64> NextClient{ 0 };
+
+	/** Kinds without a payload type yet (Note, Excerpt, Marker, the socket kinds) are not checked */
+	bool PayloadMatchesKind(EVaRestTraceKind Kind, const FVaRestTracePayload& Payload)
+	{
+		switch (Kind)
+		{
+		case EVaRestTraceKind::Started: return Payload.IsType<FVaRestTraceStarted>();
+		case EVaRestTraceKind::AttemptDispatched: return Payload.IsType<FVaRestTraceAttemptDispatched>();
+		case EVaRestTraceKind::AttemptEnded: return Payload.IsType<FVaRestTraceAttemptEnded>();
+		case EVaRestTraceKind::Completed: return Payload.IsType<FVaRestTraceCompleted>();
+		case EVaRestTraceKind::Scope: return Payload.IsType<FVaRestTraceScope>();
+		case EVaRestTraceKind::Client: return Payload.IsType<FVaRestTraceClient>();
+		default: return true;
+		}
+	}
 
 	/** Outside any lock: GetDetail is the sink's code (review M-8) */
 	FVaRestTraceDetailSettings Merge(const FVaRestTrace::FSinkList* List)
@@ -84,6 +100,14 @@ FVaRestTraceDetailSettings FVaRestTrace::GetDetailSettings()
 void FVaRestTrace::AddSink(const FSinkRef& Sink)
 {
 	check(IsInGameThread());
+	// Re-adding must not deliver a second snapshot: a store would rebuild or duplicate its rows (review M-8)
+	{
+		const TSharedPtr<const FSinkList, ESPMode::ThreadSafe> Existing = GetSinks();
+		if (Existing.IsValid() && Existing->Contains(Sink))
+		{
+			return;
+		}
+	}
 	// IN-12: a late sink (Record after Pause, a module loading after the PreDefault core) learns what already exists.
 	// A client the snapshot pinned can die only after this function returns: FClientState::ForEachLive releases its pins
 	// from a later game-thread task, so that client's Client{Destroyed} reaches this sink after OnAttached (review M-9).
@@ -96,14 +120,48 @@ void FVaRestTrace::AddSink(const FSinkRef& Sink)
 
 void FVaRestTrace::RemoveSink(const FSinkRef& Sink)
 {
+	using namespace VaRest::Http::TracePrivate;
 	check(IsInGameThread());
+	const auto Without = [&Sink](const FSinkList& List)
+	{
+		TSharedRef<FSinkList, ESPMode::ThreadSafe> Stripped = MakeShared<FSinkList, ESPMode::ThreadSafe>(List);
+		Stripped->RemoveAll([&Sink](const FSinkRef& Existing) { return Existing == Sink; });
+		return Stripped;
+	};
+
+#if WITH_DEV_AUTOMATION_TESTS
+	// Strip the sink from the lists an isolation saved too, or restoring would resurrect it after a Pause. Only the game
+	// thread touches Saved (and this is the game thread), so reading it needs no lock; the swap is under the write lock
+	// and the replaced lists are released after it (review M-8).
+	{
+		TArray<TSharedPtr<const FSinkList, ESPMode::ThreadSafe>> Rebuilt = Registry().Saved;
+		bool bChanged = false;
+		for (TSharedPtr<const FSinkList, ESPMode::ThreadSafe>& Saved : Rebuilt)
+		{
+			if (Saved.IsValid() && Saved->Contains(Sink))
+			{
+				Saved = Without(*Saved);
+				bChanged = true;
+			}
+		}
+		if (bChanged)
+		{
+			TArray<TSharedPtr<const FSinkList, ESPMode::ThreadSafe>> Replaced;
+			{
+				FWriteScopeLock WriteLock(Registry().Lock);
+				Replaced = MoveTemp(Registry().Saved);
+				Registry().Saved = MoveTemp(Rebuilt);
+			}
+		}
+	}
+#endif
+
 	TSharedPtr<const FSinkList, ESPMode::ThreadSafe> Current = GetSinks();
 	if (!Current.IsValid())
 	{
 		return;
 	}
-	TSharedRef<FSinkList, ESPMode::ThreadSafe> Next = MakeShared<FSinkList, ESPMode::ThreadSafe>(*Current);
-	Next->RemoveAll([&Sink](const FSinkRef& Existing) { return Existing == Sink; });
+	TSharedRef<FSinkList, ESPMode::ThreadSafe> Next = Without(*Current);
 	Current.Reset();
 	Swap(Next);
 }
@@ -123,6 +181,11 @@ TSharedPtr<const FVaRestTrace::FSinkList, ESPMode::ThreadSafe> FVaRestTrace::Get
 
 void FVaRestTrace::Emit(EVaRestTraceKind Kind, double Time, FVaRestTracePayload&& Payload, EVaRestTraceSource Source)
 {
+	// Spec 9: nothing is emitted from the HTTP thread; every kind but Excerpt (a background task) is game-thread only.
+	checkSlow(IsInGameThread() || Kind == EVaRestTraceKind::Excerpt);
+	// A mismatch would otherwise surface as a TVariant::Get failure inside some sink. Kinds without a payload type yet
+	// (Note, Excerpt, Marker, the socket kinds) are not checked.
+	checkSlow(VaRest::Http::TracePrivate::PayloadMatchesKind(Kind, Payload));
 	const TSharedPtr<const FSinkList, ESPMode::ThreadSafe> List = GetSinks();
 	if (!List.IsValid() || List->Num() == 0)
 	{
@@ -161,12 +224,16 @@ FVaRestTraceSnapshot FVaRestTrace::BuildSnapshot()
 
 uint64 FVaRestTrace::NewRequestId()
 {
-	return VaRest::Http::TracePrivate::NextRequest.fetch_add(1, std::memory_order_relaxed);
+	const uint64 Id = VaRest::Http::TracePrivate::NextRequest.fetch_add(1, std::memory_order_relaxed) + 1;
+	check(Id != 0);
+	return Id;
 }
 
 uint64 FVaRestTrace::NewClientId()
 {
-	return VaRest::Http::TracePrivate::NextClient.fetch_add(1, std::memory_order_relaxed);
+	const uint64 Id = VaRest::Http::TracePrivate::NextClient.fetch_add(1, std::memory_order_relaxed) + 1;
+	check(Id != 0);
+	return Id;
 }
 
 FVaRestTraceCounters& FVaRestTrace::Counters()
@@ -176,12 +243,14 @@ FVaRestTraceCounters& FVaRestTrace::Counters()
 	return *Instance;
 }
 
+#if WITH_DEV_AUTOMATION_TESTS
 FVaRestScopedSinkIsolation::FVaRestScopedSinkIsolation()
 {
 	using namespace VaRest::Http::TracePrivate;
 	check(IsInGameThread());
 	{
 		FWriteScopeLock WriteLock(Registry().Lock);
+		Depth = Registry().Saved.Num();
 		Registry().Saved.Push(Registry().Sinks);
 	}
 	FVaRestTrace::Swap(nullptr);
@@ -194,7 +263,10 @@ FVaRestScopedSinkIsolation::~FVaRestScopedSinkIsolation()
 	TSharedPtr<const FVaRestTrace::FSinkList, ESPMode::ThreadSafe> Restored;
 	{
 		FWriteScopeLock WriteLock(Registry().Lock);
+		// Non-LIFO destruction would restore someone else's list
+		check(Registry().Saved.Num() == Depth + 1);
 		Restored = Registry().Saved.Pop();
 	}
 	FVaRestTrace::Swap(MoveTemp(Restored));
 }
+#endif

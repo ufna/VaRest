@@ -343,7 +343,9 @@ public:
 
 	/**
 	 * The emitting thread: the game thread for every kind but Excerpt (a background task); never the HTTP thread
-	 * (Inspector 9). Return quickly. A background emitter may still deliver once after RemoveSink returns (IN-12).
+	 * (Inspector 9). Return quickly. Emit iterates the list it took when it started, so a sink can still be called once
+	 * after RemoveSink returns (IN-12): from a background emitter, and on the game thread for the event in progress when
+	 * another sink's OnEvent removed it. A sink added meanwhile gets the next event, not the one in progress.
 	 */
 	virtual void OnEvent(const FVaRestTraceEvent& Event) = 0;
 };
@@ -367,7 +369,12 @@ struct FVaRestTraceCounters
 	}
 };
 
-/** Test-only (IN-12): while one lives, only the sinks added inside it are active. Game thread; nests. */
+#if WITH_DEV_AUTOMATION_TESTS
+/**
+ * Test-only (IN-12): while one lives, only the sinks added inside it are active. Game thread; strictly LIFO (checked).
+ * RemoveSink also strips the sink from the saved outer lists, so a Pause during an isolation is not undone at restore.
+ * An AddSink inside an isolation is discarded at restore: the sink belongs to the isolated list.
+ */
 class VARESTHTTP_API FVaRestScopedSinkIsolation
 {
 public:
@@ -375,7 +382,12 @@ public:
 	~FVaRestScopedSinkIsolation();
 	FVaRestScopedSinkIsolation(const FVaRestScopedSinkIsolation&) = delete;
 	FVaRestScopedSinkIsolation& operator=(const FVaRestScopedSinkIsolation&) = delete;
+
+private:
+	/** Saved-stack depth before this one pushed; the destructor checks nothing nested outlives it */
+	int32 Depth = 0;
 };
+#endif
 
 /** The sink registry and the trace points' gate (Inspector 3.1, IN-10 to IN-12) */
 class VARESTHTTP_API FVaRestTrace
@@ -383,7 +395,9 @@ class VARESTHTTP_API FVaRestTrace
 public:
 	using FSinkRef = TSharedRef<IVaRestTraceSink, ESPMode::ThreadSafe>;
 	using FSinkList = TArray<FSinkRef>;
+#if WITH_DEV_AUTOMATION_TESTS
 	using FScopedSinkIsolation = FVaRestScopedSinkIsolation;
+#endif
 
 	/** IN-7: before M5, everything is in this scope */
 	static constexpr uint64 ProcessScopeId = 0;
@@ -425,15 +439,25 @@ public:
 
 	static FVaRestTraceCounters& Counters();
 
-	/** Adds the cycles it lived to Counters().TraceCycles. Build one inside a trace point, after the mask check. */
+	/**
+	 * Adds the cycles it lived to Counters().TraceCycles. Build one inside a trace point, after the mask check. Dev-only:
+	 * a no-op under Shipping. Not copyable, and [[nodiscard]] so an unnamed temporary (which would measure nothing) warns.
+	 */
 	struct FScopedCycles
 	{
-		uint64 Start = FPlatformTime::Cycles64();
+		[[nodiscard]] FScopedCycles() = default;
+#if !UE_BUILD_SHIPPING
 		~FScopedCycles() { Counters().TraceCycles += FPlatformTime::Cycles64() - Start; }
+		uint64 Start = FPlatformTime::Cycles64();
+#endif
+		FScopedCycles(const FScopedCycles&) = delete;
+		FScopedCycles& operator=(const FScopedCycles&) = delete;
 	};
 
 private:
+#if WITH_DEV_AUTOMATION_TESTS
 	friend class FVaRestScopedSinkIsolation;
+#endif
 
 	/**
 	 * Game thread. Publishes Next with its mask and caps. The caps are merged before the lock is taken and the old list is
