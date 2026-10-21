@@ -71,6 +71,14 @@ FString VaRest::Http::Testing::GetTestServerUrl()
 	return Url;
 }
 
+FString VaRest::Http::Testing::GetTestServerTlsUrl()
+{
+	// "VaRestTestServerTls=" and "VaRestTestServer=" are not substrings of each other, so neither lookup sees the other
+	FString Url;
+	FParse::Value(FCommandLine::Get(), TEXT("VaRestTestServerTls="), Url);
+	return Url;
+}
+
 VaRest::Http::Testing::FLogCapture::FLogCapture()
 {
 	GLog->AddOutputDevice(this);

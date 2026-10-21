@@ -64,6 +64,9 @@ namespace VaRest::Http::Testing
 	/** -VaRestTestServer=<url>, which Tools/run_tests.sh passes; empty when absent */
 	VARESTHTTP_API FString GetTestServerUrl();
 
+	/** -VaRestTestServerTls=<url>, the test server's TLS listener (WebSocket W0), which Tools/run_tests.sh passes; empty when absent */
+	VARESTHTTP_API FString GetTestServerTlsUrl();
+
 	/** Collects every log line written while it lives, from any thread, as "Category: text" */
 	class VARESTHTTP_API FLogCapture final : public FOutputDevice
 	{
