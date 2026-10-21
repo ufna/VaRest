@@ -2,6 +2,9 @@
 
 #include "VaRestDecode.h"
 
+#include "GenericPlatform/GenericPlatformFile.h"
+#include "HAL/PlatformFileManager.h"
+#include "Misc/Paths.h"
 #include "VaRestJsonUtf8.h"
 
 namespace VaRest::Http::DecodePrivate
@@ -147,4 +150,56 @@ void VaRest::Http::ProcessErrorBody(FFinish& Finish)
 		Finish.Error.RawBody = RawBodyText(Finish.Body);
 	}
 	Finish.Response.Body = MoveTemp(Finish.Body);
+}
+
+bool VaRest::Http::FinalizeSaveTo(FFinish& Finish, TFunctionRef<bool()> IsCanceled)
+{
+	IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
+	auto Fail = [&Finish, &PlatformFile](const TCHAR* What)
+	{
+		Finish.Error.Kind = EVaRestErrorKind::Decode;
+		Finish.Error.Message = FString::Printf(TEXT("could not %s the download at %s"), What, *Finish.SaveTo);
+		PlatformFile.DeleteFile(*Finish.TempFile);
+		return false;
+	};
+	if (!PlatformFile.FileExists(*Finish.TempFile))
+	{
+		PlatformFile.CreateDirectoryTree(*FPaths::GetPath(Finish.SaveTo));
+		TUniquePtr<IFileHandle> EmptyFile(PlatformFile.OpenWrite(*Finish.TempFile));
+		if (!EmptyFile.IsValid())
+		{
+			return Fail(TEXT("create"));
+		}
+	}
+	if (IsCanceled())
+	{
+		// Review M-4: "a canceled download never touches the destination" -- read as late as it can be
+		PlatformFile.DeleteFile(*Finish.TempFile);
+		return false;
+	}
+	if (!PlatformFile.MoveFile(*Finish.SaveTo, *Finish.TempFile))
+	{
+		const bool bReplaced = PlatformFile.FileExists(*Finish.SaveTo) && PlatformFile.DeleteFile(*Finish.SaveTo) && PlatformFile.MoveFile(*Finish.SaveTo, *Finish.TempFile);
+		if (!bReplaced)
+		{
+			return Fail(TEXT("move"));
+		}
+	}
+	Finish.Response.SavedFile = Finish.SaveTo;
+	return true;
+}
+
+void VaRest::Http::LoadFilePrefix(const FString& Path, TArray<uint8>& Out)
+{
+	TUniquePtr<IFileHandle> File(FPlatformFileManager::Get().GetPlatformFile().OpenRead(*Path));
+	if (!File.IsValid())
+	{
+		return;
+	}
+	const int64 Count = FMath::Min<int64>(File->Size(), RawBodyCap);
+	Out.SetNumUninitialized(static_cast<int32>(Count));
+	if (Count > 0 && !File->Read(Out.GetData(), Count))
+	{
+		Out.Reset();
+	}
 }

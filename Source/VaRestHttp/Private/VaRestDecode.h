@@ -18,4 +18,18 @@ namespace VaRest::Http
 	 * first 4 KiB in Error.RawBody; the raw bytes stay in Response.Body for diagnostics (spec 3.2). Background thread.
 	 */
 	void ProcessErrorBody(FFinish& Finish);
+
+	/**
+	 * SaveTo's success (spec 3.2): the temp file renamed onto the destination -- rename() on POSIX, which replaces it
+	 * atomically (UnixPlatformFile.cpp:1092); Windows' MoveFileW refuses an existing target (WindowsPlatformFile.cpp:1218),
+	 * so there the old file is deleted first, as FFileManagerGeneric::Move does (FileManagerGeneric.cpp:303-323). An empty
+	 * body never opened the sink, so it becomes an empty file. False, with a Decode error and the temp file deleted, when
+	 * the move fails. IsCanceled is read right before the rename (review M-4): when it is true the temp file is deleted,
+	 * the destination stays untouched, and false comes back with no error (Complete then delivers Canceled). A cancel
+	 * after the rename is too late: the request delivers its success. Background thread.
+	 */
+	bool FinalizeSaveTo(FFinish& Finish, TFunctionRef<bool()> IsCanceled);
+
+	/** The first RawBodyCap bytes of a file (an error body that went to SaveTo's temp file) */
+	void LoadFilePrefix(const FString& Path, TArray<uint8>& Out);
 }

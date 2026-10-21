@@ -3,7 +3,9 @@
 #include "Misc/Guid.h"
 #include "VaRestClientState.h"
 
+#include "HAL/FileManager.h"
 #include "Tasks/Task.h"
+#include "UObject/StrongObjectPtr.h"
 #include "VaRestDecode.h"
 #include "VaRestHttpLog.h"
 #include "VaRestHttpTesting.h"
@@ -147,8 +149,11 @@ namespace VaRest::Http::PipelinePrivate
 		FVaRestOutcomeCallback Outcome;
 	};
 
-	/** Background thread (or the game thread for nothing but the tests' restore-the-bug): spec 1's "parsing, decoding ... run on UE::Tasks" */
-	void RunDecode(IResultHandler& Handler, FFinish& Finish)
+	/**
+	 * Background thread (the restore-the-bug runs put it on the game thread): spec 1's "parsing, decoding ... run on
+	 * UE::Tasks". Ex is read only through its atomic cancel flag, which any thread may read.
+	 */
+	void RunDecode(IResultHandler& Handler, FFinish& Finish, const FVaRestExchange& Ex)
 	{
 #if !UE_BUILD_SHIPPING
 		if (IsInGameThread())
@@ -160,13 +165,27 @@ namespace VaRest::Http::PipelinePrivate
 			++Testing::Counters().DecodesOffGameThread;
 		}
 #endif
+		const bool bCanceled = Ex.IsCancelRequested();
 		if (Finish.bTimeDecode)
 		{
 			Finish.DecodeStartAt = Finish.Clock->Now();
 		}
-		if (!Finish.Error.IsError())
+		if (!Finish.TempFile.IsEmpty() && (bCanceled || Finish.Error.IsError()))
 		{
-			Handler.Decode(Finish);
+			// A failed or canceled download: the destination is never touched, the temp file goes
+			if (Finish.Error.Kind == EVaRestErrorKind::Http && Finish.bBodyInFile)
+			{
+				LoadFilePrefix(Finish.TempFile, Finish.Body);
+			}
+			IFileManager::Get().Delete(*Finish.TempFile, false, false, true);
+		}
+		if (!Finish.Error.IsError() && !bCanceled)
+		{
+			// Review M-4: the cancel flag is read again right before the rename
+			if (Finish.SaveTo.IsEmpty() || FinalizeSaveTo(Finish, [&Ex] { return Ex.IsCancelRequested(); }))
+			{
+				Handler.Decode(Finish);
+			}
 		}
 		else if (Finish.Error.Kind == EVaRestErrorKind::Http)
 		{
@@ -217,6 +236,16 @@ namespace VaRest::Http::PipelinePrivate
 				Refused.FailureDetail = TEXT("InvalidHeader");
 				OnOutcome(MoveTemp(Refused));
 				return;
+			}
+			if (!Ex.SaveTo.IsEmpty())
+			{
+				if (!Ex.TempFile.IsEmpty())
+				{
+					// An earlier attempt's file; removed off the game thread (spec 1: disk IO on UE::Tasks)
+					UE::Tasks::Launch(TEXT("VaRest.DeleteTemp"), [Stale = Ex.TempFile] { IFileManager::Get().Delete(*Stale, false, false, true); });
+				}
+				// Next to the destination: the same file system, so the final rename is a rename (spec 3.2: "atomic rename on success")
+				Ex.TempFile = FString::Printf(TEXT("%s.varest-%llu-%d.part"), *Ex.SaveTo, Ex.RequestId, Ex.Attempt);
 			}
 			FVaRestTransportRequest Request;
 			Request.RequestId = Ex.RequestId;
@@ -448,7 +477,12 @@ void VaRest::Http::FClientState::OnChainDone(const FVaRestExchangeRef& Exchange,
 	FVaRestExchange& Ex = *Exchange;
 	if (Ex.bFinished || Ex.Phase != EVaRestExchangePhase::InChain)
 	{
-		// Finished, or a second outcome while the first is being decoded (a stage that reported twice): ignored (review C-3)
+		// Finished, or a second outcome while the first is being decoded (a stage that reported twice): ignored (review C-3).
+		// A finished one's attempt file is removed (a second outcome's file is its decode task's to finish).
+		if (Ex.bFinished && !Ex.TempFile.IsEmpty())
+		{
+			UE::Tasks::Launch(TEXT("VaRest.DeleteTemp"), [Stale = Ex.TempFile] { IFileManager::Get().Delete(*Stale, false, false, true); });
+		}
 		return;
 	}
 	FFinish Finish = MakeFinish(Ex);
@@ -499,9 +533,8 @@ void VaRest::Http::FClientState::OnChainDone(const FVaRestExchangeRef& Exchange,
 	}
 
 	const bool bHasBody = Finish.Body.Num() > 0 || Finish.bBodyInFile;
-	const bool bTask = Finish.Error.IsError()
-		? Finish.Error.Kind == EVaRestErrorKind::Http && bHasBody
-		: (Ex.Handler->DecodesBody() && bHasBody) || !Finish.SaveTo.IsEmpty();
+	const bool bTask = !Finish.TempFile.IsEmpty() // a download to finish or clean up: disk IO, never on the game thread
+		|| (Finish.Error.IsError() ? Finish.Error.Kind == EVaRestErrorKind::Http && bHasBody : Ex.Handler->DecodesBody() && bHasBody);
 	if (!bTask)
 	{
 		// Nothing to parse (no body, raw bytes, void): the game thread only moves things
@@ -522,7 +555,7 @@ void VaRest::Http::FClientState::OnChainDone(const FVaRestExchangeRef& Exchange,
 	UE::Tasks::Launch(TEXT("VaRest.Decode"), [Held = TSharedPtr<FVaRestExchange, ESPMode::ThreadSafe>(Exchange), Decoder = MoveTemp(Handler), Pending = MoveTemp(Finish)]() mutable
 	{
 		// Spec 1: "Parsing, decoding, cache disk IO ... run on UE::Tasks background tasks"
-		RunDecode(*Decoder, Pending);
+		RunDecode(*Decoder, Pending, *Held);
 		OnGameThread(TEXT("VaRest.Deliver"), [Target = MoveTemp(Held), Delivered = MoveTemp(Decoder), Done = MoveTemp(Pending)]() mutable
 		{
 			Target->Handler = MoveTemp(Delivered);
@@ -577,8 +610,34 @@ void VaRest::Http::FClientState::Complete(const FVaRestExchangeRef& Exchange, FF
 	Ex.bDone = true;
 	InFlight.Remove(Ex.RequestId);
 	TUniquePtr<IResultHandler> Handler = MoveTemp(Ex.Handler);
-	if (Handler.IsValid())
+	if (!Handler.IsValid())
 	{
-		Handler->Deliver(Finish);
+		return;
 	}
+	if (Ex.bOnHttpThread)
+	{
+		// Decision 4: the game thread has seen the result (Completed, Task 15); the callbacks run on a worker.
+		// Decision 28 (review C-5): the owner, live here on the game thread, is pinned until the callbacks return -- a
+		// worker may not ask a TWeakObjectPtr (WeakObjectPtr.h:290-300), and GC could free the owner under a [this]
+		// callback. TStrongObjectPtr takes its reference here (StrongObjectPtrTemplates.h:57-61 -> Reset, :167 AddRef, with
+		// the incremental-GC barrier of FUObjectItem::AddRef, UObjectArray.h:347-366) and drops it on the worker, which
+		// 5.8.1 allows: ~TStrongObjectPtr -> Reset -> ReleaseUObject (StrongObjectPtrTemplates.h:47-50, :122-131;
+		// StrongObjectPtr.cpp:10-16) is an atomic decrement (UObjectArray.h:375-386) whose root-dirtying takes a try-lock
+		// or queues lock-free, from any thread (GarbageCollection.cpp:701-719).
+		TStrongObjectPtr<const UObject> Pin;
+		if (Ex.bHasOwner)
+		{
+			Pin.Reset(Ex.Owner.Get());
+		}
+		// Review I-1: nothing the worker drops may be the clock's last reference (a clock's destructor may clear
+		// game-thread timers); the callbacks do not read it, so it stays behind and dies on this thread
+		Finish.Clock.Reset();
+		UE::Tasks::Launch(TEXT("VaRest.DeliverOffGameThread"), [Delivered = MoveTemp(Handler), Done = MoveTemp(Finish), Kept = MoveTemp(Pin)]() mutable
+		{
+			Delivered->Deliver(Done);
+			Kept.Reset(); // after the callbacks, on this worker: legal, see above
+		});
+		return;
+	}
+	Handler->Deliver(Finish);
 }

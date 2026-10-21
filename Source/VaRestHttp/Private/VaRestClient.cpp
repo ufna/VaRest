@@ -239,6 +239,15 @@ FVaRestClient& FVaRestClient::WithClock(TSharedRef<IVaRestClock, ESPMode::Thread
 	return *this;
 }
 
+FVaRestClient& FVaRestClient::WithMaxJsonBytes(int64 Bytes)
+{
+	if (State.IsValid())
+	{
+		State->EditConfig([Bytes](VaRest::Http::FClientConfig& Edited) { Edited.MaxJsonBytes = FMath::Max<int64>(0, Bytes); });
+	}
+	return *this;
+}
+
 FVaRestClient& FVaRestClient::Use(FVaRestStageRef Stage, EVaRestStageSlot Slot)
 {
 	if (State.IsValid())

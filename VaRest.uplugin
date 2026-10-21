@@ -32,6 +32,12 @@
 		{
 			"Name": "VaRestEditor",
 			"Type": "UncookedOnly"
+		},
+		{
+			"Name" : "VaRestTests",
+			"Type" : "UncookedOnly",
+			"LoadingPhase" : "Default",
+			"PlatformAllowList" : [ "Win64", "Mac", "Linux" ]
 		}
 	]
 }

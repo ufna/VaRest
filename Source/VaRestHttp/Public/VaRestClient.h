@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Misc/Paths.h"
 #include "Misc/SourceLocation.h"
 #include "UObject/WeakObjectPtr.h"
 #include "VaRestBody.h"
@@ -273,6 +274,52 @@ public:
 		return MoveTemp(*this);
 	}
 
+	/** Spec 3.2: keep the raw bytes in FVaRestResponse::Body after a successful decode (a copy for JSON: the parse is in situ) */
+	TVaRestRequest KeepBody() &&
+	{
+		Spec->bKeepBody = true;
+		return MoveTemp(*this);
+	}
+
+	/**
+	 * Spec 3.2: streams the body into a temp file next to FilePath and renames it onto FilePath on success; a failed or
+	 * canceled download leaves FilePath untouched and deletes the temp file. Only for void and FVaRestResponse results
+	 * (decision 9): a body on disk has nothing to decode. The file is written on the HTTP thread, as the engine's own
+	 * SetResponseBodyReceiveStream to a file archive does (decision 31); the rename runs on a UE::Tasks worker. A Cancel()
+	 * that lands after the rename delivers the success with the saved file: the destination was already replaced, and
+	 * success is the truthful outcome (review M-4).
+	 */
+	TVaRestRequest SaveTo(FStringView FilePath) && requires (std::is_void_v<T> || std::is_same_v<T, FVaRestResponse>)
+	{
+		if (FilePath.IsEmpty())
+		{
+			Spec->Fail(TEXT("SaveTo() needs a file path"));
+		}
+		Spec->SaveTo = FPaths::ConvertRelativePathToFull(FString(FilePath));
+		return MoveTemp(*this);
+	}
+
+	/**
+	 * Spec 3.2: callbacks on a worker thread instead of the game thread, after the game thread has seen the result
+	 * (decision 4). With Owner(), the owner is checked on the game thread and then pinned (TStrongObjectPtr) until the
+	 * callbacks return, so GC cannot free it under them (decision 28): it may outlive its own destruction by one callback.
+	 * The callbacks are also destroyed on that worker once they return, and with them everything they captured: a capture
+	 * that is not safe to release off the game thread -- a NotThreadSafe TSharedPtr or TSharedRef, or an object whose
+	 * destructor touches a UObject or other game-thread state -- races there (task 8 review).
+	 */
+	TVaRestRequest OnHttpThread() &&
+	{
+		Spec->bOnHttpThread = true;
+		return MoveTemp(*this);
+	}
+
+	/** The JSON size cap for this request (decision 20); 0 = none */
+	TVaRestRequest MaxJsonBytes(int64 Bytes) &&
+	{
+		Spec->MaxJsonBytes = FMath::Max<int64>(0, Bytes);
+		return MoveTemp(*this);
+	}
+
 	TVaRestRequest Tag(FName InTag) &&
 	{
 		Spec->Tag = InTag;
@@ -283,6 +330,17 @@ public:
 	TVaRestRequest Priority(EVaRestPriority InPriority) &&
 	{
 		Spec->Priority = InPriority;
+		return MoveTemp(*this);
+	}
+
+	/**
+	 * Spec 3.2: weak. Once the owner is gone there are no callbacks and no further attempts; Task 11's cancellation path
+	 * enforces that. Until it lands, only OnHttpThread() reads the owner, to pin it for its callbacks (decision 28).
+	 */
+	TVaRestRequest Owner(const UObject* InOwner) &&
+	{
+		Spec->Owner = InOwner;
+		Spec->bHasOwner = InOwner != nullptr;
 		return MoveTemp(*this);
 	}
 
@@ -379,6 +437,8 @@ public:
 	FVaRestClient& WithNaming(EVaRestJsonNaming Naming);
 	FVaRestClient& WithTransport(TSharedRef<IVaRestTransport, ESPMode::ThreadSafe> Transport);
 	FVaRestClient& WithClock(TSharedRef<IVaRestClock, ESPMode::ThreadSafe> Clock);
+	/** The largest response body parsed as JSON (decision 20); 0 = none. Default: UVaRestHttpSettings::MaxJsonResponseBytes (32 MiB). */
+	FVaRestClient& WithMaxJsonBytes(int64 Bytes);
 	/** A custom stage (spec 4): Outer sees each logical request once, PerAttempt every attempt with its final headers */
 	FVaRestClient& Use(FVaRestStageRef Stage, EVaRestStageSlot Slot);
 
