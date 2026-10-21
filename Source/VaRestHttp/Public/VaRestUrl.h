@@ -45,8 +45,8 @@ namespace VaRest::Http
 	/**
 	 * OpenAPI N9's array styles (decision 34): adds Values to Query as Style says -- Repeat one pair per value, Csv/Ssv/Pipes
 	 * one pair, each value encoded on its own and joined by a literal ',', "%20" or '|' (RFC 6570 form
-	 * expansion; a delimiter inside a value stays encoded). The pair carries the delimiters as control characters that
-	 * only AppendQuery turns into the literal. No values: no pair.
+	 * expansion; a delimiter inside a value stays encoded). Every value after the first is a pair with a one-character
+	 * marker key (a lone surrogate) that only AppendQuery turns into the literal; values are never inspected. No values: no pair.
 	 */
 	VARESTHTTP_API void AddQueryValues(TArray<TPair<FString, FString>>& Query, FStringView Name, TConstArrayView<FString> Values, EVaRestQueryStyle Style);
 

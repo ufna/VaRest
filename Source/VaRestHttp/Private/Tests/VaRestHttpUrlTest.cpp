@@ -16,6 +16,12 @@ namespace VaRest::Http::UrlTestPrivate
 		return FString::ConstructFromPtrSize(reinterpret_cast<const UTF8CHAR*>(Bytes.GetData()), Bytes.Num());
 	}
 
+	/** Empty when Result holds an error: a regression fails the comparison instead of check()-crashing the run */
+	FString ValueOr(const TValueOrError<FString, FString>& Result)
+	{
+		return Result.HasValue() ? Result.GetValue() : FString(TEXT("<error>"));
+	}
+
 	/** A result that unexpectedly holds a value fails the assertion instead of check()-crashing the run on GetError() */
 	bool ErrorContains(const TValueOrError<FString, FString>& Result, const TCHAR* Needle)
 	{
@@ -130,11 +136,11 @@ bool FVaRestHttpPathTemplateTest::RunTest(const FString& Parameters)
 
 	const FParams Twice = { { TEXT("id"), TEXT("1") }, { TEXT("id"), TEXT("2") } };
 	TestEqualSensitive(TEXT("a placeholder used twice gets the value twice; the last Path() wins"),
-		ExpandPathTemplate(TEXT("/{id}/x/{id}"), Twice).GetValue(), FString(TEXT("/2/x/2")));
+		ValueOr(ExpandPathTemplate(TEXT("/{id}/x/{id}"), Twice)), FString(TEXT("/2/x/2")));
 	// '%' is encoded, not trusted (no double decoding), and '+' is not a space in a path
-	TestEqualSensitive(TEXT("% and + in a value"), ExpandPathTemplate(TEXT("/x/{v}"), FParams{ { TEXT("v"), TEXT("100%+1") } }).GetValue(), FString(TEXT("/x/100%25%2B1")));
-	TestEqualSensitive(TEXT("dots inside a value are fine"), ExpandPathTemplate(TEXT("/x/{v}"), FParams{ { TEXT("v"), TEXT("a..b") } }).GetValue(), FString(TEXT("/x/a..b")));
-	TestEqualSensitive(TEXT("no placeholders, no parameters"), ExpandPathTemplate(TEXT("/plain"), FParams()).GetValue(), FString(TEXT("/plain")));
+	TestEqualSensitive(TEXT("% and + in a value"), ValueOr(ExpandPathTemplate(TEXT("/x/{v}"), FParams{ { TEXT("v"), TEXT("100%+1") } })), FString(TEXT("/x/100%25%2B1")));
+	TestEqualSensitive(TEXT("dots inside a value are fine"), ValueOr(ExpandPathTemplate(TEXT("/x/{v}"), FParams{ { TEXT("v"), TEXT("a..b") } })), FString(TEXT("/x/a..b")));
+	TestEqualSensitive(TEXT("no placeholders, no parameters"), ValueOr(ExpandPathTemplate(TEXT("/plain"), FParams())), FString(TEXT("/plain")));
 
 	// Decision 10: every misuse is a Config error, never a silent "/users/"
 	const FParams Empty = { { TEXT("id"), TEXT("") } };
@@ -194,10 +200,19 @@ bool FVaRestHttpQueryTest::RunTest(const FString& Parameters)
 	AddQueryValues(Tricky, TEXT("csv"), TArray<FString>{ TEXT("a,b"), TEXT("c") }, EVaRestQueryStyle::Csv);
 	AddQueryValues(Tricky, TEXT("p"), TArray<FString>{ TEXT("a|b"), TEXT("c&d=e#f") }, EVaRestQueryStyle::Pipes);
 	AddQueryValues(Tricky, TEXT("m"), TArray<FString>{ TEXT("x\x01y"), TEXT("z") }, EVaRestQueryStyle::Csv);
+	Tricky.Emplace(TEXT("plain"), TEXT("a\x01" "b\x02" "c\x03" "d"));
 	Url = TEXT("https://h/x");
 	AppendQuery(Url, Tricky);
 	TestEqualSensitive(TEXT("delimiters in values stay encoded; structural characters cannot escape"), Url,
-		FString(TEXT("https://h/x?csv=a%2Cb,c&p=a%7Cb|c%26d%3De%23f&m=x%EF%BF%BDy,z")));
+		FString(TEXT("https://h/x?csv=a%2Cb,c&p=a%7Cb|c%26d%3De%23f&m=x%01y,z&plain=a%01b%02c%03d")));
+
+	// A marker key first in the list has nothing to continue: it is an ordinary pair, not dropped
+	FPairs Orphan;
+	AddQueryValues(Orphan, TEXT("k"), TArray<FString>{ TEXT("1"), TEXT("2") }, EVaRestQueryStyle::Csv);
+	Orphan.RemoveAt(0);
+	Url = TEXT("https://h/x");
+	AppendQuery(Url, Orphan);
+	TestEqualSensitive(TEXT("an orphan marker pair is encoded as an ordinary pair"), Url, FString(TEXT("https://h/x?%EF%BF%BD=2")));
 
 	Url = TEXT("https://h/x");
 	AppendQuery(Url, FPairs());
@@ -341,6 +356,10 @@ bool FVaRestHttpMultipartStreamTest::RunTest(const FString& Parameters)
 	FVaRestMultipart Multipart(TEXT("B"));
 	Multipart.AddField(TEXT("a"), TEXT("1")).AddFile(TEXT("f"), File, TEXT("image/png"));
 	TestTrue(TEXT("file parts"), Multipart.HasFiles());
+	if (!TestEqual(TEXT("two parts"), Multipart.GetParts().Num(), 2))
+	{
+		return false;
+	}
 	TestEqualSensitive(TEXT("the file name defaults to the clean file name"), Multipart.GetParts()[1].FileName, FString(TEXT("multipart-file.bin")));
 
 	const TValueOrError<FVaRestRequestBody, FString> Body = FVaRestRequestBody::FromMultipart(Multipart);
@@ -349,7 +368,10 @@ bool FVaRestHttpMultipartStreamTest::RunTest(const FString& Parameters)
 		return false;
 	}
 	const FVaRestRequestBody& B = Body.GetValue();
-	TestTrue(TEXT("streamed: memory, file, memory"), B.IsStreamed() && B.Segments.Num() == 3 && !B.Segments[1].FilePath.IsEmpty());
+	if (!TestTrue(TEXT("streamed: memory, file, memory"), B.IsStreamed() && B.Segments.Num() == 3 && !B.Segments[1].FilePath.IsEmpty()))
+	{
+		return false;
+	}
 
 	TArray<uint8> Expected = Utf8(TEXT("--B\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n1\r\n--B\r\nContent-Disposition: form-data; name=\"f\"; filename=\"multipart-file.bin\"\r\nContent-Type: image/png\r\n\r\n"));
 	Expected.Append(FileBytes);

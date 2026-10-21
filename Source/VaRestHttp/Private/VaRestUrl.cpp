@@ -89,35 +89,24 @@ namespace VaRest::Http::UrlPrivate
 		}
 	}
 
-	/** Review M2: AddQueryValues' delimiters, carried in a value as control characters (see there) */
-	constexpr TCHAR CsvDelimiter = 1;
-	constexpr TCHAR PipesDelimiter = 2;
-	constexpr TCHAR SsvDelimiter = 3;
+	/**
+	 * Review M2: the key of a continuation pair made by AddQueryValues (Csv, Pipes, Ssv), standing for the delimiter that
+	 * joins its value to the pair before it. Each is a lone low surrogate (U+DC01..U+DC03): valid text never holds one, since
+	 * a low surrogate only follows a high one (and ConvertForDocument turns a stray one into U+FFFD), so a plain value,
+	 * which is never inspected, cannot be mistaken for a marker. Only a whole key is read, never a value.
+	 */
+	constexpr TCHAR CsvMarker = 0xDC01;
+	constexpr TCHAR PipesMarker = 0xDC02;
+	constexpr TCHAR SsvMarker = 0xDC03;
 
-	bool IsDelimiterMarker(TCHAR C)
+	/** The literal a marker key stands for, or null when Key is not a marker */
+	const TCHAR* MarkerDelimiter(const FString& Key)
 	{
-		return C == CsvDelimiter || C == PipesDelimiter || C == SsvDelimiter;
-	}
-
-	FString EncodeQueryValue(const FString& Value)
-	{
-		FString Out;
-		Out.Reserve(Value.Len() + 8);
-		int32 Start = 0;
-		for (int32 i = 0; i <= Value.Len(); ++i)
+		if (Key.Len() != 1)
 		{
-			if (i < Value.Len() && !IsDelimiterMarker(Value[i]))
-			{
-				continue;
-			}
-			Out += VaRest::Http::PercentEncode(FStringView(*Value + Start, i - Start));
-			if (i < Value.Len())
-			{
-				Out += Value[i] == CsvDelimiter ? TEXT(",") : Value[i] == PipesDelimiter ? TEXT("|") : TEXT("%20");
-			}
-			Start = i + 1;
+			return nullptr;
 		}
-		return Out;
+		return Key[0] == CsvMarker ? TEXT(",") : Key[0] == PipesMarker ? TEXT("|") : Key[0] == SsvMarker ? TEXT("%20") : nullptr;
 	}
 
 	/** The host part of "http(s)://host/...": [Start, End) */
@@ -415,8 +404,19 @@ void VaRest::Http::AppendQuery(FString& Url, TConstArrayView<TPair<FString, FStr
 		Separator = TEXT('&');
 		bNeedSeparator = !(Url.EndsWith(TEXT("?")) || Url.EndsWith(TEXT("&")));
 	}
+	bool bFirst = true;
 	for (const TPair<FString, FString>& Pair : Query)
 	{
+		// A marker key continues the pair before it: "<delimiter><value>", no '&' and no name. At the start of the list
+		// there is nothing to continue, so it is an ordinary pair.
+		const TCHAR* Delimiter = bFirst ? nullptr : UrlPrivate::MarkerDelimiter(Pair.Key);
+		bFirst = false;
+		if (Delimiter != nullptr)
+		{
+			Url += Delimiter;
+			Url += PercentEncode(Pair.Value);
+			continue;
+		}
 		if (bNeedSeparator)
 		{
 			Url.AppendChar(Separator);
@@ -425,7 +425,7 @@ void VaRest::Http::AppendQuery(FString& Url, TConstArrayView<TPair<FString, FStr
 		Separator = TEXT('&');
 		Url += PercentEncode(Pair.Key);
 		Url.AppendChar(TEXT('='));
-		Url += UrlPrivate::EncodeQueryValue(Pair.Value);
+		Url += PercentEncode(Pair.Value);
 	}
 	Url += Fragment;
 }
@@ -446,23 +446,14 @@ void VaRest::Http::AddQueryValues(TArray<TPair<FString, FString>>& Query, FStrin
 	}
 	// Review M2: each value is encoded on its own and the delimiter is written literally (RFC 6570 form expansion,
 	// OpenAPI 3 style=form explode=false), so ["a,b","c"] is "a%2Cb,c", not the ambiguous "a%2Cb%2Cc". The pair type has
-	// no room for a flag, so the delimiter travels in the value as a control character that AppendQuery turns into the
-	// literal. A control character in a value itself is replaced first: it can then only ever be a delimiter, and a
-	// delimiter is never URL-structural (',', '|', "%20"), so no value can inject '&' or '#' through this.
-	const TCHAR Delimiter = Style == EVaRestQueryStyle::Csv ? UrlPrivate::CsvDelimiter : Style == EVaRestQueryStyle::Ssv ? UrlPrivate::SsvDelimiter : UrlPrivate::PipesDelimiter;
-	FString Joined;
-	for (int32 i = 0; i < Values.Num(); ++i)
+	// no room for a flag, so every value after the first is a pair whose key is a marker (see CsvMarker); values are
+	// stored as given.
+	const TCHAR Marker = Style == EVaRestQueryStyle::Csv ? UrlPrivate::CsvMarker : Style == EVaRestQueryStyle::Ssv ? UrlPrivate::SsvMarker : UrlPrivate::PipesMarker;
+	Query.Emplace(FString(Name), Values[0]);
+	for (int32 i = 1; i < Values.Num(); ++i)
 	{
-		if (i > 0)
-		{
-			Joined.AppendChar(Delimiter);
-		}
-		for (const TCHAR C : Values[i])
-		{
-			Joined.AppendChar(UrlPrivate::IsDelimiterMarker(C) ? TEXT('\xFFFD') : C);
-		}
+		Query.Emplace(FString(1, &Marker), Values[i]);
 	}
-	Query.Emplace(FString(Name), MoveTemp(Joined));
 }
 
 bool VaRest::Http::IsValidHeaderName(FStringView Name)
