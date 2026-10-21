@@ -115,8 +115,10 @@ namespace VaRest::Json
 	 * not in a cooked game, so every later argument would shift between PIE and a packaged client (spec 2.4).
 	 * A field StructToUtf8 omits for its value (an unset TOptional, a missing FVaRestJson: spec 2.2) is listed;
 	 * WritePropertyInternal writes null for it, since a positional argument cannot be absent. Empty for null and for a
-	 * struct written as a single value (FVaRestJson, FDateTime, FTimespan, FGuid, soft paths). Any thread; the
-	 * properties belong to Struct and live as long as it does.
+	 * struct written as a single value (FVaRestJson, FDateTime, FTimespan, FGuid, soft paths). Any thread. The list is
+	 * valid until Struct's layout changes: recompiling a Blueprint struct in the editor deletes its properties while the
+	 * struct object survives (Editor/KismetCompiler/Private/UserDefinedStructureCompilerUtils.cpp:225). So fetch it for
+	 * each use -- it reads the cached field map, which is cheap -- and never cache it.
 	 */
 	VARESTJSON_API TArray<const FProperty*> GetConvertedFieldsInternal(const UScriptStruct* Struct,
 		const FVaRestJsonConvertOptions& Options = FVaRestJsonConvertOptions());

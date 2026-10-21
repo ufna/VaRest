@@ -376,14 +376,18 @@ bool FVaRestJsonApiTextCultureTest::RunTest(const FString& Parameters)
 	// Spec 2.4: an FText is its culture-invariant string, through Set/Add/From as through a struct field, so a request
 	// body does not change with the player's language. German formats 1234.5 differently from the invariant culture.
 	FInternationalization& I18N = FInternationalization::Get();
-	const FString Previous = I18N.GetCurrentCulture()->GetName();
+	// SetCurrentCulture sets the language and the locale to one culture and clears the asset-group cultures
+	// (Internationalization.h:46-51): restoring the language name alone would leave the locale changed for every later
+	// test. Snapshot the whole state and restore it (Internationalization.h:39-44, :158, :163).
+	FInternationalization::FCultureStateSnapshot Previous;
+	I18N.BackupCultureState(Previous);
 	if (!TestTrue(TEXT("the de culture can be set"), I18N.SetCurrentCulture(TEXT("de"))))
 	{
 		return false;
 	}
 	ON_SCOPE_EXIT
 	{
-		I18N.SetCurrentCulture(Previous);
+		I18N.RestoreCultureState(Previous);
 	};
 	const FText Price = FText::AsNumber(1234.5);
 	const FString Invariant = Price.BuildSourceString();

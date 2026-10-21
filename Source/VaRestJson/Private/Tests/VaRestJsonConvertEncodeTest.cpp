@@ -404,7 +404,12 @@ bool FVaRestJsonEncodeWriterEntriesTest::RunTest(const FString& Parameters)
 	{
 		bAllWritten &= WritePropertyInternal(ArgWriter, Field, Field->ContainerPtrToValuePtr<void>(&Args), FVaRestJsonConvertOptions(), 1);
 	}
-	ArgWriter.EndArray();
+	// After a false write the writer is unusable (the contract in VaRestJsonWriterInternal.h): close the array only when
+	// every write succeeded, so a field that fails part-way fails this test instead of a check
+	if (bAllWritten)
+	{
+		ArgWriter.EndArray();
+	}
 	TestTrue(TEXT("every converted field writes"), bAllWritten);
 
 	TArray<uint8> ObjectBytes;

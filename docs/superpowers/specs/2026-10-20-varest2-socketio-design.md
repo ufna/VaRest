@@ -1278,7 +1278,7 @@ Checked against the M2 plan (Task 7 encode, Task 8 decode); details and exact si
 | # | Need | M2 as planned | Missing |
 | --- | --- | --- | --- |
 | J-1 | `TArray<uint8>` values inside structs/containers as attachments | no encode-side hook (`bBytesAsBase64` only) | `FVaRestJsonConvertOptions::BytesWriter` (`TFunction<bool(TConstArrayView<uint8>, FVaRestJson& OutReplacement)>`), the encode counterpart of Task 8's `BytesResolver` |
-| J-2 decode | positional args (field *i* ← `arg i`) | **covered**: Task 8 `JsonToProperty`, over `GetConvertedFieldsInternal(Struct)` (M2 final review I1: not `TFieldIterator<FProperty>`) | none |
+| J-2 decode | positional args (field *i* ← `arg i`) | **covered**: Task 8 `JsonToProperty`, over `GetConvertedFieldsInternal(Struct, Options)`, with the same `Options` as the encode side (the naming policy decides which of two colliding fields is kept) (M2 final review I1: not `TFieldIterator<FProperty>`) | none |
 | J-2 encode | positional args, `FVaRestJson` args and value-struct args written one pass into the packet's writer | `PropertyToJson` builds a DOM, but no public way to write a DOM, a value struct or a property into an open writer (`EmitNode` is private; `WriteStructMembersInternal` refuses value structs) | `WriteJsonInternal`, `WriteStructInternal`, `WritePropertyInternal` (`VaRestJsonWriterInternal.h`, same contract as `WriteStructMembersInternal`) |
 
 No other core changes: redaction additions use the core's per-client list (core §4.5).
