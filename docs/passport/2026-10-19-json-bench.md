@@ -1,5 +1,9 @@
 # JSON benchmark and spec 7.3 gate (2026-10-19)
 
+> **Correction (2026-10-21).** The timing tables below were taken with `-llm`, which slows the engine path about 4.4x.
+> Without LLM the 10 MiB parse ratio is **6.2x**, not 24-26x; see "Correction (2026-10-21): timings without LLM" at the
+> end. The memory columns and the spec 7.3 verdict (PASS) stand.
+
 ## Machine and build
 
 | | |
@@ -66,7 +70,7 @@ cost of that same copy, measured the same way, is subtracted.
 The "without UTF-8 validation" rows are a one-off measurement: `rapidjson::kParseValidateEncodingFlag` removed from `BaseFlags`
 in `VaRestJsonReader.cpp` (this disables RapidJSON's SIMD string scanner), rebuilt, three invocations, then the flag was restored
 and rebuilt. The change was not committed. Validation costs about 0.6 ms on 1 MiB (Parse 3.69 vs 3.09, ~16%) and on 10 MiB 0.4 ms for Parse (38.94 vs 38.57, ~1%, within noise) and 3.0 ms for ParseOwned (37.86 vs 34.82, ~8%). It is a small cost against a
-parse that is already ~26x faster than the engine, so an opt-out is low priority.
+parse that is already ~26x faster than the engine with `-llm` (6.2x without), so an opt-out is low priority.
 
 Retained memory is identical across the no-validation build, as expected.
 

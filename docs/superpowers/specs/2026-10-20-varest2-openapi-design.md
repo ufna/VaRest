@@ -186,7 +186,8 @@ and other tags (`OA-YAML-TAG`); unknown anchors (`OA-YAML-ALIAS`); bad indentati
 invalid escapes, reserved indicators `@`/`` ` `` starting a plain scalar (`OA-YAML-SYNTAX`); depth beyond core's
 512 (`OA-YAML-DEPTH`). Duplicate keys follow §2.2 (warning, last wins).
 
-JSON goes through `FVaRestJson::Parse` (core §2.1): 25× faster than `FJsonSerializer` on 10 MiB (core §7.3),
+JSON goes through `FVaRestJson::Parse` (core §2.1): about 6× faster than `FJsonSerializer` on 10 MiB (core §7.3; no-LLM
+timings in `docs/passport/2026-10-19-json-bench.md`, correction of 2026-10-21),
 exact error positions, 64-bit integers kept.
 
 ### 2.4 Limits
