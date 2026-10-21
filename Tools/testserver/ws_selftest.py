@@ -12,7 +12,6 @@ import json
 import os
 import random
 import socket
-import ssl
 import struct
 import subprocess
 import sys
@@ -116,10 +115,12 @@ class Client:
         self.send(ws.OP_CLOSE, struct.pack("!H", code) + reason)
 
     def shutdown(self):
-        try:
-            self.sock.close()
-        except OSError:
-            pass
+        """Ends TCP now: close() alone leaves the descriptor open while rfile (makefile) still references the socket"""
+        for end in (lambda: self.raw.shutdown(socket.SHUT_RDWR), self.rfile.close, self.sock.close, self.raw.close):
+            try:
+                end()
+            except OSError:
+                pass
 
 
 def raw(port, data):
@@ -236,7 +237,8 @@ class CoreTest(WsTestBase):
         # Review focus: what a hostile or broken client sends is closed with 1002 (RFC 6455 5.2, 5.4, 5.5, 7.4.1)
         cases = [
             ("unmasked", lambda c: c.send(ws.OP_TEXT, b"x", mask=False)),
-            ("126-byte control", lambda c: c.send(ws.OP_PING, b"p" * 126)),
+            # Header alone, no payload sent: the server must refuse from the header, not after reading 126 bytes
+            ("126-byte control", lambda c: c.sock.sendall(bytes([0x80 | ws.OP_PING, 0x80 | 126]) + struct.pack("!H", 126))),
             ("fragmented control", lambda c: c.send(ws.OP_PING, b"p", fin=False)),
             ("continuation first", lambda c: c.send(ws.OP_CONT, b"x")),
             ("message in a message", lambda c: (c.send(ws.OP_TEXT, b"a", fin=False), c.send(ws.OP_TEXT, b"b"))),
@@ -263,11 +265,39 @@ class CoreTest(WsTestBase):
         try:
             client = self.connect("/ws/echo")
             client.send(ws.OP_TEXT, b"a" * 600, fin=False)
-            client.send(ws.OP_CONT, b"b" * 600)
+            # The second frame's header declares 600 more bytes (1200 > 1000) and its payload is never sent
+            client.sock.sendall(bytes([0x80 | ws.OP_CONT, 0x80 | 126]) + struct.pack("!H", 600))
             kind, payload = client.message()
             self.assertEqual((kind, close_code(payload)), ("close", 1009))
         finally:
             ws.MAX_MESSAGE = saved
+
+    def test_header_error_is_not_followed_by_parsing_the_rest(self):
+        # After a refused header the bytes behind it are not frames. These ones spell a masked CLOSE: the journal must
+        # not show a "close" the client never sent, and must say how the connection really ended
+        key = uuid.uuid4().hex
+        client = self.connect("/ws/echo?key=" + key)
+        client.sock.sendall(bytes([0x80 | ws.OP_PING, 0x80 | 126]) + struct.pack("!H", 126) + bytes([0x88, 0x80]) + b"\x00" * 4)
+        kind, payload = client.message()
+        self.assertEqual((kind, close_code(payload)), ("close", 1002))
+        started = time.monotonic()
+        client.shutdown()
+        journal = self.ended(key)
+        self.assertLess(time.monotonic() - started, 3)
+        self.assertEqual(self.of(journal, "close"), [])
+        self.assertEqual([event["ev"] for event in journal["events"] if event["ev"] in ("frame", "eof", "timeout")], ["eof"])
+        self.assertEqual(self.of(journal, "eof")[0]["discarded"], 6)
+        # A client that does not end TCP: the drain is bounded and says "timeout"
+        saved = ws.DRAIN
+        ws.DRAIN = 0.3
+        try:
+            key = uuid.uuid4().hex
+            client = self.connect("/ws/echo?key=" + key)
+            client.sock.sendall(bytes([0x80 | ws.OP_PING, 0x80 | 126]) + struct.pack("!H", 126))
+            client.message()
+            self.assertEqual([event["ev"] for event in self.of(self.ended(key), "timeout")], ["timeout"])
+        finally:
+            ws.DRAIN = saved
 
     def test_invalid_utf8_closes_1007(self):
         key = uuid.uuid4().hex
@@ -317,6 +347,186 @@ class CoreTest(WsTestBase):
         connection.getresponse().read()
         connection.close()
         self.assertEqual(self.journal(key, wait_ms=0)["connections"], 0)
+
+
+class ScenarioTest(WsTestBase):
+    def test_close_with_code_message_and_answer(self):
+        key = uuid.uuid4().hex
+        client = self.connect("/ws/close/4001?msg=hi&reason=bye&key=" + key)
+        self.assertEqual(client.message(), ("text", b"hi"))
+        self.assertEqual(client.message(), ("close", struct.pack("!H", 4001) + b"bye"))
+        client.close(4001)
+        journal = self.ended(key)
+        self.assertEqual(self.of(journal, "close")[0]["code"], 4001)
+        self.assertEqual(len([event for event in self.of(journal, "sent") if event["op"] == ws.OP_CLOSE]), 1)
+
+    def test_close_payload_shapes(self):
+        self.assertEqual(self.connect("/ws/close/none").message(), ("close", b""))
+        self.assertEqual(self.connect("/ws/close/onebyte").message(), ("close", b"\x03"))
+        self.assertEqual(self.connect("/ws/close/1005").message(), ("close", struct.pack("!H", 1005)))
+        self.assertEqual(self.connect("/ws/close/65535").message(), ("close", struct.pack("!H", 65535)))
+        self.assertEqual(self.connect("/ws/close/70000").status, 400)
+        self.assertEqual(self.connect("/ws/close/1000?reason=" + "r" * 124).status, 400)
+
+    def test_drop_without_a_close_frame(self):
+        key = uuid.uuid4().hex
+        client = self.connect("/ws/drop?after_ms=50&msg=bye&key=" + key)
+        self.assertEqual(client.message(), ("text", b"bye"))
+        with self.assertRaises(EOFError):
+            client.message()
+        self.assertEqual(len(self.of(self.ended(key), "fin")), 1)
+        client = self.connect("/ws/drop?rst=1")
+        with self.assertRaises((EOFError, ConnectionResetError)):
+            client.message()
+
+    def test_silent_answers_nothing(self):
+        key = uuid.uuid4().hex
+        client = self.connect("/ws/silent?key=" + key)
+        client.send(ws.OP_PING, b"anyone?")
+        client.send(ws.OP_TEXT, b"hello?")
+        # Completion before silence: the server has read both frames, and nothing came back
+        deadline = time.monotonic() + 5
+        while len(self.of(self.journal(key, wait_ms=0), "frame")) < 2 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(len(self.of(self.journal(key, wait_ms=0), "frame")), 2)
+        client.sock.settimeout(0.5)
+        with self.assertRaises((socket.timeout, TimeoutError)):
+            client.recv()
+
+    def test_noecho_never_answers_the_close(self):
+        key = uuid.uuid4().hex
+        client = self.connect("/ws/noecho?key=" + key)
+        client.send(ws.OP_TEXT, b"x")
+        self.assertEqual(client.message(), ("text", b"x"))
+        client.close(1000)
+        deadline = time.monotonic() + 5
+        while not self.of(self.journal(key, wait_ms=0), "close") and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(len(self.of(self.journal(key, wait_ms=0), "close")), 1)
+        client.sock.settimeout(0.5)
+        with self.assertRaises((socket.timeout, TimeoutError)):
+            client.recv()
+        client.shutdown()
+        journal = self.ended(key)
+        self.assertLess(self.of(journal, "close")[0]["t"], self.of(journal, "eof")[0]["t"])
+
+    def test_serverping(self):
+        key = uuid.uuid4().hex
+        client = self.connect("/ws/serverping?count=2&interval_ms=50&size=20&unsolicited=1&key=" + key)
+        self.assertEqual(client.message(), ("pong", b"unsolicited"))
+        for index in range(2):
+            kind, payload = client.message()
+            self.assertEqual((kind, payload), ("ping", (b"ping-%d" % index).ljust(20, b".")))
+            client.send(ws.OP_PONG, payload)
+        self.assertEqual(client.message(), ("text", b"pings-done"))
+        client.close()
+        journal = self.ended(key)
+        self.assertEqual(len([event for event in self.of(journal, "frame") if event["op"] == ws.OP_PONG]), 2)
+
+    def test_fragment_offsets(self):
+        key = uuid.uuid4().hex
+        text = "Привет".encode("utf-8")
+        client = self.connect("/ws/fragment?at=3,7&text=%s&key=%s" % (urllib.parse.quote("Привет"), key))
+        self.assertEqual([client.recv() for _ in range(3)], [(0, ws.OP_TEXT, text[:3]), (0, ws.OP_CONT, text[3:7]), (1, ws.OP_CONT, text[7:])])
+        client = self.connect("/ws/fragment?cyrillic=100&split_inside=10&ping_between=1&key=" + key)
+        first = client.recv()
+        self.assertEqual(client.recv(), (1, ws.OP_PING, b"between"))
+        rest = client.recv()
+        self.assertEqual((first[0], first[1], rest[0], rest[1]), (0, ws.OP_TEXT, 1, ws.OP_CONT))
+        # The cut lands inside a two-byte letter: the second frame starts with a continuation byte
+        self.assertEqual(rest[2][0] & 0xC0, 0x80)
+        self.assertEqual(len((first[2] + rest[2]).decode("utf-8").encode("utf-8")), 100)
+        sent = self.of(self.journal(key, connections=2, wait_ms=0), "message_sent", conn=2)[0]
+        self.assertEqual(sent["frames_at"], [len(first[2])])
+        self.assertEqual(self.connect("/ws/fragment?text=abc&at=5").status, 400)
+
+    def test_large(self):
+        key = uuid.uuid4().hex
+        client = self.connect("/ws/large?bytes=100000&ascii=0&frame=4096&key=" + key)
+        frames = [client.recv()]
+        while not frames[-1][0]:
+            frames.append(client.recv())
+        self.assertEqual(len(frames), 25)
+        data = b"".join(frame[2] for frame in frames)
+        self.assertEqual(len(data), 100000)
+        data.decode("utf-8")
+        self.assertEqual(self.of(self.journal(key, wait_ms=0), "message_sent")[0]["sha256"], hashlib.sha256(data).hexdigest())
+        self.assertEqual(self.connect("/ws/large?bytes=1000&binary=1&seed=3").message(), ("binary", random.Random(3).randbytes(1000)))
+        self.assertEqual(self.connect("/ws/large?bytes=%d" % (ws.MAX_MESSAGE + 1)).status, 400)
+
+    def test_order(self):
+        client = self.connect("/ws/order?n=6")
+        self.assertEqual([client.message() for _ in range(6)],
+                         [("text", b"t0"), ("binary", struct.pack("!I", 1)), ("text", b"t2"), ("binary", struct.pack("!I", 3)),
+                          ("text", b"t4"), ("binary", struct.pack("!I", 5))])
+
+    def test_headers(self):
+        client = self.connect("/ws/headers?x=1", headers=[("X-Probe", "Value With Case")])
+        kind, data = client.message()
+        seen = json.loads(data)
+        self.assertEqual(kind, "text")
+        self.assertIn(["X-Probe", "Value With Case"], seen["headers"])
+        self.assertEqual((seen["path"], seen["query"]), ("/ws/headers", {"x": ["1"]}))
+
+    def test_protocol_selection(self):
+        chosen = self.connect("/ws/protocol?select=chat.v2", protocols=("chat.v1",))
+        self.assertEqual((chosen.status, chosen.headers.get("sec-websocket-protocol")), (101, "chat.v2"))
+        self.assertNotIn("sec-websocket-protocol", self.connect("/ws/protocol?select=", protocols=("chat.v1",)).headers)
+        self.assertEqual(self.connect("/ws/protocol?select=a%0D%0Ab").status, 400)
+
+    def test_auth_uses_the_http_tokens(self):
+        refused = self.connect("/ws/auth")
+        self.assertEqual((refused.status, refused.headers.get("www-authenticate")), (401, "Bearer"))
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        connection.request("POST", "/login", b'{"user":"neo","password":"trinity"}')
+        tokens = json.loads(connection.getresponse().read())
+        connection.close()
+        self.assertTrue(self.connect("/ws/auth", headers=[("Authorization", "Bearer " + tokens["accessToken"])]).accepted)
+        self.assertTrue(self.connect("/ws/auth?token=" + tokens["accessToken"]).accepted)
+
+    def test_flaky_noupgrade_hang_slowupgrade(self):
+        key = uuid.uuid4().hex
+        self.assertEqual(self.connect("/ws/flaky?n=1&key=" + key).status, 0)
+        self.assertTrue(self.connect("/ws/flaky?n=1&key=" + key).accepted)
+        self.assertEqual(self.connect("/ws/noupgrade").status, 0)
+        started = time.monotonic()
+        self.assertEqual(self.connect("/ws/hang?ms=300").status, 0)
+        self.assertGreaterEqual(time.monotonic() - started, 0.25)
+        started = time.monotonic()
+        self.assertTrue(self.connect("/ws/slowupgrade?ms=300").accepted)
+        self.assertGreaterEqual(time.monotonic() - started, 0.25)
+
+    def test_badutf8(self):
+        self.assertEqual(self.connect("/ws/badutf8?where=text").recv(), (1, ws.OP_TEXT, b"ok \xc3\x28"))
+        self.assertEqual(self.connect("/ws/badutf8?where=close").message(), ("close", struct.pack("!H", 1000) + b"\xc3\x28"))
+        self.assertEqual(self.connect("/ws/badutf8?where=nope").status, 400)
+
+    def test_broken_handshakes(self):
+        wrong = self.connect("/ws/broken?what=accept")
+        self.assertEqual((wrong.status, wrong.accepted), (101, False))
+        self.assertNotIn("upgrade", self.connect("/ws/broken?what=upgrade").headers)
+        self.assertNotIn("connection", self.connect("/ws/broken?what=connection").headers)
+
+    def test_sink_pushes_and_echoes_nothing(self):
+        key = uuid.uuid4().hex
+        client = self.connect("/ws/sink?push=2&after_frames=1&key=" + key)
+        client.send(ws.OP_TEXT, b"a")
+        self.assertEqual(client.message(), ("text", b"2"))
+        client.send(ws.OP_TEXT, b"b")
+        client.send(ws.OP_PING, b"p")
+        # The PONG is the next frame: "b" was not echoed before it
+        self.assertEqual(client.message(), ("pong", b"p"))
+        client.close()
+        self.assertEqual(client.message()[0], "close")
+        self.assertEqual([event.get("text") for event in self.of(self.ended(key), "message")], ["a", "b"])
+
+    def test_flood(self):
+        key = uuid.uuid4().hex
+        client = self.connect("/ws/flood?bytes=262144&chunk=65536&key=" + key)
+        self.assertEqual([(kind, len(data)) for kind, data in (client.message() for _ in range(4))], [("binary", 65536)] * 4)
+        client.close()
+        self.assertEqual(client.message()[0], "close")
+        self.assertEqual(self.of(self.ended(key), "flood")[0]["bytes"], 262144)
 
 
 class ScriptModeTest(unittest.TestCase):
