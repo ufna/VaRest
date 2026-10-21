@@ -244,8 +244,10 @@ namespace VaRest::Http::PipelinePrivate
 					// An earlier attempt's file; removed off the game thread (spec 1: disk IO on UE::Tasks)
 					UE::Tasks::Launch(TEXT("VaRest.DeleteTemp"), [Stale = Ex.TempFile] { IFileManager::Get().Delete(*Stale, false, false, true); });
 				}
-				// Next to the destination: the same file system, so the final rename is a rename (spec 3.2: "atomic rename on success")
-				Ex.TempFile = FString::Printf(TEXT("%s.varest-%llu-%d.part"), *Ex.SaveTo, Ex.RequestId, Ex.Attempt);
+				// Next to the destination: the same file system, so the final rename is a rename (spec 3.2: "atomic rename on
+				// success"). A new name for every start, not every attempt: a stage after the attempt boundary may re-issue
+				// (auth replay, spec 4), and the stale delete above must never name the live file (task 10 review I1).
+				Ex.TempFile = MakeTempFileName(Ex.SaveTo, Ex.RequestId);
 			}
 			FVaRestTransportRequest Request;
 			Request.RequestId = Ex.RequestId;
@@ -533,7 +535,10 @@ void VaRest::Http::FClientState::OnChainDone(const FVaRestExchangeRef& Exchange,
 	}
 
 	const bool bHasBody = Finish.Body.Num() > 0 || Finish.bBodyInFile;
-	const bool bTask = !Finish.TempFile.IsEmpty() // a download to finish or clean up: disk IO, never on the game thread
+	// A download to finish (SaveTo's success, from the transport or from a stage, review M1) or to clean up: disk IO, never
+	// on the game thread
+	const bool bDownload = !Finish.TempFile.IsEmpty() || (!Finish.SaveTo.IsEmpty() && !Finish.Error.IsError());
+	const bool bTask = bDownload
 		|| (Finish.Error.IsError() ? Finish.Error.Kind == EVaRestErrorKind::Http && bHasBody : Ex.Handler->DecodesBody() && bHasBody);
 	if (!bTask)
 	{
@@ -619,11 +624,11 @@ void VaRest::Http::FClientState::Complete(const FVaRestExchangeRef& Exchange, FF
 		// Decision 4: the game thread has seen the result (Completed, Task 15); the callbacks run on a worker.
 		// Decision 28 (review C-5): the owner, live here on the game thread, is pinned until the callbacks return -- a
 		// worker may not ask a TWeakObjectPtr (WeakObjectPtr.h:290-300), and GC could free the owner under a [this]
-		// callback. TStrongObjectPtr takes its reference here (StrongObjectPtrTemplates.h:57-61 -> Reset, :167 AddRef, with
-		// the incremental-GC barrier of FUObjectItem::AddRef, UObjectArray.h:347-366) and drops it on the worker, which
-		// 5.8.1 allows: ~TStrongObjectPtr -> Reset -> ReleaseUObject (StrongObjectPtrTemplates.h:47-50, :122-131;
-		// StrongObjectPtr.cpp:10-16) is an atomic decrement (UObjectArray.h:375-386) whose root-dirtying takes a try-lock
-		// or queues lock-free, from any thread (GarbageCollection.cpp:701-719).
+		// callback. TStrongObjectPtr takes its reference here (Reset(InNewObject), StrongObjectPtrTemplates.h:152-169,
+		// AddRef at :167, with the incremental-GC barrier of FUObjectItem::AddRef, UObjectArray.h:347-366) and drops it on
+		// the worker, which 5.8.1 allows: ~TStrongObjectPtr -> Reset -> ReleaseUObject (StrongObjectPtrTemplates.h:47-50,
+		// :122-131; StrongObjectPtr.cpp:10-16) is an atomic decrement (UObjectArray.h:375-386) whose root-dirtying takes a
+		// try-lock or queues lock-free, from any thread (GarbageCollection.cpp:701-719).
 		TStrongObjectPtr<const UObject> Pin;
 		if (Ex.bHasOwner)
 		{

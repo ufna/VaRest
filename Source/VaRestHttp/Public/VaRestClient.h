@@ -70,7 +70,10 @@ public:
 
 	/** The request id, also in log lines (#57) and traces (IN-10, IN-16) */
 	uint64 GetId() const { return Id; }
-	/** Any thread: sent and not finished */
+	/**
+	 * Any thread: sent and not finished. With OnHttpThread(), false once the result is handed to the worker; the callbacks
+	 * may still be running.
+	 */
 	bool IsActive() const;
 
 private:
@@ -287,7 +290,11 @@ public:
 	 * (decision 9): a body on disk has nothing to decode. The file is written on the HTTP thread, as the engine's own
 	 * SetResponseBodyReceiveStream to a file archive does (decision 31); the rename runs on a UE::Tasks worker. A Cancel()
 	 * that lands after the rename delivers the success with the saved file: the destination was already replaced, and
-	 * success is the truthful outcome (review M-4).
+	 * success is the truthful outcome (review M-4). The rename replaces the destination atomically everywhere but on
+	 * Windows, whose MoveFileW will not replace a file: there the old file is first moved aside to a .bak next to it, and
+	 * moved back if the new one cannot be moved in, so a crash between those two renames leaves the old file only as that
+	 * .bak. An error response's body goes to the temp file too; its first 4 KiB are read back for FVaRestError, so a JSON
+	 * error body larger than that is not parsed into FVaRestError::Body and arrives only as its RawBody prefix.
 	 */
 	TVaRestRequest SaveTo(FStringView FilePath) && requires (std::is_void_v<T> || std::is_same_v<T, FVaRestResponse>)
 	{

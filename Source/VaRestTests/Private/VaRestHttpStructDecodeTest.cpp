@@ -83,7 +83,8 @@ bool FVaRestHttpEmptyBodiesTest::RunTest(const FString& Parameters)
 	FTestRig Rig;
 	Rig.Fake->Enqueue(Json(200, ""));
 	Rig.Fake->Enqueue(Json(200, ""));
-	Rig.Fake->Enqueue(Json(204, ""));
+	// Review M3: a 204 with a stray body, so this case rests on the 204 rule (spec 3.2), not on an empty body
+	Rig.Fake->Enqueue(Json(204, "garbage"));
 	auto JsonEmpty = MakeOutcome<FVaRestJson>();
 	auto StructEmpty = MakeOutcome<FVaRestHttpTestProfile>();
 	auto NoContent = MakeOutcome<FVaRestHttpTestProfile>();
@@ -94,7 +95,7 @@ bool FVaRestHttpEmptyBodiesTest::RunTest(const FString& Parameters)
 	// Spec 3.2: "204/empty -> T default" -- a 200 with an empty JSON body included
 	TestTrue(TEXT("an empty 200 JSON body: success with an invalid handle"), JsonEmpty->SuccessCalls == 1 && JsonEmpty->Value.IsSet() && !JsonEmpty->Value->IsValid());
 	TestTrue(TEXT("an empty 200 struct body: success with the defaults"), StructEmpty->SuccessCalls == 1 && StructEmpty->Value.IsSet() && StructEmpty->Value->Score == 7);
-	TestTrue(TEXT("204: success with the defaults"), NoContent->SuccessCalls == 1 && NoContent->Value.IsSet());
+	TestTrue(TEXT("204: success with the defaults, whatever its body"), NoContent->SuccessCalls == 1 && NoContent->Value.IsSet() && NoContent->Value->Score == 7);
 	return true;
 }
 

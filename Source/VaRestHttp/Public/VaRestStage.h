@@ -136,7 +136,10 @@ public:
 	int32 GetAttempt() const { return Attempt; }
 	/** Any thread */
 	bool IsCancelRequested() const { return bCancelRequested.load(); }
-	/** Any thread: the callbacks have been delivered (or dropped) */
+	/**
+	 * Any thread: the callbacks have been delivered (or dropped). With OnHttpThread(), true once the result is handed to the
+	 * worker; the callbacks may still be running.
+	 */
 	bool IsDone() const { return bDone.load(); }
 
 	// ---- VaRestHttp internals. Set by Send on the sending thread, read on the game thread after the hop:
