@@ -98,6 +98,8 @@ if [[ "${VAREST_NO_TESTSERVER:-0}" != "1" ]]; then
 	TLS_URL="$(sed -n 2p "$SERVER_URL_FILE")"
 	if [[ -n "$TLS_URL" ]]; then
 		SERVER_ARGS+=("-VaRestTestServerTls=$TLS_URL")
+	else
+		echo "run_tests: the test server's ready file has no TLS URL; -VaRestTestServerTls is not passed and TLS tests will fail" >&2
 	fi
 fi
 

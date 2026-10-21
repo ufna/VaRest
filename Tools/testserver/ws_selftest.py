@@ -616,6 +616,49 @@ class WssTest(unittest.TestCase):
         client.close()
         self.assertEqual(client.message()[0], "close")
 
+    def trusted(self):
+        return ssl.create_default_context(cafile=os.path.join(server.CERTS_DIR, "test-ca.pem"))
+
+    def connect(self, path):
+        client = Client(self.port, path, tls=self.trusted())
+        self.addCleanup(client.shutdown)
+        return client
+
+    def journal(self, key):
+        context = self.trusted()
+        connection = http.client.HTTPSConnection("localhost", self.port, timeout=30, context=context)
+        try:
+            connection.request("GET", "/ws/journal?key=%s&connections=1&wait_ms=5000" % key)
+            journal = json.loads(connection.getresponse().read())
+        finally:
+            connection.close()
+        self.assertTrue(journal["ended"], journal)
+        return journal
+
+    def test_routes_that_shut_the_socket_down_over_tls(self):
+        # Python's SSLSocket.shutdown drops the SSL object: the drop, close and drain paths of ws.py must still end
+        # the connection and journal what they did, as over plain TCP (they call shutdown(), then read)
+        key = uuid.uuid4().hex
+        client = self.connect("/ws/drop?msg=bye&key=" + key)
+        self.assertEqual(client.message(), ("text", b"bye"))
+        with self.assertRaises((EOFError, ssl.SSLError, OSError)):
+            client.message()
+        self.assertEqual([e["ev"] for e in self.journal(key)["events"] if e["ev"] in ("fin", "rst")], ["fin"])
+        key = uuid.uuid4().hex
+        client = self.connect("/ws/close/1000?key=" + key)
+        self.assertEqual(client.message()[0], "close")
+        client.close()
+        self.assertEqual([e["ev"] for e in self.journal(key)["events"] if e["ev"] == "close"], ["close"])
+        # A refused header: the rest of the stream is drained as bytes, to the client's end
+        key = uuid.uuid4().hex
+        client = self.connect("/ws/echo?key=" + key)
+        client.sock.sendall(bytes([0x80 | ws.OP_PING, 0x80 | 126]) + struct.pack("!H", 126) + bytes([0x88, 0x80]) + b"\x00" * 4)
+        self.assertEqual(close_code(client.message()[1]), 1002)
+        client.shutdown()
+        events = self.journal(key)["events"]
+        self.assertEqual([e["ev"] for e in events if e["ev"] in ("close", "eof", "timeout", "error")], ["eof"])
+        self.assertEqual([e for e in events if e["ev"] == "eof"][0]["discarded"], 6)
+
 
 class ScriptModeTest(unittest.TestCase):
     """ws.py loaded by server.py, and started by itself: one module either way (WebSocket spec 16.3)"""

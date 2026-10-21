@@ -612,8 +612,14 @@ class Server(http.server.ThreadingHTTPServer):
     def handle_error(self, request, client_address):
         # A client that cancels, times out or drops a keep-alive connection resets it, and a TLS client may refuse our
         # test certificate or speak plain HTTP to the TLS port: test scenarios, not errors
-        quiet = (ConnectionResetError, BrokenPipeError, TimeoutError, socket.timeout) + ((ssl.SSLError,) if ssl is not None else ())
-        if isinstance(sys.exc_info()[1], quiet):
+        error = sys.exc_info()[1]
+        if ssl is not None and isinstance(error, ssl.SSLError):
+            # Swallowed, but a TLS client library that fails against this listener (the libwebsockets probe) needs the
+            # reason: VAREST_TESTSERVER_VERBOSE=1 puts it in the server log
+            if os.environ.get("VAREST_TESTSERVER_VERBOSE") == "1":
+                print("VaRestTestServer: TLS error from %s:%s: reason=%s: %s" % (client_address[0], client_address[1], getattr(error, "reason", None), error), file=sys.stderr, flush=True)
+            return
+        if isinstance(error, (ConnectionResetError, BrokenPipeError, TimeoutError, socket.timeout)):
             return
         super().handle_error(request, client_address)
 
@@ -716,9 +722,11 @@ def main(argv=None):
         try:
             extras.append(make_tls_server(args.host, args.tls_port))
         except OSError as error:
-            # Review M-11: the runner only says "did not start -- see <log>"; this line names the file that failed
-            # (ssl.SSLError is an OSError: a certificate that does not load lands here too)
-            print("VaRestTestServer: cannot start the TLS listener: %s: %s" % (getattr(error, "filename", None) or CERTS_DIR, error), file=sys.stderr, flush=True)
+            # Review M-11: the runner only says "did not start -- see <log>"; this line names what failed. Only an error
+            # that carries a file name gets one (a missing certificate); a bind failure or a certificate that does not
+            # load (ssl.SSLError is an OSError) says which step instead of pointing at the directory
+            where = getattr(error, "filename", None) or ("loading the certificate chain" if ssl is not None and isinstance(error, ssl.SSLError) else "binding %s:%d" % (args.host, args.tls_port))
+            print("VaRestTestServer: cannot start the TLS listener: %s: %s" % (where, error), file=sys.stderr, flush=True)
             server.server_close()
             return 2
         urls.append("https://%s:%d" % (args.host, extras[0].server_address[1]))

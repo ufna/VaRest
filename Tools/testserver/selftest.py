@@ -526,6 +526,45 @@ class LifecycleTest(unittest.TestCase):
         self.assertIn(b"cannot start the TLS listener", result.stderr)
         self.assertIn(b"test-server", result.stderr)
 
+    def test_tls_port_in_use_says_binding_not_a_directory(self):
+        # Review minor: an error without a file name must not be reported against the certs directory
+        with socket.socket() as taken:
+            taken.bind(("127.0.0.1", 0))
+            taken.listen(1)
+            result = subprocess.run([sys.executable, "-I", os.path.join(HERE, "server.py"), "--port", "0", "--tls-port",
+                                     str(taken.getsockname()[1])], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=20)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(b"cannot start the TLS listener: binding 127.0.0.1:", result.stderr)
+        self.assertNotIn(b"certs", result.stderr)
+
+    def test_verbose_logs_swallowed_tls_errors(self):
+        # Review minor: a plain-HTTP client on the TLS port is a quiet scenario, but VAREST_TESTSERVER_VERBOSE=1 says why
+        for verbose in ("1", "0"):
+            environment = dict(os.environ, VAREST_TESTSERVER_VERBOSE=verbose)
+            with tempfile.TemporaryDirectory() as directory:
+                ready = os.path.join(directory, "url")
+                process = subprocess.Popen([sys.executable, "-I", os.path.join(HERE, "server.py"), "--port", "0", "--tls-port", "0",
+                                            "--ready-file", ready], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=environment)
+                try:
+                    deadline = time.monotonic() + 10
+                    while not os.path.exists(ready) and time.monotonic() < deadline:
+                        time.sleep(0.05)
+                    with open(ready, encoding="utf-8") as stream:
+                        port = urllib.parse.urlsplit(stream.read().split()[1]).port
+                    with socket.create_connection(("127.0.0.1", port), timeout=5) as plain:
+                        plain.sendall(b"GET /echo HTTP/1.1\r\nHost: x\r\n\r\n")
+                        try:
+                            plain.recv(65536)
+                        except OSError:
+                            pass
+                    time.sleep(0.5)
+                finally:
+                    process.kill()
+                    errors = process.stderr.read()
+                    process.wait()
+                    process.stderr.close()
+            self.assertEqual(b"TLS error from" in errors, verbose == "1", errors)
+
 
 class PluginTest(unittest.TestCase):
     def test_script_mode_plugin_shares_the_module(self):
