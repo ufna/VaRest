@@ -9,6 +9,10 @@
 # VAREST_EXTRA_ARGS is appended to the editor command line (e.g. -llm for the benchmarks).
 # VAREST_TEST_TIMEOUT (seconds, default 1800) bounds the editor run: a hung test fails the run
 # with "timed out" instead of blocking forever.
+# The runner starts Tools/testserver/server.py on a port the OS picks and passes its URL to the editor as
+# -VaRestTestServer=<url> for the VaRest.Integration.* tests (M3 plan decision 14); it stops the server on exit, and the
+# server also exits by itself when this script dies (--parent-pid). VAREST_NO_TESTSERVER=1 skips it: integration tests
+# then fail, by design. The server's output goes to <Host>/Saved/Logs/VaRestTestServer.<runner pid>.log.
 #
 # Results are read from the run's own log file, never from stdout: an interleaved
 # UnrealTraceServer fork clobbers the tail of stdout on Linux (VaCuus dev-loop note).
@@ -57,6 +61,40 @@ if [[ $BUILD -eq 1 ]]; then
 		-project="$PROJECT" || { echo "run_tests: build failed" >&2; exit 2; }
 fi
 
+SERVER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/testserver"
+# $$ in the names: two runners at once each get their own (review M-13)
+SERVER_URL_FILE="$HOST/Saved/Logs/VaRestTestServer.$$.url"
+SERVER_LOG="$HOST/Saved/Logs/VaRestTestServer.$$.log"
+SERVER_PID=""
+stop_server() {
+	# Our own child, by PID (never by name or pattern)
+	if [[ -n "$SERVER_PID" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
+		kill "$SERVER_PID" 2>/dev/null || true
+		wait "$SERVER_PID" 2>/dev/null || true
+	fi
+	rm -f "$SERVER_URL_FILE"
+}
+trap stop_server EXIT
+SERVER_ARGS=()
+if [[ "${VAREST_NO_TESTSERVER:-0}" != "1" ]]; then
+	command -v python3 >/dev/null || { echo "run_tests: python3 not found; the integration tests need it (VAREST_NO_TESTSERVER=1 runs without)" >&2; exit 2; }
+	mkdir -p "$(dirname "$SERVER_URL_FILE")"
+	rm -f "$SERVER_URL_FILE"
+	# --fixtures-dir: the benchmark fixtures of Tools/gen_bench_json.py, for Bench.VaRest.Http.RequestPath (Task 17).
+	# A simple command run with &: bash forks once and execs python3, so the server is this shell's direct child and its
+	# getppid() is $$ until this shell dies (review M-13)
+	python3 -I "$SERVER_DIR/server.py" --host 127.0.0.1 --port 0 --ready-file "$SERVER_URL_FILE" --parent-pid $$ \
+		--fixtures-dir "$HOST/Saved/VaRestBench" >"$SERVER_LOG" 2>&1 &
+	SERVER_PID=$!
+	for _ in $(seq 1 100); do
+		[[ -s "$SERVER_URL_FILE" ]] && break
+		kill -0 "$SERVER_PID" 2>/dev/null || break
+		sleep 0.1
+	done
+	[[ -s "$SERVER_URL_FILE" ]] || { echo "run_tests: the test server did not start -- see $SERVER_LOG" >&2; exit 2; }
+	SERVER_ARGS=("-VaRestTestServer=$(head -n 1 "$SERVER_URL_FILE")")
+fi
+
 TIMEOUT="${VAREST_TEST_TIMEOUT:-1800}"
 PIDFILE="$HOST/Saved/Logs/VaRestTests.pid"
 rm -f "$LOG" "$PIDFILE"
@@ -73,7 +111,7 @@ set +e
 timeout --foreground --kill-after=30 "$TIMEOUT" bash -c 'echo $$ > "$0"; exec "$@"' "$PIDFILE" \
 	"$ENGINE/Engine/Binaries/Linux/UnrealEditor-Cmd" "$PROJECT" \
 	-ExecCmds="Automation RunTests $FILTER; Quit" \
-	-unattended -nullrhi -nosplash -nopause -abslog="$LOG" ${VAREST_EXTRA_ARGS:-} >/dev/null 2>&1
+	-unattended -nullrhi -nosplash -nopause -abslog="$LOG" ${SERVER_ARGS[@]+"${SERVER_ARGS[@]}"} ${VAREST_EXTRA_ARGS:-} >/dev/null 2>&1
 STATUS=$?
 set -e
 # timeout exits 124 after TERM, 137 when it had to KILL; an editor killed by someone else also
@@ -111,6 +149,7 @@ fi
 if [[ $FAILED -gt 0 ]]; then
 	echo "---- failures ----"
 	grep -E 'Test Completed. Result=\{Fail\}|LogAutomationController: Error' "$LOG" || true
+	[[ -n "$SERVER_PID" ]] && echo "run_tests: test server log: $SERVER_LOG"
 fi
 echo "run_tests: $PASSED passed, $FAILED failed (filter '$FILTER', log $LOG)"
 if [[ "$EXITCODE" != "0" ]]; then
