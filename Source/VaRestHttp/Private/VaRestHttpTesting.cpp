@@ -117,4 +117,33 @@ VaRest::Http::Testing::FTestRig::FTestRig(FStringView BaseUrl)
 	// Logging is a test subject of its own (VaRest.Http.Log.*); elsewhere it would only add noise and warnings
 	Client.WithTransport(Fake).WithClock(Clock).WithLogLevel(EVaRestLogLevel::None);
 }
+
+bool VaRest::Http::Testing::FTestRig::Drain(double TimeoutSeconds) const
+{
+	const double Deadline = FPlatformTime::Seconds() + TimeoutSeconds;
+	// Monotonic counts, not "in flight": a task that starts and ends while the queue runs would leave an in-flight count at
+	// zero with its result still queued
+	const auto Started = [this]
+	{
+		return static_cast<int64>(Fake->NumCompletionsQueued()) + Counters().DecodeTasksLaunched.load();
+	};
+	const auto Settled = [this]
+	{
+		return Fake->NumCompletionsRun() == Fake->NumCompletionsQueued() && Counters().DecodeTasksHandedBack.load() == Counters().DecodeTasksLaunched.load();
+	};
+	for (;;)
+	{
+		// Each worker counts itself done after it queued its game-thread task, so once settled, all of that is queued
+		if (!PumpUntil(Settled, FMath::Max(0.0, Deadline - FPlatformTime::Seconds())))
+		{
+			return false;
+		}
+		const int64 Before = Started();
+		FTaskGraphInterface::Get().ProcessThreadUntilIdle(ENamedThreads::GameThread);
+		if (Started() == Before)
+		{
+			return true;
+		}
+	}
+}
 #endif // WITH_DEV_AUTOMATION_TESTS

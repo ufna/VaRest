@@ -801,6 +801,9 @@ void VaRest::Http::FClientState::OnChainDone(const FVaRestExchangeRef& Exchange,
 	TUniquePtr<IResultHandler> Handler = MoveTemp(Ex.Handler);
 	// The exchange travels as a TSharedPtr moved into the continuation, so the worker never drops the last reference
 	// (review I-1; TSharedRef's move constructor copies, SharedPointer.h:354-361)
+#if !UE_BUILD_SHIPPING
+	++Testing::Counters().DecodeTasksLaunched;
+#endif
 	UE::Tasks::Launch(TEXT("VaRest.Decode"), [Held = TSharedPtr<FVaRestExchange, ESPMode::ThreadSafe>(Exchange), Decoder = MoveTemp(Handler), Pending = MoveTemp(Finish)]() mutable
 	{
 		// Spec 1: "Parsing, decoding, cache disk IO ... run on UE::Tasks background tasks"
@@ -811,6 +814,10 @@ void VaRest::Http::FClientState::OnChainDone(const FVaRestExchangeRef& Exchange,
 			Returned.Handler = MoveTemp(Delivered);
 			Returned.State->Complete(Target.ToSharedRef(), MoveTemp(Done));
 		});
+#if !UE_BUILD_SHIPPING
+		// Last, after the result is queued for the game thread (Testing::FTestRig::Drain)
+		++Testing::Counters().DecodeTasksHandedBack;
+#endif
 	});
 }
 
@@ -905,6 +912,9 @@ void VaRest::Http::FClientState::Complete(const FVaRestExchangeRef& Exchange, FF
 		// Review I-1: nothing the worker drops may be the clock's last reference (a clock's destructor may clear
 		// game-thread timers); the callbacks do not read it, so it stays behind and dies on this thread
 		Finish.Clock.Reset();
+#if !UE_BUILD_SHIPPING
+		++Testing::Counters().OffGameThreadDeliveries;
+#endif
 		UE::Tasks::Launch(TEXT("VaRest.DeliverOffGameThread"), [Delivered = MoveTemp(Handler), Done = MoveTemp(Finish), Kept = MoveTemp(Pin)]() mutable
 		{
 			Delivered->Deliver(Done);

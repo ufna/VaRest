@@ -27,6 +27,14 @@ namespace VaRest::Http::Testing
 		std::atomic<int32> ExchangesDestroyedOffGameThread{ 0 };
 		/** Bytes body logging copied on the game thread (task 14 review M7: at most the cap per body, Inspector 7) */
 		std::atomic<int64> LogBodyBytesCopied{ 0 };
+		/**
+		 * Decode tasks started (game thread, as the task is launched) and those that have queued their result for the game
+		 * thread (counted last, on the worker): equal when no decode is in flight (FTestRig::Drain, final review M10)
+		 */
+		std::atomic<int32> DecodeTasksLaunched{ 0 };
+		std::atomic<int32> DecodeTasksHandedBack{ 0 };
+		/** OnHttpThread() deliveries launched on a worker (game thread, at the launch): a silent request launches none (final review M11) */
+		std::atomic<int32> OffGameThreadDeliveries{ 0 };
 	};
 	VARESTHTTP_API FTestCounters& Counters();
 }
@@ -166,6 +174,15 @@ namespace VaRest::Http::Testing
 		{
 			return PumpUntil([&Outcome] { return Outcome->IsDone(); }, TimeoutSeconds);
 		}
+
+		/**
+		 * Game thread, from a test body (final review M10): pumps until this rig's work has settled -- every completion the
+		 * fake queued for a worker has run there, every decode task has queued its result for the game thread, and the
+		 * game-thread tasks those queued have run without starting more. Deterministic, unlike a fixed wait: what a "nothing
+		 * else arrives" check needs. It does not see OnHttpThread() callbacks on a worker, timers on the virtual clock, or a
+		 * request sent from another thread whose Enter task is not queued yet. False after TimeoutSeconds.
+		 */
+		bool Drain(double TimeoutSeconds = 5.0) const;
 	};
 }
 #endif // WITH_DEV_AUTOMATION_TESTS

@@ -9,6 +9,7 @@
 #include "Misc/AutomationTest.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "Misc/ScopeLock.h"
 #include "UObject/Package.h"
 #include "UObject/UObjectGlobals.h"
 #include "VaRestClient.h"
@@ -16,6 +17,7 @@
 #include "VaRestExchangeState.h"
 #include "VaRestHttpSettings.h"
 #include "VaRestHttpTesting.h"
+#include "VaRestTrace.h"
 
 #include <atomic>
 
@@ -140,6 +142,70 @@ namespace VaRest::Http::DecodeTestPrivate
 		Ops.IsFile = [](const FString& Path) { return FPlatformFileManager::Get().GetPlatformFile().FileExists(*Path); };
 		return Ops;
 	}
+
+	/** The requests whose Completed event a trace sink saw (IN-5: on the game thread, before any callback) */
+	class FCompletedRecorder final : public IVaRestTraceSink
+	{
+	public:
+		virtual FVaRestTraceDetailSettings GetDetail() const override
+		{
+			FVaRestTraceDetailSettings Detail;
+			Detail.Flags = EVaRestTraceDetail::Metadata;
+			return Detail;
+		}
+		virtual void OnAttached(const FVaRestTraceSnapshot&) override {}
+		virtual void OnEvent(const FVaRestTraceEvent& Event) override
+		{
+			if (Event.Kind == EVaRestTraceKind::Completed)
+			{
+				FScopeLock Lock(&Mutex);
+				Completed.Add(Event.Payload.Get<FVaRestTraceCompleted>().RequestId);
+			}
+		}
+		/** Any thread */
+		bool HasCompleted(uint64 RequestId) const
+		{
+			FScopeLock Lock(&Mutex);
+			return Completed.Contains(RequestId);
+		}
+
+	private:
+		mutable FCriticalSection Mutex;
+		TSet<uint64> Completed;
+	};
+
+	/** What OnHttpThread() callbacks saw, written on a worker */
+	struct FWorkerSeen
+	{
+		/** The request's id, set on the game thread right after Send(), before the request can complete */
+		std::atomic<uint64> RequestId{ 0 };
+		std::atomic<int32> ErrorCalls{ 0 };
+		std::atomic<int32> CompleteCalls{ 0 };
+		std::atomic<int32> SuccessCalls{ 0 };
+		std::atomic<uint8> Kind{ 0 };
+		std::atomic<bool> bAllOffGameThread{ true };
+		std::atomic<bool> bAllAfterCompleted{ true };
+	};
+
+	/** Wires OnError, OnSuccess and OnComplete of an OnHttpThread() request into Seen, each checking it runs after Completed */
+	TVaRestRequest<FVaRestJson> WatchOnWorker(TVaRestRequest<FVaRestJson>&& Request, const TSharedRef<FWorkerSeen, ESPMode::ThreadSafe>& Seen,
+		const TSharedRef<FCompletedRecorder, ESPMode::ThreadSafe>& Recorder)
+	{
+		auto Note = [Seen, Recorder]
+		{
+			Seen->bAllOffGameThread = Seen->bAllOffGameThread.load() && !IsInGameThread();
+			Seen->bAllAfterCompleted = Seen->bAllAfterCompleted.load() && Recorder->HasCompleted(Seen->RequestId.load());
+		};
+		return MoveTemp(Request).OnHttpThread()
+			.OnSuccess([Seen, Note](const FVaRestJson&) { Note(); ++Seen->SuccessCalls; })
+			.OnError([Seen, Note](const FVaRestError& Error)
+			{
+				Note();
+				Seen->Kind = static_cast<uint8>(Error.Kind);
+				++Seen->ErrorCalls;
+			})
+			.OnComplete([Seen, Note](const TVaRestResult<FVaRestJson>&) { Note(); ++Seen->CompleteCalls; });
+	}
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpZeroCopyTest, "VaRest.Http.Decode.ZeroCopy",
@@ -254,6 +320,72 @@ bool FVaRestHttpOnHttpThreadTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("completes"), Rig.Wait(Outcome));
 	TestFalse(TEXT("OnHttpThread: callbacks off the game thread (decision 4)"), Outcome->bAllOnGameThread.load());
 	TestEqual(TEXT("... still exactly once"), Outcome->CompleteCalls.load(), 1);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpOnHttpThreadErrorTest, "VaRest.Http.Decode.OnHttpThreadErrorAndCancel",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpOnHttpThreadErrorTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::DecodeTestPrivate;
+	// Final review M11: an error and an explicit Cancel() take the OnHttpThread() path too -- on a worker, after the game
+	// thread's Completed (decision 4, Inspector IN-5)
+	FVaRestTrace::FScopedSinkIsolation Isolation;
+	const TSharedRef<FCompletedRecorder, ESPMode::ThreadSafe> Recorder = MakeShared<FCompletedRecorder, ESPMode::ThreadSafe>();
+	FVaRestTrace::AddSink(Recorder);
+	FTestRig Rig;
+	Rig.Fake->Enqueue(Json(404, R"({"error":"missing"})"));
+	Rig.Fake->Enqueue(FVaRestFakeResponse::Manual());
+	const TSharedRef<FWorkerSeen, ESPMode::ThreadSafe> Failed = MakeShared<FWorkerSeen, ESPMode::ThreadSafe>();
+	const TSharedRef<FWorkerSeen, ESPMode::ThreadSafe> Canceled = MakeShared<FWorkerSeen, ESPMode::ThreadSafe>();
+	Failed->RequestId = WatchOnWorker(Rig.Client.Get(TEXT("/missing")), Failed, Recorder).Send().GetId();
+	const FVaRestRequestHandle CancelHandle = WatchOnWorker(Rig.Client.Get(TEXT("/slow")), Canceled, Recorder).Send();
+	Canceled->RequestId = CancelHandle.GetId();
+	TestTrue(TEXT("dispatched"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 2; }));
+	CancelHandle.Cancel();
+	TestTrue(TEXT("both complete"), PumpUntil([Failed, Canceled] { return Failed->CompleteCalls.load() == 1 && Canceled->CompleteCalls.load() == 1; }));
+	FVaRestTrace::RemoveSink(Recorder);
+	TestTrue(TEXT("an error: one OnError (Kind Http), one OnComplete, no OnSuccess"), Failed->ErrorCalls.load() == 1 && Failed->SuccessCalls.load() == 0
+		&& Failed->Kind.load() == static_cast<uint8>(EVaRestErrorKind::Http));
+	TestTrue(TEXT("... on a worker"), Failed->bAllOffGameThread.load());
+	TestTrue(TEXT("... after Completed"), Failed->bAllAfterCompleted.load());
+	TestTrue(TEXT("a Cancel(): one OnError (Kind Canceled), one OnComplete, no OnSuccess"), Canceled->ErrorCalls.load() == 1 && Canceled->SuccessCalls.load() == 0
+		&& Canceled->Kind.load() == static_cast<uint8>(EVaRestErrorKind::Canceled));
+	TestTrue(TEXT("... on a worker"), Canceled->bAllOffGameThread.load());
+	TestTrue(TEXT("... after Completed"), Canceled->bAllAfterCompleted.load());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpOnHttpThreadOwnerGoneTest, "VaRest.Http.Decode.OnHttpThreadOwnerGone",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpOnHttpThreadOwnerGoneTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::DecodeTestPrivate;
+	// Final review M11: owner gone with OnHttpThread() is silent (spec 3.2) and pins nothing (decision 28 pins only for a
+	// delivery that happens)
+	FTestRig Rig;
+	Rig.Fake->Enqueue(FVaRestFakeResponse::Manual());
+	UObject* Owner = NewObject<UVaRestHttpSettings>(GetTransientPackage(), NAME_None, RF_Transient);
+	const TWeakObjectPtr<UObject> Weak(Owner);
+	auto Outcome = MakeOutcome<FVaRestJson>();
+	const int32 DeliveriesBefore = Counters().OffGameThreadDeliveries.load();
+	const FVaRestRequestHandle Handle = Observe(Rig.Client.Get(TEXT("/owned")).Owner(Owner).OnHttpThread(), Outcome).Send();
+	TestTrue(TEXT("dispatched"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 1; }));
+	Owner->MarkAsGarbage();
+	Owner = nullptr;
+	Rig.Fake->Complete(0, Json(200, R"({"late":1})"));
+	TestTrue(TEXT("the request finishes"), PumpUntil([&Handle] { return !Handle.IsActive(); }));
+	TestTrue(TEXT("drained"), Rig.Drain());
+	// Complete sets IsActive() false and launches the worker delivery in the same game-thread call, so this count is final
+	TestEqual(TEXT("silent: no worker delivery was launched"), Counters().OffGameThreadDeliveries.load() - DeliveriesBefore, 0);
+	TestEqual(TEXT("... and no callback ran"), Outcome->SuccessCalls.load() + Outcome->ErrorCalls.load() + Outcome->CompleteCalls.load(), 0);
+	TestEqual(TEXT("... nothing left in flight"), Rig.Client.GetInFlightCount(), 0);
+	CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS, true);
+	TestFalse(TEXT("nothing pinned the owner: the collector freed it"), Weak.IsValid(true));
 	return true;
 }
 

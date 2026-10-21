@@ -309,19 +309,28 @@ bool FVaRestHttpLogForgedLinesTest::RunTest(const FString& Parameters)
 	FVaRestFakeResponse Echoed = FVaRestFakeResponse::Text(200, Forgery);
 	Echoed.Headers.Add(TEXT("X-Note"), Forgery);
 	Rig.Fake->Enqueue(Echoed);
+	// Task 14 re-review N1 (P14.1): Run waits for each request's callbacks and its body lines, so the lines captured from one
+	// mark to the next are that request's, and each must carry that request's own #id, not any of the four
+	const int32 EchoFrom = Capture.GetLines().Num();
 	const FVaRestRequestHandle Echo = Run(Rig, Rig.Client.Get<FString>(TEXT("/text")));
+	const int32 PartsFrom = Capture.GetLines().Num();
 	const FVaRestRequestHandle Parts = Run(Rig, Rig.Client.Post(TEXT("/parts")).Body(FVaRestMultipart().AddField(TEXT("a"), TEXT("1")).AddField(TEXT("b"), Forgery)));
+	const int32 ForgedFrom = Capture.GetLines().Num();
 	const FVaRestRequestHandle Forged = Run(Rig, Rig.Client.Get(TEXT("/forged")));
 	// Fix round 2: an absolute URL -- one a server handed back -- keeps its authority as it is (VaRestUrl.cpp:121, :146).
 	// Resolve refuses it (Kind=Config) before the chain, so its Basic line is the Config error's, through the same ShownUrl.
+	const int32 RefusedFrom = Capture.GetLines().Num();
 	const FVaRestRequestHandle Refused = Run(Rig, Rig.Client.Get(TEXT("https://api.test\r\nFAKE #999 GET http://evil -> 200/x")));
 
-	const FString Ids[] = { Id(Echo), Id(Parts), Id(Forged), Id(Refused) };
+	const TArray<TPair<int32, FString>> Owners = { { EchoFrom, Id(Echo) }, { PartsFrom, Id(Parts) }, { ForgedFrom, Id(Forged) }, { RefusedFrom, Id(Refused) } };
+	const TArray<FString> Captured = Capture.GetLines();
 	int32 Lines = 0;
 	int32 Raw = 0;
-	int32 Untagged = 0;
-	for (const FString& Line : Capture.GetLines())
+	int32 Misattributed = 0;
+	TArray<int32> PerRequest = { 0, 0, 0, 0 };
+	for (int32 Index = 0; Index < Captured.Num(); ++Index)
 	{
+		const FString& Line = Captured[Index];
 		if (!Line.StartsWith(TEXT("LogVaRestHttp: ")))
 		{
 			continue;
@@ -333,21 +342,27 @@ bool FVaRestHttpLogForgedLinesTest::RunTest(const FString& Parameters)
 			++Raw;
 			AddInfo(FString::Printf(TEXT("raw line break: %s"), *Line.ReplaceCharWithEscapedChar()));
 		}
-		const FString Message = Line.RightChop(FCString::Strlen(TEXT("LogVaRestHttp: ")));
-		bool bTagged = false;
-		for (const FString& Tag : Ids)
+		// The request whose window holds this line: the last mark at or before it (none before the first)
+		int32 Owner = INDEX_NONE;
+		for (int32 Request = 0; Request < Owners.Num(); ++Request)
 		{
-			bTagged |= Message.StartsWith(Tag, ESearchCase::CaseSensitive);
+			Owner = Index >= Owners[Request].Key ? Request : Owner;
 		}
-		if (!bTagged)
+		const FString Message = Line.RightChop(FCString::Strlen(TEXT("LogVaRestHttp: ")));
+		if (Owner == INDEX_NONE || !Message.StartsWith(Owners[Owner].Value, ESearchCase::CaseSensitive))
 		{
-			++Untagged;
-			AddInfo(FString::Printf(TEXT("untagged: %s"), *Line.ReplaceCharWithEscapedChar()));
+			++Misattributed;
+			AddInfo(FString::Printf(TEXT("not its own request's #id: %s"), *Line.ReplaceCharWithEscapedChar()));
+		}
+		else
+		{
+			++PerRequest[Owner];
 		}
 	}
 	TestTrue(TEXT("the four requests wrote their lines"), Lines >= 13);
+	TestTrue(TEXT("... each of them"), PerRequest[0] > 0 && PerRequest[1] > 0 && PerRequest[2] > 0 && PerRequest[3] > 0);
 	TestEqual(TEXT("no raw CR or LF in any line"), Raw, 0);
-	TestEqual(TEXT("IN-16: every line starts with its request's #<RequestId>"), Untagged, 0);
+	TestEqual(TEXT("IN-16: every line starts with its own request's #<RequestId>"), Misattributed, 0);
 	TestTrue(TEXT("a text body, escaped"), Capture.Contains(Id(Echo) + TEXT("< body (text, ")) && Capture.Contains(TEXT("): a\\r\\nFAKE #999 GET http://evil -> 200")));
 	TestTrue(TEXT("a response header value, escaped"), Capture.Contains(Id(Echo) + TEXT("<   X-Note: a\\r\\nFAKE #999 GET http://evil -> 200")));
 	TestTrue(TEXT("multipart parts on one line"), Capture.Contains(Id(Parts) + TEXT("> body (multipart, ")) && Capture.Contains(TEXT("): part \"a\": 1\\npart \"b\": a\\r\\nFAKE #999")));

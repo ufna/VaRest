@@ -7,6 +7,7 @@
 #include "VaRestClientState.h"
 #include "VaRestHttpLog.h"
 #include "VaRestHttpSettings.h"
+#include "VaRestHttpTesting.h"
 #include "VaRestRedactor.h"
 #include "VaRestTrace.h"
 
@@ -59,6 +60,9 @@ namespace VaRest::Http::ClientPrivate
 				{
 					Pin.Reset(WeakOwner.Get());
 				}
+#if !UE_BUILD_SHIPPING
+				++Testing::Counters().OffGameThreadDeliveries;
+#endif
 				UE::Tasks::Launch(TEXT("VaRest.DeliverOffGameThread"), [Delivered = MoveTemp(Callbacks), Done = MoveTemp(Pending), Kept = MoveTemp(Pin)]() mutable
 				{
 					Delivered->Deliver(Done);

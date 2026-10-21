@@ -152,7 +152,8 @@ bool FVaRestHttpCancelInTransportTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("the transport call was canceled"), Rig.Fake->NumCanceled(), 1);
 	TestFalse(TEXT("inactive afterwards"), Handle.IsActive());
 	Handle.Cancel();
-	PumpUntil([] { return false; }, 0.05);
+	// Final review M10: drained, not a fixed wait -- every queued completion and decode back on the game thread, its tasks run
+	TestTrue(TEXT("drained"), Rig.Drain());
 	TestEqual(TEXT("a Cancel after the end changes nothing"), Outcome->CompleteCalls.load(), 1);
 	return true;
 }
@@ -207,7 +208,7 @@ bool FVaRestHttpCancelRacesTest::RunTest(const FString& Parameters)
 		TUniqueFunction<void()> Run = MoveTemp(Stage->Resume);
 		Run();
 	}
-	PumpUntil([] { return false; }, 0.05);
+	TestTrue(TEXT("drained"), Held.Drain()); // final review M10
 	TestEqual(TEXT("a stage that resumes later reaches no transport (Proceed reports Canceled)"), Held.Fake->NumCalls(), 0);
 	TestEqual(TEXT("... and nothing is delivered twice"), Parked->CompleteCalls.load(), 1);
 	return true;
@@ -235,7 +236,7 @@ bool FVaRestHttpCancelHeldOutcomeTest::RunTest(const FString& Parameters)
 		Run();
 	}
 	TestTrue(TEXT("completes"), Rig.Wait(Outcome));
-	PumpUntil([] { return false; }, 0.05);
+	TestTrue(TEXT("drained: the decode task is back and its tasks ran"), Rig.Drain()); // final review M10
 	TestTrue(TEXT("exactly one OnError(Canceled) and one OnComplete"), Outcome->ErrorCalls == 1 && Outcome->CompleteCalls == 1
 		&& Outcome->SuccessCalls == 0 && Outcome->Error.Kind == EVaRestErrorKind::Canceled);
 	return true;
@@ -415,6 +416,47 @@ bool FVaRestHttpCancelAllTest::RunTest(const FString& Parameters)
 	PumpUntil([] { return false; }, 0.05);
 	TestEqual(TEXT("a request sent during shutdown is not sent"), Rig.Fake->NumCalls(), 3);
 	TestEqual(TEXT("... and delivers nothing"), Late->CompleteCalls.load(), 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpShutdownWhileDecodingTest, "VaRest.Http.Cancel.ShutdownWhileDecoding",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpShutdownWhileDecodingTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::CancelTestPrivate;
+	// Final review M11: engine exit while a decode task holds the handler (review C-3): Cancel only flags a Decoding exchange,
+	// and the decode's own Complete must then deliver nothing (decision 2) and still finish it. Process-wide, as
+	// Cancel.AllAndShutdown: it cancels every live client's requests, so run it where no other VaRest traffic matters.
+	FTestRig Rig;
+	TSharedRef<FOutcomeHoldingStage, ESPMode::ThreadSafe> Stage = MakeShared<FOutcomeHoldingStage, ESPMode::ThreadSafe>();
+	Rig.Client.Use(Stage, EVaRestStageSlot::Outer);
+	Rig.Fake->Enqueue(Json(200, R"({"ok":true})"));
+	auto Outcome = MakeOutcome<FVaRestJson>();
+	const FVaRestRequestHandle Handle = Observe(Rig.Client.Get(TEXT("/decoding")), Outcome).Send();
+	TestTrue(TEXT("the stage holds the outcome"), PumpUntil([&Stage] { return Stage->bHolding; }));
+	const int32 LaunchedBefore = Counters().DecodeTasksLaunched.load();
+	{
+		// Synchronously, before any pump: OnChainDone starts the decode task, which takes the handler; its result can come
+		// back only through a game-thread task, which cannot run before CancelForShutdown below
+		TUniqueFunction<void()> Run = MoveTemp(Stage->Forward);
+		Run();
+	}
+	TestEqual(TEXT("a decode task started"), Counters().DecodeTasksLaunched.load() - LaunchedBefore, 1);
+	bool bHeld = false;
+	VaRest::Http::FClientAccess::State(Rig.Client)->ForEachInFlight([&bHeld](VaRest::Http::FExchangeState& Ex)
+	{
+		bHeld = Ex.Phase == EVaRestExchangePhase::Decoding && !Ex.Handler.IsValid();
+	});
+	TestTrue(TEXT("... and holds the handler"), bHeld);
+	VaRest::Http::FClientState::CancelForShutdown();
+	ON_SCOPE_EXIT { VaRest::Http::FClientState::ResetShutdownInternal(); };
+	TestTrue(TEXT("the request finishes"), PumpUntil([&Handle] { return !Handle.IsActive(); }));
+	TestTrue(TEXT("drained"), Rig.Drain());
+	TestEqual(TEXT("decision 2: nothing is delivered at engine exit, the decoded success included"),
+		Outcome->SuccessCalls.load() + Outcome->ErrorCalls.load() + Outcome->CompleteCalls.load(), 0);
+	TestEqual(TEXT("... and nothing is left in flight"), Rig.Client.GetInFlightCount(), 0);
 	return true;
 }
 

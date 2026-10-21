@@ -6,6 +6,8 @@
 #include "VaRestClock.h"
 #include "VaRestTransport.h"
 
+#include <atomic>
+
 #if WITH_DEV_AUTOMATION_TESTS
 
 /** A scripted response */
@@ -74,6 +76,14 @@ public:
 	/** Destroys the call's completion without calling it, as the engine does at HTTP module shutdown and with NullHttp (review I-3) */
 	void Drop(int32 Index);
 
+	/**
+	 * Completions queued on the worker pipe (bCompleteOnWorker; game thread), and those whose callback has returned there
+	 * (any thread). The callback queues its game-thread task before it returns, so once the two are equal every completion's
+	 * game-thread task is queued (FTestRig::Drain, final review M10). Inline completions count in neither.
+	 */
+	int32 NumCompletionsQueued() const { return CompletionsQueued; }
+	int32 NumCompletionsRun() const { return CompletionsRun->load(); }
+
 	virtual TSharedRef<IVaRestTransportCall, ESPMode::ThreadSafe> Start(FVaRestTransportRequest&& Request, FVaRestTransportComplete&& OnComplete) override;
 
 private:
@@ -97,6 +107,9 @@ private:
 	FResponder Responder;
 	TArray<FVaRestFakeResponse> Queue;
 	TArray<TSharedRef<FEntry>> Entries;
+	int32 CompletionsQueued = 0;
+	/** Shared with the queued completions: one may run after this transport is gone */
+	TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> CompletionsRun = MakeShared<std::atomic<int32>, ESPMode::ThreadSafe>(0);
 };
 
 #endif // WITH_DEV_AUTOMATION_TESTS

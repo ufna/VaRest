@@ -44,13 +44,23 @@ bool FVaRestHttpTimeoutAppliedTest::RunTest(const FString& Parameters)
 	Rig.Client.Get(TEXT("/a")).Send();
 	Rig.Client.Get(TEXT("/b")).Timeout(2.f).Send();
 	Rig.Client.Get(TEXT("/c")).Timeout(2.f, 1.f).Send();
-	TestTrue(TEXT("all reach the transport"), PumpUntil([&] { return Plain.Fake->NumCalls() == 1 && Rig.Fake->NumCalls() == 3; }));
+	Rig.Client.Get(TEXT("/d")).Timeout(0.f, 1.f).Send();
+	Rig.Client.Get(TEXT("/e")).Timeout(-1.f).Send();
+	FTestRig Clamped;
+	Clamped.Client.WithTimeout(-5.f, -1.f);
+	Clamped.Client.Get(TEXT("/f")).Send();
+	TestTrue(TEXT("all reach the transport"), PumpUntil([&] { return Plain.Fake->NumCalls() == 1 && Rig.Fake->NumCalls() == 5 && Clamped.Fake->NumCalls() == 1; }));
 	auto Of = [&Rig](int32 i) -> const FVaRestTransportRequest& { return Rig.Fake->GetCall(i).Request; };
 	TestTrue(TEXT("no setting: 0, the engine's default (HttpModule.cpp:96-98)"), Plain.Fake->GetCall(0).Request.Timeout == 0.f && Plain.Fake->GetCall(0).Request.ActivityTimeout == 0.f);
 	TestTrue(TEXT("the client's timeouts (spec 3.1)"), Of(0).Timeout == 10.f && Of(0).ActivityTimeout == 3.f);
 	TestTrue(TEXT("a request's total timeout replaces the client's; its activity timeout stays"), Of(1).Timeout == 2.f && Of(1).ActivityTimeout == 3.f);
 	TestTrue(TEXT("... and both"), Of(2).Timeout == 2.f && Of(2).ActivityTimeout == 1.f);
-	PumpUntil([&] { return Plain.Client.GetInFlightCount() == 0 && Rig.Client.GetInFlightCount() == 0; });
+	// Task 13 review minor 1 (P13.1): a total of 0 keeps the client's 10 s, beside an activity timeout of its own
+	TestTrue(TEXT("a request's total of 0 keeps the client's; its activity timeout replaces the client's"), Of(3).Timeout == 10.f && Of(3).ActivityTimeout == 1.f);
+	TestTrue(TEXT("... and a negative total keeps both of the client's"), Of(4).Timeout == 10.f && Of(4).ActivityTimeout == 3.f);
+	TestTrue(TEXT("WithTimeout clamps negative values to 0, the engine's default"), Clamped.Fake->GetCall(0).Request.Timeout == 0.f
+		&& Clamped.Fake->GetCall(0).Request.ActivityTimeout == 0.f);
+	PumpUntil([&] { return Plain.Client.GetInFlightCount() == 0 && Rig.Client.GetInFlightCount() == 0 && Clamped.Client.GetInFlightCount() == 0; });
 	return true;
 }
 
@@ -170,11 +180,13 @@ bool FVaRestHttpProgressOwnerGoneTest::RunTest(const FString& Parameters)
 	Rig.Fake->Enqueue(FVaRestFakeResponse::Manual());
 	TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> AfterCancel = MakeShared<std::atomic<int32>, ESPMode::ThreadSafe>(0);
 	auto Canceled = MakeOutcome<FVaRestJson>();
+	// Task 13 review minor 6 (P13.6): only this exchange's timers count, whatever else the clock holds
+	const int32 TimersBeforeCancel = Rig.Clock->NumPendingTimers();
 	const FVaRestRequestHandle CancelHandle = Observe(Rig.Client.Get(TEXT("/canceled")).OnProgress([AfterCancel](const FVaRestProgress&) { ++*AfterCancel; }), Canceled).Send();
 	PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 2; });
 	CancelHandle.Cancel();
-	// The fake's Manual() call arms no timers of its own: the progress tick is the only one there was
-	TestEqual(TEXT("Cancel() stops the progress timer (review M-3)"), Rig.Clock->NumPendingTimers(), 0);
+	// The fake's Manual() call arms no timers of its own: the progress tick is the only one this request had
+	TestEqual(TEXT("Cancel() stops the progress timer (review M-3)"), Rig.Clock->NumPendingTimers(), TimersBeforeCancel);
 	const int32 AtCancel = AfterCancel->load();
 	Rig.Fake->ReportProgress(1, 0, 10, 100);
 	Rig.Clock->Advance(0.1);
@@ -185,11 +197,12 @@ bool FVaRestHttpProgressOwnerGoneTest::RunTest(const FString& Parameters)
 	Rig.Fake->Enqueue(FVaRestFakeResponse::Manual());
 	TSharedRef<FVaRestRequestHandle, ESPMode::ThreadSafe> SelfHandle = MakeShared<FVaRestRequestHandle, ESPMode::ThreadSafe>();
 	auto SelfCanceled = MakeOutcome<FVaRestJson>();
+	const int32 TimersBeforeSelf = Rig.Clock->NumPendingTimers();
 	*SelfHandle = Observe(Rig.Client.Get(TEXT("/self")).OnProgress([SelfHandle](const FVaRestProgress&) { SelfHandle->Cancel(); }), SelfCanceled).Send();
 	PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 3; });
 	Rig.Fake->ReportProgress(2, 0, 10, 100);
 	Rig.Clock->Advance(0.1);
-	TestEqual(TEXT("a Cancel() inside OnProgress stops the progress timer (review M-3)"), Rig.Clock->NumPendingTimers(), 0);
+	TestEqual(TEXT("a Cancel() inside OnProgress stops the progress timer (review M-3)"), Rig.Clock->NumPendingTimers(), TimersBeforeSelf);
 	TestTrue(TEXT("... and the request completes"), Rig.Wait(SelfCanceled));
 	TestTrue(TEXT("... as Canceled"), SelfCanceled->Error.Kind == EVaRestErrorKind::Canceled);
 
@@ -237,6 +250,48 @@ bool FVaRestHttpProgressAfterFinishTest::RunTest(const FString& Parameters)
 	const TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> Late = Stage->LateAnswers;
 	TestTrue(TEXT("the transport's late answer is drained"), PumpUntil([Late] { return Late->load() == 1; }));
 	TestEqual(TEXT("... and the request was delivered once"), Outcome->CompleteCalls.load(), 1);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpProgressFinalCallTest, "VaRest.Http.Progress.FinalCall",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpProgressFinalCallTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	// Task 13 review minor 2 (P13.2): decision 8's last call exists so a caller sees 100% even when the transfer was quicker
+	// than one tick. A POST completed before any Advance: no tick ever ran, only the last call.
+	FTestRig Rig;
+	struct FSeen
+	{
+		TArray<FVaRestProgress> Calls;
+	};
+	TSharedRef<FSeen, ESPMode::ThreadSafe> Seen = MakeShared<FSeen, ESPMode::ThreadSafe>();
+	Rig.Fake->Enqueue(FVaRestFakeResponse::Json(200, FUtf8StringView(UTF8TEXT(R"({"ok":1})"))));
+	auto Quick = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Post(TEXT("/quick")).Body(TArray<uint8>{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 })
+		.OnProgress([Seen](const FVaRestProgress& Progress) { Seen->Calls.Add(Progress); }), Quick).Send();
+	TestTrue(TEXT("completes"), Rig.Wait(Quick));
+	if (!TestEqual(TEXT("one call, the last"), Seen->Calls.Num(), 1))
+	{
+		return false;
+	}
+	const FVaRestProgress& Last = Seen->Calls[0];
+	TestTrue(TEXT("every byte sent, against the upload total"), Last.BytesSent == 10 && Last.UploadTotal == 10);
+	TestTrue(TEXT("every byte received, against the download total"), Last.BytesReceived == 8 && Last.DownloadTotal == 8);
+
+	// Task 13 review minor 3 (P13.3): Cancel() inside that last OnProgress. Cancel finds no transport call and finishes the
+	// exchange through a deferred Complete (decision 3); the outcome then goes up and the decode task takes the handler,
+	// so the deferred Complete leaves it to that task (review C-3), which delivers Canceled.
+	TSharedRef<FVaRestRequestHandle, ESPMode::ThreadSafe> SelfHandle = MakeShared<FVaRestRequestHandle, ESPMode::ThreadSafe>();
+	auto AtEnd = MakeOutcome<FVaRestJson>();
+	*SelfHandle = Observe(Rig.Client.Post(TEXT("/cancel-at-end")).Body(TArray<uint8>{ 1, 2, 3 })
+		.OnProgress([SelfHandle](const FVaRestProgress&) { SelfHandle->Cancel(); }), AtEnd).Send();
+	TestTrue(TEXT("completes"), Rig.Wait(AtEnd));
+	TestTrue(TEXT("drained"), Rig.Drain());
+	TestTrue(TEXT("one OnError(Canceled), one OnComplete, no OnSuccess"), AtEnd->ErrorCalls.load() == 1 && AtEnd->CompleteCalls.load() == 1
+		&& AtEnd->SuccessCalls.load() == 0 && AtEnd->Error.Kind == EVaRestErrorKind::Canceled);
+	TestEqual(TEXT("nothing left in flight"), Rig.Client.GetInFlightCount(), 0);
 	return true;
 }
 

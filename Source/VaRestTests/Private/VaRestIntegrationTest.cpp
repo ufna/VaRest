@@ -3,11 +3,13 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "HAL/FileManager.h"
+#include "HAL/IConsoleManager.h"
 #include "HAL/PlatformTime.h"
 #include "Misc/AutomationTest.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Guid.h"
 #include "Misc/Paths.h"
+#include "Misc/ScopeExit.h"
 #include "Misc/ScopeLock.h"
 #include "Tasks/Task.h"
 #include "VaRestClient.h"
@@ -744,6 +746,67 @@ bool FVaRestIntegrationStructTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("a field the server leaves out keeps its default"), Profile.Score, 7);
 	TestEqual(TEXT("decoded off the game thread"), Counters().DecodesOffGameThread - OffBefore, 1);
 	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestIntegrationFallbackTest, "VaRest.Integration.Http.GameThreadFallback",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestIntegrationFallbackTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRestTestsIntegrationPrivate;
+	FString BaseUrl;
+	if (!ServerUrl(*this, BaseUrl))
+	{
+		return false;
+	}
+	// Task 17 review M6 (P17.7): spec 9's fallback is what docs/dev/http-thread-completion.md tells a failing platform to
+	// ship, so it runs end to end through FVaRestClient: a body the sink takes on the game thread, the decode hop, SaveTo
+	IConsoleVariable* const Fallback = IConsoleManager::Get().FindConsoleVariable(TEXT("VaRest.Http.CompleteOnGameThread"));
+	if (!TestNotNull(TEXT("the cvar exists"), Fallback))
+	{
+		return false;
+	}
+	const bool bBefore = Fallback->GetBool();
+	// The cvar's guard lives in this lambda, so it is restored on every return from it (~TGuardConsoleVariable,
+	// IConsoleManager.h:1441-1447); the check after it proves that
+	const bool bRan = [this, &BaseUrl]() -> bool
+	{
+		TGuardConsoleVariable<bool> GameThreadCompletion(TEXT("VaRest.Http.CompleteOnGameThread"), true);
+		FVaRestClient Client = MakeClient(BaseUrl);
+		const FString Dir = MakeTempDir();
+		ON_SCOPE_EXIT { IFileManager::Get().DeleteDirectory(*Dir, false, true); };
+		const FString Target = Dir / TEXT("fallback.bin");
+		const int32 OffBefore = Counters().DecodesOffGameThread;
+		auto Json = MakeOutcome<FVaRestJson>();
+		Observe(Client.Get(TEXT("/json/profile")), Json).Send();
+		auto Saved = MakeOutcome<FVaRestResponse>();
+		Observe(Client.Get<FVaRestResponse>(TEXT("/large?bytes=1048576&seed=5")).SaveTo(Target), Saved).Send();
+		TestTrue(TEXT("both complete"), WaitAll(Json, Saved));
+		// Each request's success first (review I-1); its checks only behind it
+		const bool bJson = Succeeded(*this, TEXT("the JSON GET"), Json);
+		const bool bSaved = Succeeded(*this, TEXT("the SaveTo download"), Saved);
+		TestTrue(TEXT("every callback on the game thread"), Json->bAllOnGameThread.load() && Saved->bAllOnGameThread.load());
+		TestTrue(TEXT("the decode still ran off the game thread (spec 9: decoding stays on UE::Tasks)"), Counters().DecodesOffGameThread - OffBefore >= 1);
+		if (bJson)
+		{
+			const FVaRestJson& Profile = Json->Value.GetValue();
+			TestEqualSensitive(TEXT("the decoded value"), Profile[TEXT("name")].AsString(), FString(TEXT("Neo")));
+			TestEqual(TEXT("... an int64 past 2^53, exact"), Profile[TEXT("id")].AsInt64(), static_cast<int64>(9007199254740993ll));
+			TestTrue(TEXT("... and its array"), Profile[TEXT("items")].Num() == 2 && Profile[TEXT("items")][1][TEXT("level")].AsInt() == 1);
+		}
+		if (bSaved)
+		{
+			TArray<uint8> OnDisk;
+			TestTrue(TEXT("the file is there"), FFileHelper::LoadFileToArray(OnDisk, *Target));
+			TestEqual(TEXT("... whole"), OnDisk.Num(), 1048576);
+			TestEqualSensitive(TEXT("... byte-exact"), Hex(OnDisk), Saved->Response.Headers.Get(TEXT("X-Sha256")));
+			TestTrue(TEXT("... named in the response"), Saved->Value.IsSet() && Saved->Value.GetValue().SavedFile == Target);
+		}
+		return bJson && bSaved;
+	}();
+	TestEqual(TEXT("the cvar is restored"), Fallback->GetBool(), bBefore);
+	return bRan;
 }
 
 #endif

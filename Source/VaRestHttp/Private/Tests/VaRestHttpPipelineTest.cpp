@@ -683,9 +683,12 @@ bool FVaRestHttpPipelineOutcomeTwiceTest::RunTest(const FString& Parameters)
 	Rig.Client.Use(MakeShared<FRecordingStage, ESPMode::ThreadSafe>(TEXT("twice"), Log, FRecordingStage::EMode::Twice), EVaRestStageSlot::Outer);
 	Rig.Fake->Enqueue(Json(200, R"({"ok":true})"));
 	auto Outcome = MakeOutcome<FVaRestJson>();
+	const int32 DecodesBefore = Counters().DecodeTasksLaunched.load();
 	Observe(Rig.Client.Get(TEXT("/twice")), Outcome).Send();
 	TestTrue(TEXT("completes"), Rig.Wait(Outcome));
-	PumpUntil([] { return false; }, 0.05);
+	// Final review M10: drained, not a fixed wait -- a second decode task would be counted and waited for
+	TestTrue(TEXT("drained"), Rig.Drain());
+	TestEqual(TEXT("one decode task for two reports"), Counters().DecodeTasksLaunched.load() - DecodesBefore, 1);
 	TestTrue(TEXT("one OnSuccess, one OnComplete"), Outcome->SuccessCalls == 1 && Outcome->CompleteCalls == 1 && Outcome->ErrorCalls == 0);
 	return true;
 }

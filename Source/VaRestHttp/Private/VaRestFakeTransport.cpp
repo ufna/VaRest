@@ -335,6 +335,13 @@ void FVaRestFakeTransport::Finish(int32 Index, FVaRestFakeResponse&& Response)
 		// A completed body is every byte that arrived: the engine's count only grows (CurlHttp.cpp:663), and its finish
 		// reports it once more (CurlHttp.cpp:1274, :1221-1237), so a script that reported more than the body ends at the body
 		Req.Probe->BytesReceived = Result.BytesDown;
+		// Task 13 review minor 2 (P13.2): that finishing report carries the sent count too (CurlHttp.cpp:1225, :1236), and a
+		// completed request sent its whole body: never lower than a ReportProgress already put there
+		int64 Sent = Req.Probe->BytesSent.load();
+		const int64 Whole = Req.Probe->UploadTotal.load();
+		while (Sent < Whole && !Req.Probe->BytesSent.compare_exchange_weak(Sent, Whole))
+		{
+		}
 	}
 	else
 	{
@@ -355,9 +362,12 @@ void FVaRestFakeTransport::Finish(int32 Index, FVaRestFakeResponse&& Response)
 		// One leaked pipe: completions run FIFO, one at a time, off the game thread, as the engine's single HTTP thread
 		// runs them (review M-5). Leaked because ~FPipe checks it is idle (Pipe.h:40-43) and tests may end with work queued.
 		static UE::Tasks::FPipe* const CompletionPipe = new UE::Tasks::FPipe(TEXT("VaRest.FakeTransport"));
-		CompletionPipe->Launch(TEXT("VaRest.FakeTransport.Complete"), [Deliver = MoveTemp(Callback), Moved = MoveTemp(Result)]() mutable
+		++CompletionsQueued;
+		CompletionPipe->Launch(TEXT("VaRest.FakeTransport.Complete"), [Deliver = MoveTemp(Callback), Moved = MoveTemp(Result), Ran = CompletionsRun]() mutable
 		{
 			Deliver(MoveTemp(Moved));
+			// Last, after the callback queued its game-thread task (FTestRig::Drain)
+			++*Ran;
 		});
 	}
 	else

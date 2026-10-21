@@ -8,6 +8,7 @@
 #include "HAL/PlatformProcess.h"
 #include "HAL/PlatformTime.h"
 #include "Misc/AutomationTest.h"
+#include "Misc/ConfigCacheIni.h"
 #include "Misc/DateTime.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
@@ -61,7 +62,7 @@ namespace VaRestTestsRequestPathBenchPrivate
 	}
 
 	/** v1 as a game uses it: UVaRestRequestJSON, completed on the game thread by the engine's default policy, parsed there */
-	FRun RunV1(const FString& FullUrl, int64 ExpectedCount)
+	FRun RunV1(FAutomationTestBase& Test, const FString& FullUrl, int64 ExpectedCount)
 	{
 		FRun Run;
 		TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> Finished = MakeShared<std::atomic<int32>, ESPMode::ThreadSafe>(0);
@@ -77,10 +78,22 @@ namespace VaRestTestsRequestPathBenchPrivate
 		Run.LatencyMs = (FPlatformTime::Seconds() - Start) * 1000.0;
 		if (Finished->load() == 0)
 		{
-			// Every test drains what it sends: the cancel completes it through the same game-thread tick
-			Request->Cancel();
+			// Every test drains what it sends, but v1 cannot cancel its transport: UVaRestRequestJSON::Cancel() only drops the
+			// latent action and resets the response data (VaRestRequestJSON.cpp:137-142), and v1 exposes no handle to the HTTP
+			// request (task 17 review M1). The request stays rooted until it completes (:305, :487), so this keeps pumping
+			// until the engine's own activity timeout ends it ([HTTP] HttpActivityTimeout, 30 s, BaseEngine.ini:41), with a
+			// margin; a request still in flight after that is an error here, not a late "Request failed" in the next test.
+			// Read as the HTTP module reads it (HttpModule.cpp:63), so this module needs no HTTP dependency of its own
+			float ActivityTimeout = 30.f;
+			GConfig->GetFloat(TEXT("HTTP"), TEXT("HttpActivityTimeout"), ActivityTimeout, GEngineIni);
+			const double Grace = FMath::Max(0.f, ActivityTimeout) + 10.0;
 			FRun Ignored;
-			Pump([Finished] { return Finished->load() != 0; }, Ignored, 10.0);
+			Pump([Finished] { return Finished->load() != 0; }, Ignored, Grace);
+			if (Finished->load() == 0)
+			{
+				Test.AddError(FString::Printf(TEXT("a v1 request to %s is still in flight %.0f s after its 120 s wait: v1 cannot cancel it, and it may fail into a later test"),
+					*FullUrl, Grace));
+			}
 			return Run;
 		}
 		// Checked after the clock stops: GetObjectField makes UObjects
@@ -175,7 +188,7 @@ bool FVaRestHttpRequestPathBench::RunTest(const FString& Parameters)
 		const FString FullUrl = BaseUrl + Path;
 
 		// Warm-up, untimed: connections, the server's file cache, first-use allocations
-		RunV1(FullUrl, ExpectedCount);
+		RunV1(*this, FullUrl, ExpectedCount);
 		RunV2(Client, Path, ExpectedCount);
 
 		FRow V1Shipped;
@@ -190,10 +203,10 @@ bool FVaRestHttpRequestPathBench::RunTest(const FString& Parameters)
 		for (int32 Index = 0; Index < Fixture.Runs; ++Index)
 		{
 			// Interleaved, so drift in the machine's state spreads over all three
-			V1Shipped.Runs.Add(RunV1(FullUrl, ExpectedCount));
+			V1Shipped.Runs.Add(RunV1(*this, FullUrl, ExpectedCount));
 			// The "Log" console command (LogSuppressionInterface.cpp:589-591), reached through UEngine::Exec (UnrealEngine.cpp:5533)
 			GEngine->Exec(nullptr, TEXT("Log LogVaRest Off"));
-			V1Quiet.Runs.Add(RunV1(FullUrl, ExpectedCount));
+			V1Quiet.Runs.Add(RunV1(*this, FullUrl, ExpectedCount));
 			GEngine->Exec(nullptr, TEXT("Log LogVaRest Log"));
 			V2.Runs.Add(RunV2(Client, Path, ExpectedCount));
 		}
