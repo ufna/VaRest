@@ -349,38 +349,42 @@ FString FVaRestRedactor::ScrubText(FStringView Text) const
 	return Out;
 }
 
-bool FVaRestRedactor::IsSecretPair(FStringView Piece, EVaRestRedactKeyKind Kind) const
+int32 FVaRestRedactor::SecretValueStart(FStringView Piece, EVaRestRedactKeyKind Kind) const
 {
-	int32 Equals = INDEX_NONE;
-	if (!Piece.FindChar(TEXT('='), Equals))
+	// One rule for query, fragment, form bodies and path parameters (review round 2): a key can start at the front of the
+	// piece or after any '?' (a query inside a query value or a hash-router fragment) or ';' (a pair separator for some
+	// servers, a path parameter's start). The first candidate that is a secret key wins, and its value runs to the end
+	// of the piece: ';' and '?' only ever START a key, they never end a value, so "password=ab;cd" cannot leak "cd".
+	// Over-redaction is accepted; leaking a tail is not.
+	for (int32 Start = 0; Start < Piece.Len(); ++Start)
 	{
-		return false;
+		if (Start > 0 && Piece[Start - 1] != TEXT('?') && Piece[Start - 1] != TEXT(';'))
+		{
+			continue;
+		}
+		int32 Equals = INDEX_NONE;
+		if (Piece.RightChop(Start).FindChar(TEXT('='), Equals) && Rules.ShouldRedact(FStringView(VaRest::Http::PercentDecode(Piece.Mid(Start, Equals), true)), Kind))
+		{
+			return Start + Equals;
+		}
 	}
-	FStringView Key = Piece.Left(Equals);
-	// Review M1: "#/callback?code=X" -- a hash router puts a query inside the fragment, so the key is what follows the last '?'
-	int32 Question = INDEX_NONE;
-	if (Key.FindLastChar(TEXT('?'), Question))
-	{
-		Key = Key.RightChop(Question + 1);
-	}
-	return Rules.ShouldRedact(FStringView(VaRest::Http::PercentDecode(Key, true)), Kind);
+	return INDEX_NONE;
 }
 
 void FVaRestRedactor::AppendRedactedPairs(FStringView Pairs, EVaRestRedactKeyKind Kind, FString& Out) const
 {
-	// Review M2: ';' separates pairs for some servers (HTML 4.01 B.2.2), so a key after one is judged too; the output keeps
-	// the separators as sent
+	// Only '&' separates pairs, so a secret value always ends at the next '&' or at the end
 	int32 Start = 0;
 	while (Start <= Pairs.Len())
 	{
 		int32 End = Start;
-		while (End < Pairs.Len() && Pairs[End] != TEXT('&') && Pairs[End] != TEXT(';'))
+		while (End < Pairs.Len() && Pairs[End] != TEXT('&'))
 		{
 			++End;
 		}
 		const FStringView Piece = Pairs.Mid(Start, End - Start);
-		int32 Equals = INDEX_NONE;
-		if (IsSecretPair(Piece, Kind) && Piece.FindChar(TEXT('='), Equals))
+		const int32 Equals = SecretValueStart(Piece, Kind);
+		if (Equals != INDEX_NONE)
 		{
 			Out += Piece.Left(Equals);
 			Out += TEXT("=***");
@@ -391,7 +395,7 @@ void FVaRestRedactor::AppendRedactedPairs(FStringView Pairs, EVaRestRedactKeyKin
 		}
 		if (End < Pairs.Len())
 		{
-			Out.AppendChar(Pairs[End]);
+			Out.AppendChar(TEXT('&'));
 		}
 		Start = End + 1;
 	}
@@ -399,37 +403,37 @@ void FVaRestRedactor::AppendRedactedPairs(FStringView Pairs, EVaRestRedactKeyKin
 
 void FVaRestRedactor::AppendRedactedPath(FStringView Path, FString& Out) const
 {
-	// Review M2: path parameters (";jsessionid=X") are "name=value" pairs too
+	// Path parameters (";jsessionid=X"): a parameter run goes to the next '/', and a secret key's value to the end of that run
 	int32 Start = 0;
 	while (Start < Path.Len())
 	{
+		int32 End = Start;
 		if (Path[Start] != TEXT(';'))
 		{
-			int32 SegmentEnd = Start;
-			while (SegmentEnd < Path.Len() && Path[SegmentEnd] != TEXT(';'))
+			while (End < Path.Len() && Path[End] != TEXT(';'))
 			{
-				++SegmentEnd;
+				++End;
 			}
-			Out += Path.Mid(Start, SegmentEnd - Start);
-			Start = SegmentEnd;
+			Out += Path.Mid(Start, End - Start);
+			Start = End;
 			continue;
 		}
-		int32 End = Start + 1;
-		while (End < Path.Len() && Path[End] != TEXT(';') && Path[End] != TEXT('/'))
+		++End;
+		while (End < Path.Len() && Path[End] != TEXT('/'))
 		{
 			++End;
 		}
-		const FStringView Param = Path.Mid(Start + 1, End - Start - 1);
-		int32 Equals = INDEX_NONE;
+		const FStringView Run = Path.Mid(Start + 1, End - Start - 1);
+		const int32 Equals = SecretValueStart(Run, EVaRestRedactKeyKind::Query);
 		Out.AppendChar(TEXT(';'));
-		if (IsSecretPair(Param, EVaRestRedactKeyKind::Query) && Param.FindChar(TEXT('='), Equals))
+		if (Equals != INDEX_NONE)
 		{
-			Out += Param.Left(Equals);
+			Out += Run.Left(Equals);
 			Out += TEXT("=***");
 		}
 		else
 		{
-			Out += Param;
+			Out += Run;
 		}
 		Start = End;
 	}

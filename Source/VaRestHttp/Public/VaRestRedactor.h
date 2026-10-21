@@ -110,7 +110,8 @@ private:
 	bool ScrubUtf8(TArray<uint8>& Utf8) const;
 	/** Drops the tail of a capped excerpt that begins a known secret; true when it dropped anything */
 	bool TrimNeedleTail(TArray<uint8>& Utf8) const;
-	bool IsSecretPair(FStringView Piece, EVaRestRedactKeyKind Kind) const;
+	/** The index of the "=" whose value is a secret (the first candidate key after the start, a '?' or a ';' that Rules names), else INDEX_NONE */
+	int32 SecretValueStart(FStringView Piece, EVaRestRedactKeyKind Kind) const;
 	void AppendRedactedPath(FStringView Path, FString& Out) const;
 
 	FVaRestRedactRules Rules;

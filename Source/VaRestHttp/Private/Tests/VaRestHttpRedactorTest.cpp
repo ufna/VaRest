@@ -53,6 +53,10 @@ bool FVaRestHttpRedactUrlTest::RunTest(const FString& Parameters)
 	TestEqualSensitive(TEXT("a query inside a fragment"), Redactor.RedactUrl(TEXT("https://h/#/callback?code=X&state=Y")), FString(TEXT("https://h/#/callback?code=***&state=Y")));
 	// Review M2: ';' as a pair separator and path parameters
 	TestEqualSensitive(TEXT("a semicolon-separated pair"), Redactor.RedactUrl(TEXT("https://h/x?a=1;token=X")), FString(TEXT("https://h/x?a=1;token=***")));
+	TestEqualSensitive(TEXT("';' never ends a secret value"), Redactor.RedactUrl(TEXT("https://h/x?password=ab;cd")), FString(TEXT("https://h/x?password=***")));
+	TestEqualSensitive(TEXT("a pair after '&' is separate"), Redactor.RedactUrl(TEXT("https://h/x?a=1;token=X&b=2")), FString(TEXT("https://h/x?a=1;token=***&b=2")));
+	TestEqualSensitive(TEXT("a query inside a query value"), Redactor.RedactUrl(TEXT("https://h/x?next=/x?code=X&s=1")), FString(TEXT("https://h/x?next=/x?code=***&s=1")));
+	TestEqualSensitive(TEXT("a path parameter run"), Redactor.RedactUrl(TEXT("/p;jsessionid=X;y=1/q")), FString(TEXT("/p;jsessionid=***/q")));
 	TestEqualSensitive(TEXT("a path parameter"), Redactor.RedactUrl(TEXT("/p;jsessionid=X")), FString(TEXT("/p;jsessionid=***")));
 	TestEqualSensitive(TEXT("a plain path parameter is kept"), Redactor.RedactUrl(TEXT("/p;v=2/q?a=1")), FString(TEXT("/p;v=2/q?a=1")));
 	// Review M3: leading whitespace, and userinfo without a scheme
@@ -139,6 +143,7 @@ bool FVaRestHttpRedactBodiesTest::RunTest(const FString& Parameters)
 	const FVaRestTraceExcerpt Form = Run(TEXT("application/x-www-form-urlencoded"), "a=1&password=canary-6&b=2");
 	TestTrue(TEXT("form kind"), Form.Kind == EVaRestExcerptKind::Form);
 	TestEqualSensitive(TEXT("form pairs by key"), Form.ToText(), FString(TEXT("a=1&password=***&b=2")));
+	TestEqualSensitive(TEXT("';' does not end a form secret"), Run(TEXT("application/x-www-form-urlencoded"), "a=1&password=ab;cd&b=2").ToText(), FString(TEXT("a=1&password=***&b=2")));
 	const TConstArrayView<uint8> FormBody = Bytes("a=1&b=22&c=333");
 	TestEqualSensitive(TEXT("a capped form drops its cut last pair"),
 		Redactor.RedactBody(TEXT("application/x-www-form-urlencoded"), FormBody.Left(10), FormBody.Num(), 10).ToText(), FString(TEXT("a=1&b=22")));
