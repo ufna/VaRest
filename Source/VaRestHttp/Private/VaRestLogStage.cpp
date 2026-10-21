@@ -6,6 +6,7 @@
 #include "VaRestHttpLog.h"
 #include "VaRestHttpTesting.h"
 #include "VaRestRedactionPipe.h"
+#include "VaRestUrl.h"
 
 namespace VaRest::Http::LogStagePrivate
 {
@@ -23,10 +24,10 @@ namespace VaRest::Http::LogStagePrivate
 		return (Code < 0x20 && Code != '\t') || Code == '\\' || (Code >= 0x7F && Code <= 0x9F) || Code == 0x2028 || Code == 0x2029;
 	}
 
-	/** The URL as a line shows it: redacted, then escaped */
-	FString ShownUrl(const FVaRestExchange& Ex, const FRedactorRef& Redactor)
+	/** A URL as a line shows it: redacted, then escaped */
+	FString ShownUrl(const FRedactorRef& Redactor, FStringView Url)
 	{
-		return EscapeForLog(Redactor->RedactUrl(Ex.Url));
+		return EscapeForLog(Redactor->RedactUrl(Url));
 	}
 
 	void LogHeaders(uint64 RequestId, const TCHAR* Direction, const FVaRestHeaders& Redacted)
@@ -159,7 +160,7 @@ namespace VaRest::Http::LogStagePrivate
 		{
 			if (Url.IsEmpty())
 			{
-				Url = ShownUrl(Ex, Redactor);
+				Url = ShownUrl(Redactor, Ex.Url);
 			}
 			const FString ShownVerb = EscapeForLog(Ex.Verb);
 			if (bCanceled)
@@ -234,7 +235,7 @@ namespace VaRest::Http::LogStagePrivate
 			FString Shown;
 			if (bLogActive && Level >= EVaRestLogLevel::Headers)
 			{
-				Shown = ShownUrl(Ex, Redactor);
+				Shown = ShownUrl(Redactor, Ex.Url);
 				UE_LOG(LogVaRestHttp, Log, TEXT("#%llu > %s %s (attempt %d)"), Ex.RequestId, *EscapeForLog(Ex.Verb), *Shown, Ex.Attempt);
 				LogHeaders(Ex.RequestId, TEXT(">"), Redactor->RedactHeaders(Ex.AttemptHeaders));
 			}
@@ -300,6 +301,19 @@ FString VaRest::Http::EscapeForLog(FStringView Text)
 		}
 	}
 	return Out;
+}
+
+void VaRest::Http::LogConfigError(const FVaRestExchange& Ex, FStringView Message)
+{
+	// Task 14 fix round 2: a builder error or a URL Resolve refused (spec 3.3, Kind=Config) never enters the chain, so the
+	// log stage never sees it. A Warning, as every failure but a cancel; the URL as the error carries it, redacted, then escaped.
+	const FClientConfig& Cfg = *Ex.Config;
+	if (EffectiveLogLevel(Cfg.LogLevel) == EVaRestLogLevel::None || !UE_LOG_ACTIVE(LogVaRestHttp, Warning))
+	{
+		return;
+	}
+	const FString Url = LogStagePrivate::ShownUrl(Cfg.Redactor.ToSharedRef(), Ex.Url.IsEmpty() ? JoinUrl(Cfg.BaseUrl, Ex.RawPath) : Ex.Url);
+	UE_LOG(LogVaRestHttp, Warning, TEXT("#%llu %s %s -> Config error: %s"), Ex.RequestId, *EscapeForLog(Ex.Verb), *Url, *EscapeForLog(Message));
 }
 
 FVaRestStageRef VaRest::Http::MakeLogStage()

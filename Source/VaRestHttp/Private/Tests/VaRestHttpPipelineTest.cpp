@@ -619,6 +619,37 @@ bool FVaRestHttpPipelineConfigErrorTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpPipelineControlInAuthorityTest, "VaRest.Http.Pipeline.ControlInAuthority",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpPipelineControlInAuthorityTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	// Task 14 fix round 2: JoinUrl percent-encodes CTLs and spaces only after the authority (VaRestUrl.cpp:146), so one inside
+	// it -- an absolute URL a server handed back, or a base URL -- is refused as Config before any transport call, as a
+	// non-ASCII host is, instead of failing in curl without a reason
+	FTestRig Rig;
+	auto Injected = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("https://api.test\r\nX-Evil: 1/x")), Injected).Send();
+	FTestRig Spaced(TEXTVIEW("https://api test"));
+	auto BaseSpace = MakeOutcome<FVaRestJson>();
+	Observe(Spaced.Client.Get(TEXT("/a")), BaseSpace).Send();
+	auto PathControl = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/a\tb")), PathControl).Send();
+	TestTrue(TEXT("complete"), PumpUntil([Injected, BaseSpace, PathControl] { return Injected->IsDone() && BaseSpace->IsDone() && PathControl->IsDone(); }));
+	TestTrue(TEXT("CR LF in an absolute URL's authority: Kind Config, named"), Injected->Error.Kind == EVaRestErrorKind::Config
+		&& Injected->Error.Message.Contains(TEXT("authority")) && !Injected->Error.bRetryable);
+	TestTrue(TEXT("a space in the base URL's authority: Kind Config"), BaseSpace->Error.Kind == EVaRestErrorKind::Config);
+	TestEqual(TEXT("... neither was sent"), Spaced.Fake->NumCalls(), 0);
+	TestTrue(TEXT("a control in the path is no authority problem: sent"), PathControl->SuccessCalls == 1);
+	if (!TestEqual(TEXT("... the only call of this rig"), Rig.Fake->NumCalls(), 1))
+	{
+		return false;
+	}
+	TestEqualSensitive(TEXT("... percent-encoded"), Rig.Fake->GetCall(0).Request.Url, FString(TEXT("https://api.test/a%09b")));
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpPipelineDroppedCompletionTest, "VaRest.Http.Pipeline.DroppedCompletion",
 	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
 

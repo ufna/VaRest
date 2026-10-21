@@ -303,6 +303,7 @@ bool FVaRestHttpLogForgedLinesTest::RunTest(const FString& Parameters)
 	FLogCapture Capture;
 	AddExpectedErrorPlain(TEXT("header \"X-Bad\\r\\nFAKE\" is not a token"), EAutomationExpectedErrorFlags::Contains, 1);
 	AddExpectedMessagePlain(TEXT("-> Other InvalidHeader"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
+	AddExpectedMessagePlain(TEXT("-> Config error: the URL's authority"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
 	Rig.Client.WithLogLevel(EVaRestLogLevel::Body).Use(MakeShared<FForger, ESPMode::ThreadSafe>(), EVaRestStageSlot::PerAttempt);
 
 	FVaRestFakeResponse Echoed = FVaRestFakeResponse::Text(200, Forgery);
@@ -311,8 +312,11 @@ bool FVaRestHttpLogForgedLinesTest::RunTest(const FString& Parameters)
 	const FVaRestRequestHandle Echo = Run(Rig, Rig.Client.Get<FString>(TEXT("/text")));
 	const FVaRestRequestHandle Parts = Run(Rig, Rig.Client.Post(TEXT("/parts")).Body(FVaRestMultipart().AddField(TEXT("a"), TEXT("1")).AddField(TEXT("b"), Forgery)));
 	const FVaRestRequestHandle Forged = Run(Rig, Rig.Client.Get(TEXT("/forged")));
+	// Fix round 2: an absolute URL -- one a server handed back -- keeps its authority as it is (VaRestUrl.cpp:121, :146).
+	// Resolve refuses it (Kind=Config) before the chain, so its Basic line is the Config error's, through the same ShownUrl.
+	const FVaRestRequestHandle Refused = Run(Rig, Rig.Client.Get(TEXT("https://api.test\r\nFAKE #999 GET http://evil -> 200/x")));
 
-	const FString Ids[] = { Id(Echo), Id(Parts), Id(Forged) };
+	const FString Ids[] = { Id(Echo), Id(Parts), Id(Forged), Id(Refused) };
 	int32 Lines = 0;
 	int32 Raw = 0;
 	int32 Untagged = 0;
@@ -341,13 +345,15 @@ bool FVaRestHttpLogForgedLinesTest::RunTest(const FString& Parameters)
 			AddInfo(FString::Printf(TEXT("untagged: %s"), *Line.ReplaceCharWithEscapedChar()));
 		}
 	}
-	TestTrue(TEXT("the three requests wrote their lines"), Lines >= 12);
+	TestTrue(TEXT("the four requests wrote their lines"), Lines >= 13);
 	TestEqual(TEXT("no raw CR or LF in any line"), Raw, 0);
 	TestEqual(TEXT("IN-16: every line starts with its request's #<RequestId>"), Untagged, 0);
 	TestTrue(TEXT("a text body, escaped"), Capture.Contains(Id(Echo) + TEXT("< body (text, ")) && Capture.Contains(TEXT("): a\\r\\nFAKE #999 GET http://evil -> 200")));
 	TestTrue(TEXT("a response header value, escaped"), Capture.Contains(Id(Echo) + TEXT("<   X-Note: a\\r\\nFAKE #999 GET http://evil -> 200")));
 	TestTrue(TEXT("multipart parts on one line"), Capture.Contains(Id(Parts) + TEXT("> body (multipart, ")) && Capture.Contains(TEXT("): part \"a\": 1\\npart \"b\": a\\r\\nFAKE #999")));
 	TestTrue(TEXT("a stage's header name and value, escaped"), Capture.Contains(Id(Forged) + TEXT(">   X-Bad\\r\\nFAKE: a\\r\\nFAKE #999")));
+	TestTrue(TEXT("a URL's authority, escaped on the Config error's Basic line"), Capture.Contains(Id(Refused) + TEXT("GET https://api.test\\r\\nFAKE #999"))
+		&& Capture.Contains(TEXT("-> Config error: the URL's authority")));
 	TestEqualSensitive(TEXT("a backslash is escaped too, so no escape can be forged"), VaRest::Http::EscapeForLog(TEXT("a\\r\tb\x1b\x7f\x85\x2028***")),
 		FString(TEXT("a\\\\r\tb\\x1B\\x7F\\x85\\u2028***")));
 	return true;

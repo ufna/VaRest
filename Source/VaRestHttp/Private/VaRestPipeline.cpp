@@ -519,6 +519,15 @@ bool VaRest::Http::FClientState::Resolve(FVaRestExchange& Exchange, FString& Out
 			*Cfg.Redactor->RedactUrl(Resolved));
 		return false;
 	}
+	if (HasControlInAuthority(Resolved))
+	{
+		// Task 14 fix round 2: JoinUrl percent-encodes CTLs and spaces only after the authority (VaRestUrl.cpp:146), and
+		// FindAuthority ends it only at '/', '?' or '#' (:121), so "https://h\r\n.../x" -- an absolute URL a server handed
+		// back -- would reach the transport, which refuses it without saying why. The URL stays out of the message: it is
+		// in Error.Url (redacted), and the message is text a game may log as it is.
+		OutError = TEXT("the URL's authority (after the scheme, to the first '/', '?' or '#') holds a control character or a space");
+		return false;
+	}
 	AppendQuery(Resolved, Exchange.Query);
 	Exchange.Url = MoveTemp(Resolved);
 
@@ -593,6 +602,8 @@ void VaRest::Http::FClientState::Enter(const FVaRestExchangeRef& Exchange)
 		FFinish Finish = MakeFinish(Ex);
 		Finish.Error.Kind = EVaRestErrorKind::Config;
 		Finish.Error.Message = Ex.BuildError.IsEmpty() ? MoveTemp(Problem) : Ex.BuildError;
+		// It never reaches the log stage: its Basic line is written here
+		LogConfigError(Ex, Finish.Error.Message);
 		Complete(Exchange, MoveTemp(Finish));
 		return;
 	}

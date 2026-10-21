@@ -311,6 +311,24 @@ bool VaRest::Http::HasNonAsciiHost(FStringView Url)
 	return false;
 }
 
+bool VaRest::Http::HasControlInAuthority(FStringView Url)
+{
+	int32 Start = 0;
+	int32 End = 0;
+	if (!UrlPrivate::FindAuthority(Url.TrimStartAndEnd(), Start, End))
+	{
+		return false;
+	}
+	for (const TCHAR C : Url.TrimStartAndEnd().Mid(Start, End - Start))
+	{
+		if (C <= 0x20 || C == 0x7F)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 TValueOrError<FString, FString> VaRest::Http::ExpandPathTemplate(FStringView Template, TConstArrayView<TPair<FString, FString>> Params)
 {
 	TArray<bool, TInlineAllocator<8>> Used;

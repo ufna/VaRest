@@ -33,6 +33,12 @@ namespace VaRest::Http
 	VARESTHTTP_API bool HasNonAsciiHost(FStringView Url);
 
 	/**
+	 * True when the authority of an "http(s)://..." URL (after the scheme, to the first '/', '?' or '#') holds a CTL
+	 * (U+0000-U+001F, U+007F) or a space. JoinUrl copies the authority as it is, so the caller reports Kind=Config.
+	 */
+	VARESTHTTP_API bool HasControlInAuthority(FStringView Url);
+
+	/**
 	 * "/users/{id}" with each {name} replaced by PercentEncode(value): one segment, so '/' in a value is %2F. The last
 	 * value given for a name wins. Errors (decision 10): a placeholder without a value, an empty value, a value that is "." or "..", a value whose name
 	 * the template lacks, '{' without '}', a stray '}', and "{}".

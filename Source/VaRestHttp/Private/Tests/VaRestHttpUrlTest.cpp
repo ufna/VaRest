@@ -113,6 +113,17 @@ bool FVaRestHttpJoinTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("a non-ASCII host is detected (IDN is out of scope, Config)"), HasNonAsciiHost(TEXT("https://münchen.de/x")));
 	TestFalse(TEXT("... a non-ASCII path is not a host"), HasNonAsciiHost(TEXT("https://h/münchen")));
 	TestFalse(TEXT("... nor a query"), HasNonAsciiHost(TEXT("https://h?q=é")));
+	// Task 14 fix round 2: JoinUrl keeps the authority as it is, so a CTL or a space there is refused (Kind=Config)
+	TestTrue(TEXT("CR LF in the authority"), HasControlInAuthority(TEXT("https://h\r\nX: 1/x")));
+	TestTrue(TEXT("... a space"), HasControlInAuthority(TEXT("http://a b/")));
+	TestTrue(TEXT("... a TAB"), HasControlInAuthority(TEXT("https://h\t/")));
+	TestTrue(TEXT("... DEL"), HasControlInAuthority(TEXT("https://h\x7f")));
+	TestTrue(TEXT("... a C0 control in the userinfo"), HasControlInAuthority(TEXT("https://u\x01:p@h/")));
+	TestFalse(TEXT("a plain authority with userinfo and a port"), HasControlInAuthority(TEXT("https://u:p@h.test:8443/x")));
+	TestFalse(TEXT("... a control after the authority is the path's (JoinUrl encodes it)"), HasControlInAuthority(TEXT("https://h/a\r\nb")));
+	TestFalse(TEXT("... after a '?'"), HasControlInAuthority(TEXT("https://h?q=a b")));
+	TestFalse(TEXT("... after a '#'"), HasControlInAuthority(TEXT("https://h#a b")));
+	TestFalse(TEXT("... no authority without a scheme"), HasControlInAuthority(TEXT("/a b")));
 	return true;
 }
 

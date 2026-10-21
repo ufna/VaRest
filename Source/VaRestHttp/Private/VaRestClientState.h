@@ -120,6 +120,8 @@ namespace VaRest::Http
 	FVaRestStageRef MakeTransportStage();
 	/** Spec 4.5, per attempt (VaRestLogStage.cpp) */
 	FVaRestStageRef MakeLogStage();
+	/** The Basic line (a Warning) of a request refused before the chain, with Kind=Config: a builder error or Resolve's */
+	void LogConfigError(const FVaRestExchange& Ex, FStringView Message);
 	/** The cvar VaRest.LogLevel when it is 0..3, else the client's level */
 	EVaRestLogLevel EffectiveLogLevel(EVaRestLogLevel ClientLevel);
 	/** Spec 4.5: "Logged bodies are truncated to 4 KiB" */
