@@ -149,6 +149,22 @@ namespace VaRest::Http::PipelinePrivate
 		FVaRestOutcomeCallback Outcome;
 	};
 
+	bool IsOwnerGone(const FVaRestExchange& Ex)
+	{
+		// IsValid() is false for an object marked as garbage, not only for one collected (WeakObjectPtr.h:290)
+		return Ex.bHasOwner && !Ex.Owner.IsValid();
+	}
+
+	void MarkOwnerGone(FVaRestExchange& Ex)
+	{
+		// Silence wins over an earlier User cancel (review C-2); Shutdown is silent too, and stays
+		if (Ex.CancelReason != EVaRestCancelReason::Shutdown)
+		{
+			Ex.CancelReason = EVaRestCancelReason::OwnerGone;
+		}
+		Ex.bCancelRequested = true;
+	}
+
 	/**
 	 * Background thread (the restore-the-bug runs put it on the game thread): spec 1's "parsing, decoding ... run on
 	 * UE::Tasks". Ex is read only through its atomic cancel flag, which any thread may read.
@@ -223,6 +239,13 @@ namespace VaRest::Http::PipelinePrivate
 		virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) override
 		{
 			FVaRestExchange& Ex = *Exchange;
+			if (IsOwnerGone(Ex))
+			{
+				// Spec 3.2: "owner gone -> no callbacks, no further retries": no attempt starts for it
+				MarkOwnerGone(Ex);
+				OnOutcome(FVaRestAttemptOutcome::Canceled());
+				return;
+			}
 			const FClientConfig& Cfg = *Ex.Config;
 			FString BadName;
 			if (FindBadHeader(Ex, BadName))
@@ -437,6 +460,18 @@ void VaRest::Http::FClientState::Enter(const FVaRestExchangeRef& Exchange)
 	Ex.StartedAt = Ex.Config->Clock->Now();
 	Ex.Phase = EVaRestExchangePhase::InChain;
 	InFlight.Add(Ex.RequestId, Exchange);
+	if (IsShuttingDown())
+	{
+		// Review M-14: after OnEnginePreExit; the HTTP module unloads next (LaunchEngineLoop.cpp:5182)
+		Ex.CancelReason = EVaRestCancelReason::Shutdown;
+		Ex.bCancelRequested = true;
+	}
+	if (Ex.IsCancelRequested() || IsOwnerGone(Ex))
+	{
+		// Canceled before it reached the game thread, its owner is already gone, or the engine is exiting: no transport call
+		Complete(Exchange, MakeFinish(Ex));
+		return;
+	}
 
 	FString Problem;
 	if (!Ex.BuildError.IsEmpty() || !Resolve(Ex, Problem))
@@ -455,9 +490,15 @@ void VaRest::Http::FClientState::Enter(const FVaRestExchangeRef& Exchange)
 
 void VaRest::Http::FClientState::OnAttemptDone(const FVaRestExchangeRef& Exchange, FVaRestTransportResult&& Result, FVaRestOutcomeCallback&& OnOutcome)
 {
+	using namespace PipelinePrivate;
 	check(IsInGameThread());
 	FVaRestExchange& Ex = *Exchange;
 	Ex.TransportCall.Reset();
+	if (IsOwnerGone(Ex))
+	{
+		// Seen as canceled by every stage the outcome passes on its way up (M4's retry stops here)
+		MarkOwnerGone(Ex);
+	}
 	FVaRestAttemptOutcome Outcome;
 	Outcome.Status = Result.Status;
 	Outcome.Headers = MoveTemp(Result.Headers);
@@ -581,8 +622,7 @@ void VaRest::Http::FClientState::Complete(const FVaRestExchangeRef& Exchange, FF
 	if (Ex.Phase == EVaRestExchangePhase::Decoding && !Ex.Handler.IsValid())
 	{
 		// Review C-3: a decode task holds the handler. It completes the exchange when it returns (as Canceled when the
-		// cancel flag is set, once Task 11 adds the cancel path to Complete), so finishing here would leave nothing to
-		// deliver to and lose every callback.
+		// cancel flag is set: see below), so finishing here would leave nothing to deliver to and lose every callback.
 		return;
 	}
 	if (Ex.ApiDepth > 0)
@@ -593,6 +633,24 @@ void VaRest::Http::FClientState::Complete(const FVaRestExchangeRef& Exchange, FF
 			Exchange->State->Complete(Exchange, MoveTemp(Pending));
 		});
 		return;
+	}
+	if (IsOwnerGone(Ex))
+	{
+		// Spec 3.2: owner gone -> no callbacks, whatever canceled it first (a Cancel() in the owner's EndPlay, review C-2)
+		MarkOwnerGone(Ex);
+	}
+	if (Ex.IsCancelRequested() && Ex.CancelReason == EVaRestCancelReason::None)
+	{
+		Ex.CancelReason = EVaRestCancelReason::User; // the flag set off the game thread before the reason
+	}
+	if (Ex.IsCancelRequested() && Finish.Response.SavedFile.IsEmpty())
+	{
+		// After Cancel() nothing but Canceled is delivered, even an answer that raced it (decision 2). A SaveTo whose
+		// rename already replaced the destination delivers its success: the truthful outcome (review M-4).
+		FFinish Canceled = MakeFinish(Ex);
+		Canceled.Error.Kind = EVaRestErrorKind::Canceled;
+		Canceled.Error.Message = FVaRestError::DefaultMessage(EVaRestErrorKind::Canceled, 0);
+		Finish = MoveTemp(Canceled);
 	}
 	Ex.bFinished = true;
 	Ex.Phase = EVaRestExchangePhase::Done;
@@ -615,7 +673,9 @@ void VaRest::Http::FClientState::Complete(const FVaRestExchangeRef& Exchange, FF
 	Ex.bDone = true;
 	InFlight.Remove(Ex.RequestId);
 	TUniquePtr<IResultHandler> Handler = MoveTemp(Ex.Handler);
-	if (!Handler.IsValid())
+	// Spec 3.2: owner gone -> no callbacks; nor at engine exit (decision 2)
+	const bool bSilent = Ex.CancelReason == EVaRestCancelReason::OwnerGone || Ex.CancelReason == EVaRestCancelReason::Shutdown;
+	if (!Handler.IsValid() || bSilent)
 	{
 		return;
 	}
@@ -646,3 +706,75 @@ void VaRest::Http::FClientState::Complete(const FVaRestExchangeRef& Exchange, FF
 	}
 	Handler->Deliver(Finish);
 }
+
+void VaRest::Http::FClientState::Cancel(const FVaRestExchangeRef& Exchange, EVaRestCancelReason Reason)
+{
+	using namespace PipelinePrivate;
+	check(IsInGameThread());
+	FVaRestExchange& Ex = *Exchange;
+	if (Ex.bFinished)
+	{
+		return;
+	}
+	// Review C-2: the first reason wins, but silence (OwnerGone, Shutdown) overrides User
+	if (Ex.CancelReason == EVaRestCancelReason::None || Reason == EVaRestCancelReason::Shutdown || Reason == EVaRestCancelReason::OwnerGone)
+	{
+		Ex.CancelReason = Reason;
+	}
+	Ex.bCancelRequested = true;
+	if (Ex.Phase != EVaRestExchangePhase::InChain)
+	{
+		// Created: Enter sees the flag. Decoding: Complete replaces the decoded result when it comes back.
+		return;
+	}
+	FApiScope Scope(Ex);
+	if (Ex.TransportCall.IsValid())
+	{
+		// The transport answers Canceled through the normal path, which releases what the attempt holds
+		Ex.TransportCall->Cancel();
+		return;
+	}
+	// Held by a custom stage, or its answer is queued for the game thread: finish now; what arrives later is ignored
+	Complete(Exchange, MakeFinish(Ex));
+}
+
+void VaRest::Http::FClientState::CancelAll(FName InTag, EVaRestCancelReason Reason)
+{
+	check(IsInGameThread());
+	TArray<FVaRestExchangeRef> Targets;
+	for (const TPair<uint64, FVaRestExchangeRef>& Pair : InFlight)
+	{
+		if (InTag.IsNone() || Pair.Value->GetTag() == InTag)
+		{
+			Targets.Add(Pair.Value);
+		}
+	}
+	for (const FVaRestExchangeRef& Target : Targets)
+	{
+		Cancel(Target, Reason);
+	}
+}
+
+namespace VaRest::Http::PipelinePrivate
+{
+	/** Trivially destructible: safe as a static (review I-4) */
+	std::atomic<bool> bShuttingDown{ false };
+}
+
+void VaRest::Http::FClientState::CancelForShutdown()
+{
+	PipelinePrivate::bShuttingDown = true;
+	ForEachLive([](FClientState& Client) { Client.CancelAll(NAME_None, EVaRestCancelReason::Shutdown); });
+}
+
+bool VaRest::Http::FClientState::IsShuttingDown()
+{
+	return PipelinePrivate::bShuttingDown.load();
+}
+
+#if WITH_DEV_AUTOMATION_TESTS
+void VaRest::Http::FClientState::ResetShutdownInternal()
+{
+	PipelinePrivate::bShuttingDown = false;
+}
+#endif

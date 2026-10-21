@@ -60,6 +60,22 @@ namespace VaRest::Http
 		/** Every live client (game thread): the trace snapshot, engine shutdown */
 		static void ForEachLive(TFunctionRef<void(FClientState&)> Visit);
 
+		/**
+		 * Game thread. The first reason wins, except that a silent one (OwnerGone, Shutdown) overrides User: callbacks
+		 * must not run into an owner that is gone or at engine exit, whatever canceled first (review C-2).
+		 */
+		void Cancel(const FVaRestExchangeRef& Exchange, EVaRestCancelReason Reason);
+		/** Game thread: every in-flight exchange with InTag (all for NAME_None) */
+		void CancelAll(FName InTag, EVaRestCancelReason Reason);
+		/** FCoreDelegates::OnEnginePreExit: every live client's requests, without callbacks; later sends complete silently (review M-14) */
+		static void CancelForShutdown();
+		/** Any thread */
+		static bool IsShuttingDown();
+#if WITH_DEV_AUTOMATION_TESTS
+		/** Tests: the editor goes on after a simulated shutdown */
+		static void ResetShutdownInternal();
+#endif
+
 	private:
 		bool Resolve(FVaRestExchange& Exchange, FString& OutError) const;
 		void OnChainDone(const FVaRestExchangeRef& Exchange, FVaRestAttemptOutcome&& Outcome);

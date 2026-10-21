@@ -133,6 +133,25 @@ bool FVaRestRequestHandle::IsActive() const
 	return Pinned.IsValid() && !Pinned->IsDone();
 }
 
+void FVaRestRequestHandle::Cancel() const
+{
+	TSharedPtr<FVaRestExchange, ESPMode::ThreadSafe> Pinned = Exchange.Pin();
+	if (!Pinned.IsValid() || Pinned->IsDone())
+	{
+		return;
+	}
+	if (IsInGameThread())
+	{
+		Pinned->State->Cancel(Pinned.ToSharedRef(), EVaRestCancelReason::User);
+		return;
+	}
+	// Any thread: the flag now (a decode in flight sees it), the rest where the control plane lives (spec 1). The pin is
+	// moved into the task, so this thread never drops the last reference (review I-1).
+	Pinned->bCancelRequested = true;
+	UE::Tasks::Launch(TEXT("VaRest.Cancel"), [Target = MoveTemp(Pinned)] { Target->State->Cancel(Target.ToSharedRef(), EVaRestCancelReason::User); },
+		UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
+}
+
 FVaRestClient FVaRestClient::Make(FStringView BaseUrl)
 {
 	checkf(IsInGameThread(), TEXT("FVaRestClient::Make runs on the game thread"));
@@ -166,6 +185,15 @@ int32 FVaRestClient::GetInFlightCount() const
 {
 	check(IsInGameThread());
 	return State.IsValid() ? State->NumInFlight() : 0;
+}
+
+void FVaRestClient::CancelAll(FName InTag)
+{
+	check(IsInGameThread());
+	if (State.IsValid())
+	{
+		State->CancelAll(InTag, EVaRestCancelReason::User);
+	}
 }
 
 FVaRestClient& FVaRestClient::WithName(FStringView DisplayName)

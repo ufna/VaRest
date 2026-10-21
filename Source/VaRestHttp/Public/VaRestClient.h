@@ -75,6 +75,11 @@ public:
 	 * may still be running.
 	 */
 	bool IsActive() const;
+	/**
+	 * Any thread. The callbacks then get Kind=Canceled (decision 2), never inside Cancel() (decision 3); after it returns
+	 * on the game thread no OnSuccess runs. No-op on a finished request.
+	 */
+	void Cancel() const;
 
 private:
 	TWeakPtr<FVaRestExchange, ESPMode::ThreadSafe> Exchange;
@@ -340,10 +345,7 @@ public:
 		return MoveTemp(*this);
 	}
 
-	/**
-	 * Spec 3.2: weak. Once the owner is gone there are no callbacks and no further attempts; Task 11's cancellation path
-	 * enforces that. Until it lands, only OnHttpThread() reads the owner, to pin it for its callbacks (decision 28).
-	 */
+	/** Spec 3.2: weak. Once the owner is gone there are no callbacks and no further attempts. */
 	TVaRestRequest Owner(const UObject* InOwner) &&
 	{
 		Spec->Owner = InOwner;
@@ -434,6 +436,8 @@ public:
 	FString GetBaseUrl() const;
 	/** Game thread */
 	int32 GetInFlightCount() const;
+	/** Game thread: cancels every in-flight request with this tag (all of them for NAME_None), like Cancel() on each */
+	void CancelAll(FName InTag = NAME_None);
 
 	// ---- configuration (game thread)
 	FVaRestClient& WithName(FStringView DisplayName);
