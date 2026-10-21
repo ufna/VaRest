@@ -11,7 +11,9 @@ with --ready-file, writes the base URL to that file (atomically, so a reader nev
 with SIGKILL leaves no server behind. The parent must be the process that started the server: any other PID is
 refused at start (exit 2). A server that stops by itself (the parent watch, Ctrl-C) removes its ready file.
 
-Routes. Every response with a body has a Content-Length unless the route says chunked.
+Routes. Every response with a body has a Content-Length unless the route says chunked. Bounds (review M1): a request
+body over MAX_BODY (64 MiB) gets 413, a request-target over MAX_TARGET (16 KiB) 414, and a numeric parameter that is
+not an integer or is out of its range 400 ({"error", "name", ...}); each closes the connection.
 
   ANY  /echo[/<anything>]   JSON: method, path, query {k: [v, ...]}, headers {lower-case name: value}, content_type,
                             body (UTF-8 text or null), body_base64, body_length, body_sha256, plus form {k: [v, ...]}
@@ -27,13 +29,15 @@ Routes. Every response with a body has a Content-Length unless the route says ch
   GET  /large?bytes=N&seed=S                  N deterministic bytes (application/octet-stream), X-Sha256 header
   GET  /large/json?bytes=N                    a JSON array of objects, at least N bytes; X-Item-Count header
   GET  /chunked?chunks=K&size=M               chunked transfer: a JSON array of K strings of M letters
-  ANY  /redirect?to=<path>  302 to that path
+  ANY  /redirect?to=<path>  302 to that path, with a JSON body of its own ({"redirect": "body-must-not-leak"}) that a
+                            client following the redirect must never deliver
   ANY  /headers/set?<Name>=<Value>&...        200 {} with each pair as a response header
   GET  /json/profile        the FVaRestHttpTestProfile fixture (camelCase keys; an id above 2^53; no "score")
   ANY  /slowread?chunk=N&interval_ms=M        reads the request body N bytes at a time, M ms apart (TCP backpressure
                             slows the client's upload, so upload progress can be watched), then {"received": bytes}
   GET  /fixture/<name>      a file of --fixtures-dir (the benchmark's bench_*.json from Tools/gen_bench_json.py), kept
-                            in memory after the first read; 404 without the option or the file
+                            in memory after the first read; 404 without the option or the file, and for ".", "..", an
+                            absolute name, a symlink or anything whose real path is not directly in that directory
   For M4's stage tests (core spec 7.1):
   ANY  /retry-after/<n>?key=<k>&seconds=<s>   the first n calls per key: 503 with Retry-After: s; then 200
   GET  /etag?tag=<t>        ETag "t"; a matching If-None-Match gets 304
@@ -78,11 +82,29 @@ _UPGRADES = {}
 FIXTURES_DIR = None
 _FIXTURES = {}
 
+# Review M1 (task 16): bounds, so a wrong request costs a 4xx and not the run's memory or time. The largest body a test
+# sends is UploadProgress's 16 MiB; the largest one generated, LargeDownload's 8 MiB.
+MAX_BODY = 64 * 1024 * 1024
+MAX_TARGET = 16 * 1024
+MAX_MS = 60 * 1000
+MAX_COUNT = 1 << 16
+
+REDIRECT_BODY = {"redirect": "body-must-not-leak"}
+
 PROFILE = {
     "id": 9007199254740993,
     "name": "Neo",
     "items": [{"name": "sword", "level": 3}, {"name": "shield", "level": 1}],
 }
+
+
+class Refused(Exception):
+    """A request the server will not serve: dispatch answers it with this status and a JSON body, and closes"""
+
+    def __init__(self, status, message, **fields):
+        super().__init__(message)
+        self.status = status
+        self.fields = dict(fields, error=message)
 
 
 def register_upgrade(token, handler):
@@ -146,8 +168,22 @@ def count_call(table, key):
     return seen
 
 
-def query_int(h, name, default):
-    return int(h.query.get(name, [str(default)])[0])
+def query_int(h, name, default, high, low=0):
+    text = h.query.get(name, [str(default)])[0]
+    try:
+        value = int(text)
+    except ValueError:
+        raise Refused(400, "not an integer", name=name, value=text)
+    if not low <= value <= high:
+        raise Refused(400, "out of range", name=name, value=value, min=low, max=high)
+    return value
+
+
+def path_int(match, name, high):
+    value = int(match.group(1))
+    if value > high:
+        raise Refused(400, "out of range", name=name, value=value, max=high)
+    return value
 
 
 def route_echo(h, match):
@@ -188,8 +224,9 @@ def route_status(h, match):
 
 
 def route_delay(h, match):
-    ms = int(match.group(1))
+    ms = path_int(match, "ms", MAX_MS)
     key = h.query.get("key", [None])[0]
+    entry = None
     if key:
         with LOCK:
             entry = STATE["delay"].setdefault(key, {"in_flight": 0, "max_in_flight": 0, "count": 0})
@@ -199,9 +236,11 @@ def route_delay(h, match):
     try:
         time.sleep(ms / 1000.0)
     finally:
-        if key:
+        if entry is not None:
+            # Review M6: the entry this call counted in, not a lookup by key -- /stats?reset=1 may have dropped it meanwhile
+            # (a lookup raised KeyError and lost the response) or a later call may have made a new one (it would be off by one)
             with LOCK:
-                STATE["delay"][key]["in_flight"] -= 1
+                entry["in_flight"] -= 1
     h.send_json(200, {"delayed_ms": ms})
 
 
@@ -215,9 +254,9 @@ def route_stats(h, match):
 
 
 def route_drip(h, match):
-    total = query_int(h, "bytes", 1024)
-    chunks = max(1, query_int(h, "chunks", 4))
-    interval = query_int(h, "interval_ms", 100) / 1000.0
+    total = query_int(h, "bytes", 1024, MAX_BODY)
+    chunks = query_int(h, "chunks", 4, MAX_COUNT, low=1)
+    interval = query_int(h, "interval_ms", 100, MAX_MS) / 1000.0
     h.send_response(200)
     h.send_header("Content-Type", "application/octet-stream")
     h.send_header("Content-Length", str(total))
@@ -232,12 +271,13 @@ def route_drip(h, match):
 
 
 def route_large(h, match):
-    body = random.Random(query_int(h, "seed", 1)).randbytes(query_int(h, "bytes", 1048576))
+    seed = query_int(h, "seed", 1, 2 ** 63 - 1, low=-(2 ** 63))
+    body = random.Random(seed).randbytes(query_int(h, "bytes", 1048576, MAX_BODY))
     h.send_bytes(200, body, "application/octet-stream", [("X-Sha256", hashlib.sha256(body).hexdigest())])
 
 
 def route_large_json(h, match):
-    target = query_int(h, "bytes", 1048576)
+    target = query_int(h, "bytes", 1048576, MAX_BODY)
     items = []
     size = 2
     while size < target:
@@ -250,8 +290,10 @@ def route_large_json(h, match):
 
 
 def route_chunked(h, match):
-    chunks = query_int(h, "chunks", 8)
-    size = query_int(h, "size", 1024)
+    chunks = query_int(h, "chunks", 8, MAX_COUNT)
+    size = query_int(h, "size", 1024, MAX_BODY)
+    if chunks * size > MAX_BODY:
+        raise Refused(400, "out of range", name="chunks*size", value=chunks * size, max=MAX_BODY)
     h.send_response(200)
     h.send_header("Content-Type", "application/json")
     h.send_header("Transfer-Encoding", "chunked")
@@ -266,7 +308,9 @@ def route_chunked(h, match):
 
 
 def route_redirect(h, match):
-    h.send_bytes(302, b"", "text/plain", [("Location", h.query.get("to", ["/echo"])[0])])
+    # Review I-2 (task 16): a body of its own, so a transport or sink that kept a followed redirect's bytes breaks the
+    # final JSON instead of passing unseen (m3-plan-review-concurrency.md:427-428: libcurl discards it)
+    h.send_json(302, REDIRECT_BODY, [("Location", h.query.get("to", ["/echo"])[0])])
 
 
 def route_headers_set(h, match):
@@ -277,12 +321,26 @@ def route_profile(h, match):
     h.send_json(200, PROFILE)
 
 
+def fixture_path(name):
+    """The file /fixture/<name> may serve, or None (review M3): a plain file directly in FIXTURES_DIR, never through a
+    symlink, "..", an absolute name or a separator"""
+    if not FIXTURES_DIR or name in ("", ".", "..") or os.path.isabs(name) or "/" in name or os.sep in name:
+        return None
+    if os.altsep and os.altsep in name:
+        return None
+    root = os.path.realpath(FIXTURES_DIR)
+    path = os.path.join(root, name)
+    if os.path.islink(path) or os.path.dirname(os.path.realpath(path)) != root or not os.path.isfile(path):
+        return None
+    return path
+
+
 def route_fixture(h, match):
     name = match.group(1)
-    path = os.path.join(FIXTURES_DIR, name) if FIXTURES_DIR else None
     with LOCK:
         body = _FIXTURES.get(name)
-    if body is None and path and os.path.isfile(path):
+    path = fixture_path(name) if body is None else None
+    if path:
         with open(path, "rb") as stream:
             body = stream.read()
         with LOCK:
@@ -295,9 +353,9 @@ def route_fixture(h, match):
 
 def route_slowread(h):
     """Called before the body is read: it reads the body itself, slowly"""
-    chunk = max(1, query_int(h, "chunk", 65536))
-    interval = query_int(h, "interval_ms", 100) / 1000.0
-    remaining = int(h.headers.get("Content-Length") or 0)
+    chunk = query_int(h, "chunk", 65536, MAX_BODY, low=1)
+    interval = query_int(h, "interval_ms", 100, MAX_MS) / 1000.0
+    remaining = h.content_length()
     received = 0
     while remaining > 0:
         data = h.rfile.read(min(chunk, remaining))
@@ -366,7 +424,7 @@ def route_protected(h, match):
 
 
 def route_flaky(h, match):
-    failures = query_int(h, "n", 1)
+    failures = query_int(h, "n", 1, MAX_COUNT)
     seen = count_call("flaky", h.query.get("key", ["default"])[0])
     if seen < failures:
         # No status line at all: the client sees the connection end (a Connection error)
@@ -431,6 +489,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def dispatch(self):
         try:
+            if len(self.path) > MAX_TARGET:
+                raise Refused(414, "the request-target is over the server's limit", length=len(self.path), max=MAX_TARGET)
             upgrade = self.headers.get("Upgrade", "").strip().lower()
             if upgrade in _UPGRADES:
                 _UPGRADES[upgrade](self)
@@ -447,22 +507,49 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     route(self, match)
                     return
             self.send_json(404, {"error": "no route", "path": url.path})
+        except Refused as refused:
+            # Before any byte of a response; a body may be left unread, so the connection ends with this answer
+            self.send_json(refused.status, refused.fields, [("Connection", "close")])
+            self.close_connection = True
         except (BrokenPipeError, ConnectionResetError):
             # The client gave up (a timeout or cancel test)
             self.close_connection = True
 
+    def content_length(self):
+        text = self.headers.get("Content-Length")
+        if not text:
+            return 0
+        try:
+            length = int(text)
+        except ValueError:
+            raise Refused(400, "bad Content-Length", value=text)
+        if length < 0:
+            raise Refused(400, "bad Content-Length", value=text)
+        if length > MAX_BODY:
+            raise Refused(413, "the body is over the server's limit", length=length, max=MAX_BODY)
+        return length
+
     def read_body(self):
         if "chunked" in self.headers.get("Transfer-Encoding", "").lower():
             chunks = []
+            total = 0
             while True:
-                size = int(self.rfile.readline().split(b";")[0].strip() or b"0", 16)
+                line = self.rfile.readline(1024).split(b";")[0].strip()
+                try:
+                    size = int(line or b"0", 16)
+                except ValueError:
+                    raise Refused(400, "bad chunk size", value=line.decode("latin-1"))
+                # Checked before the chunk is read: the declared size alone is refused
+                if size < 0 or total + size > MAX_BODY:
+                    raise Refused(413, "the body is over the server's limit", length=total + size, max=MAX_BODY)
                 if size == 0:
-                    while self.rfile.readline() not in (b"\r\n", b"\n", b""):
+                    while self.rfile.readline(1024) not in (b"\r\n", b"\n", b""):
                         pass
                     return b"".join(chunks)
                 chunks.append(self.rfile.read(size))
-                self.rfile.readline()
-        length = int(self.headers.get("Content-Length") or 0)
+                total += size
+                self.rfile.readline(1024)
+        length = self.content_length()
         return self.rfile.read(length) if length > 0 else b""
 
     def send_bytes(self, status, body, content_type="application/octet-stream", headers=()):

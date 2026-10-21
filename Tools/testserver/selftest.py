@@ -10,6 +10,7 @@ import hashlib
 import http.client
 import json
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -161,8 +162,10 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(items, ["aaa", "bbb", "ccc", "ddd", "eee"])
 
     def test_redirect_and_headers(self):
-        status, headers, _ = self.call("GET", "/redirect?to=/echo/after")
+        status, headers, data = self.call("GET", "/redirect?to=/echo/after")
         self.assertEqual((status, headers["Location"]), (302, "/echo/after"))
+        # Review I-2: the 302 carries a body of its own, which a client that follows it must not deliver
+        self.assertEqual((headers["Content-Type"], json.loads(data)), ("application/json", {"redirect": "body-must-not-leak"}))
         status, headers, _ = self.call("GET", "/headers/set?Set-Cookie=sid%3Dx&X-A=1")
         self.assertEqual((status, headers["Set-Cookie"], headers["X-A"]), (200, "sid=x", "1"))
 
@@ -183,6 +186,83 @@ class ServerTest(unittest.TestCase):
                 self.assertEqual(self.call("GET", "/fixture/..")[0], 404)
             finally:
                 server.FIXTURES_DIR = None
+
+    def test_fixture_refuses_links_and_escapes(self):
+        # Review M3: only a plain file directly in --fixtures-dir; never through a symlink, "..", an absolute name or a separator
+        with tempfile.TemporaryDirectory() as outside, tempfile.TemporaryDirectory() as directory:
+            secret = os.path.join(outside, "secret.json")
+            with open(secret, "wb") as stream:
+                stream.write(b'{"secret":true}')
+            with open(os.path.join(directory, "plain.json"), "wb") as stream:
+                stream.write(b"{}")
+            os.mkdir(os.path.join(directory, "sub"))
+            try:
+                os.symlink(secret, os.path.join(directory, "link.json"))
+            except (OSError, NotImplementedError):
+                self.skipTest("no symlinks here")
+            server.FIXTURES_DIR = directory
+            try:
+                self.assertEqual(self.call("GET", "/fixture/link.json")[0], 404)
+                self.assertEqual(self.call("GET", "/fixture/sub")[0], 404)
+                self.assertEqual(self.call("GET", "/fixture/plain.json")[0], 200)
+                for name in ("link.json", "..", ".", "", secret, "sub/../plain.json", "../" + os.path.basename(outside)):
+                    self.assertIsNone(server.fixture_path(name), name)
+                self.assertEqual(server.fixture_path("plain.json"), os.path.join(os.path.realpath(directory), "plain.json"))
+            finally:
+                server.FIXTURES_DIR = None
+
+    def raw(self, data):
+        """Sends bytes as they are and reads until the server closes"""
+        with socket.create_connection(("127.0.0.1", self.port), timeout=10) as connection:
+            connection.sendall(data)
+            received = b""
+            while True:
+                chunk = connection.recv(65536)
+                if not chunk:
+                    return received
+                received += chunk
+
+    def test_bounds(self):
+        # Review M1: a body over MAX_BODY is refused from its declared size alone, before any of it is read
+        over = server.MAX_BODY + 1
+        answer = self.raw(b"POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: %d\r\n\r\n" % over)
+        self.assertTrue(answer.startswith(b"HTTP/1.1 413 "), answer[:80])
+        answer = self.raw(b"POST /slowread HTTP/1.1\r\nHost: x\r\nContent-Length: %d\r\n\r\n" % over)
+        self.assertTrue(answer.startswith(b"HTTP/1.1 413 "), answer[:80])
+        answer = self.raw(b"POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n%x\r\n" % over)
+        self.assertTrue(answer.startswith(b"HTTP/1.1 413 "), answer[:80])
+        answer = self.raw(b"POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: nope\r\n\r\n")
+        self.assertTrue(answer.startswith(b"HTTP/1.1 400 "), answer[:80])
+        status, _, value = self.call_json("GET", "/echo?" + "a" * server.MAX_TARGET)
+        self.assertEqual((status, value["max"]), (414, server.MAX_TARGET))
+        for path in ("/large?bytes=%d" % over, "/large?bytes=x", "/large/json?bytes=-1", "/drip?chunks=0", "/delay/%d" % (server.MAX_MS + 1),
+                     "/chunked?chunks=4096&size=65536", "/flaky?n=99999999"):
+            status, _, value = self.call_json("GET", path)
+            self.assertEqual(status, 400, path)
+            self.assertIn(value["error"], ("out of range", "not an integer"), path)
+        # A refusal ends its connection; the server goes on serving
+        self.assertEqual(self.call("GET", "/echo")[0], 200)
+
+    def test_stats_reset_while_delay_in_flight(self):
+        # Review M6: a reset while a /delay with that key sleeps must not cost that request its response
+        key = uuid.uuid4().hex
+        result = {}
+
+        def delayed():
+            try:
+                result["status"] = self.call("GET", "/delay/400?key=" + key)[0]
+            except (http.client.HTTPException, OSError) as error:
+                result["error"] = repr(error)
+
+        thread = threading.Thread(target=delayed)
+        thread.start()
+        deadline = time.monotonic() + 5
+        while self.call_json("GET", "/stats?key=" + key)[2]["in_flight"] != 1 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(self.call_json("GET", "/stats?reset=1&key=" + key)[2]["in_flight"], 1)
+        thread.join()
+        self.assertEqual(result, {"status": 200})
+        self.assertEqual(self.call_json("GET", "/stats?key=" + key)[2], {"in_flight": 0, "max_in_flight": 0, "count": 0})
 
     def test_retry_after(self):
         key = uuid.uuid4().hex
@@ -250,7 +330,8 @@ class LifecycleTest(unittest.TestCase):
                        " '--parent-pid', str(os.getpid())], stdout=subprocess.DEVNULL)\n"
                        "open(sys.argv[3], 'w').write(str(child.pid))\n"
                        "time.sleep(60)\n")
-            parent = subprocess.Popen([sys.executable, "-c", starter, os.path.join(HERE, "server.py"), ready, child_pid_file])
+            # -I for the stand-in too: with -c, sys.path[0] is the current directory (review M2)
+            parent = subprocess.Popen([sys.executable, "-I", "-c", starter, os.path.join(HERE, "server.py"), ready, child_pid_file])
             child_pid = None
             gone = False
             try:
@@ -299,6 +380,53 @@ class LifecycleTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn(b"--parent-pid 1 is not the process that started this one", result.stderr)
         self.assertLess(time.monotonic() - started, 5)
+
+
+class PluginTest(unittest.TestCase):
+    def test_script_mode_plugin_shares_the_module(self):
+        # WebSocket spec 16.3 (review M4): run as a script, server.py is __main__, and a plug-in's "import server" must
+        # get that module -- one STATE, one upgrade registry -- not a second copy. A stub ws.py next to a copy checks it.
+        stub = ("import json, sys\n"
+                "import server\n"
+                "def handler(request):\n"
+                "    body = json.dumps({'same_module': server is sys.modules['__main__'],\n"
+                "                       'serial': server.STATE['tokens']['serial']}).encode()\n"
+                "    request.wfile.write(b'HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: x-stub\\r\\nConnection: Upgrade\\r\\n\\r\\n' + body)\n"
+                "    request.close_connection = True\n"
+                "server.register_upgrade('x-stub', handler)\n")
+        with tempfile.TemporaryDirectory() as directory:
+            shutil.copy(os.path.join(HERE, "server.py"), directory)
+            with open(os.path.join(directory, "ws.py"), "w", encoding="utf-8") as stream:
+                stream.write(stub)
+            ready = os.path.join(directory, "url")
+            child = subprocess.Popen([sys.executable, "-I", os.path.join(directory, "server.py"), "--port", "0", "--ready-file", ready],
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                deadline = time.monotonic() + 10
+                while not os.path.exists(ready) and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                with open(ready, encoding="utf-8") as stream:
+                    url = urllib.parse.urlsplit(stream.read().strip())
+                connection = http.client.HTTPConnection(url.hostname, url.port, timeout=10)
+                connection.request("POST", "/login", b'{"user":"neo","password":"trinity"}')
+                self.assertEqual(connection.getresponse().status, 200)
+                connection.close()
+                with socket.create_connection((url.hostname, url.port), timeout=10) as raw:
+                    raw.sendall(b"GET /anything HTTP/1.1\r\nHost: x\r\nUpgrade: x-stub\r\nConnection: Upgrade\r\n\r\n")
+                    received = b""
+                    while True:
+                        chunk = raw.recv(4096)
+                        if not chunk:
+                            break
+                        received += chunk
+                head, _, body = received.partition(b"\r\n\r\n")
+                self.assertTrue(head.startswith(b"HTTP/1.1 101 "), received[:80])
+                # The plug-in sees the token /login issued through the same process's routes
+                self.assertEqual(json.loads(body), {"same_module": True, "serial": 1})
+            finally:
+                child.kill()
+                child.wait()
+            self.assertFalse(os.path.exists(os.path.join(directory, "__pycache__")))
 
 
 if __name__ == "__main__":

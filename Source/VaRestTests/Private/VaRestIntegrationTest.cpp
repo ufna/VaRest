@@ -16,6 +16,8 @@
 #include "VaRestSha256.h"
 #include "VaRestTrace.h"
 
+#include <type_traits>
+
 namespace VaRestTestsIntegrationPrivate
 {
 	/** Decision 14: without the runner's server an integration test fails; it never skips (a skip is a false green) */
@@ -52,6 +54,32 @@ namespace VaRestTestsIntegrationPrivate
 		bool bAll = true;
 		((bAll = Wait(Outcomes) && bAll), ...);
 		return bAll;
+	}
+
+	/**
+	 * Review I-1 (task 16): asserts that the request succeeded, before anything reads its value. An error completes a request
+	 * too, and a check that only sits under if (Value.IsSet()) is skipped in silence: a false green. On failure the error is
+	 * logged, so the run says what went wrong.
+	 */
+	template <typename T>
+	bool Succeeded(FAutomationTestBase& Test, const TCHAR* What, const TSharedRef<VaRest::Http::Testing::TTestOutcome<T>, ESPMode::ThreadSafe>& Outcome)
+	{
+		bool bOk = Outcome->SuccessCalls.load() == 1 && Outcome->ErrorCalls.load() == 0;
+		if constexpr (!std::is_void_v<T>)
+		{
+			bOk = bOk && Outcome->Value.IsSet();
+		}
+		if (!bOk && Outcome->Error.IsError())
+		{
+			Test.AddInfo(FString::Printf(TEXT("%s: %s"), What, *Outcome->Error.Describe()));
+		}
+		return Test.TestTrue(FString::Printf(TEXT("%s succeeded"), What), bOk);
+	}
+
+	FString BytesToText(TConstArrayView<uint8> Bytes)
+	{
+		const FUTF8ToTCHAR Converted(reinterpret_cast<const ANSICHAR*>(Bytes.GetData()), Bytes.Num());
+		return FString(Converted.Length(), Converted.Get());
 	}
 
 	FString Hex(TConstArrayView<uint8> Bytes)
@@ -132,7 +160,7 @@ bool FVaRestIntegrationEchoTest::RunTest(const FString& Parameters)
 		.Body(FVaRestJson::Object().Set(TEXT("hello"), TEXT("мир"))), Outcome).Send();
 	TestTrue(TEXT("completes"), Wait(Outcome));
 	TestTrue(TEXT("one OnSuccess, one OnComplete, on the game thread (spec 1)"), Outcome->SuccessCalls == 1 && Outcome->CompleteCalls == 1 && Outcome->bAllOnGameThread);
-	if (!Outcome->Value.IsSet())
+	if (!Succeeded(*this, TEXT("the echo"), Outcome))
 	{
 		return false;
 	}
@@ -172,7 +200,7 @@ bool FVaRestIntegrationQueryStyleTest::RunTest(const FString& Parameters)
 		.Query(TEXT("s"), Values, EVaRestQueryStyle::Ssv)
 		.Query(TEXT("u"), TEXT("мир")), Outcome).Send();
 	TestTrue(TEXT("completes"), Wait(Outcome));
-	if (!Outcome->Value.IsSet())
+	if (!Succeeded(*this, TEXT("the query request"), Outcome))
 	{
 		return false;
 	}
@@ -228,12 +256,18 @@ bool FVaRestIntegrationBodiesTest::RunTest(const FString& Parameters)
 	Observe(Client.Post(TEXT("/echo")).Body(TArray<uint8>{ 0, 1, 2, 255 }), BytesOutcome).Send();
 
 	TestTrue(TEXT("all complete"), WaitAll(FormOutcome, PartsOutcome, FileOutcome, TextOutcome, BytesOutcome));
-	if (FormOutcome->Value.IsSet())
+	// Each upload's success is asserted first (review I-1); the checks of its echo run only behind that assertion
+	const bool bForm = Succeeded(*this, TEXT("the form upload"), FormOutcome);
+	const bool bParts = Succeeded(*this, TEXT("the multipart upload"), PartsOutcome);
+	const bool bFile = Succeeded(*this, TEXT("the BodyFile upload"), FileOutcome);
+	const bool bText = Succeeded(*this, TEXT("the text upload"), TextOutcome);
+	const bool bBytes = Succeeded(*this, TEXT("the bytes upload"), BytesOutcome);
+	if (bForm)
 	{
 		const FVaRestJson FormEcho = FormOutcome->Value.GetValue()[TEXT("form")];
 		TestTrue(TEXT("a form arrives decoded"), FormEcho[TEXT("name")][0].AsString() == TEXT("Neo Anderson") && FormEcho[TEXT("city")][0].AsString() == TEXT("Zion & co"));
 	}
-	if (PartsOutcome->Value.IsSet())
+	if (bParts)
 	{
 		const FVaRestJson Seen = PartsOutcome->Value.GetValue()[TEXT("parts")];
 		TestEqual(TEXT("three parts"), Seen.Num(), 3);
@@ -242,19 +276,19 @@ bool FVaRestIntegrationBodiesTest::RunTest(const FString& Parameters)
 		TestEqualSensitive(TEXT("a streamed file part (SetContentFromStream), byte-exact"), Seen[2][TEXT("sha256")].AsString(), Hex(FileBytes));
 		TestEqualSensitive(TEXT("... named after the file"), Seen[2][TEXT("filename")].AsString(), FString(TEXT("upload.bin")));
 	}
-	if (FileOutcome->Value.IsSet())
+	if (bFile)
 	{
 		const FVaRestJson& Echo = FileOutcome->Value.GetValue();
 		// Task 7 review M-1: a BodyFile is one checked segment of FVaRestSegmentStream (SetContentFromStream), not SetContentAsStreamedFile
 		TestTrue(TEXT("a streamed file body (SetContentFromStream, one checked segment), byte-exact"), Echo[TEXT("body_length")].AsInt64() == FileBytes.Num()
 			&& Echo[TEXT("body_sha256")].AsString() == Hex(FileBytes));
 	}
-	if (TextOutcome->Value.IsSet())
+	if (bText)
 	{
 		const FVaRestJson& Echo = TextOutcome->Value.GetValue();
 		TestTrue(TEXT("text goes up as UTF-8 text/plain"), Echo[TEXT("body")].AsString() == TEXT("привет") && Echo[TEXT("content_type")].AsString().StartsWith(TEXT("text/plain; charset=utf-8")));
 	}
-	if (BytesOutcome->Value.IsSet())
+	if (bBytes)
 	{
 		TestEqualSensitive(TEXT("bytes go up as they are"), BytesOutcome->Value.GetValue()[TEXT("body_base64")].AsString(), FString(TEXT("AAEC/w==")));
 	}
@@ -360,7 +394,7 @@ bool FVaRestIntegrationDownloadTest::RunTest(const FString& Parameters)
 	Observe(Client.Get<TArray<uint8>>(FString::Printf(TEXT("/large?bytes=%d&seed=3"), Size))
 		.OnProgress([Progress](const FVaRestProgress& Seen) { Progress->Seen.Add(Seen); }), Outcome).Send();
 	TestTrue(TEXT("completes"), Wait(Outcome, 60.0));
-	if (!Outcome->Value.IsSet())
+	if (!Succeeded(*this, TEXT("the download"), Outcome))
 	{
 		return false;
 	}
@@ -400,7 +434,10 @@ bool FVaRestIntegrationUploadProgressTest::RunTest(const FString& Parameters)
 	Observe(Client.Post(TEXT("/slowread?chunk=1048576&interval_ms=100")).Body(Pattern(Size))
 		.OnProgress([Progress](const FVaRestProgress& Seen) { Progress->Seen.Add(Seen); }), Outcome).Send();
 	TestTrue(TEXT("completes"), Wait(Outcome, 60.0));
-	TestTrue(TEXT("the server got every byte"), Outcome->Value.IsSet() && Outcome->Value.GetValue()[TEXT("received")].AsInt64() == Size);
+	if (Succeeded(*this, TEXT("the upload"), Outcome))
+	{
+		TestEqual(TEXT("the server got every byte"), Outcome->Value.GetValue()[TEXT("received")].AsInt64(), static_cast<int64>(Size));
+	}
 	TestTrue(TEXT("upload progress arrives while the body goes up, not only at the end"),
 		Progress->Seen.ContainsByPredicate([](const FVaRestProgress& Seen) { return Seen.BytesSent > 0 && Seen.BytesSent < Size; }));
 	TestTrue(TEXT("... ending at the whole body"), Progress->Seen.Num() > 0 && Progress->Seen.Last().BytesSent == Size && Progress->Seen.Last().UploadTotal == Size);
@@ -435,7 +472,7 @@ bool FVaRestIntegrationSaveToTest::RunTest(const FString& Parameters)
 	Observe(Client.Get<FVaRestResponse>(TEXT("/large?bytes=4194304&seed=4")).SaveTo(Target), Outcome).Send();
 	TestTrue(TEXT("completes"), Wait(Outcome, 60.0));
 	TArray<uint8> OnDisk;
-	TestTrue(TEXT("the file is there"), Outcome->SuccessCalls == 1 && FFileHelper::LoadFileToArray(OnDisk, *Target));
+	TestTrue(TEXT("the file is there"), Succeeded(*this, TEXT("the SaveTo download"), Outcome) && FFileHelper::LoadFileToArray(OnDisk, *Target));
 	TestEqual(TEXT("... whole"), OnDisk.Num(), 4194304);
 	TestEqualSensitive(TEXT("... byte-exact"), Hex(OnDisk), Outcome->Response.Headers.Get(TEXT("X-Sha256")));
 	TestTrue(TEXT("... named in the response"), Outcome->Value.IsSet() && Outcome->Value.GetValue().SavedFile == Target);
@@ -470,21 +507,41 @@ bool FVaRestIntegrationShapesTest::RunTest(const FString& Parameters)
 	auto Chunked = MakeOutcome<FVaRestJson>();
 	Observe(Client.Get(TEXT("/chunked?chunks=16&size=4096")), Chunked).Send();
 	auto Redirected = MakeOutcome<FVaRestJson>();
-	Observe(Client.Get(TEXT("/redirect?to=/echo/after")), Redirected).Send();
+	// KeepBody: the raw bytes the sink received stay in Response.Body, so the check below sees every one of them
+	Observe(Client.Get(TEXT("/redirect?to=/echo/after")).KeepBody(), Redirected).Send();
 	auto Capped = MakeOutcome<FVaRestJson>();
 	Observe(Client.Get(TEXT("/large/json?bytes=2097152")).MaxJsonBytes(1024 * 1024), Capped).Send();
 	auto Uncapped = MakeOutcome<FVaRestJson>();
 	Observe(Client.Get(TEXT("/large/json?bytes=2097152")), Uncapped).Send();
 	TestTrue(TEXT("all complete"), WaitAll(Chunked, Redirected, Capped, Uncapped));
 
-	TestTrue(TEXT("a chunked body without Content-Length decodes"), Chunked->Value.IsSet() && Chunked->Value.GetValue().Num() == 16
-		&& Chunked->Value.GetValue()[15].AsString().Len() == 4096);
-	TestTrue(TEXT("a redirect is followed (CurlHttp.cpp:183)"), Redirected->Value.IsSet() && Redirected->Value.GetValue()[TEXT("path")].AsString() == TEXT("/echo/after"));
+	if (Succeeded(*this, TEXT("the chunked request"), Chunked))
+	{
+		TestTrue(TEXT("a chunked body without Content-Length decodes"), Chunked->Value.GetValue().Num() == 16 && Chunked->Value.GetValue()[15].AsString().Len() == 4096);
+	}
+	// Review I-2 (task 16): the 302 carries a JSON body of its own (server.py REDIRECT_BODY). libcurl discards a followed
+	// redirect's body (m3-plan-review-concurrency.md:427-428); a transport or sink that kept it would put it before the final
+	// body, which would then fail to parse, carry the marker, or outgrow its Content-Length.
+	if (Succeeded(*this, TEXT("the redirected request"), Redirected))
+	{
+		const FVaRestJson& After = Redirected->Value.GetValue();
+		TestEqualSensitive(TEXT("a redirect is followed (CurlHttp.cpp:183)"), After[TEXT("path")].AsString(), FString(TEXT("/echo/after")));
+		TestFalse(TEXT("... the 302's own body never reaches the result"), After.Has(TEXT("redirect")));
+		const TArray<uint8>& Received = Redirected->Response.Body;
+		TestFalse(TEXT("... nor the sink"), BytesToText(Received).Contains(TEXT("body-must-not-leak"), ESearchCase::CaseSensitive));
+		TestEqual(TEXT("... which holds exactly the final response's bytes"), static_cast<int64>(Received.Num()),
+			FCString::Atoi64(*Redirected->Response.Headers.Get(TEXT("Content-Length"))));
+	}
 	TestTrue(TEXT("... and the effective URL says where it ended"), Redirected->Response.EffectiveUrl.EndsWith(TEXT("/echo/after")));
+	// curl keeps no header of a 3xx it follows (CurlHttp.cpp:509 skips them while bRedirected, set at :560)
+	TestFalse(TEXT("... and the 302's headers are not the response's"), Redirected->Response.Headers.Contains(TEXT("Location")));
 	TestTrue(TEXT("a JSON body over MaxJsonBytes is a Decode error (decision 20)"), Capped->Error.Kind == EVaRestErrorKind::Decode && Capped->Error.Message.Contains(TEXT("MaxJsonBytes")));
 	TestTrue(TEXT("... stopped by the transport, not retryable, nothing kept (reviews M-6, M13)"), !Capped->Error.bRetryable && Capped->Response.Body.Num() == 0);
-	TestTrue(TEXT("... and the same body under the default cap decodes whole"), Uncapped->Value.IsSet()
-		&& Uncapped->Value.GetValue().Num() == FCString::Atoi(*Uncapped->Response.Headers.Get(TEXT("X-Item-Count"))));
+	if (Succeeded(*this, TEXT("the uncapped request"), Uncapped))
+	{
+		TestEqual(TEXT("... and the same body under the default cap decodes whole"), Uncapped->Value.GetValue().Num(),
+			FCString::Atoi(*Uncapped->Response.Headers.Get(TEXT("X-Item-Count"))));
+	}
 	return true;
 }
 
@@ -541,16 +598,17 @@ bool FVaRestIntegrationLimiterTest::RunTest(const FString& Parameters)
 		for (const TSharedRef<TTestOutcome<FVaRestJson>, ESPMode::ThreadSafe>& Each : Outcomes)
 		{
 			TestTrue(TEXT("completes"), Wait(Each));
+			Succeeded(*this, TEXT("a held request"), Each);
 		}
 		auto Stats = MakeOutcome<FVaRestJson>();
 		Observe(MakeClient(BaseUrl).Get(FString::Printf(TEXT("/stats?key=%s"), *Key)), Stats).Send();
-		Wait(Stats);
-		return Stats->Value.IsSet() ? Stats->Value.GetValue()[TEXT("max_in_flight")].AsInt() : -1;
+		TestTrue(TEXT("completes"), Wait(Stats));
+		return Succeeded(*this, TEXT("the stats request"), Stats) ? Stats->Value.GetValue()[TEXT("max_in_flight")].AsInt() : -1;
 	};
 	const int32 Limited = MaxInFlight(2);
 	TestTrue(TEXT("WithMaxConcurrent(2): never more than two at the server (spec 4.6)"), Limited >= 1 && Limited <= 2);
 	// The control: the server's count works, and the engine would have sent more at once (16 per host: HttpModule.cpp:101,
-	// handed to curl at CurlHttpManager.cpp:307-312)
+	// handed to curl at CurlHttpManager.cpp:308-317)
 	const int32 Unlimited = MaxInFlight(16);
 	TestTrue(TEXT("without the limit, more than two at once"), Unlimited > 2);
 	AddInfo(FString::Printf(TEXT("most requests the server held at once: %d with WithMaxConcurrent(2), %d with 16"), Limited, Unlimited));
@@ -579,7 +637,7 @@ bool FVaRestIntegrationWorkerTest::RunTest(const FString& Parameters)
 	});
 	TestTrue(TEXT("completes"), Wait(Outcome));
 	TestTrue(TEXT("sent from a worker"), bSentOffGameThread->load());
-	TestTrue(TEXT("spec 1: marshalled to the game thread; the callbacks run there"), Outcome->SuccessCalls == 1 && Outcome->bAllOnGameThread);
+	TestTrue(TEXT("spec 1: marshalled to the game thread; the callbacks run there"), Succeeded(*this, TEXT("the worker's request"), Outcome) && Outcome->bAllOnGameThread);
 	return true;
 }
 
@@ -610,6 +668,9 @@ bool FVaRestIntegrationTraceLogTest::RunTest(const FString& Parameters)
 	auto Cookie = MakeOutcome<FVaRestJson>();
 	Observe(Client.Get(TEXT("/headers/set?Set-Cookie=sid%3Dcanary-cookie")), Cookie).Send();
 	TestTrue(TEXT("both complete"), WaitAll(Echo, Cookie));
+	// Review I-1: a failed request would leave less to scan for leaks
+	Succeeded(*this, TEXT("the echo request"), Echo);
+	Succeeded(*this, TEXT("the cookie request"), Cookie);
 	FlushRedactionPipe();
 	FVaRestTrace::RemoveSink(Sink);
 
@@ -672,7 +733,7 @@ bool FVaRestIntegrationStructTest::RunTest(const FString& Parameters)
 	auto Outcome = MakeOutcome<FVaRestHttpTestProfile>();
 	Observe(Client.Get<FVaRestHttpTestProfile>(TEXT("/json/profile")), Outcome).Send();
 	TestTrue(TEXT("completes"), Wait(Outcome));
-	if (!Outcome->Value.IsSet())
+	if (!Succeeded(*this, TEXT("the struct request"), Outcome))
 	{
 		return false;
 	}
