@@ -25,7 +25,7 @@ Engine paths below are relative to `/w/Unreal/UnrealEngine/Engine/Source/` unles
 7. **`ws.py` in W0 covers every transport scenario that §16.2 and §16.4 need and leaves out `/ws/route` (W4) and `/ws/apping` (W3).** Those two encode codec and heartbeat contracts that W0 does not design. `/ws/auth` is included, because it is ten lines over the shared tokens. Cost: one small server task each in the W3 and W4 plans.
 8. **Monolithic coexistence is not run in W0.** No VaRest runtime module links LWS before W1, and `VaRestTests` is never in a game target (decision 1). It is recorded as an `unverified` fact. W1's exit row already reads "editor coexistence; monolithic build". Cost if wrong: none.
 9. **Two service-wait shapes, chosen per fact (review C-1).** LWS checks its own deadlines (`lws_set_timeout`, the handshake and close-ack timeouts, a `LWS_TO_KILL_ASYNC`) only when `lws_service` returns; `poll()` gets the caller's wait, capped only by the hrtimer list (`lws-plat-unix.c.o` `_lws_plat_service_tsi`: `__lws_hrtimer_service` at 0x314, then `poll` at 0x378; the timeout checks run in `lws_service_fd_tsi` after it, with second granularity; opened with `objdump -dr` on the archive member, as review C-1 did). So facts about **LWS's own timers** (`timeout.default_secs`, `timeout.configured_secs`, both blackholes, `close.ours_noecho_wait_ms`, `ping.idle_survives_timeout_secs`) use a 100 ms wait (`FRigOptions::ServiceTimeoutMs = 100`). Facts about **the service shape** (the command path, the cancel wake, timers, the kill latencies) keep a 10 s wait woken by `lws_cancel_service`, and each kill latency has a 100 ms control row (`svc.kill_async_ms_short_wait`, `timeout.kill_pending_ms_short_wait`), so the passport shows how much of a delay is the wait. Spec §2.1 plans `lws_service(ctx, NextDeadline)`, which is neither, and Task 11's E3 is written from the pair. `Probe.VaRest.Lws.Service.Commands` also runs a control round trip with commands drained between `lws_service` calls, the engine's way (`LwsWebSocketsManager.cpp:480-517`).
-10. **Calls that may crash run in their own invocation, after a `PENDING` line, one case per invocation (review C-2).** One such call is `lws_http_client_http_response` inside `CONNECTION_ERROR`, which is documented for `ESTABLISHED_CLIENT_HTTP` only (`libwebsockets.h:3596-3607`) and dereferences NULL when the connection has no header table (`client.c.o` `lws_http_client_http_response` 0x1294-0x12b2: with `[rdi+0x8]` and `[rdi+0x120]` both null it reads `[0+0x3a4]`; opened with `objdump -dr` on the archive member). Six tests, `Probe.VaRest.Risky.Lws.StatusInConnectionError.<Case>` (`Refused`, `ConnectRefused`, `DnsFailure`, `NoUpgrade`, `TlsVerifyFailure`, `KilledPending`), each with its own id, `PENDING` line and `Tools/run_tests.sh` run, because a crash ends the run. A `PENDING` id with no `FACT` becomes `crashed` in the passport, so the crash itself is recorded. Cost: seven runs instead of one.
+10. **Calls that may crash run in their own invocation, after a `PENDING` line, one case per invocation (review C-2).** One such call is `lws_http_client_http_response` inside `CONNECTION_ERROR`, which is documented for `ESTABLISHED_CLIENT_HTTP` only (`libwebsockets.h:3595-3607`) and dereferences NULL when the connection has no header table (`client.c.o` `lws_http_client_http_response` 0x1294-0x12b2: with `[rdi+0x8]` and `[rdi+0x120]` both null it reads `[0+0x3a4]`; opened with `objdump -dr` on the archive member). Six tests, `Probe.VaRest.Risky.Lws.StatusInConnectionError.<Case>` (`Refused`, `ConnectRefused`, `DnsFailure`, `NoUpgrade`, `TlsVerifyFailure`, `KilledPending`), each with its own id, `PENDING` line and `Tools/run_tests.sh` run, because a crash ends the run. A `PENDING` id with no `FACT` becomes `crashed` in the passport, so the crash itself is recorded. Cost: seven runs instead of one.
 11. **The coexistence test turns on the engine's `[LwsWebSocket] bDisableCertValidation` for its own duration and restores it (ruling Q4).** The engine reads that key again on any config change (`LwsWebSocketsManager.cpp:91-93`, `WebSocketsModule.cpp:47`, `:68-74`). The flag does not change the engine's TLS flags: `wss` still gets only `LCCSCF_ALLOW_SELFSIGNED` (`LwsWebSocket.cpp:741-743`). It works because the engine's verify callback then sets `X509_V_OK` and accepts (`LwsWebSocket.cpp:554-568`), which also passes the host-name check an IP URL would fail (review M-9). Ruling Q4's conditions hold by shape: the restore is an `ON_SCOPE_EXIT` declared right after the old value is read and before the flag is set, so it runs on every exit path; a key that was absent is removed (`GConfig->RemoveKey`), not written as `False`; and while the flag is on, the test connects only to the local test server (`Site.Host`, the runner's `127.0.0.1`). Cost: the engine's certificate check is off, process-wide, for a few seconds of a test run.
 12. **The probe reaches `IWebSocket` through `FWebSocketsModule`'s virtuals only (`PrivateIncludePathModuleNames`, no link), so `VaRestTests` keeps its own static libwebsockets.** That copy situation is the one `VaRestWebSocket` will have, because spec §1.1 says `WebSockets` "is **not** a dependency". The probe uses `FModuleManager::LoadModuleChecked<FWebSocketsModule>`; the static `FWebSocketsModule::Get()` needs the import library, so it is never called. Cost: none.
 13. **The monolithic SSL-module context path is stood in for by a context the probe makes itself (`Probe.VaRest.Lws.Tls.ProvidedContext`).** In modular builds `FSslManager::InitializeSsl()` returns false and `CreateSslContext` returns null (`SslManager.cpp:26-55`, `:76-131`), so an editor cannot see the engine's provided-context path any other way. Cost: that context lacks the engine's root certificates. The probe adds the test CA instead.
@@ -3705,7 +3705,7 @@ bool VaRest::LwsProbe::IsMessageStart(int32 Protocol)
 Run: `Tools/run_tests.sh Probe.VaRest.Lws.Rig`
 Expected: `run_tests: 4 passed, 0 failed`.
 
-If `Rig.Echo` cannot open, echo or close while the other three pass, the inside-callback command path may be what fails (review M-13): set `FRigOptions::bCommandsInsideCallback`'s default to `false` in `VaRestLwsProbe.h` (commands then drain between `lws_service` calls, the engine's way), re-run, and note it in the task report. Task 5's `svc.commands_*` rows record both placements either way, and Task 11's E2 reads them.
+If `Rig.Echo`, `Rig.SequentialConnections` and `Rig.TeardownWithOpenConnection` fail to open, echo or close while `Rig.FactLine` passes, the inside-callback command path may be what fails (review M-13, re-review N-2: those three all go through `Enqueue` → `DrainCommands`, only `Rig.FactLine` does not): set `FRigOptions::bCommandsInsideCallback`'s default to `false` in `VaRestLwsProbe.h` (commands then drain between `lws_service` calls, the engine's way), re-run, and keep it if they pass; note it in the task report. Task 5's `svc.commands_*` rows record both placements either way, and Task 11's E2 reads them.
 
 Restore-the-bug: in `FRig::Stop()`, comment out the `lws_cancel_service(Context);` call. `Probe.VaRest.Lws.Rig.TeardownWithOpenConnection` must fail with "the teardown returns within 5 s ... (took ~10 s)", because the service thread sits out its 10 s wait. Restore the line and see it pass. Report both outcomes.
 
@@ -4208,6 +4208,8 @@ Second control (C-1): `svc.kill_async_ms_short_wait` should read well under the 
 
 - [ ] **Step 4: Commit**
 
+If Step 3 flipped `bCommandsInsideCallback`'s default, also stage the header: add `Source/VaRestTests/Private/LwsProbe/VaRestLwsProbe.h` to the `git add` line below (re-review N-2).
+
 ```bash
 git add Source/VaRestTests/Private/LwsProbe/VaRestLwsProbeServiceTest.cpp
 git commit -m "tests: LWS 3.0 probe -- environment, command path, timers, forced closes with short-wait controls, handshake and blackhole timeouts (WS W0)
@@ -4402,7 +4404,7 @@ namespace VaRest::LwsProbe::VaRestLwsProbeHandshakeTestPrivate
 	}
 
 	/** The claim every StatusInConnectionError case tests */
-	const TCHAR* const StatusSpec = TEXT("WebSocket spec 0.3 (inferred from 4.3) and 2.2: lws_http_client_http_response(wsi) gives the upgrade's status inside CONNECTION_ERROR (documented for ESTABLISHED_CLIENT_HTTP only, libwebsockets.h:3594-3606)");
+	const TCHAR* const StatusSpec = TEXT("WebSocket spec 0.3 (inferred from 4.3) and 2.2: lws_http_client_http_response(wsi) gives the upgrade's status inside CONNECTION_ERROR (documented for ESTABLISHED_CLIENT_HTTP only, libwebsockets.h:3595-3607)");
 
 	/**
 	 * Calls lws_http_client_http_response(wsi) in CONNECTION_ERROR and records what it returned. Without a header table
@@ -4643,8 +4645,9 @@ bool FVaRestLwsProbeRefusalsTest::RunTest(const FString& Parameters)
 	}
 	Fact(*this, TEXT("hs.refusal_sequence"), EVerdict::Recorded, CallSequence(RefusedSeen403), TEXT("none"), TEXT("the callbacks of the 403 attempt"));
 
-	// Review M-14: which callbacks carry the connection in user. The engine takes its socket from user for every reason
-	// it handles, WSI_DESTROY included (LwsWebSocketsManager.cpp:434, :458-461, :463-477)
+	// Review M-14: which callbacks carry the connection in user. The engine takes its socket from user for every
+	// connection reason it handles, WSI_DESTROY included (LwsWebSocketsManager.cpp:434, :458-461, :463-477), except the
+	// certificate check, where user is the X509_STORE_CTX and the socket comes from lws_wsi_user (:447-456)
 	FConnectSpec Echo;
 	Echo.Path = TEXT("/ws/echo?key=") + NewKey();
 	TArray<FEvent> EchoSeen;
@@ -7166,13 +7169,22 @@ SECTIONS = (
     ("tls", "TLS"),
     ("coexist", "Coexistence with the engine's WebSockets module"),
 )
+COMMANDS_INSIDE = (
+    "One service thread per context, waiting up to 10 s in `lws_service` and woken by `lws_cancel_service`; game-thread "
+    "commands (connect, write, close, kill, flow control) run inside `LWS_CALLBACK_EVENT_WAIT_CANCELLED` "
+    "(`svc.commands_*` compares that with the engine's between-calls placement).")
+# Task 4 Step 7 / Task 5 Step 3 switch the rig to the engine's placement when the inside one does not work
+COMMANDS_BETWEEN = (
+    "One service thread per context, waiting up to 10 s in `lws_service` and woken by `lws_cancel_service`; game-thread "
+    "commands (connect, write, close, kill, flow control) are drained between `lws_service` calls, the engine's way: "
+    "inside `LWS_CALLBACK_EVENT_WAIT_CANCELLED` they did not work in this run (`svc.commands_inside_wait_cancelled` "
+    "differs), so the rig's default was switched.")
+# None: the command placement, chosen per run by method()
 METHOD = (
     "One `lws_context` per test with WebSocket spec 2.1's shape: one protocol `varest` (`rx_buffer_size` 64 KiB), "
     "`CONTEXT_PORT_NO_LISTEN`, `PEER_CERT_NOT_REQUIRED | DISABLE_OS_CA_CERTS | JUST_USE_RAW_ORIGIN`, 32 KiB header "
     "buffers, `ws_ping_pong_interval = 0`.",
-    "One service thread per context, waiting up to 10 s in `lws_service` and woken by `lws_cancel_service`; game-thread "
-    "commands (connect, write, close, kill, flow control) run inside `LWS_CALLBACK_EVENT_WAIT_CANCELLED` "
-    "(`svc.commands_*` compares that with the engine's between-calls placement).",
+    None,
     "Facts about LWS's own timers (handshake, close-ack and idle timeouts, the blackholes) wait at most 100 ms instead: "
     "LWS checks its deadlines only when `lws_service` returns. Each kill latency is measured with both waits "
     "(`*_short_wait` rows).",
@@ -7239,6 +7251,12 @@ def plugin_commit():
         return "unknown"
 
 
+def method(facts):
+    """METHOD with the command placement this run used (re-review N-2)"""
+    between = facts.get("svc.commands_inside_wait_cancelled", {}).get("verdict") == "differs"
+    return [(COMMANDS_BETWEEN if between else COMMANDS_INSIDE) if text is None else text for text in METHOD]
+
+
 def render(facts, logs, machine, today, missing):
     def observed(key):
         return facts.get(key, {}).get("observed", "not recorded")
@@ -7257,7 +7275,7 @@ def render(facts, logs, machine, today, missing):
     lines.append("| OpenSSL (as VaRestTests' calls resolve) | %s |" % cell(observed("env.openssl_version")))
     lines.append("| Build | %s |" % cell(observed("env.build")))
     lines.append("| Logs | %s |" % cell(", ".join(os.path.basename(path) for path in logs)))
-    lines += ["", "## How the probe works", ""] + ["- " + text for text in METHOD]
+    lines += ["", "## How the probe works", ""] + ["- " + text for text in method(facts)]
 
     counts = {verdict: 0 for verdict in VERDICTS}
     for record in facts.values():
@@ -7382,6 +7400,14 @@ class SelfTest(unittest.TestCase):
         prefixes = {prefix for prefix, _ in SECTIONS}
         self.assertEqual(sorted({key.split(".", 1)[0] for key in EXPECTED} - prefixes), [])
 
+    def test_method_follows_the_command_placement(self):
+        inside = render({}, [], [], "2026-10-21", [])
+        self.assertIn("run inside `LWS_CALLBACK_EVENT_WAIT_CANCELLED`", inside)
+        flipped = {"svc.commands_inside_wait_cancelled": {"verdict": "differs", "observed": "established=no"}}
+        between = render(flipped, [], [], "2026-10-21", [])
+        self.assertIn("drained between `lws_service` calls", between)
+        self.assertNotIn("run inside `LWS_CALLBACK_EVENT_WAIT_CANCELLED`", between)
+
     def test_every_risky_case_has_its_id(self):
         ids = ["hs.status_in_connection_error." + re.sub(r"(?<!^)(?=[A-Z])", "_", case).lower() for case in RISKY_CASES]
         self.assertEqual([key for key in ids if key not in EXPECTED], [])
@@ -7398,7 +7424,7 @@ if __name__ == "__main__":
 - [ ] **Step 3: Run the selftest to see it pass**
 
 Run: `python3 -I Tools/lws_probe_passport.py --selftest`
-Expected: `Ran 5 tests ... OK`, exit 0.
+Expected: `Ran 6 tests ... OK`, exit 0.
 
 - [ ] **Step 4: Run the whole probe**
 
@@ -7439,7 +7465,7 @@ Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 ---
 ### Task 11: Spec corrections (§0.3, §2, and per ruling Q3 §1.2, D30, §3.4's 1002 row), CLAUDE.md, beads, final verification
 
-W0's exit row: "probe recorded; §0.3/§2 corrected where needed". This task edits `docs/superpowers/specs/2026-10-20-varest2-websocket-design.md` only as the tables below say: §0.3 (Step 1), §2 (Step 2) and, per ruling Q3, §1.2, D30 in §20 and §3.4's 1002 row (Step 3, rows S1–S4). Each row is applied only when its condition holds on an unambiguous fact. A fact that is ambiguous or `unverified` for a row becomes a bead (Step 6), and so does a finding that contradicts any other section. Every inserted citation names the passport row, written `[<id>]`, and the passport file `docs/passport/<date>-lws30-probe.md` (the date of Task 10's run). "Observed" below means the passport's `observed` cell for that id, copied (shortened to its first clause when it runs over a line). The task also adds the probe's commands to `CLAUDE.md` (Step 5, ruling Q1).
+W0's exit row: "probe recorded; §0.3/§2 corrected where needed". This task edits `docs/superpowers/specs/2026-10-20-varest2-websocket-design.md` only as the tables below say: §0.3 (Step 1), §2 (Step 2) and, per ruling Q3, §1.2, D30 in §20 and §3.4's 1002 row (Step 3, rows S1–S4). Each row is applied only when its condition holds on an unambiguous fact. A fact that is ambiguous or `unverified` for a row becomes a bead (Step 6), and so does a finding that contradicts any other section, and so does every `differs` that no row consumed (Step 6's last bead, re-review N-4). Every inserted citation names the passport row, written `[<id>]`, and the passport file `docs/passport/<date>-lws30-probe.md` (the date of Task 10's run). "Observed" below means the passport's `observed` cell for that id, copied (shortened to its first clause when it runs over a line). The task also adds the probe's commands to `CLAUDE.md` (Step 5, ruling Q1).
 
 **Files:**
 - Modify: `docs/superpowers/specs/2026-10-20-varest2-websocket-design.md` (§0.3, §1.2, §2, §3.4's table, the D30 row in §20; nothing else)
@@ -7480,7 +7506,7 @@ Then one row per line, in this order. `CEIC` below abbreviates the six ids `hs.s
 | T17 | `hs.unregistered_selected_bound` agrees | A server-selected subprotocol the context does not register is accepted when `local_protocol_name` pre-binds the connection, which stays bound to `varest`; `FILTER_PRE_ESTABLISH` reads the selected name: <`hs.selected_protocol_in_filter` observed> |
 | T17 | ... differs, observed starts with "refused" | A server-selected subprotocol the context does not register is refused even when `local_protocol_name` pre-binds the connection: <observed> |
 | T17 | ... differs, observed starts with "established" | A server-selected subprotocol the context does not register is accepted, but the connection is bound to another protocol than `local_protocol_name` names: <observed> |
-| T18 | all six CEIC agree | `lws_http_client_http_response(wsi)` is safe inside `CONNECTION_ERROR` in every case probed (refused upgrade, connect refused, DNS failure, no upgrade response, TLS verify failure, a kill while pending): the status after a status line, 0 otherwise |
+| T18 | all six CEIC agree | `lws_http_client_http_response(wsi)` is safe inside `CONNECTION_ERROR` in every case probed (refused upgrade, connect refused, DNS failure, no upgrade response, TLS verify failure, a kill while pending): the status after a status line, 0 otherwise. On a connection without a header table it dereferences NULL (`client.c.o` `lws_http_client_http_response` 0x1294-0x12b2), so only these cases are known safe |
 | T18 | `.refused` agrees, another CEIC case crashed, differs or is unverified | Inside `CONNECTION_ERROR`, `lws_http_client_http_response(wsi)` returns the status only when the status-line parser failed (<`.refused` observed>); <for each other case: "<case>: crashed" \| "<case>: returned N" \| "<case>: not reached">. Without a header table it dereferences NULL (`client.c.o` `lws_http_client_http_response` 0x1294-0x12b2), so it is never called elsewhere |
 | T18 | `.refused` differs, crashed or is unverified | `lws_http_client_http_response(wsi)` does not give the status inside `CONNECTION_ERROR` (<`.refused` observed>): the error strings are the only source |
 | T19 | `close.rewritten_codes` (recorded) | Received close codes: <observed>. Returning 0 from `WS_PEER_INITIATED_CLOSE` echoes the close: <`close.echo_on_return_0` observed> |
@@ -7518,14 +7544,15 @@ Apply each row whose condition holds; leave the passage as it is otherwise. The 
 | E7 | `hs.append_header_fill` differs | `` with the remaining length checked per header `` (the end of the **Headers** bullet's first line) | `` with the remaining length checked per header, kept 1 KiB below what LWS 3.0 reports, which did not all fit (<observed> [hs.append_header_fill]), `` |
 | E8 | `tls.insecure_ip_host` refused and `tls.insecure_skip_hostname` established | `` and outside Shipping `wss+insecure` `` ⏎ `` (self-signed allowed, as `LwsWebSocket.cpp:733-769`). `` | `` and outside Shipping `wss+insecure` (self-signed allowed and the host name not checked, `LCCSCF_ALLOW_SELFSIGNED \| LCCSCF_SKIP_SERVER_CERT_HOSTNAME_CHECK`: with `ALLOW_SELFSIGNED` alone, as the engine sets it at `LwsWebSocket.cpp:747-750`, an IP URL fails the host-name check [tls.insecure_ip_host, tls.insecure_skip_hostname]). `` |
 | E9 | `timeout.kill_pending_ms` over 1500 ms, or `timeout.kill_pending_sequence` without `WSI_DESTROY` | `` `lws_set_timeout(…, LWS_TO_KILL_ASYNC)` (T14), so a hitching game thread cannot cause it. `` | `` `lws_set_timeout(…, LWS_TO_KILL_ASYNC)` (T14), so a hitching game thread cannot cause it; a pending attempt ends <`timeout.kill_pending_ms` observed> after the kill with a 10 s wait, <`timeout.kill_pending_ms_short_wait` observed> with 100 ms (<`timeout.kill_pending_sequence` observed>) [timeout.kill_pending_ms, timeout.kill_pending_ms_short_wait]. `` |
-| E9b | `timeout.configured_secs` agrees | the sentence ending `so a hitching game thread cannot cause it` (as E9 left it, or the original) | that sentence, then: `` The context's `timeout_secs` is set to the default `ConnectTimeout` as a backstop [timeout.configured_secs]: it is the vhost's, so context-wide for VaRest's one context ("various processes involving network roundtrips", `libwebsockets.h:2791-2795`), and it backs only the default; a socket with its own `ConnectTimeout` relies on the kill. `` |
-| E10 | all six CEIC agree | `` and from `lws_http_client_http_response(wsi)` if W0 shows `` ⏎ `` it is valid there. `` | `` and from `lws_http_client_http_response(wsi)`, which is valid there in every case W0 probed: refused upgrade, connect refused, DNS failure, no upgrade response, TLS verify failure, a kill while pending [hs.status_in_connection_error.refused, …connect_refused, …dns_failure, …no_upgrade, …tls_verify_failure, …killed_pending]. `` |
+| E9b | `timeout.configured_secs` agrees, and `ping.idle_survives_timeout_secs` agrees (E25 not applied: a `timeout_secs` that also ends idle open connections must not be lowered to `ConnectTimeout`) | the **Connect timeout** bullet's first sentence (as E9 left it, or the original) | insert after it: `` The context's `timeout_secs` is set to the default `ConnectTimeout` as a backstop [timeout.configured_secs]: it is the vhost's, so context-wide for VaRest's one context ("various processes involving network roundtrips", `libwebsockets.h:2791-2795`), and it backs only the default; a socket with its own `ConnectTimeout` relies on the kill. `` |
+| E10 | all six CEIC agree | `` and from `lws_http_client_http_response(wsi)` if W0 shows `` ⏎ `` it is valid there. `` | `` and from `lws_http_client_http_response(wsi)`, which is valid there in every case W0 probed: refused upgrade, connect refused, DNS failure, no upgrade response, TLS verify failure, a kill while pending [hs.status_in_connection_error.refused, …connect_refused, …dns_failure, …no_upgrade, …tls_verify_failure, …killed_pending]; it dereferences NULL on a connection without a header table (`client.c.o` 0x1294-0x12b2), so W1 calls it only in these cases. `` |
 | E10c | `.refused` agrees, and another CEIC case crashed, differs or is unverified | the same Find text | `` and from `lws_http_client_http_response(wsi)` only when the error comes from the status-line parser (the strings `HS: ws upgrade …`) [hs.status_in_connection_error.refused]; never elsewhere: without a header table it dereferences NULL (`client.c.o` `lws_http_client_http_response` 0x1294-0x12b2) [<the CEIC ids that crashed, differ or are unverified>]. `` |
 | E10b | `.refused` differs, crashed or is unverified | the same Find text | `` and not from `lws_http_client_http_response(wsi)`, which is <not valid there (differs) \| fatal there (crashed) \| not reached in W0 (unverified)> [hs.status_in_connection_error.refused]: the strings are the only source. `` |
 | E11 | any `hs.refusal_*` differs | `` (T7: "not 101, was N"; `` ⏎ `` "unauthorized" = 401; "forbidden" = 403) `` | `` (T7, as LWS 3.0 sends them [hs.refusal_401, hs.refusal_403, hs.refusal_404]: 401 <observed>, 403 <observed>, other codes <hs.refusal_404 observed with 404 replaced by N>) `` |
 | E12 | always | `` reports it as its own failure reason, `NoUpgradeResponse`; W0 pins the LWS 3.0 error string. `` | `` reports it as its own failure reason, `NoUpgradeResponse`; LWS 3.0 reports it as <`hs.no_upgrade_response` observed> [hs.no_upgrade_response]. `` |
 | E13 | any of `hs.redirect_relative`, `hs.redirect_absolute`, `hs.redirect_to_tls` observed starts with "followed", and `hs.redirect_veto` agrees | (insert a new bullet right after the **No upgrade response** bullet) | `` * **Redirects** are refused (ruling Q2): VaRest never follows a 3xx to the upgrade, as browsers do not (the WHATWG WebSockets standard fetches with redirect mode "error"; RFC 6455 §4.1 only permits following). LWS 3.0 follows one itself [hs.redirect_relative, hs.redirect_absolute, hs.redirect_to_tls] and runs `APPEND_HANDSHAKE_HEADER` again for the new request (<`hs.redirect_reappends_headers` observed>), where the callback sees <`hs.redirect_target_visible` observed> [hs.redirect_target_visible] and the request carries <`hs.redirect_host_header` observed> [hs.redirect_host_header]. So the appended-header callback adds nothing (no auth, no custom headers) once the connection's target differs from the original scheme+host+port, which the second `APPEND_HANDSHAKE_HEADER` of an attempt marks, and the socket fails the connection at the first callback that can (`APPEND_HANDSHAKE_HEADER`, else `FILTER_PRE_ESTABLISH`: a non-zero return gives <`hs.redirect_veto` observed> [hs.redirect_veto]) with a redirect error; the W1 plan names the error kind. A redirect from wss to ws is <`hs.redirect_downgrade` observed> [hs.redirect_downgrade]. `` |
 | E13c | E13's "followed" condition holds and `hs.redirect_veto` differs (a non-zero return did not fail it) | (insert the same place) | E13's bullet with its sentence from `and the socket fails the connection` replaced by: `` and the socket fails the connection: a non-zero return from those callbacks does not (<`hs.redirect_veto` observed> [hs.redirect_veto]), so it kills the attempt with `lws_set_timeout(…, LWS_TO_KILL_ASYNC)` (T14) from the second `APPEND_HANDSHAKE_HEADER`, reported as a redirect error; the W1 plan names the error kind. `` |
+| E13d | E13's "followed" condition holds and `hs.redirect_veto` is `recorded` (a veto run was not exercised: the relative redirect was not followed, or the redirected request failed before `FILTER_PRE_ESTABLISH`) | (insert the same place) | E13's bullet with its sentence from `and the socket fails the connection` replaced by: `` and the socket fails the connection by killing the attempt with `lws_set_timeout(…, LWS_TO_KILL_ASYNC)` (T14) from the second `APPEND_HANDSHAKE_HEADER`, reported as a redirect error (the veto points were not exercised in W0: <`hs.redirect_veto` observed> [hs.redirect_veto]); the W1 plan names the error kind. `` |
 | E13b | none of the three starts with "followed" | (insert the same place) | `` * **Redirects** are refused (ruling Q2: VaRest never follows a 3xx to the upgrade, as browsers do not). LWS 3.0 does not follow one either (<`hs.redirect_relative` observed> [hs.redirect_relative, hs.redirect_absolute, hs.redirect_to_tls]); it is an upgrade refusal, §3.4's "upgrade 3xx" row. `` |
 | E14 | `rx.final_flag` or `rx.remaining_payload` differs | `` complete when `lws_is_final_fragment` and `` ⏎ `` `lws_remaining_packet_payload == 0` (T8). `` | `` complete as LWS 3.0 marks it (<`rx.final_flag` observed>; <`rx.remaining_payload` observed> [rx.final_flag, rx.remaining_payload]): W1's rule is the observed one, pinned by the transport suite's fragment tests. `` |
 | E15 | `rx.flow_resume_form` shows the explicit form resumed reading and the bool form did not | `` Reading resumes below half. `` | `` Reading resumes below half, with `lws_rx_flow_control(wsi, LWS_RXFLOW_REASON_APPLIES_ENABLE \| LWS_RXFLOW_REASON_USER_BOOL \| LWS_RXFLOW_REASON_FLAG_PROCESS_NOW)`: the resume runs outside the connection's own callback (`libwebsockets.h:5192-5194`), where the bool form does not resume it on LWS 3.0 [rx.flow_resume_form]. `` (neither form resumed, `rx.flow_resume_from_command` differs: no edit, the P1 bead of Step 6) |
@@ -7540,6 +7567,7 @@ Apply each row whose condition holds; leave the passage as it is otherwise. The 
 | E22 | `close.rewritten_codes` observed is not "none: ..." | `` Codes a peer must not send`` ⏎ `` (<1000, 1004–1006, 1015, 1016–2999, ≥5000) are normalised to 1005. `` | `` Codes a peer must not send (<1000, 1004–1006, 1015, 1016–2999, ≥5000) are normalised to 1005. LWS 3.0 rewrites some codes before the callback (<observed> [close.rewritten_codes]), so a received 1002 may be one of those. `` |
 | E23 | `close.echo_on_return_0` differs | `` The callback returns 0 so LWS`` ⏎ `` echoes the close, as RFC 6455 §5.5.1 requires `` | `` LWS 3.0 does not echo even when the callback returns 0 (<observed> [close.echo_on_return_0]), so VaRest answers with `lws_close_reason` and a non-zero return, as RFC 6455 §5.5.1 requires `` |
 | E24 | always | `` * **Unclean end** (`CLIENT_CLOSED` / `WSI_DESTROY` without a close frame, or a read/write error) →`` ⏎ `` 1006, `bWasClean = false`. `` | `` * **Unclean end** (`CLIENT_CLOSED` / `WSI_DESTROY` without a close frame, or a read/write error) → 1006, `bWasClean = false`. On LWS 3.0 a dropped connection gives <`close.drop_reports_client_closed` observed> [close.drop_fin_sequence, close.drop_rst_sequence]. `` |
+| E25 | `ping.idle_survives_timeout_secs` differs | §2.1: `` `JUST_USE_RAW_ORIGIN` (T4); `ws_ping_pong_interval = 0` (our ping is per connection, §5); `` | `` `JUST_USE_RAW_ORIGIN` (T4); `ws_ping_pong_interval = 0` (our ping is per connection, §5), although LWS 3.0 still ends an idle open connection by itself (with `timeout_secs` = 3: <observed> [ping.idle_survives_timeout_secs]), so the context does not lower `timeout_secs` to `ConnectTimeout` (no connect backstop) and W1's transport suite pins what ends an idle connection under LWS's default against `PingInterval` (bead); `` |
 
 In the tables of Steps 2 and 3, `⏎` stands for the line break and two-space indent of the spec's text as it is now; a `\|` is a literal `|`. After each edit, rewrap the bullet to the spec's width (about 100 columns).
 
@@ -7548,7 +7576,7 @@ In the tables of Steps 2 and 3, `⏎` stands for the line break and two-space in
 | # | Condition | Find | Replace with |
 | --- | --- | --- | --- |
 | S1 | `coexist.lws_symbol_owner` observed says "has its own copy at another address" and `coexist.shared_lws_state` differs | §1.2: `` * **Linux interposition is benign.** `libUnrealEditor-WebSockets.so` exports 185 `lws_*` functions`` ⏎ `` (`nm -D --defined-only`, verified on this host), so ELF resolves both modules' calls to whichever`` ⏎ `` copy loaded first. Both copies come from the identical archive, so behaviour is identical.`` ⏎ `` Windows DLLs and Mac two-level-namespace dylibs keep separate copies. Monolithic builds have one. `` | `` * **Each module keeps its own copy, on Linux too.** `libUnrealEditor-WebSockets.so` exports 185 `lws_*` functions (`nm -D --defined-only`), but UE loads modules with `RTLD_LOCAL` (`Runtime/Core/Private/Unix/UnixPlatformProcess.cpp:107-148`), so each module's calls stay in its own copy (<`coexist.lws_symbol_owner` observed> [coexist.lws_symbol_owner, coexist.shared_lws_state]). Both copies come from the identical archive, so behaviour is identical. Windows DLLs and Mac two-level-namespace dylibs keep separate copies too. Monolithic builds have one. `` |
-| S2 | S1's condition | §1.2: `` * **The only shared state is process-global** (T16): log level/emitter and allocator. VaRest never`` ⏎ `` calls `lws_set_allocator`, and calls `lws_set_log_level(LLL_ERR \| LLL_WARN, VaRestLwsLog)` only if`` ⏎ `` the engine's `WebSockets` module is not loaded; otherwise the engine's routing to `LogWebSockets` `` ⏎ `` (`LwsWebSocketsManager.cpp:174-176`) stays. Never both, so no one's logs are hijacked. `` | `` * **Process-global state is per copy** (T16): log level/emitter and allocator. VaRest never calls `lws_set_allocator`. In modular builds its copy's log state is its own [coexist.shared_lws_state], so there VaRest always calls `lws_set_log_level(LLL_ERR \| LLL_WARN, VaRestLwsLog)`, and the engine's routing to `LogWebSockets` (`LwsWebSocketsManager.cpp:174-176`) stays in the engine's copy (<`coexist.engine_lws_log_routed` observed> [coexist.engine_lws_log_routed]). In a monolithic build the copy is shared, so there VaRest calls it only if the engine's `WebSockets` module is not loaded (at VaRestTests' startup in the editor it was loaded: <`env.websockets_loaded_at_start` observed> [env.websockets_loaded_at_start]). Never both in one copy, so no one's logs are hijacked. `` |
+| S2 | S1's condition | §1.2: `` * **The only shared state is process-global** (T16): log level/emitter and allocator. VaRest never`` ⏎ `` calls `lws_set_allocator`, and calls `lws_set_log_level(LLL_ERR \| LLL_WARN, VaRestLwsLog)` only if`` ⏎ `` the engine's `WebSockets` module is not loaded; otherwise the engine's routing to `LogWebSockets` `` ⏎ `` (`LwsWebSocketsManager.cpp:174-176`) stays. Never both, so no one's logs are hijacked. `` | `` * **Process-global state is per copy** (T16): log level/emitter and allocator. VaRest never calls `lws_set_allocator`. In modular builds its copy's log state is its own [coexist.shared_lws_state], so there VaRest always calls `lws_set_log_level(LLL_ERR \| LLL_WARN, VaRestLwsLog)`, and the engine's routing to `LogWebSockets` (`LwsWebSocketsManager.cpp:174-176`) stays in the engine's copy (<`coexist.engine_lws_log_routed` observed> [coexist.engine_lws_log_routed]). In a monolithic build the copy is shared, so there VaRest calls it only if the engine's `WebSockets` module is not loaded (in the editor, at VaRestTests' startup: <`env.websockets_loaded_at_start` observed> [env.websockets_loaded_at_start]). Never both in one copy, so no one's logs are hijacked. `` |
 | S2b | S1's condition | §20: `` \| D30 \| `lws_set_log_level` only when the engine `WebSockets` module is not loaded; never `lws_set_allocator` \| `` | `` \| D30 \| `lws_set_log_level` on VaRest's own copy (modular builds) always, and on the one shared copy of a monolithic build only when the engine `WebSockets` module is not loaded (§1.2, [coexist.shared_lws_state]); never `lws_set_allocator` \| `` |
 | S3 | `close.rewritten_codes` observed is "none: every code arrived as sent" | §3.4: `` \| 1002, 1003, 1007, 1010 from the server \| stop — unless W0 shows LWS 3.0 rewrites codes to 1002, then 1002 reconnects and stops after 3 in a row \| `Server` \| `` | `` \| 1002, 1003, 1007, 1010 from the server \| stop (LWS 3.0 hands every received code over unchanged [close.rewritten_codes]) \| `Server` \| `` |
 | S3b | `close.rewritten_codes` observed lists rewrites, at least one of them `-> 1002`, and none `-> no code` | the same Find text | two rows: `` \| 1003, 1007, 1010 from the server \| stop \| `Server` \| `` and `` \| 1002 from the server \| reconnect; stop after 3 in a row (LWS 3.0 rewrites <the codes listed with "-> 1002"> to 1002 [close.rewritten_codes]) \| `Server` \| `` |
@@ -7663,6 +7691,26 @@ When `tls.untrusted_rejected` differs, or E1b's condition holds and `tls.provide
 ```bash
 bd create "WS: LWS 3.0 TLS verification does not behave as the engine glue assumes (W0 passport tls.*)" -t bug -p 0 \
 	--deps discovered-from:VaRest-81s -d "Passport rows tls.untrusted_rejected, tls.load_extra_fired, tls.provided_ctx_connects: <observed>. W1 must not ship wss until this is understood."
+```
+
+When E25 applied (`ping.idle_survives_timeout_secs` differs):
+
+```bash
+bd create "WS W1: LWS 3.0 ends idle open connections by itself despite ws_ping_pong_interval = 0 (W0 passport)" -t task -p 2 \
+	--deps discovered-from:VaRest-81s -d "Passport row ping.idle_survives_timeout_secs: <observed> (timeout_secs = 3, a silent server, one unanswered PING). Spec 2.1 (E25) now says the context keeps LWS's default timeout_secs; W1's transport suite measures what ends an idle connection under that default and keeps PingInterval and PingTimeout below it."
+```
+
+Last, the catch-all (re-review N-4): list the passport's differing ids with
+
+```bash
+sed -n '/^## Differs from the spec/,/^## Crashed/p' docs/passport/<date>-lws30-probe.md | grep -o '^- `[^`]*`'
+```
+
+and file one bead for every id there that no applied T, E or S row names in its condition and no bead above quotes (likely candidates: `coexist.both_ws`, `coexist.both_wss`, `coexist.engine_after_probe_teardown` against §1.2's "W0 verifies it" bullet; `tls.trusted_ca_verified`, `rx.order_preserved`, `rx.control_inside_fragmented`, `close.reason_utf8_bytes`, `tx.large_write_intact`). Priority P1 for `coexist.*` and `tls.*` ids, P2 for the rest:
+
+```bash
+bd create "WS W1: <id> differs from the spec (W0 passport)" -t task -p <1 for coexist.* and tls.*, else 2> \
+	--deps discovered-from:VaRest-81s -d "Passport docs/passport/<date>-lws30-probe.md row <id>: observed <observed>; spec <the row's spec cell>. No Task 11 row of W0 consumed it; W1 decides what the spec and the transport do about it."
 ```
 
 Each `<observed>` is the passport's cell for that id.
