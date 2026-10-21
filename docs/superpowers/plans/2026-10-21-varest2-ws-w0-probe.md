@@ -2,11 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build `Tools/testserver/ws.py` (a hand-written RFC 6455 server inside the HTTP test server), its TLS listener and selftests, and a probe that drives the engine-bundled libwebsockets 3.0 directly against it. The probe records every WebSocket spec §16.4 item as a fact in `docs/passport/<date>-lws30-probe.md`, and the plan ends by correcting spec §0.3/§2 where the probe contradicts them.
+**Goal:** Build `Tools/testserver/ws.py` (a hand-written RFC 6455 server inside the HTTP test server), its TLS listener and selftests, and a probe that drives the engine-bundled libwebsockets 3.0 directly against it. The probe records every WebSocket spec §16.4 item as a fact in `docs/passport/<date>-lws30-probe.md`, and the plan ends by correcting spec §0.3/§2 where the probe contradicts them (and, per ruling Q3, §1.2, D30 and §3.4's 1002 row where its facts are unambiguous).
 
 **Architecture:** `ws.py` plugs into `server.py`'s upgrade hook. One process serves the plain port and a TLS port, shares the login token state, and journals what it saw for each `?key=` so that `GET /ws/journal` can return it. The probe tests (`Probe.VaRest.Lws.*`, in the UncookedOnly `VaRestTests` module) each own one `lws_context` built the way spec §2.1 plans the transport: one protocol `varest`, a service thread blocked in `lws_service` and woken by `lws_cancel_service`, and game-thread commands run inside `LWS_CALLBACK_EVENT_WAIT_CANCELLED`. The rig records every callback in order. Each test reads the server's side from the journal over HTTP and logs one JSON `FACT` line per item. A stdlib script turns the run logs into the passport.
 
 **Tech Stack:** UE 5.8.1 (`/w/Unreal/UnrealEngine`), C++20, libwebsockets 3.0.0 and OpenSSL 1.1.1t as the engine bundles them (`Engine/Source/ThirdParty/libWebSockets`, `ThirdParty/OpenSSL/1.1.1t`), the engine `SSL` and `WebSockets` modules, UE Automation tests, Python 3.9+ standard library, and the `openssl` command line once, to make the test certificates.
+
+**Revision 1 (2026-10-21):** applies the controller's rulings and the pre-execution review (`.superpowers/sdd/ws-w0-plan-rulings.md`, `ws-w0-plan-review.md`); the per-finding map is `.superpowers/sdd/ws-w0-plan-revision-report.md`.
 
 **Spec:** `docs/superpowers/specs/2026-10-20-varest2-websocket-design.md` — §0.3 (what LWS 3.0 gives; the "inferred from 4.3" list), §1.2 (two LWS copies), §2 (the transport), §16.3 (test server), §16.4 (the W0 probe checklist), §17 row W0 ("`ws.py` + TLS listener + selftest; LWS 3.0 probe harness; passport"; exit "probe recorded; §0.3/§2 corrected where needed"), §18 (risks), §20 D20/D24/D30, §22.2 A2 and the "W0 probe additions" under it. Program rulings: own client on the engine-bundled libwebsockets 3.0, not `IWebSocket` (R1, 2026-10-20); `.superpowers/sdd/release-2.0-program.md:140` (W0 runs before M4 on the one checkout).
 
@@ -16,18 +18,20 @@ Engine paths below are relative to `/w/Unreal/UnrealEngine/Engine/Source/` unles
 
 1. **The probe lives in `VaRestTests`, not in a new module.** That module is UncookedOnly, so UBT never builds it for a game target: `ModuleDescriptor.cs:792-793` (`Programs/UnrealBuildTool/Configuration/Descriptors/`) builds `UncookedOnly` only when `!bBuildRequiresCookedData`, and a Game target sets that flag (`Programs/UnrealBuildTool/Configuration/Rules/TargetRules.cs:1190-1193`). It also already has the integration harness. Cost if wrong: W1 moves four files.
 2. **The probe tests are named `Probe.VaRest.Lws.*`, and the one that may crash the process `Probe.VaRest.Risky.Lws.*`.** `Tools/run_tests.sh` anchors a bare filter at the start (`^VaRest`), so neither group runs in the default suite. They take minutes, several facts depend on the host (DNS, routes), and one call may end the process. Cost: someone has to run them on purpose after an engine upgrade. The passport says how.
-3. **A probe test passes when it recorded, not when the library agrees with the spec.** Each item is logged as `LogVaRestLwsProbe: Display: FACT {json}` with `id`, `verdict` (`agrees`, `differs`, `recorded`, `unverified`), `observed`, `spec` and `evidence`. A test fails only when the harness fails (no server, a connection that never ends, a journal that never arrives). W0's job is to record, and a contradiction is a finding. `Tools/lws_probe_passport.py` checks that the run logged every id in its `EXPECTED` list. Cost: a library change shows up as a changed passport, not as a red test.
-4. **Test certificates are a throwaway CA and a leaf, made once by `Tools/testserver/certs/make_certs.sh` and committed (`ca.pem`, `server.pem` = leaf + CA, `server.key`).** The CA's private key is deleted as the script exits, so nothing else can ever be signed by it. Why: Python's standard library cannot make X.509 certificates. Committed files mean no host needs `openssl` at test time (spec D20 already says "a committed test cert"). Sending the CA in the chain makes `LCCSCF_ALLOW_SELFSIGNED` see `X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN`, which LWS 3.0 can accept ("accepting self-signed certificate (verify_callback)" is a string in `lib/Unix/x86_64-unknown-linux-gnu/Release/libwebsockets.a`), while trusting `ca.pem` exercises real verification. SAN: `DNS:localhost, IP:127.0.0.1, IP:::1`. Validity: 36500 days. Cost: a secret scanner may flag `server.key` (it signs nothing and protects nothing), and the files must be regenerated before 2126.
+3. **A probe test passes when it recorded, not when the library agrees with the spec.** Each item is logged as `LogVaRestLwsProbe: Display: FACT {json}` with `id`, `verdict` (`agrees`, `differs`, `recorded`, `unverified`), `observed`, `spec` and `evidence`. Library outcomes (a connection that opened or not, ended or not, echoed or not) are recorded with `NoteOutcome` (an `AddInfo`) and the fact, never asserted (review M-2 ruling). `TestTrue` is kept for harness invariants only: the server was found and answered (its journal arrived), the rig's context and service thread exist, the rig's own self-tests (`Probe.VaRest.Lws.Rig.*`), and the precondition connection to `/ws/echo` that every other fact of a test depends on. W0's job is to record, and a contradiction is a finding. `Tools/lws_probe_passport.py` checks that the run logged every id in its `EXPECTED` list. Cost: a library change shows up as a changed passport, not as a red test.
+4. **Test certificates are a throwaway CA and a leaf, made once by `Tools/testserver/certs/make_certs.sh` and committed, with names that explain a scanner hit (ruling Q5): `test-ca.pem`, `test-server.pem` (leaf + CA), `test-server.key`, plus `Tools/testserver/certs/README.md`.** The CA's private key is deleted as the script exits, so nothing else can ever be signed by it. Why: Python's standard library cannot make X.509 certificates. Committed files mean no host needs `openssl` at test time (spec D20 already says "a committed test cert"). Sending the CA in the chain makes `LCCSCF_ALLOW_SELFSIGNED` see `X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN`, which LWS 3.0 can accept ("accepting self-signed certificate (verify_callback)" is a string in `lib/Unix/x86_64-unknown-linux-gnu/Release/libwebsockets.a`), while trusting `test-ca.pem` exercises real verification. SAN: `DNS:localhost, IP:127.0.0.1, IP:::1`. Validity: 36500 days. Cost: a secret scanner may flag `test-server.key` (it signs nothing and protects nothing; the README says so), and the files must be regenerated before 2126. The release package excluding `Tools/` is the controller's note on bead 8e5, not a step of this plan.
 5. **The TLS listener is a second port of the same server process.** It serves the same routes and plug-ins and shares `STATE`. Its URL is the second line of the ready file and reaches the editor as `-VaRestTestServerTls=<url>`, read by `VaRest::Http::Testing::GetTestServerTlsUrl()`, which sits next to `GetTestServerUrl()` so W1 can reuse it. Cost: one more runner argument.
 6. **The server-side evidence comes from `GET /ws/journal`, fetched with `FVaRestClient`.** The probe never reads its evidence through the library under test. Cost: none.
 7. **`ws.py` in W0 covers every transport scenario that §16.2 and §16.4 need and leaves out `/ws/route` (W4) and `/ws/apping` (W3).** Those two encode codec and heartbeat contracts that W0 does not design. `/ws/auth` is included, because it is ten lines over the shared tokens. Cost: one small server task each in the W3 and W4 plans.
 8. **Monolithic coexistence is not run in W0.** No VaRest runtime module links LWS before W1, and `VaRestTests` is never in a game target (decision 1). It is recorded as an `unverified` fact. W1's exit row already reads "editor coexistence; monolithic build". Cost if wrong: none.
-9. **The rig's service thread waits up to 10 s in `lws_service` and is woken by `lws_cancel_service`, which is the production shape (§2.1).** Every timing fact is measured under that shape. `Probe.VaRest.Lws.Service.Commands` also runs a control round trip with commands drained between `lws_service` calls, the engine's way (`LwsWebSocketsManager.cpp:480-517`).
-10. **Calls that may crash run in their own invocation, after a `PENDING` line.** One such call is `lws_http_client_http_response` inside `CONNECTION_ERROR`, which is documented for `ESTABLISHED_CLIENT_HTTP` only (`libwebsockets.h:3596-3607`). The test lives in `Probe.VaRest.Risky.Lws.*`. A `PENDING` id with no `FACT` becomes `crashed` in the passport, so the crash itself is recorded. Cost: two runs.
-11. **The coexistence test turns on the engine's `[LwsWebSocket] bDisableCertValidation` for its own duration and restores it.** The engine reads that key again on any config change (`LwsWebSocketsManager.cpp:91-93`, `WebSocketsModule.cpp:47`, `:68-74`). Without it, the engine's `wss` leg fails the host-name check against an IP URL (its `wss+insecure` sets only `LCCSCF_ALLOW_SELFSIGNED`, `LwsWebSocket.cpp:747-750`), and coexistence would go unmeasured. Cost: the engine's certificate check is off, process-wide, for a few seconds of a test run.
+9. **Two service-wait shapes, chosen per fact (review C-1).** LWS checks its own deadlines (`lws_set_timeout`, the handshake and close-ack timeouts, a `LWS_TO_KILL_ASYNC`) only when `lws_service` returns; `poll()` gets the caller's wait, capped only by the hrtimer list (`lws-plat-unix.c.o` `_lws_plat_service_tsi`: `__lws_hrtimer_service` at 0x314, then `poll` at 0x378; the timeout checks run in `lws_service_fd_tsi` after it, with second granularity; opened with `objdump -dr` on the archive member, as review C-1 did). So facts about **LWS's own timers** (`timeout.default_secs`, `timeout.configured_secs`, both blackholes, `close.ours_noecho_wait_ms`, `ping.idle_survives_timeout_secs`) use a 100 ms wait (`FRigOptions::ServiceTimeoutMs = 100`). Facts about **the service shape** (the command path, the cancel wake, timers, the kill latencies) keep a 10 s wait woken by `lws_cancel_service`, and each kill latency has a 100 ms control row (`svc.kill_async_ms_short_wait`, `timeout.kill_pending_ms_short_wait`), so the passport shows how much of a delay is the wait. Spec §2.1 plans `lws_service(ctx, NextDeadline)`, which is neither, and Task 11's E3 is written from the pair. `Probe.VaRest.Lws.Service.Commands` also runs a control round trip with commands drained between `lws_service` calls, the engine's way (`LwsWebSocketsManager.cpp:480-517`).
+10. **Calls that may crash run in their own invocation, after a `PENDING` line, one case per invocation (review C-2).** One such call is `lws_http_client_http_response` inside `CONNECTION_ERROR`, which is documented for `ESTABLISHED_CLIENT_HTTP` only (`libwebsockets.h:3596-3607`) and dereferences NULL when the connection has no header table (`client.c.o` `lws_http_client_http_response` 0x1294-0x12b2: with `[rdi+0x8]` and `[rdi+0x120]` both null it reads `[0+0x3a4]`; opened with `objdump -dr` on the archive member). Six tests, `Probe.VaRest.Risky.Lws.StatusInConnectionError.<Case>` (`Refused`, `ConnectRefused`, `DnsFailure`, `NoUpgrade`, `TlsVerifyFailure`, `KilledPending`), each with its own id, `PENDING` line and `Tools/run_tests.sh` run, because a crash ends the run. A `PENDING` id with no `FACT` becomes `crashed` in the passport, so the crash itself is recorded. Cost: seven runs instead of one.
+11. **The coexistence test turns on the engine's `[LwsWebSocket] bDisableCertValidation` for its own duration and restores it (ruling Q4).** The engine reads that key again on any config change (`LwsWebSocketsManager.cpp:91-93`, `WebSocketsModule.cpp:47`, `:68-74`). The flag does not change the engine's TLS flags: `wss` still gets only `LCCSCF_ALLOW_SELFSIGNED` (`LwsWebSocket.cpp:741-743`). It works because the engine's verify callback then sets `X509_V_OK` and accepts (`LwsWebSocket.cpp:554-568`), which also passes the host-name check an IP URL would fail (review M-9). Ruling Q4's conditions hold by shape: the restore is an `ON_SCOPE_EXIT` declared right after the old value is read and before the flag is set, so it runs on every exit path; a key that was absent is removed (`GConfig->RemoveKey`), not written as `False`; and while the flag is on, the test connects only to the local test server (`Site.Host`, the runner's `127.0.0.1`). Cost: the engine's certificate check is off, process-wide, for a few seconds of a test run.
 12. **The probe reaches `IWebSocket` through `FWebSocketsModule`'s virtuals only (`PrivateIncludePathModuleNames`, no link), so `VaRestTests` keeps its own static libwebsockets.** That copy situation is the one `VaRestWebSocket` will have, because spec §1.1 says `WebSockets` "is **not** a dependency". The probe uses `FModuleManager::LoadModuleChecked<FWebSocketsModule>`; the static `FWebSocketsModule::Get()` needs the import library, so it is never called. Cost: none.
 13. **The monolithic SSL-module context path is stood in for by a context the probe makes itself (`Probe.VaRest.Lws.Tls.ProvidedContext`).** In modular builds `FSslManager::InitializeSsl()` returns false and `CreateSslContext` returns null (`SslManager.cpp:26-55`, `:76-131`), so an editor cannot see the engine's provided-context path any other way. Cost: that context lacks the engine's root certificates. The probe adds the test CA instead.
-14. **Spec corrections follow a fixed table, fact by fact, and touch §0.3 and §2 only.** A probe result that contradicts any other section (§1.2, §3.4, §16.4) becomes a bead and is not edited here (Task 11).
+14. **Spec corrections follow a fixed table, fact by fact (Task 11).** Per ruling Q3, the table also has rows for §1.2 (two copies, their log state, the TLS index), D30 in §20, and §3.4's 1002 row. Each row is applied only when its fact is unambiguous; a fact that is ambiguous or `unverified` becomes a bead instead.
+15. **Upgrade redirects are refused (ruling Q2).** VaRest never follows a 3xx to the upgrade, as browsers do not: the WHATWG WebSockets standard fetches with redirect mode "error", and RFC 6455 §4.1 only permits following. W0 records what LWS 3.0 does (whether it follows, whether a callback can see the new target, whether a non-zero return vetoes it, which `Host` the second request carries), so Task 11 can write §2.2's rule from evidence, and the P1 bead carries the same facts either way.
+16. **The rig never creates a context while another rig of the same LWS copy has a TLS handshake in flight (review I-3).** Every `lws_create_context` re-allocates the copy's process-global `openssl_websocket_private_data_index` (`ssl.c.o` `lws_context_init_ssl_library` stores it on both the `DO_SSL_GLOBAL_INIT` path and the other one), and `OpenSSL_client_verify_callback` reads it through the GOT and dereferences `SSL_get_ex_data`'s result without a null check (`openssl-client.c.o` 0x1c8-0x1d6: `mov 0x78(%rax),%rcx`; `ssl.c.o` stores at 0x1f4 and 0x23a; opened with `objdump -dr`, as review I-3 did). Tests create their rigs before connecting and keep one TLS rig alive at a time. The hazard itself is recorded as `coexist.context_create_reallocates_ssl_index`.
 
 ## Global Constraints
 
@@ -36,10 +40,12 @@ Engine paths below are relative to `/w/Unreal/UnrealEngine/Engine/Source/` unles
 - Results come from the run's log file (`/w/Unreal/VaRestHost/Saved/Logs/VaRestTests.log`), never from stdout. The runner deletes that file at the start of each run, so copy it before the next run when a later step needs it.
 - Python: standard library only, run as `python3 -I`, Python 3.9+ (`socket.timeout`, not a bare `TimeoutError`, catches socket timeouts on 3.9). Every script that imports a sibling inserts its own directory into `sys.path` and sets `sys.dont_write_bytecode = True` (no `__pycache__` in the tree).
 - Test server rules (M3 review M1/M3/M-13): every request-controlled size and count is bounded and checked before work; nothing is read from disk under a request-controlled name (`/tls/ca.pem` is one fixed file); the server exits when the runner dies (`--parent-pid`, unchanged); refusals before the 101 are HTTP 4xx JSON and close the connection.
-- The certificates in `Tools/testserver/certs/` are test-only: a throwaway CA whose key no longer exists, a leaf for `localhost`/`127.0.0.1`/`::1`, and no key of any real service. Never point a non-test client at that CA.
+- The certificates in `Tools/testserver/certs/` (`test-ca.pem`, `test-server.pem`, `test-server.key`, `README.md`) are test-only: a throwaway CA whose key no longer exists, a leaf for `localhost`/`127.0.0.1`/`::1`, and no key of any real service. Never point a non-test client at that CA.
 - Modules: `VaRestTests` stays `"Type": "UncookedOnly"`, `"PlatformAllowList": ["Win64","Mac","Linux"]`. Nothing under `Source/VaRest/`, `Source/VaRestEditor/` or `Source/VaRestJson/` changes. `VaRestHttp` gains one testing helper (`GetTestServerTlsUrl`) and nothing else. W0 adds no VaRest WebSocket client code (spec §16.4: "A minimal LWS harness (no VaRest client code)").
 - libwebsockets and OpenSSL headers are included only through `Source/VaRestTests/Private/LwsProbe/VaRestLwsProbeLws.h`, the engine's way (`Runtime/Online/WebSockets/Private/Lws/LwsWebSocketsManager.h:14-24`). UBT defines `NDEBUG=1` without the debug CRT (`Programs/UnrealBuildTool/Configuration/UEBuildPlatform.cs:1338-1345`), so `lws_config.h:3-7` does not define `_DEBUG`.
 - The probe never calls `lws_set_log_level` or `lws_set_allocator`. Both are process-global per library copy (spec T16, D30).
+- Library outcomes are facts, not assertions (decision 3): record them with `NoteOutcome` and `Fact`; `TestTrue`/`TestNotNull` only for harness invariants.
+- Never create an `FRig` while another `FRig` has a TLS connection that has not opened or ended (decision 16).
 - Rig threading: LWS is called only on the rig's service thread. The exceptions are `lws_cancel_service` (any thread, `libwebsockets.h:3704-3716`), `lws_create_context` on the game thread before the thread starts, and `lws_context_destroy` on the game thread after the thread has stopped, the engine's order (`LwsWebSocketsManager.cpp:298-309`). Hooks and commands run on the service thread and talk to the test only through `FRig::Record`. The game thread reads only the rig's event list.
 - Lessons from M3. Every test drains what it opens: `WaitEnded` for every connection, or the rig's teardown. Completion is asserted before silence. Nothing is indexed or dereferenced after a non-fatal check (guard in the same expression or return). Callbacks never capture test stack locals by reference (shared state is a `TSharedRef`, rig state lives in `FConn`). Expected-log patterns name one source each: `"Lws("` matches only the engine's routed LWS lines (`LwsWebSocketsManager.cpp:415-422`).
 - JSON strings compare case-sensitively (`Equals(..., ESearchCase::CaseSensitive)`; `FString ==` ignores case). HTTP header names compare case-insensitively.
@@ -72,22 +78,25 @@ Tools/testserver/
   server.py                     register_route (Task 1); TLS listener, Handler.setup, /tls/ca.pem, --tls-port (Task 3)
   selftest.py                   plug-in route (Task 1); TlsTest, TLS lifecycle, /tls/ca.pem (Task 3)
   certs/make_certs.sh           NEW (Task 3): makes the three files below; run once
-  certs/ca.pem, server.pem, server.key   NEW (Task 3): generated, committed, test-only
+  certs/test-ca.pem, test-server.pem, test-server.key   NEW (Task 3): generated, committed, test-only
+  certs/README.md               NEW (Task 3): what these are, why the key is harmless, how to regenerate
 Tools/run_tests.sh              --tls-port 0, -VaRestTestServerTls=<url> (Task 3)
 Tools/lws_probe_passport.py     NEW (Task 10): FACT lines -> passport, EXPECTED ids, --selftest
 Source/VaRestHttp/Public/VaRestHttpTesting.h, Private/VaRestHttpTesting.cpp   GetTestServerTlsUrl (Task 4)
 Source/VaRestTests/VaRestTests.Build.cs                                     SSL, WebSockets headers, LWS/OpenSSL/zlib (Task 4)
+Source/VaRestTests/Private/VaRestTestsModule.cpp                            module class: WebSockets loaded at startup? (Task 4)
 Source/VaRestTests/Private/LwsProbe/
   VaRestLwsProbeLws.h           NEW (Task 4): the one place LWS/OpenSSL headers are included
   VaRestLwsProbe.h/.cpp         NEW (Task 4): FRig, FConn, events, facts, journal/HTTP helpers
   VaRestLwsProbeRigTest.cpp     NEW (Task 4): Probe.VaRest.Lws.Rig.*
   VaRestLwsProbeServiceTest.cpp NEW (Task 5): Probe.VaRest.Lws.Service.*, .Timeout.*
-  VaRestLwsProbeHandshakeTest.cpp NEW (Task 6): Probe.VaRest.Lws.Handshake.*, Probe.VaRest.Risky.Lws.*
+  VaRestLwsProbeHandshakeTest.cpp NEW (Task 6): Probe.VaRest.Lws.Handshake.*, Probe.VaRest.Risky.Lws.StatusInConnectionError.*
   VaRestLwsProbeCloseTest.cpp   NEW (Task 7): Probe.VaRest.Lws.Close.*, .Ping.*
   VaRestLwsProbeDataTest.cpp    NEW (Task 8): Probe.VaRest.Lws.Data.*
   VaRestLwsProbeTlsTest.cpp     NEW (Task 9): Probe.VaRest.Lws.Tls.*, .Coexist.*
 docs/passport/<run date>-lws30-probe.md                                    NEW (Task 10): generated
-docs/superpowers/specs/2026-10-20-varest2-websocket-design.md              §0.3, §2 (Task 11)
+docs/superpowers/specs/2026-10-20-varest2-websocket-design.md              §0.3, §2; §1.2, §3.4's table, §20 D30 when their facts are unambiguous (Task 11)
+CLAUDE.md                                                                   Build & Test: ws_selftest, the probe runs (Task 11, ruling Q1)
 ```
 
 Task order: 1 → 2 → 3 (server side) → 4 (rig) → 5–9 (probe groups, any order after 4) → 10 → 11.
@@ -600,7 +609,8 @@ DATA_OPS = (OP_CONT, OP_TEXT, OP_BINARY)
 
 MAX_MESSAGE = 64 * 1024 * 1024
 MAX_KEYS = 256
-MAX_EVENTS = 20000
+# Ample for every probe (the busiest, Data.AutoReplyBoundary, journals about 70 frames); 256 keys x 2000 bounds memory
+MAX_EVENTS = 2000
 # Payloads up to this many bytes are journaled whole (base64), longer ones as a SHA-256
 INLINE = 256
 # The longest a connection waits on its peer (silent, hang, noecho)
@@ -758,8 +768,10 @@ class WsConn:
             length = struct.unpack("!H", self.read_exact(2))[0]
         elif length == 127:
             length = struct.unpack("!Q", self.read_exact(8))[0]
+        # Both refused from the header alone: nothing of the payload is read (review M-10)
+        if op >= 0x8 and length > 125:
+            raise ProtocolError(1002, "a control frame is at most 125 bytes")
         if length > MAX_MESSAGE:
-            # Refused from the header alone: nothing of the payload is read
             raise ProtocolError(1009, "a frame over the server's limit")
         mask = self.read_exact(4) if masked else b""
         payload = self.read_exact(length)
@@ -842,8 +854,8 @@ class WsConn:
                 if on_frame:
                     on_frame(self, op, fin, payload)
                 if op >= 0x8:
-                    if not fin or len(payload) > 125:
-                        raise ProtocolError(1002, "a control frame is final and at most 125 bytes")
+                    if not fin:
+                        raise ProtocolError(1002, "a control frame is final")
                     if op == OP_PING:
                         if answer_ping:
                             self.send_frame(OP_PONG, payload)
@@ -865,10 +877,11 @@ class WsConn:
                     kind = "text" if op == OP_TEXT else "binary"
                 else:
                     raise ProtocolError(1002, "an unknown data opcode")
+                # Checked before the append: the assembled message never grows past the limit (review M-10)
+                if total + len(payload) > MAX_MESSAGE:
+                    raise ProtocolError(1009, "a message over the server's limit")
                 parts.append(payload)
                 total += len(payload)
-                if total > MAX_MESSAGE:
-                    raise ProtocolError(1009, "a message over the server's limit")
                 if not fin:
                     continue
                 data, done = b"".join(parts), kind
@@ -1596,8 +1609,8 @@ Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 ### Task 3: TLS listener, test certificates, runner
 
 **Files:**
-- Create: `Tools/testserver/certs/make_certs.sh`
-- Create (generated by the script, then committed): `Tools/testserver/certs/ca.pem`, `Tools/testserver/certs/server.pem`, `Tools/testserver/certs/server.key`
+- Create: `Tools/testserver/certs/make_certs.sh`, `Tools/testserver/certs/README.md`
+- Create (generated by the script, then committed): `Tools/testserver/certs/test-ca.pem`, `Tools/testserver/certs/test-server.pem`, `Tools/testserver/certs/test-server.key`
 - Modify: `Tools/testserver/server.py` (imports, constants, `Handler.setup`, `Server.handle_error`, `TlsServer`, `make_tls_context`, `make_tls_server`, `route_tls_ca`, `ROUTES`, `main`, docstring)
 - Modify: `Tools/testserver/selftest.py` (`import ssl`, a `ServerTest` test, `class TlsTest`, a `LifecycleTest` test)
 - Modify: `Tools/testserver/ws_selftest.py` (`class WssTest`)
@@ -1609,7 +1622,8 @@ Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
   - `server.CERTS_DIR`, `server.TLS_HANDSHAKE_TIMEOUT`, `server.make_tls_context()`, `server.make_tls_server(host="127.0.0.1", port=0)` (a `Server` whose sockets are TLS), `GET /tls/ca.pem` (the test CA, `application/x-pem-file`) on both listeners.
   - `python3 -I server.py ... --tls-port P`: also listens with TLS on P (0: the OS picks); prints `VaRestTestServerTls <https url>`; the ready file holds two lines, the http base URL and then the https base URL.
   - `Tools/run_tests.sh` passes `-VaRestTestServer=http://127.0.0.1:<port>` and `-VaRestTestServerTls=https://127.0.0.1:<tlsport>`.
-  - Certificates: `ca.pem` (the test CA, `CN=VaRest Test CA (not trusted anywhere)`, `CA:TRUE, pathlen:0`), `server.pem` (the leaf for `DNS:localhost, IP:127.0.0.1, IP:::1`, then `ca.pem`: the chain the listener sends), `server.key` (the leaf's RSA 2048 key, unencrypted). All valid for 36500 days.
+  - Certificates (names chosen so a secret-scanner hit explains itself, ruling Q5): `test-ca.pem` (the test CA, `CN=VaRest Test CA (not trusted anywhere)`, `CA:TRUE, pathlen:0`), `test-server.pem` (the leaf for `DNS:localhost, IP:127.0.0.1, IP:::1`, then `test-ca.pem`: the chain the listener sends), `test-server.key` (the leaf's RSA 2048 key, unencrypted). All valid for 36500 days. `README.md` says what they are.
+  - A listener whose certificate files cannot be loaded makes `server.py` print `VaRestTestServer: cannot start the TLS listener: <file>: <error>` and exit 2 (review M-11), so the runner's "did not start -- see <log>" names the file.
 
 - [ ] **Step 1: Write the failing TLS selftests**
 
@@ -1618,7 +1632,7 @@ In `Tools/testserver/selftest.py`, add `import ssl` to the imports (alphabetical
 ```python
     def test_tls_ca_route(self):
         status, headers, data = self.call("GET", "/tls/ca.pem")
-        with open(os.path.join(server.CERTS_DIR, "ca.pem"), "rb") as stream:
+        with open(os.path.join(server.CERTS_DIR, "test-ca.pem"), "rb") as stream:
             self.assertEqual((status, headers["Content-Type"], data), (200, "application/x-pem-file", stream.read()))
 ```
 
@@ -1642,7 +1656,7 @@ class TlsTest(unittest.TestCase):
 
     @staticmethod
     def trusted():
-        return ssl.create_default_context(cafile=os.path.join(server.CERTS_DIR, "ca.pem"))
+        return ssl.create_default_context(cafile=os.path.join(server.CERTS_DIR, "test-ca.pem"))
 
     def get(self, context, server_hostname, path="/echo"):
         """One HTTPS GET over a socket to 127.0.0.1 whose certificate is checked for server_hostname"""
@@ -1667,13 +1681,13 @@ class TlsTest(unittest.TestCase):
             self.get(ssl.create_default_context(), "localhost")
 
     def test_certificate_files(self):
-        with open(os.path.join(server.CERTS_DIR, "server.pem"), encoding="ascii") as stream:
+        with open(os.path.join(server.CERTS_DIR, "test-server.pem"), encoding="ascii") as stream:
             chain = stream.read()
         # The leaf and then the CA: a client that allows self-signed chains sees SELF_SIGNED_CERT_IN_CHAIN
         self.assertEqual(chain.count("-----BEGIN CERTIFICATE-----"), 2)
-        with open(os.path.join(server.CERTS_DIR, "ca.pem"), encoding="ascii") as stream:
+        with open(os.path.join(server.CERTS_DIR, "test-ca.pem"), encoding="ascii") as stream:
             self.assertTrue(chain.rstrip().endswith(stream.read().strip()))
-        with open(os.path.join(server.CERTS_DIR, "server.key"), encoding="ascii") as stream:
+        with open(os.path.join(server.CERTS_DIR, "test-server.key"), encoding="ascii") as stream:
             self.assertNotIn("ENCRYPTED", stream.read())
         _, certificate = self.get(self.trusted(), "localhost")
         self.assertGreater(ssl.cert_time_to_seconds(certificate["notAfter"]) - time.time(), 10 * 365 * 86400)
@@ -1716,7 +1730,7 @@ In `class LifecycleTest`, add:
                 with open(ready, encoding="utf-8") as stream:
                     plain_url, tls_url = [urllib.parse.urlsplit(line) for line in stream.read().split()]
                 self.assertEqual((plain_url.scheme, tls_url.scheme), ("http", "https"))
-                context = ssl.create_default_context(cafile=os.path.join(server.CERTS_DIR, "ca.pem"))
+                context = ssl.create_default_context(cafile=os.path.join(server.CERTS_DIR, "test-ca.pem"))
                 connection = http.client.HTTPSConnection("127.0.0.1", tls_url.port, timeout=10, context=context)
                 connection.request("GET", "/echo")
                 self.assertEqual(connection.getresponse().status, 200)
@@ -1748,6 +1762,16 @@ In `class LifecycleTest`, add:
                         os.kill(child_pid, getattr(signal, "SIGKILL", signal.SIGTERM))
                     except OSError:
                         pass
+
+    def test_missing_certificate_names_the_file(self):
+        # Review M-11: the runner always passes --tls-port, so a missing certificate must say which file, not just fail
+        with tempfile.TemporaryDirectory() as directory:
+            shutil.copy(os.path.join(HERE, "server.py"), directory)
+            result = subprocess.run([sys.executable, "-I", os.path.join(directory, "server.py"), "--port", "0", "--tls-port", "0"],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=20)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(b"cannot start the TLS listener", result.stderr)
+        self.assertIn(b"test-server", result.stderr)
 ```
 
 In `Tools/testserver/ws_selftest.py`, insert above `class ScriptModeTest`:
@@ -1767,7 +1791,7 @@ class WssTest(unittest.TestCase):
         cls.httpd.server_close()
 
     def test_wss_echo_verified(self):
-        context = ssl.create_default_context(cafile=os.path.join(server.CERTS_DIR, "ca.pem"))
+        context = ssl.create_default_context(cafile=os.path.join(server.CERTS_DIR, "test-ca.pem"))
         client = Client(self.port, "/ws/echo", tls=context)
         self.addCleanup(client.shutdown)
         self.assertTrue(client.accepted, client.headers)
@@ -1790,10 +1814,10 @@ Create `Tools/testserver/certs/make_certs.sh` and `chmod +x` it:
 #!/usr/bin/env bash
 # Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 # Makes the TLS listener's test certificates (WebSocket spec 16.3). Run once; the output is committed:
-#   ca.pem      the throwaway test CA. Its private key is made in a temporary directory and deleted when this script
-#               exits, so nothing else can ever be signed by it.
-#   server.pem  the listener's certificate (localhost, 127.0.0.1, ::1), then ca.pem: the chain the listener sends
-#   server.key  the listener's private key (RSA 2048, unencrypted). A test key: it protects nothing and signs nothing.
+#   test-ca.pem      the throwaway test CA. Its private key is made in a temporary directory and deleted when this
+#                    script exits, so nothing else can ever be signed by it.
+#   test-server.pem  the listener's certificate (localhost, 127.0.0.1, ::1), then test-ca.pem: the chain it sends
+#   test-server.key  the listener's private key (RSA 2048, unencrypted). A test key: it protects and signs nothing.
 # Python's standard library cannot make certificates, so this needs the openssl command line (1.1.1 or later); the
 # tests themselves do not. 36500 days: the suite must not expire under itself; regenerate before 2126.
 set -euo pipefail
@@ -1806,31 +1830,57 @@ openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days "$DAYS" \
 	-subj "/CN=VaRest Test CA (not trusted anywhere)" \
 	-addext "basicConstraints=critical,CA:TRUE,pathlen:0" \
 	-addext "keyUsage=critical,keyCertSign,cRLSign" \
-	-keyout "$WORK/ca.key" -out ca.pem
+	-keyout "$WORK/ca.key" -out test-ca.pem
 
-openssl req -newkey rsa:2048 -nodes -sha256 -subj "/CN=localhost" -keyout server.key -out "$WORK/server.csr"
+openssl req -newkey rsa:2048 -nodes -sha256 -subj "/CN=localhost" -keyout test-server.key -out "$WORK/server.csr"
 cat > "$WORK/server.ext" <<'EOF'
 basicConstraints=critical,CA:FALSE
 keyUsage=critical,digitalSignature,keyEncipherment
 extendedKeyUsage=serverAuth
 subjectAltName=DNS:localhost,IP:127.0.0.1,IP:::1
 EOF
-openssl x509 -req -sha256 -days "$DAYS" -in "$WORK/server.csr" -CA ca.pem -CAkey "$WORK/ca.key" \
+openssl x509 -req -sha256 -days "$DAYS" -in "$WORK/server.csr" -CA test-ca.pem -CAkey "$WORK/ca.key" \
 	-CAcreateserial -CAserial "$WORK/ca.srl" -extfile "$WORK/server.ext" -out "$WORK/server.crt"
 
-cat "$WORK/server.crt" ca.pem > server.pem
-chmod 0644 ca.pem server.pem server.key
-openssl verify -CAfile ca.pem "$WORK/server.crt"
+cat "$WORK/server.crt" test-ca.pem > test-server.pem
+chmod 0644 test-ca.pem test-server.pem test-server.key
+openssl verify -CAfile test-ca.pem "$WORK/server.crt"
 ```
 
 Run: `Tools/testserver/certs/make_certs.sh`
-Expected: the last line is `.../server.crt: OK`. `ls Tools/testserver/certs` shows `ca.pem make_certs.sh server.key server.pem`, and no key of the CA.
+Expected: the last line is `.../server.crt: OK`. `ls Tools/testserver/certs` shows `make_certs.sh test-ca.pem test-server.key test-server.pem`, and no key of the CA.
+
+Create `Tools/testserver/certs/README.md` (ruling Q5):
+
+```markdown
+# Test certificates for Tools/testserver (test-only)
+
+These files let the test server's TLS listener (`server.py --tls-port`) serve `https://` and `wss://` to the VaRest
+automation tests (WebSocket spec 16.3). They protect nothing and must never be trusted outside these tests.
+
+| File | What it is |
+| --- | --- |
+| `test-ca.pem` | A throwaway CA, `CN=VaRest Test CA (not trusted anywhere)`. Its private key was made in a temporary directory and destroyed right after it signed the leaf, so this CA can never issue anything else. |
+| `test-server.pem` | The listener's certificate (SAN `DNS:localhost`, `IP:127.0.0.1`, `IP:::1`), followed by `test-ca.pem`: the chain the listener sends. |
+| `test-server.key` | The listener's private key (RSA 2048, unencrypted). It is committed on purpose: a secret scanner flags it, and it is a test key that serves only `localhost`. |
+
+All three are valid for 36500 days. To regenerate them (needs the `openssl` command line, 1.1.1 or later; the tests do
+not): run `Tools/testserver/certs/make_certs.sh`, then commit the three files. Tests that verify the listener trust
+`test-ca.pem` (`GET /tls/ca.pem` serves it); tests that only need TLS allow self-signed chains.
+```
 
 - [ ] **Step 4: Add the TLS listener to server.py**
 
 In `Tools/testserver/server.py`:
 
-Add `import ssl` to the imports (after `import socket`).
+After `import socket`, add (a Python built without `ssl` still serves plain HTTP, and `--tls-port` then says why it cannot, review M-11):
+
+```python
+try:
+    import ssl
+except ImportError:
+    ssl = None
+```
 
 Below `HERE = ...` add:
 
@@ -1845,8 +1895,8 @@ Below `def route_envelope_err(h, match): ...` add:
 
 ```python
 def route_tls_ca(h, match):
-    """The test CA (certs/ca.pem): a client that wants the TLS listener verified, not only allowed, trusts this one"""
-    with open(os.path.join(CERTS_DIR, "ca.pem"), "rb") as stream:
+    """The test CA (certs/test-ca.pem): a client that wants the TLS listener verified, not only allowed, trusts this one"""
+    with open(os.path.join(CERTS_DIR, "test-ca.pem"), "rb") as stream:
         h.send_bytes(200, stream.read(), "application/x-pem-file")
 ```
 
@@ -1862,7 +1912,7 @@ In `class Handler`, add as its first method (after `server_version`):
     def setup(self):
         # The TLS handshake runs here, on this connection's thread, not in the accept loop: a client that never finishes
         # it must not stall the others (TlsServer.get_request wraps without shaking hands)
-        if isinstance(self.request, ssl.SSLSocket):
+        if ssl is not None and isinstance(self.request, ssl.SSLSocket):
             self.request.settimeout(TLS_HANDSHAKE_TIMEOUT)
             self.request.do_handshake()
             self.request.settimeout(None)
@@ -1875,7 +1925,8 @@ In `class Server`, change `handle_error`'s check to also ignore TLS failures:
     def handle_error(self, request, client_address):
         # A client that cancels, times out or drops a keep-alive connection resets it, and a TLS client may refuse our
         # test certificate or speak plain HTTP to the TLS port: test scenarios, not errors
-        if isinstance(sys.exc_info()[1], (ConnectionResetError, BrokenPipeError, TimeoutError, socket.timeout, ssl.SSLError)):
+        quiet = (ConnectionResetError, BrokenPipeError, TimeoutError, socket.timeout) + ((ssl.SSLError,) if ssl is not None else ())
+        if isinstance(sys.exc_info()[1], quiet):
             return
         super().handle_error(request, client_address)
 ```
@@ -1896,8 +1947,15 @@ class TlsServer(Server):
 
 
 def make_tls_context():
+    if ssl is None:
+        raise OSError("this Python has no ssl module")
+    chain, key = os.path.join(CERTS_DIR, "test-server.pem"), os.path.join(CERTS_DIR, "test-server.key")
+    # load_cert_chain's FileNotFoundError carries no file name: check first, so the message names the missing file
+    for path in (chain, key):
+        if not os.path.isfile(path):
+            raise FileNotFoundError(2, "no such file", path)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    context.load_cert_chain(os.path.join(CERTS_DIR, "server.pem"), os.path.join(CERTS_DIR, "server.key"))
+    context.load_cert_chain(chain, key)
     return context
 
 
@@ -1919,7 +1977,14 @@ and replace everything from `load_plugins()` to the end of `main()` with:
     urls = ["http://%s:%d" % (args.host, server.server_address[1])]
     extras = []
     if args.tls_port is not None:
-        extras.append(make_tls_server(args.host, args.tls_port))
+        try:
+            extras.append(make_tls_server(args.host, args.tls_port))
+        except OSError as error:
+            # Review M-11: the runner only says "did not start -- see <log>"; this line names the file that failed
+            # (ssl.SSLError is an OSError: a certificate that does not load lands here too)
+            print("VaRestTestServer: cannot start the TLS listener: %s: %s" % (getattr(error, "filename", None) or CERTS_DIR, error), file=sys.stderr, flush=True)
+            server.server_close()
+            return 2
         urls.append("https://%s:%d" % (args.host, extras[0].server_address[1]))
     if args.parent_pid:
         threading.Thread(target=watch_parent, args=(args.parent_pid, server), daemon=True).start()
@@ -1959,7 +2024,7 @@ In the module docstring, replace the usage line and the paragraph after it with:
 --port 0 lets the OS choose. Once the server accepts connections it prints "VaRestTestServer <base url>" and,
 with --ready-file, writes the base URL to that file (atomically, so a reader never sees half of it). --tls-port also
 serves every route and plug-in over TLS (stdlib ssl, the test certificate in certs/: localhost, 127.0.0.1 and ::1,
-signed by the throwaway test CA certs/ca.pem; WebSocket spec 16.3): it prints "VaRestTestServerTls <https url>" and
+signed by the throwaway test CA certs/test-ca.pem; WebSocket spec 16.3): it prints "VaRestTestServerTls <https url>" and
 the ready file holds that URL on a second line. With --parent-pid it exits when that process is gone or is no longer
 its parent (a reused PID), so a runner killed with SIGKILL leaves no server behind. The parent must be the process
 that started the server: any other PID is refused at start (exit 2). A server that stops by itself (the parent
@@ -2015,7 +2080,8 @@ Expected: the M3 integration suite passes as before (`run_tests: N passed, 0 fai
 - [ ] **Step 8: Commit**
 
 ```bash
-git add Tools/testserver/certs/make_certs.sh Tools/testserver/certs/ca.pem Tools/testserver/certs/server.pem Tools/testserver/certs/server.key \
+git add Tools/testserver/certs/make_certs.sh Tools/testserver/certs/README.md Tools/testserver/certs/test-ca.pem \
+	Tools/testserver/certs/test-server.pem Tools/testserver/certs/test-server.key \
 	Tools/testserver/server.py Tools/testserver/selftest.py Tools/testserver/ws_selftest.py Tools/run_tests.sh
 git commit -m "testserver: TLS listener (WS W0) -- committed throwaway test CA and leaf, --tls-port, /tls/ca.pem, handshake off the accept loop; runner passes -VaRestTestServerTls
 
@@ -2028,6 +2094,7 @@ Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 **Files:**
 - Modify: `Source/VaRestHttp/Public/VaRestHttpTesting.h`, `Source/VaRestHttp/Private/VaRestHttpTesting.cpp` (`GetTestServerTlsUrl`)
 - Modify: `Source/VaRestTests/VaRestTests.Build.cs`
+- Modify: `Source/VaRestTests/Private/VaRestTestsModule.cpp` (a module class that samples `IsModuleLoaded("WebSockets")` at startup, review I-4)
 - Create: `Source/VaRestTests/Private/LwsProbe/VaRestLwsProbeLws.h`
 - Create: `Source/VaRestTests/Private/LwsProbe/VaRestLwsProbe.h`
 - Create: `Source/VaRestTests/Private/LwsProbe/VaRestLwsProbe.cpp`
@@ -2041,14 +2108,15 @@ Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
   - `enum EEventFlags : uint32 { FirstFragment, FinalFragment, BinaryFrame, UserIsConnection, WsiUserIsConnection }` (bits 0–4).
   - `struct FEvent { int32 Conn; int32 Reason; double Time; int64 Len; uint32 Flags; int64 Remaining; TArray<uint8> Bytes; FString Note; }`.
   - `struct FServer { FString HttpBase; FString Host; int32 Port; int32 TlsPort; }`; `bool FindServer(FAutomationTestBase&, FServer&, bool bNeedTls = false)`.
-  - `enum class EVerdict : uint8 { Agrees, Differs, Recorded, Unverified }`; `EVerdict AgreesIf(bool)`; `void Fact(FAutomationTestBase&, const FString& Id, EVerdict, const FString& Observed, const FString& Spec, const FString& Evidence)`; `void Pending(const FString& Id)`; `const TCHAR* YesNo(bool)`.
+  - `enum class EVerdict : uint8 { Agrees, Differs, Recorded, Unverified }`; `EVerdict AgreesIf(bool)`; `void Fact(FAutomationTestBase&, const FString& Id, EVerdict, const FString& Observed, const FString& Spec, const FString& Evidence)`; `void Pending(const FString& Id)`; `const TCHAR* YesNo(bool)`; `bool NoteOutcome(FAutomationTestBase&, const FString& What, bool bOutcome)` (a library outcome as an `AddInfo`, never a failure; returns `bOutcome`; review M-2 ruling).
+  - `extern bool GWebSocketsLoadedAtModuleStartup` (defined in `VaRestTestsModule.cpp`, set in `StartupModule`).
   - `constexpr int32 KeepDefault`; `using FHook = TFunction<int32(FConn& Conn, lws* Wsi, int32 Reason, void* User, void* In, size_t Len)>`.
   - `struct FConnectSpec { FString Path = "/ws/echo"; bool bTls; FString Address; int32 Port; FString Host; TOptional<FString> Origin; FString Protocols; FString LocalProtocolName = "varest"; int32 SslFlags; TArray<FString> AppendHeaders; int32 PeerCloseReturn; FHook Hook; }`.
   - `struct FWrite { TArray<uint8> Buffer; int32 Protocol; }` (`Buffer` = `LWS_PRE` bytes of headroom + payload).
   - `struct FConn { FRig* Rig; int32 Id; lws* Wsi; bool bDestroyed; FConnectSpec Spec; TArray<ANSICHAR> PathUtf8, AddressUtf8, HostUtf8, OriginUtf8, ProtocolsUtf8, LocalNameUtf8; TArray<FWrite> Outbox; int32 CloseCode; TArray<uint8> CloseReason; TMap<FName, int64> Counters; }`.
   - `enum class ETls : uint8 { None, LwsGlobalInit, SslModule, ProvidedContext }`; `struct FRigOptions { int32 ServiceTimeoutMs = 10000; uint32 ContextOptions = PEER_CERT_NOT_REQUIRED | DISABLE_OS_CA_CERTS | JUST_USE_RAW_ORIGIN; ETls Tls = None; SSL_CTX* ProvidedSslContext; uint32 TimeoutSecs = 0; uint32 RxBufferSize = 65536; bool bCommandsInsideCallback = true; TFunction<void(SSL_CTX*)> OnLoadExtraClientVerifyCerts; TFunction<int32(FConn&, X509_STORE_CTX*, int64 PreverifyOk)> OnVerifyServerCert; }`.
   - `class FRig final : public FRunnable`: `FRig(const FServer&, FRigOptions = {})`, `~FRig()`, `bool IsReady() const`, `bool UsedSslModuleContext() const`, `const FServer& GetServer() const`, `void Shutdown()`; game thread: `int32 Connect(FConnectSpec)`, `void Exec(const TCHAR* Label, TFunction<void(FRig&)>)`, `void ExecOn(int32 ConnId, const TCHAR* Label, TFunction<void(FConn&)>)`, `void Write(int32 ConnId, int32 Protocol, TArray<uint8> Payload)`, `void WriteText(int32 ConnId, const FString& Text, int32 Protocol = LWS_WRITE_TEXT)`, `void Close(int32 ConnId, int32 Code, const FString& Reason)`, `bool WaitFor(TFunctionRef<bool(const TArray<FEvent>&)>, double Seconds = 15.0)`, `bool WaitReason(int32 ConnId, int32 Reason, double Seconds = 15.0)`, `bool WaitEnded(int32 ConnId, double Seconds = 15.0)`, `TArray<FEvent> Events(int32 ConnId = 0) const`, `bool Find(int32 ConnId, int32 Reason, FEvent& Out, const TCHAR* NotePrefix = nullptr) const`; any thread: `void Record(int32 ConnId, int32 Reason, int64 Len, const FString& Note)`; service thread: `int32 WriteNow(FConn&, lws* Wsi, int32 Protocol, TConstArrayView<uint8> Payload, const TCHAR* Label)`; `static int Callback(lws*, lws_callback_reasons, void*, void*, size_t)`. Members (MSVC C4458: no local may take these names): `Server, Options, Context, Protocols, Thread, bStopping, Commands, ConnsLock, Conns, EventsLock, Recorded, CopiedBytes, SslModuleContext, bSslInitialized, bSslModuleContext, NextId` and the functions above plus `Run, Stop, Enqueue, DrainCommands, Handle, ConnectNow, FindConn, AppendHeaders, WriteNext, Append, CopyBytes`.
-  - Helpers (game thread): `FString NewKey()`, `FString Utf8Text(const void*, size_t)`, `FString EventText(const FEvent&)`, `TArray<uint8> Utf8Bytes(const FString&)`, `FString HexOf(TConstArrayView<uint8>)`, `FString ReasonName(int32)`, `FString CallSequence(const TArray<FEvent>&)`, `TArray<FEvent> OfReason(const TArray<FEvent>&, int32 Reason)`, `bool Opened(const TArray<FEvent>&)`, `FString ErrorOf(const TArray<FEvent>&)`, `FString ConnectResult(const TArray<FEvent>&)`, `bool Visit(FAutomationTestBase&, FRig&, FConnectSpec, TArray<FEvent>& Out, double Seconds = 20.0)`, `bool WaitBytes(FRig&, int32 ConnId, int64 Bytes, double Seconds = 15.0)`, `FVaRestJson FetchJournal(FAutomationTestBase&, const FServer&, const FString& Key, int32 Connections = 1, int32 WaitMs = 5000)`, `TArray<FVaRestJson> JournalEvents(const FVaRestJson&, const TCHAR* Kind, int32 ConnIndex = 0)`, `FString JournalHeader(const FVaRestJson&, const TCHAR* Name, int32 ConnIndex = 1)`, `TArray<uint8> JournalBytes(const FVaRestJson& Event)`, `bool FetchBytes(FAutomationTestBase&, const FServer&, const FString& Path, TArray<uint8>& Out)`, `int32 AddPemToStore(SSL_CTX*, TConstArrayView<uint8> Pem)`, `FString UrlValue(const FString&)`, `bool IsMessageStart(int32 Protocol)`.
+  - Helpers (game thread): `FString NewKey()`, `FString Utf8Text(const void*, size_t)`, `FString EventText(const FEvent&)`, `TArray<uint8> Utf8Bytes(const FString&)`, `FString HexOf(TConstArrayView<uint8>)`, `FString ReasonName(int32)`, `FString CallSequence(const TArray<FEvent>&)`, `TArray<FEvent> OfReason(const TArray<FEvent>&, int32 Reason)`, `bool Opened(const TArray<FEvent>&)`, `FString ErrorOf(const TArray<FEvent>&)`, `FString ConnectResult(const TArray<FEvent>&)`, `bool Visit(FAutomationTestBase&, FRig&, FConnectSpec, TArray<FEvent>& Out, double Seconds = 20.0)` (a connection that never ends is noted, not failed), `bool WaitBytes(FRig&, int32 ConnId, int64 Bytes, double Seconds = 15.0)`, `FVaRestJson FetchJournal(FAutomationTestBase&, const FServer&, const FString& Key, int32 Connections = 1, int32 WaitMs = 5000)`, `TArray<FVaRestJson> JournalEvents(const FVaRestJson&, const TCHAR* Kind, int32 ConnIndex = 0)`, `FString JournalHeader(const FVaRestJson&, const TCHAR* Name, int32 ConnIndex = 1)`, `TArray<uint8> JournalBytes(const FVaRestJson& Event)`, `bool FetchBytes(FAutomationTestBase&, const FServer&, const FString& Path, TArray<uint8>& Out)`, `int32 AddPemToStore(SSL_CTX*, TConstArrayView<uint8> Pem)`, `FString UrlValue(const FString&)`, `bool IsMessageStart(int32 Protocol)`.
   - `VaRest::Http::Testing::GetTestServerTlsUrl()` (VaRestHttp).
 
 - [ ] **Step 1: Write the failing rig tests and wire the module**
@@ -2080,6 +2148,35 @@ In `Source/VaRestTests/VaRestTests.Build.cs`, replace the constructor body with:
 		// links it (WebSockets.Build.cs:118; ModuleRules.cs:1601-1607 adds them as private dependencies). Test-only: this
 		// module is UncookedOnly, never in a game target (ModuleDescriptor.cs:792-793, TargetRules.cs:1190-1193).
 		AddEngineThirdPartyPrivateStaticDependencies(Target, "OpenSSL", "libWebSockets", "zlib");
+```
+
+Replace `Source/VaRestTests/Private/VaRestTestsModule.cpp` with:
+
+```cpp
+// Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
+
+#include "Modules/ModuleManager.h"
+
+namespace VaRest::LwsProbe
+{
+	/**
+	 * Whether the engine's WebSockets module was loaded when this module started, before any test ran (WS W0 review I-4):
+	 * automation runs tests in name order, so Probe.VaRest.Lws.Coexist.* (which loads WebSockets) runs before
+	 * Probe.VaRest.Lws.Service.Environment, which reports this value. WebSocket spec D30 branches on it.
+	 */
+	bool GWebSocketsLoadedAtModuleStartup = false;
+}
+
+class FVaRestTestsModule final : public IModuleInterface
+{
+public:
+	virtual void StartupModule() override
+	{
+		VaRest::LwsProbe::GWebSocketsLoadedAtModuleStartup = FModuleManager::Get().IsModuleLoaded(TEXT("WebSockets"));
+	}
+};
+
+IMPLEMENT_MODULE(FVaRestTestsModule, VaRestTests);
 ```
 
 Create `Source/VaRestTests/Private/LwsProbe/VaRestLwsProbeRigTest.cpp`:
@@ -2347,6 +2444,12 @@ Create `Source/VaRestTests/Private/LwsProbe/VaRestLwsProbe.h`:
 // One FRig per test: one lws_context with one protocol "varest", one service thread that waits in lws_service and is
 // woken by lws_cancel_service, game-thread commands run inside LWS_CALLBACK_EVENT_WAIT_CANCELLED (the shape of WebSocket
 // spec 2.1), and every callback recorded in order. Test-only: VaRestTests is UncookedOnly, never in a game target.
+//
+// One constraint for every test (WS W0 decision 16, review I-3): never create an FRig while another FRig has a TLS
+// connection that has neither opened nor ended. Each lws_create_context re-allocates this LWS copy's process-global
+// openssl_websocket_private_data_index (ssl.c.o lws_context_init_ssl_library, stores at 0x1f4 and 0x23a), and the
+// client verify callback dereferences what SSL_get_ex_data returns under it without a null check (openssl-client.c.o
+// 0x1c8-0x1d6), so a handshake in flight across a context creation crashes.
 
 #include "CoreMinimal.h"
 #include "Containers/Queue.h"
@@ -2437,6 +2540,15 @@ namespace VaRest::LwsProbe
 
 	/** Logged and flushed right before a call that may end the process: an id with PENDING and no FACT is "crashed" */
 	void Pending(const FString& Id);
+
+	/**
+	 * A library outcome (opened, ended, echoed...), recorded as an AddInfo and never a failure: the facts carry it
+	 * (WS W0 decision 3, review M-2 ruling). Returns bOutcome, so the caller can still branch on it.
+	 */
+	bool NoteOutcome(FAutomationTestBase& Test, const FString& What, bool bOutcome);
+
+	/** Set by FVaRestTestsModule::StartupModule (VaRestTestsModule.cpp) */
+	extern bool GWebSocketsLoadedAtModuleStartup;
 
 	struct FConn;
 	class FRig;
@@ -2609,7 +2721,7 @@ namespace VaRest::LwsProbe
 	FString ErrorOf(const TArray<FEvent>& Events);
 	/** What lws_client_connect_via_info returned: "wsi", "null" or "(not called)" */
 	FString ConnectResult(const TArray<FEvent>& Events);
-	/** Connects, waits for the open or the end, closes 1000 if it opened, waits for the end; AddError when it never ends */
+	/** Connects, waits for the open or the end, closes 1000 if it opened, waits for the end; a connection that never ends is noted (NoteOutcome), and false returned */
 	bool Visit(FAutomationTestBase& Test, FRig& Rig, FConnectSpec Spec, TArray<FEvent>& Out, double Seconds = 20.0);
 	/** Until the connection's CLIENT_RECEIVE lengths add up to Bytes */
 	bool WaitBytes(FRig& Rig, int32 ConnId, int64 Bytes, double Seconds = 15.0);
@@ -2744,6 +2856,12 @@ void VaRest::LwsProbe::Pending(const FString& Id)
 	UE_LOG(LogVaRestLwsProbe, Display, TEXT("PENDING %s"), *FVaRestJson::Object().Set(TEXT("id"), Id).ToString());
 	// The next call may be the last thing the process does: this line must reach the file first
 	GLog->Flush();
+}
+
+bool VaRest::LwsProbe::NoteOutcome(FAutomationTestBase& Test, const FString& What, bool bOutcome)
+{
+	Test.AddInfo(FString::Printf(TEXT("outcome: %s: %s"), *What, YesNo(bOutcome)));
+	return bOutcome;
 }
 
 // ---- FRig
@@ -3138,7 +3256,10 @@ int32 VaRest::LwsProbe::FRig::Handle(lws* Wsi, int32 Reason, void* User, void* I
 		break;
 	case LWS_CALLBACK_CLIENT_FILTER_PRE_ESTABLISH:
 	{
-		// The last point the response headers exist (libwebsockets.h:1301-1307): the selected subprotocol and the status
+		// The last point the response headers exist (libwebsockets.h:1301-1307): the selected subprotocol and the status.
+		// lws_http_client_http_response is safe here because the header table exists by definition in this callback
+		// (T6); without one it dereferences NULL (client.c.o 0x1294-0x12b2), which is why the CONNECTION_ERROR cases
+		// are probed one per run (Probe.VaRest.Risky.Lws.StatusInConnectionError.*)
 		char Selected[256] = {};
 		const int Total = lws_hdr_total_length(Wsi, WSI_TOKEN_PROTOCOL);
 		if (Total > 0 && Total < static_cast<int>(sizeof(Selected)))
@@ -3458,10 +3579,7 @@ bool VaRest::LwsProbe::Visit(FAutomationTestBase& Test, FRig& Rig, FConnectSpec 
 	}
 	const bool bEnded = Rig.WaitEnded(ConnId, Seconds);
 	Out = Rig.Events(ConnId);
-	if (!bEnded)
-	{
-		Test.AddError(FString::Printf(TEXT("connection %d did not end within %.0f s: %s"), ConnId, Seconds, *CallSequence(Out)));
-	}
+	NoteOutcome(Test, FString::Printf(TEXT("connection %d ended within %.0f s (%s)"), ConnId, Seconds, *CallSequence(Out)), bEnded);
 	return bEnded;
 }
 
@@ -3587,6 +3705,8 @@ bool VaRest::LwsProbe::IsMessageStart(int32 Protocol)
 Run: `Tools/run_tests.sh Probe.VaRest.Lws.Rig`
 Expected: `run_tests: 4 passed, 0 failed`.
 
+If `Rig.Echo` cannot open, echo or close while the other three pass, the inside-callback command path may be what fails (review M-13): set `FRigOptions::bCommandsInsideCallback`'s default to `false` in `VaRestLwsProbe.h` (commands then drain between `lws_service` calls, the engine's way), re-run, and note it in the task report. Task 5's `svc.commands_*` rows record both placements either way, and Task 11's E2 reads them.
+
 Restore-the-bug: in `FRig::Stop()`, comment out the `lws_cancel_service(Context);` call. `Probe.VaRest.Lws.Rig.TeardownWithOpenConnection` must fail with "the teardown returns within 5 s ... (took ~10 s)", because the service thread sits out its 10 s wait. Restore the line and see it pass. Report both outcomes.
 
 - [ ] **Step 8: Check the default suite and the monolithic build are untouched**
@@ -3601,6 +3721,7 @@ Expected: `Result: Succeeded`. VaRestTests and its libwebsockets copy are not pa
 
 ```bash
 git add Source/VaRestHttp/Public/VaRestHttpTesting.h Source/VaRestHttp/Private/VaRestHttpTesting.cpp Source/VaRestTests/VaRestTests.Build.cs \
+	Source/VaRestTests/Private/VaRestTestsModule.cpp \
 	Source/VaRestTests/Private/LwsProbe/VaRestLwsProbeLws.h Source/VaRestTests/Private/LwsProbe/VaRestLwsProbe.h \
 	Source/VaRestTests/Private/LwsProbe/VaRestLwsProbe.cpp Source/VaRestTests/Private/LwsProbe/VaRestLwsProbeRigTest.cpp
 git commit -m "tests: libwebsockets 3.0 probe rig (WS W0) -- one context per test with the spec's service shape, ordered callback journal, facts as JSON log lines, server journal and TLS helpers
@@ -3615,9 +3736,10 @@ Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 - Create: `Source/VaRestTests/Private/LwsProbe/VaRestLwsProbeServiceTest.cpp`
 
 **Interfaces:**
-- Consumes (Task 4): `FRig` (`Connect`, `Exec`, `ExecOn`, `WriteText`, `Close`, `WaitFor`, `WaitReason`, `WaitEnded`, `Events`, `Find`), `FConnectSpec`, `FRigOptions` (`bCommandsInsideCallback`, `TimeoutSecs`), `FindServer`, `Fact`, `AgreesIf`, `EVerdict`, `YesNo`, `NewKey`, `EventText`, `Utf8Text`, `CallSequence`, `ErrorOf`, `FetchJournal`, `JournalEvents`, pseudo reasons `ConnectCalling`, `ConnectReturned`, `CommandRan`; server routes `/ws/echo`, `/ws/hang`.
-- Produces facts (ids exactly as in `Tools/lws_probe_passport.py` `EXPECTED`): `env.lws_version`, `env.openssl_version`, `env.build`, `env.websockets_loaded_at_start`, `release.win64`, `release.mac`, `release.android_ios`, `coexist.monolithic`, `svc.commands_inside_wait_cancelled`, `svc.commands_between_service_calls`, `svc.cancel_wake_ms`, `svc.timer_latency_ms`, `svc.kill_async_ms`, `svc.kill_async_sequence`, `svc.kill_async_close_frame`, `timeout.default_secs`, `timeout.configured_secs`, `timeout.kill_pending_ms`, `timeout.kill_pending_sequence`, `timeout.tcp_connect_blackhole`.
+- Consumes (Task 4): `FRig` (`Connect`, `Exec`, `ExecOn`, `WriteText`, `Close`, `WaitFor`, `WaitReason`, `WaitEnded`, `Events`, `Find`), `FConnectSpec`, `FRigOptions` (`bCommandsInsideCallback`, `TimeoutSecs`, `ServiceTimeoutMs`), `FindServer`, `Fact`, `AgreesIf`, `EVerdict`, `YesNo`, `NoteOutcome`, `GWebSocketsLoadedAtModuleStartup`, `NewKey`, `EventText`, `Utf8Text`, `CallSequence`, `ErrorOf`, `FetchJournal`, `JournalEvents`, pseudo reasons `ConnectCalling`, `ConnectReturned`, `CommandRan`; server routes `/ws/echo`, `/ws/hang`.
+- Produces facts (ids exactly as in `Tools/lws_probe_passport.py` `EXPECTED`): `env.lws_version`, `env.openssl_version`, `env.build`, `env.websockets_loaded_at_start`, `release.win64`, `release.mac`, `release.android_ios`, `coexist.monolithic`, `svc.commands_inside_wait_cancelled`, `svc.commands_between_service_calls`, `svc.cancel_wake_ms`, `svc.timer_latency_ms`, `svc.kill_async_ms`, `svc.kill_async_ms_short_wait`, `svc.kill_async_sequence`, `svc.kill_async_close_frame`, `timeout.default_secs`, `timeout.configured_secs`, `timeout.kill_pending_ms`, `timeout.kill_pending_ms_short_wait`, `timeout.kill_pending_sequence`, `timeout.tcp_connect_blackhole`, `timeout.default_secs_blackhole`.
 - Tests: `Probe.VaRest.Lws.Service.Environment`, `.Service.Commands`, `.Service.TimerAndKill`, `Probe.VaRest.Lws.Timeout.DefaultHandshake`, `.Timeout.ConfiguredHandshake`, `.Timeout.KillPending`, `.Timeout.Blackhole`.
+- Service waits (decision 9, review C-1): the timeout tests use 100 ms (`ShortWaitMs`), because they ask what LWS's own timers do. The command, wake and timer facts use the rig's 10 s, because they ask what the service shape does. Each kill latency is taken with both waits.
 
 - [ ] **Step 1: Run the filter to see it match nothing**
 
@@ -3632,7 +3754,9 @@ Create `Source/VaRestTests/Private/LwsProbe/VaRestLwsProbeServiceTest.cpp`:
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 
 // WebSocket spec 16.4 (W0): the environment, the service thread's command path, timers and forced closes, and the
-// handshake timeouts, as LWS 3.0 does them under the service shape WebSocket spec 2.1 plans
+// handshake timeouts. Two service waits (WS W0 decision 9, review C-1): LWS checks its own deadlines only when
+// lws_service returns (lws-plat-unix.c.o _lws_plat_service_tsi: the hrtimer list caps poll()'s wait, nothing else
+// does), so facts about LWS's timers take a 100 ms wait, and facts about the service shape the rig's 10 s one
 
 #include "VaRestLwsProbe.h"
 
@@ -3643,10 +3767,20 @@ Create `Source/VaRestTests/Private/LwsProbe/VaRestLwsProbeServiceTest.cpp`:
 #include "HAL/PlatformTime.h"
 #include "Misc/App.h"
 #include "Misc/AutomationTest.h"
+#include "Misc/Paths.h"
 #include "Modules/ModuleManager.h"
+
+#if PLATFORM_LINUX
+#include <dlfcn.h>
+#endif
 
 namespace VaRest::LwsProbe::VaRestLwsProbeServiceTestPrivate
 {
+	/** The wait for facts about LWS's own timers: short enough that a deadline is noticed within 0.1 s of passing */
+	constexpr int32 ShortWaitMs = 100;
+	/** The rig's default, spec 2.1's long wait woken by lws_cancel_service */
+	constexpr int32 LongWaitMs = 10000;
+
 	struct FRoundTrip
 	{
 		bool bEstablished = false;
@@ -3708,12 +3842,16 @@ namespace VaRest::LwsProbe::VaRestLwsProbeServiceTestPrivate
 		FString Sequence;
 	};
 
-	/** A connection whose TCP connects and whose upgrade is never answered (or a TCP connect to Address), timed to its end */
+	/**
+	 * A connection whose TCP connects and whose upgrade is never answered (/ws/hang), or a TCP connect to Address, timed
+	 * from the connect call to its end, with the short wait: these ask what LWS's own deadline is (review C-1)
+	 */
 	FHang Hang(const FServer& Site, uint32 TimeoutSecs, const FString& Address, int32 Port, double WaitSeconds)
 	{
 		FHang Out;
 		FRigOptions Options;
 		Options.TimeoutSecs = TimeoutSecs;
+		Options.ServiceTimeoutMs = ShortWaitMs;
 		FRig Rig(Site, MoveTemp(Options));
 		if (!Rig.IsReady())
 		{
@@ -3743,6 +3881,74 @@ namespace VaRest::LwsProbe::VaRestLwsProbeServiceTestPrivate
 		return Run.bEnded ? FString::Printf(TEXT("%.1f s, then \"%s\" (%s)"), Run.Seconds, *Run.Error, *Run.Sequence)
 			: FString::Printf(TEXT("still pending after %.0f s (%s)"), WaitSeconds, *Run.Sequence);
 	}
+
+	/** A blackhole result, saying so when the host has no blackhole (the connect failed at once) */
+	FString DescribeBlackhole(const FHang& Run, double WaitSeconds)
+	{
+		return Run.bEnded && Run.Seconds >= 0.0 && Run.Seconds < 0.5
+			? FString::Printf(TEXT("no blackhole on this host (failed at once): %s"), *Describe(Run, WaitSeconds))
+			: Describe(Run, WaitSeconds);
+	}
+
+	struct FKill
+	{
+		bool bReady = false;
+		bool bEnded = false;
+		double Ms = -1.0;
+		FString Sequence;
+		FString Key;
+		FString KillNote = TEXT("not run");
+	};
+
+	/**
+	 * A connection to Route killed with lws_set_timeout(LWS_TO_KILL_ASYNC) from a command -- open (bWhenOpen, /ws/echo)
+	 * or pending with its upgrade unanswered (/ws/hang) -- timed from the command to WSI_DESTROY under one service wait
+	 */
+	FKill Kill(const FServer& Site, const FString& Route, int32 ServiceTimeoutMs, bool bWhenOpen)
+	{
+		FKill Out;
+		FRigOptions Options;
+		Options.ServiceTimeoutMs = ServiceTimeoutMs;
+		FRig Rig(Site, MoveTemp(Options));
+		if (!Rig.IsReady())
+		{
+			return Out;
+		}
+		Out.Key = NewKey();
+		FConnectSpec Spec;
+		Spec.Path = FString::Printf(TEXT("%s%skey=%s"), *Route, Route.Contains(TEXT("?")) ? TEXT("&") : TEXT("?"), *Out.Key);
+		const int32 Conn = Rig.Connect(MoveTemp(Spec));
+		Out.bReady = bWhenOpen ? Rig.WaitReason(Conn, LWS_CALLBACK_CLIENT_ESTABLISHED) : Rig.WaitReason(Conn, ConnectReturned);
+		if (!Out.bReady)
+		{
+			Rig.WaitEnded(Conn);
+			return Out;
+		}
+		// Open: the service thread parks in its wait. Pending: the upgrade is out and unanswered by now
+		FPlatformProcess::Sleep(bWhenOpen ? 0.2f : 1.0f);
+		Rig.ExecOn(Conn, TEXT("kill"), [](FConn& C) { lws_set_timeout(C.Wsi, PENDING_TIMEOUT_USER_REASON_BASE, LWS_TO_KILL_ASYNC); });
+		Out.bEnded = Rig.WaitEnded(Conn, 25.0);
+		FEvent Killed;
+		FEvent Destroyed;
+		if (Rig.Find(Conn, CommandRan, Killed, TEXT("kill")))
+		{
+			Out.KillNote = Killed.Note;
+		}
+		// Review M-12: the sequence and the latency only from a kill that ran (a "kill: no wsi" never reached LWS)
+		if (Out.bEnded && Out.KillNote.Equals(TEXT("kill"), ESearchCase::CaseSensitive) && Rig.Find(Conn, LWS_CALLBACK_WSI_DESTROY, Destroyed))
+		{
+			Out.Ms = (Destroyed.Time - Killed.Time) * 1000.0;
+			Out.Sequence = CallSequence(Rig.Events(Conn).FilterByPredicate([&Killed](const FEvent& Each) { return Each.Time >= Killed.Time && Each.Reason != CommandRan; }));
+		}
+		return Out;
+	}
+
+	FString Describe(const FKill& Run, int32 ServiceTimeoutMs)
+	{
+		return Run.Ms >= 0.0
+			? FString::Printf(TEXT("%.1f ms from lws_set_timeout(LWS_TO_KILL_ASYNC) to WSI_DESTROY, lws_service waiting up to %d ms"), Run.Ms, ServiceTimeoutMs)
+			: FString::Printf(TEXT("not measured: ready %s, kill %s, ended %s (wait %d ms)"), YesNo(Run.bReady), *Run.KillNote, YesNo(Run.bEnded), ServiceTimeoutMs);
+	}
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestLwsProbeEnvironmentTest, "Probe.VaRest.Lws.Service.Environment",
@@ -3756,24 +3962,38 @@ bool FVaRestLwsProbeEnvironmentTest::RunTest(const FString& Parameters)
 	Fact(*this, TEXT("env.lws_version"), AgreesIf(Version.StartsWith(TEXT("3.0.0"))), Version,
 		TEXT("T1: libwebsockets 3.0.0 on every target (lws_config.h:34)"), TEXT("lws_get_library_version() in VaRestTests' copy"));
 	const char* SslVersion = OpenSSL_version(OPENSSL_VERSION);
+	// Review M-5: VaRestTests links OpenSSL statically, but on Linux its calls may bind to the global-scope copy (the
+	// HTTP and SSL modules export it): which object the function resolves to goes in the evidence
+	FString SslOwner = TEXT("which object provides it is not looked up on this platform");
+#if PLATFORM_LINUX
+	Dl_info SslInfo = {};
+	SslOwner = dladdr(reinterpret_cast<void*>(&OpenSSL_version), &SslInfo) != 0 && SslInfo.dli_fname
+		? FString::Printf(TEXT("OpenSSL_version resolves to %s"), *FPaths::GetCleanFilename(UTF8_TO_TCHAR(SslInfo.dli_fname)))
+		: FString(TEXT("dladdr found no object for OpenSSL_version"));
+#endif
 	Fact(*this, TEXT("env.openssl_version"), EVerdict::Recorded, Utf8Text(SslVersion, FCStringAnsi::Strlen(SslVersion)),
-		TEXT("none (the engine bundles OpenSSL 1.1.1t, ThirdParty/OpenSSL/OpenSSL.Build.cs:12)"), TEXT("OpenSSL_version(OPENSSL_VERSION)"));
+		TEXT("none (the engine bundles OpenSSL 1.1.1t, ThirdParty/OpenSSL/OpenSSL.Build.cs:12)"),
+		FString::Printf(TEXT("OpenSSL_version(OPENSSL_VERSION) as VaRestTests' calls resolve it; %s"), *SslOwner));
 	const FString Platform = ANSI_TO_TCHAR(FPlatformProperties::PlatformName());
 	Fact(*this, TEXT("env.build"), EVerdict::Recorded,
 		FString::Printf(TEXT("%s, %s, %s"), *Platform, IS_MONOLITHIC ? TEXT("monolithic") : TEXT("modular"), LexToString(FApp::GetBuildConfiguration())),
 		TEXT("none"), TEXT("FPlatformProperties::PlatformName, IS_MONOLITHIC, FApp::GetBuildConfiguration"));
-	Fact(*this, TEXT("env.websockets_loaded_at_start"), EVerdict::Recorded, YesNo(FModuleManager::Get().IsModuleLoaded(TEXT("WebSockets"))),
-		TEXT("none"), TEXT("FModuleManager::IsModuleLoaded(\"WebSockets\") when this test ran"));
+	// Review I-4: sampled in FVaRestTestsModule::StartupModule, before any test (tests run in name order, and Coexist,
+	// which loads WebSockets, runs before this one)
+	Fact(*this, TEXT("env.websockets_loaded_at_start"), EVerdict::Recorded,
+		FString::Printf(TEXT("%s at VaRestTests' startup (%s when this test ran)"), YesNo(GWebSocketsLoadedAtModuleStartup), YesNo(FModuleManager::Get().IsModuleLoaded(TEXT("WebSockets")))),
+		TEXT("WebSocket spec D30 sets the LWS log level only when the engine's WebSockets module is not loaded"),
+		TEXT("FModuleManager::IsModuleLoaded(\"WebSockets\") in FVaRestTestsModule::StartupModule (LoadingPhase Default), and again now"));
 
 	const FString ReleasePass = TEXT("WebSocket spec 16.6: Win64, Mac, Android and iOS in the release pass (bead VaRest-b4d)");
 	const FString Here = FString::Printf(TEXT("this run: %s"), *Platform);
 	Fact(*this, TEXT("release.win64"), PLATFORM_WINDOWS ? EVerdict::Recorded : EVerdict::Unverified,
 		PLATFORM_WINDOWS ? FString(TEXT("this is the Win64 run: see the other rows"))
-			: FString(TEXT("unverified here; release-pass item (Win64): run Tools/run_tests.sh Probe.VaRest.Lws and Probe.VaRest.Risky there")),
+			: FString(TEXT("unverified here; release-pass item (Win64): run Tools/run_tests.sh Probe.VaRest.Lws and each Probe.VaRest.Risky case there")),
 		ReleasePass, Here);
 	Fact(*this, TEXT("release.mac"), PLATFORM_MAC ? EVerdict::Recorded : EVerdict::Unverified,
 		PLATFORM_MAC ? FString(TEXT("this is the Mac run: see the other rows"))
-			: FString(TEXT("unverified here; release-pass item (Mac): run Tools/run_tests.sh Probe.VaRest.Lws and Probe.VaRest.Risky there")),
+			: FString(TEXT("unverified here; release-pass item (Mac): run Tools/run_tests.sh Probe.VaRest.Lws and each Probe.VaRest.Risky case there")),
 		ReleasePass, Here);
 	Fact(*this, TEXT("release.android_ios"), EVerdict::Unverified,
 		TEXT("unverified here; release-pass item (Android, iOS): the probe cannot run there (VaRestTests: PlatformAllowList Win64, Mac, Linux); W1's transport suite on devices covers them"),
@@ -3798,7 +4018,7 @@ bool FVaRestLwsProbeCommandsTest::RunTest(const FString& Parameters)
 	}
 	const FRoundTrip Inside = RoundTrip(Site, true);
 	const FRoundTrip Between = RoundTrip(Site, false);
-	TestTrue(TEXT("both round trips ended"), Inside.bEnded && Between.bEnded);
+	NoteOutcome(*this, TEXT("both round trips ended"), Inside.bEnded && Between.bEnded);
 	Fact(*this, TEXT("svc.commands_inside_wait_cancelled"), AgreesIf(Inside.bEstablished && Inside.bEchoed && Inside.bEnded), Describe(Inside),
 		TEXT("WebSocket spec 2.1: the service thread drains commands (connect, send, close) in LWS_CALLBACK_EVENT_WAIT_CANCELLED"),
 		TEXT("lws_client_connect_via_info, lws_callback_on_writable and the close all called inside EVENT_WAIT_CANCELLED"));
@@ -3817,61 +4037,65 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestLwsProbeTimerAndKillTest, "Probe.VaRest.
 bool FVaRestLwsProbeTimerAndKillTest::RunTest(const FString& Parameters)
 {
 	using namespace VaRest::LwsProbe;
+	using namespace VaRest::LwsProbe::VaRestLwsProbeServiceTestPrivate;
 	FServer Site;
 	if (!FindServer(*this, Site))
 	{
 		return false;
 	}
-	FRig Rig(Site);
-	if (!TestTrue(TEXT("the probe's context exists"), Rig.IsReady()))
 	{
-		return false;
-	}
-	const FString Key = NewKey();
-	FConnectSpec Spec;
-	Spec.Path = TEXT("/ws/echo?key=") + Key;
-	const int32 Conn = Rig.Connect(MoveTemp(Spec));
-	if (!TestTrue(TEXT("the connection opens"), Rig.WaitReason(Conn, LWS_CALLBACK_CLIENT_ESTABLISHED)))
-	{
-		return false;
+		// A per-wsi timer, armed from a command while lws_service would wait 10 s (libwebsockets.h:4705-4732): the
+		// hrtimer list caps poll()'s wait, so this one is about the shape and keeps the long wait
+		FRig Rig(Site);
+		if (!TestTrue(TEXT("the probe's context exists"), Rig.IsReady()))
+		{
+			return false;
+		}
+		FConnectSpec Spec;
+		Spec.Path = TEXT("/ws/echo?key=") + NewKey();
+		const int32 Conn = Rig.Connect(MoveTemp(Spec));
+		if (!TestTrue(TEXT("the echo connection opens"), Rig.WaitReason(Conn, LWS_CALLBACK_CLIENT_ESTABLISHED)))
+		{
+			return false;
+		}
+		FPlatformProcess::Sleep(0.2f);
+		Rig.ExecOn(Conn, TEXT("timer"), [](FConn& C) { lws_set_timer_usecs(C.Wsi, 200 * 1000); });
+		const bool bTimer = Rig.WaitReason(Conn, LWS_CALLBACK_TIMER, 15.0);
+		FEvent Armed;
+		FEvent Fired;
+		const bool bTimed = bTimer && Rig.Find(Conn, CommandRan, Armed, TEXT("timer")) && Rig.Find(Conn, LWS_CALLBACK_TIMER, Fired);
+		const double TimerMs = bTimed ? (Fired.Time - Armed.Time) * 1000.0 : -1.0;
+		Fact(*this, TEXT("svc.timer_latency_ms"), AgreesIf(bTimed && TimerMs < 1000.0),
+			bTimed ? FString::Printf(TEXT("%.1f ms for a 200 ms timer, lws_service waiting up to 10 s"), TimerMs) : FString(TEXT("no LWS_CALLBACK_TIMER within 15 s")),
+			TEXT("T14: lws_set_timer_usecs -> LWS_CALLBACK_TIMER, supported by the default poll loop (libwebsockets.h:4705-4732)"),
+			TEXT("lws_set_timer_usecs(wsi, 200000) from a command on an open connection"));
+		Rig.Close(Conn, 1000, TEXT("done"));
+		NoteOutcome(*this, TEXT("the timer connection ended"), Rig.WaitEnded(Conn));
 	}
 
-	// A per-wsi timer, armed from a command while lws_service would wait 10 s (libwebsockets.h:4705-4732)
-	FPlatformProcess::Sleep(0.2f);
-	Rig.ExecOn(Conn, TEXT("timer"), [](FConn& C) { lws_set_timer_usecs(C.Wsi, 200 * 1000); });
-	const bool bTimer = Rig.WaitReason(Conn, LWS_CALLBACK_TIMER, 15.0);
-	FEvent Armed;
-	FEvent Fired;
-	const bool bTimed = bTimer && Rig.Find(Conn, CommandRan, Armed, TEXT("timer")) && Rig.Find(Conn, LWS_CALLBACK_TIMER, Fired);
-	const double TimerMs = bTimed ? (Fired.Time - Armed.Time) * 1000.0 : -1.0;
-	Fact(*this, TEXT("svc.timer_latency_ms"), AgreesIf(bTimed && TimerMs < 1000.0),
-		bTimed ? FString::Printf(TEXT("%.1f ms for a 200 ms timer, lws_service waiting up to 10 s"), TimerMs) : FString(TEXT("no LWS_CALLBACK_TIMER within 15 s")),
-		TEXT("T14: lws_set_timer_usecs -> LWS_CALLBACK_TIMER, supported by the default poll loop (libwebsockets.h:4705-4732)"),
-		TEXT("lws_set_timer_usecs(wsi, 200000) from a command on an open connection"));
-
-	// A forced close from a command: "killed at the next timeout check" (libwebsockets.h:4673-4679)
-	FPlatformProcess::Sleep(0.2f);
-	Rig.ExecOn(Conn, TEXT("kill"), [](FConn& C) { lws_set_timeout(C.Wsi, PENDING_TIMEOUT_USER_REASON_BASE, LWS_TO_KILL_ASYNC); });
-	const bool bEnded = Rig.WaitEnded(Conn, 20.0);
-	TestTrue(TEXT("the killed connection ends"), bEnded);
-	FEvent Kill;
-	FEvent Destroyed;
-	const bool bMeasured = bEnded && Rig.Find(Conn, CommandRan, Kill, TEXT("kill")) && Rig.Find(Conn, LWS_CALLBACK_WSI_DESTROY, Destroyed);
-	Fact(*this, TEXT("svc.kill_async_ms"), EVerdict::Recorded,
-		bMeasured ? FString::Printf(TEXT("%.1f ms from lws_set_timeout(LWS_TO_KILL_ASYNC) to WSI_DESTROY, lws_service waiting up to 10 s"), (Destroyed.Time - Kill.Time) * 1000.0)
-			: FString(TEXT("did not end within 20 s")),
-		TEXT("T14: forced close with lws_set_timeout(..., LWS_TO_KILL_ASYNC); WebSocket spec 2.1 loops lws_service(ctx, NextDeadline)"),
-		TEXT("the kill from a command on an open echo connection"));
-	const TArray<FEvent> After = Rig.Events(Conn).FilterByPredicate([&Kill](const FEvent& Each) { return Each.Time >= Kill.Time && Each.Reason != CommandRan; });
-	Fact(*this, TEXT("svc.kill_async_sequence"), EVerdict::Recorded, CallSequence(After), TEXT("none"), TEXT("the callbacks after the kill command"));
-	const FVaRestJson Journal = FetchJournal(*this, Site, Key);
-	if (!TestTrue(TEXT("the server's journal ended"), Journal[TEXT("ended")].AsBool()))
+	// A forced close from a command, "killed at the next timeout check" (libwebsockets.h:4673-4679): with the long wait
+	// (the shape) and the short one (the control that shows how much of the delay is the wait, review C-1)
+	const FKill Long = Kill(Site, TEXT("/ws/echo"), LongWaitMs, true);
+	const FKill Short = Kill(Site, TEXT("/ws/echo"), ShortWaitMs, true);
+	const FString KillSpec = TEXT("T14: forced close with lws_set_timeout(..., LWS_TO_KILL_ASYNC); WebSocket spec 2.1 loops lws_service(ctx, NextDeadline)");
+	Fact(*this, TEXT("svc.kill_async_ms"), EVerdict::Recorded, Describe(Long, LongWaitMs), KillSpec, TEXT("a kill from a command on an open echo connection"));
+	Fact(*this, TEXT("svc.kill_async_ms_short_wait"), EVerdict::Recorded, Describe(Short, ShortWaitMs), KillSpec,
+		TEXT("the control for svc.kill_async_ms: the same kill with a 100 ms wait"));
+	Fact(*this, TEXT("svc.kill_async_sequence"), EVerdict::Recorded, Long.Sequence.IsEmpty() ? FString(TEXT("not measured")) : Long.Sequence,
+		TEXT("none"), TEXT("the callbacks after the kill command (the long-wait connection)"));
+	FString CloseFrame = TEXT("not measured: the killed connection did not run");
+	if (!Long.Key.IsEmpty())
 	{
-		return false;
+		const FVaRestJson Journal = FetchJournal(*this, Site, Long.Key);
+		if (!TestTrue(TEXT("the server's journal arrived"), Journal.IsValid()))
+		{
+			return false;
+		}
+		CloseFrame = !Journal[TEXT("ended")].AsBool() ? FString(TEXT("the server still held the connection 5 s after the kill"))
+			: JournalEvents(Journal, TEXT("close")).Num() > 0 ? FString(TEXT("a close frame reached the server"))
+			: FString(TEXT("no close frame: the TCP connection just ended"));
 	}
-	Fact(*this, TEXT("svc.kill_async_close_frame"), EVerdict::Recorded,
-		JournalEvents(Journal, TEXT("close")).Num() > 0 ? FString(TEXT("a close frame reached the server")) : FString(TEXT("no close frame: the TCP connection just ended")),
-		TEXT("none"), TEXT("the server's journal of the killed connection"));
+	Fact(*this, TEXT("svc.kill_async_close_frame"), EVerdict::Recorded, CloseFrame, TEXT("none"), TEXT("the server's journal of the killed connection"));
 	return true;
 }
 
@@ -3888,10 +4112,10 @@ bool FVaRestLwsProbeDefaultHandshakeTimeoutTest::RunTest(const FString& Paramete
 		return false;
 	}
 	const FHang Run = Hang(Site, 0, FString(), 0, 45.0);
-	TestTrue(TEXT("the unanswered upgrade ends within 45 s"), Run.bEnded);
+	NoteOutcome(*this, TEXT("the unanswered upgrade ended within 45 s"), Run.bEnded);
 	Fact(*this, TEXT("timeout.default_secs"), EVerdict::Recorded, Describe(Run, 45.0),
 		TEXT("WebSocket spec 0.3 (inferred from 4.3): LWS's default timeout_secs"),
-		TEXT("timeout_secs = 0; /ws/hang accepts TCP, reads the upgrade, never answers"));
+		TEXT("timeout_secs = 0; /ws/hang accepts TCP, reads the upgrade, never answers; lws_service waiting up to 100 ms"));
 	return true;
 }
 
@@ -3908,10 +4132,10 @@ bool FVaRestLwsProbeConfiguredHandshakeTimeoutTest::RunTest(const FString& Param
 		return false;
 	}
 	const FHang Run = Hang(Site, 3, FString(), 0, 20.0);
-	TestTrue(TEXT("the unanswered upgrade ends within 20 s"), Run.bEnded);
+	NoteOutcome(*this, TEXT("the unanswered upgrade ended within 20 s"), Run.bEnded);
 	Fact(*this, TEXT("timeout.configured_secs"), AgreesIf(Run.bEnded && Run.Seconds >= 2.5 && Run.Seconds <= 5.0), Describe(Run, 20.0),
-		TEXT("lws_context_creation_info::timeout_secs bounds the handshake (libwebsockets.h:2791-2795)"),
-		TEXT("timeout_secs = 3; /ws/hang"));
+		TEXT("lws_context_creation_info::timeout_secs bounds the handshake (libwebsockets.h:2791-2795; it is context-wide)"),
+		TEXT("timeout_secs = 3; /ws/hang; lws_service waiting up to 100 ms"));
 	return true;
 }
 
@@ -3921,37 +4145,22 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestLwsProbeKillPendingTest, "Probe.VaRest.L
 bool FVaRestLwsProbeKillPendingTest::RunTest(const FString& Parameters)
 {
 	using namespace VaRest::LwsProbe;
+	using namespace VaRest::LwsProbe::VaRestLwsProbeServiceTestPrivate;
 	FServer Site;
 	if (!FindServer(*this, Site))
 	{
 		return false;
 	}
-	FRig Rig(Site);
-	if (!TestTrue(TEXT("the probe's context exists"), Rig.IsReady()))
-	{
-		return false;
-	}
-	FConnectSpec Spec;
-	Spec.Path = TEXT("/ws/hang?ms=60000&key=") + NewKey();
-	const int32 Conn = Rig.Connect(MoveTemp(Spec));
-	TestTrue(TEXT("the connect returns"), Rig.WaitReason(Conn, ConnectReturned));
-	// The upgrade is sent and unanswered by now; this is how WebSocket spec 2.2 enforces ConnectTimeout
-	FPlatformProcess::Sleep(1.0f);
-	Rig.ExecOn(Conn, TEXT("kill"), [](FConn& C) { lws_set_timeout(C.Wsi, PENDING_TIMEOUT_USER_REASON_BASE, LWS_TO_KILL_ASYNC); });
-	const bool bEnded = Rig.WaitEnded(Conn, 25.0);
-	TestTrue(TEXT("the killed attempt ends"), bEnded);
-	FEvent Kill;
-	FEvent Destroyed;
-	const bool bKilled = Rig.Find(Conn, CommandRan, Kill, TEXT("kill"));
-	const bool bMeasured = bEnded && bKilled && Kill.Note.Equals(TEXT("kill"), ESearchCase::CaseSensitive) && Rig.Find(Conn, LWS_CALLBACK_WSI_DESTROY, Destroyed);
-	Fact(*this, TEXT("timeout.kill_pending_ms"), EVerdict::Recorded,
-		bMeasured ? FString::Printf(TEXT("%.1f ms from the kill to WSI_DESTROY"), (Destroyed.Time - Kill.Time) * 1000.0)
-			: FString::Printf(TEXT("not measured: kill %s, ended %s"), bKilled ? *Kill.Note : TEXT("not run"), YesNo(bEnded)),
-		TEXT("WebSocket spec 2.2: ConnectTimeout enforced with lws_set_timeout(..., LWS_TO_KILL_ASYNC) (T14)"),
-		TEXT("a kill from a command 1 s after the upgrade went out to /ws/hang, timeout_secs left at LWS's default"));
-	const TArray<FEvent> After = Rig.Events(Conn).FilterByPredicate([&Kill](const FEvent& Each) { return Each.Time >= Kill.Time && Each.Reason != CommandRan; });
-	Fact(*this, TEXT("timeout.kill_pending_sequence"), EVerdict::Recorded, CallSequence(After),
-		TEXT("none: the engine reads WSI_DESTROY before an open as a timeout (LwsWebSocket.cpp:392-405)"), TEXT("the callbacks after the kill"));
+	// How WebSocket spec 2.2 enforces ConnectTimeout: a kill 1 s after the upgrade went out to a server that never
+	// answers, timeout_secs left at LWS's default, with the long wait (the shape) and the short one (the control)
+	const FKill Long = Kill(Site, TEXT("/ws/hang?ms=60000"), LongWaitMs, false);
+	const FKill Short = Kill(Site, TEXT("/ws/hang?ms=60000"), ShortWaitMs, false);
+	const FString KillSpec = TEXT("WebSocket spec 2.2: ConnectTimeout enforced with lws_set_timeout(..., LWS_TO_KILL_ASYNC) (T14)");
+	Fact(*this, TEXT("timeout.kill_pending_ms"), EVerdict::Recorded, Describe(Long, LongWaitMs), KillSpec, TEXT("a pending attempt to /ws/hang, killed from a command"));
+	Fact(*this, TEXT("timeout.kill_pending_ms_short_wait"), EVerdict::Recorded, Describe(Short, ShortWaitMs), KillSpec,
+		TEXT("the control for timeout.kill_pending_ms: the same kill with a 100 ms wait"));
+	Fact(*this, TEXT("timeout.kill_pending_sequence"), EVerdict::Recorded, Long.Sequence.IsEmpty() ? FString(TEXT("not measured")) : Long.Sequence,
+		TEXT("none: the engine reads WSI_DESTROY before an open as a timeout (LwsWebSocket.cpp:392-405)"), TEXT("the callbacks after the kill (the long-wait attempt)"));
 	return true;
 }
 
@@ -3968,15 +4177,18 @@ bool FVaRestLwsProbeBlackholeTest::RunTest(const FString& Parameters)
 		return false;
 	}
 	// 192.0.2.1 is TEST-NET-1 (RFC 5737): never assigned, so a SYN to it usually goes unanswered. A host without a route
-	// fails at once instead, and the fact says so.
-	const FHang Run = Hang(Site, 5, TEXT("192.0.2.1"), 80, 40.0);
-	TestTrue(TEXT("the connect to TEST-NET-1 ends within 40 s"), Run.bEnded);
-	const FString Observed = Run.bEnded && Run.Seconds >= 0.0 && Run.Seconds < 0.5
-		? FString::Printf(TEXT("no blackhole on this host (failed at once): %s"), *Describe(Run, 40.0))
-		: Describe(Run, 40.0);
-	Fact(*this, TEXT("timeout.tcp_connect_blackhole"), EVerdict::Recorded, Observed,
-		TEXT("WebSocket spec 2.2: a connect timeout bounds a TCP connect that is never answered"),
-		TEXT("timeout_secs = 5; TCP to 192.0.2.1:80"));
+	// fails at once instead, and the facts say so.
+	const FHang Configured = Hang(Site, 5, TEXT("192.0.2.1"), 80, 40.0);
+	NoteOutcome(*this, TEXT("the connect to TEST-NET-1 with timeout_secs 5 ended within 40 s"), Configured.bEnded);
+	Fact(*this, TEXT("timeout.tcp_connect_blackhole"), EVerdict::Recorded, DescribeBlackhole(Configured, 40.0),
+		TEXT("WebSocket spec 2.2: whether a set timeout_secs bounds a TCP connect that is never answered"),
+		TEXT("timeout_secs = 5; TCP to 192.0.2.1:80; lws_service waiting up to 100 ms"));
+	// WebSocket spec 16.4: "default timeout_secs (blackhole address)" -- LWS's default against the kernel's SYN retries
+	const FHang Default = Hang(Site, 0, TEXT("192.0.2.1"), 80, 60.0);
+	NoteOutcome(*this, TEXT("the connect to TEST-NET-1 with LWS's default timeout ended within 60 s"), Default.bEnded);
+	Fact(*this, TEXT("timeout.default_secs_blackhole"), EVerdict::Recorded, DescribeBlackhole(Default, 60.0),
+		TEXT("WebSocket spec 0.3 (inferred from 4.3) and 16.4: LWS's default timeout_secs, on a blackhole address"),
+		TEXT("timeout_secs = 0; TCP to 192.0.2.1:80; lws_service waiting up to 100 ms"));
 	return true;
 }
 
@@ -3986,17 +4198,19 @@ bool FVaRestLwsProbeBlackholeTest::RunTest(const FString& Parameters)
 - [ ] **Step 3: Build and run the group**
 
 Run: `Tools/run_tests.sh Probe.VaRest.Lws.Service && cp /w/Unreal/VaRestHost/Saved/Logs/VaRestTests.log /w/Unreal/VaRestHost/Saved/Logs/VaRestProbe-service.log && Tools/run_tests.sh --no-build Probe.VaRest.Lws.Timeout`
-Expected: `run_tests: 3 passed, 0 failed`, then `run_tests: 4 passed, 0 failed` (the timeout group takes up to two minutes).
+Expected: `run_tests: 3 passed, 0 failed`, then `run_tests: 4 passed, 0 failed` (the timeout group takes up to three minutes). A test fails only on a harness invariant (decision 3): the server was not found, a rig did not start, or the precondition echo connection did not open.
 
-Check the facts: `grep -c 'LogVaRestLwsProbe: Display: FACT {"id":"\(env\|release\|coexist\|svc\)\.' /w/Unreal/VaRestHost/Saved/Logs/VaRestProbe-service.log` prints `15`, and `grep -c 'LogVaRestLwsProbe: Display: FACT {"id":"timeout\.' /w/Unreal/VaRestHost/Saved/Logs/VaRestTests.log` prints `5`.
+Check the facts: `grep -c 'LogVaRestLwsProbe: Display: FACT {"id":"\(env\|release\|coexist\|svc\)\.' /w/Unreal/VaRestHost/Saved/Logs/VaRestProbe-service.log` prints `16`, and `grep -c 'LogVaRestLwsProbe: Display: FACT {"id":"timeout\.' /w/Unreal/VaRestHost/Saved/Logs/VaRestTests.log` prints `7`.
 
-Control: open the `svc.commands_inside_wait_cancelled` and `svc.commands_between_service_calls` lines. At least one of them shows `established=yes echoed=yes ended=yes`; if neither does, the rig is broken, so stop and fix it before recording anything. If only the "between" mode works, set `FRigOptions::bCommandsInsideCallback`'s default to `false` in `VaRestLwsProbe.h` (the probe then measures everything the engine's way), re-run Task 4's rig tests, and note it in the task report: it is a finding for Task 11.
+Control: open the `svc.commands_inside_wait_cancelled` and `svc.commands_between_service_calls` lines. At least one of them shows `established=yes echoed=yes ended=yes`; if neither does, the rig is broken, so stop and fix it before recording anything. If only the "between" mode works, set `FRigOptions::bCommandsInsideCallback`'s default to `false` in `VaRestLwsProbe.h` (the probe then measures everything the engine's way, Task 4 Step 7), re-run Task 4's rig tests, and note it in the task report: it is a finding for Task 11 (E2).
+
+Second control (C-1): `svc.kill_async_ms_short_wait` should read well under the long-wait row. If both are large, the delay is LWS's own, not the wait, and Task 11's E3 must not be applied.
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git add Source/VaRestTests/Private/LwsProbe/VaRestLwsProbeServiceTest.cpp
-git commit -m "tests: LWS 3.0 probe -- environment, command path, timers, forced closes, handshake timeouts (WS W0)
+git commit -m "tests: LWS 3.0 probe -- environment, command path, timers, forced closes with short-wait controls, handshake and blackhole timeouts (WS W0)
 
 Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 ```
@@ -4008,9 +4222,9 @@ Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 - Create: `Source/VaRestTests/Private/LwsProbe/VaRestLwsProbeHandshakeTest.cpp`
 
 **Interfaces:**
-- Consumes (Task 4): `FRig`, `FRigOptions` (`ContextOptions`, `Tls`, `OnLoadExtraClientVerifyCerts`), `ETls::LwsGlobalInit`, `FConnectSpec` (`Protocols`, `LocalProtocolName`, `Origin`, `AppendHeaders`, `Address`, `Port`, `Host`, `bTls`, `SslFlags`, `Hook`), `Visit`, `Opened`, `ErrorOf`, `ConnectResult`, `CallSequence`, `OfReason`, `FetchJournal`, `JournalEvents`, `JournalHeader`, `FetchBytes`, `AddPemToStore`, `UrlValue`, `Fact`, `Pending`, `AgreesIf`, `KeepDefault`, `Marker`, flags `UserIsConnection`, `WsiUserIsConnection`; server routes `/ws/protocol`, `/ws/echo`, `/ws/status/<code>`, `/ws/noupgrade`, `/ws/broken`, `/tls/ca.pem`.
-- Produces facts: `hs.unregistered_selected_bound`, `hs.selected_protocol_in_filter`, `hs.unregistered_selected_unbound`, `hs.unoffered_selected`, `hs.none_selected`, `hs.offered_header`, `hs.raw_origin`, `hs.default_origin`, `hs.origin_omitted`, `hs.append_header_space`, `hs.append_header_user`, `hs.append_header_fill`, `hs.host_header`, `hs.refusal_401`, `hs.refusal_403`, `hs.refusal_404`, `hs.refusal_429`, `hs.refusal_500`, `hs.refusal_503`, `hs.refusal_sequence`, `hs.no_upgrade_response`, `hs.bad_accept`, `hs.missing_upgrade`, `hs.missing_connection`, `hs.connect_refused`, `hs.dns_failure`, `hs.redirect_relative`, `hs.redirect_absolute`, `hs.redirect_reappends_headers`, `hs.redirect_to_tls`, `hs.redirect_downgrade`, `hs.status_in_connection_error`.
-- Tests: `Probe.VaRest.Lws.Handshake.Subprotocols`, `.Handshake.OriginAndHeaders`, `.Handshake.Refusals`, `.Handshake.Redirects`, and `Probe.VaRest.Risky.Lws.StatusInConnectionError` (its own run, decision 10).
+- Consumes (Task 4): `FRig`, `FRigOptions` (`ContextOptions`, `Tls`, `ServiceTimeoutMs`, `OnLoadExtraClientVerifyCerts`), `ETls::LwsGlobalInit`, `FConnectSpec` (`Protocols`, `LocalProtocolName`, `Origin`, `AppendHeaders`, `Address`, `Port`, `Host`, `bTls`, `SslFlags`, `Hook`), `FHook`, `FConn::Counters`, `Visit`, `Opened`, `ErrorOf`, `ConnectResult`, `CallSequence`, `OfReason`, `ReasonName`, `Utf8Text`, `FetchJournal`, `JournalEvents`, `JournalHeader`, `FetchBytes`, `AddPemToStore`, `UrlValue`, `Fact`, `Pending`, `AgreesIf`, `YesNo`, `NoteOutcome`, `KeepDefault`, `Marker`, `ConnectReturned`, flags `UserIsConnection`, `WsiUserIsConnection`; server routes `/ws/protocol`, `/ws/echo`, `/ws/status/<code>`, `/ws/noupgrade`, `/ws/broken`, `/ws/hang`, `/tls/ca.pem`.
+- Produces facts: `hs.unregistered_selected_bound`, `hs.selected_protocol_in_filter`, `hs.unregistered_selected_unbound`, `hs.unoffered_selected`, `hs.none_selected`, `hs.offered_header`, `hs.raw_origin`, `hs.default_origin`, `hs.origin_omitted`, `hs.append_header_space`, `hs.append_header_user`, `hs.append_header_fill`, `hs.host_header`, `hs.refusal_401`, `hs.refusal_403`, `hs.refusal_404`, `hs.refusal_429`, `hs.refusal_500`, `hs.refusal_503`, `hs.refusal_sequence`, `hs.callback_user_by_reason`, `hs.no_upgrade_response`, `hs.bad_accept`, `hs.missing_upgrade`, `hs.missing_connection`, `hs.connect_refused`, `hs.dns_failure`, `hs.redirect_relative`, `hs.redirect_absolute`, `hs.redirect_reappends_headers`, `hs.redirect_to_tls`, `hs.redirect_downgrade`, `hs.redirect_target_visible`, `hs.redirect_veto`, `hs.redirect_host_header`; and, one per risky test, `hs.status_in_connection_error.refused`, `.connect_refused`, `.dns_failure`, `.no_upgrade`, `.tls_verify_failure`, `.killed_pending`.
+- Tests: `Probe.VaRest.Lws.Handshake.Subprotocols`, `.Handshake.OriginAndHeaders`, `.Handshake.Refusals`, `.Handshake.Redirects`, and six risky tests `Probe.VaRest.Risky.Lws.StatusInConnectionError.{Refused,ConnectRefused,DnsFailure,NoUpgrade,TlsVerifyFailure,KilledPending}`, each run on its own (decision 10, review C-2: a crash ends the run, so one case per invocation).
 
 - [ ] **Step 1: Run the filter to see it match nothing**
 
@@ -4025,12 +4239,14 @@ Create `Source/VaRestTests/Private/LwsProbe/VaRestLwsProbeHandshakeTest.cpp`:
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 
 // WebSocket spec 16.4 (W0): what LWS 3.0 does with subprotocols, the Origin, appended headers, refused and broken
-// upgrades and redirects (WebSocket spec 2.2)
+// upgrades and redirects (WebSocket spec 2.2). Library outcomes are facts, never failed assertions (decision 3, review
+// M-2): a test fails only when the harness did not run.
 
 #include "VaRestLwsProbe.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
+#include "HAL/PlatformProcess.h"
 #include "Misc/AutomationTest.h"
 
 namespace VaRest::LwsProbe::VaRestLwsProbeHandshakeTestPrivate
@@ -4054,18 +4270,173 @@ namespace VaRest::LwsProbe::VaRestLwsProbeHandshakeTestPrivate
 		return Opened(Seen) ? FString::Printf(TEXT("established, %s"), *BoundNote(Seen)) : FString::Printf(TEXT("refused: %s"), *ErrorOf(Seen));
 	}
 
-	/** Whether a second request reached the server under the same key, and what the client saw */
-	FString Redirected(const TArray<FEvent>& Seen, const FVaRestJson& Journal)
+	/** The notes of the hook's marker events that start with Prefix */
+	TArray<FString> Marks(const TArray<FEvent>& Seen, const TCHAR* Prefix)
+	{
+		TArray<FString> Out;
+		for (const FEvent& Each : Seen)
+		{
+			if (Each.Reason == Marker && Each.Note.StartsWith(Prefix, ESearchCase::CaseSensitive))
+			{
+				Out.Add(Each.Note);
+			}
+		}
+		return Out;
+	}
+
+	/**
+	 * Whether the redirect was followed (review M-1): a second request at the server, or at the client a second
+	 * APPEND_HANDSHAKE_HEADER, or -- when the original connection was plain -- a certificate check or a TLS error. A
+	 * followed wss redirect can fail its TLS before any request reaches the server: the review (M-1) reads
+	 * lws_client_reset as keeping only the scheme's SSL bit, so SslFlags (ALLOW_SELFSIGNED, the host-name skip) do not
+	 * carry over, and the name checked becomes the bare address
+	 */
+	FString Redirected(const TArray<FEvent>& Seen, const FVaRestJson& Journal, bool bOriginalTls)
 	{
 		const TArray<FVaRestJson> Second = JournalEvents(Journal, TEXT("request"), 2);
-		return Second.Num() > 0
-			? FString::Printf(TEXT("followed: second request %s; the client %s"), *Second[0][TEXT("target")].AsString(), *Outcome(Seen))
-			: FString::Printf(TEXT("not followed (no second request); the client %s"), *Outcome(Seen));
+		const int32 Appends = OfReason(Seen, LWS_CALLBACK_CLIENT_APPEND_HANDSHAKE_HEADER).Num();
+		const int32 Verifies = bOriginalTls ? 0 : OfReason(Seen, LWS_CALLBACK_OPENSSL_PERFORM_SERVER_CERT_VERIFICATION).Num();
+		const FString Error = ErrorOf(Seen);
+		// FString::Contains ignores case by default
+		const bool bTlsError = !bOriginalTls && (Error.Contains(TEXT("ssl")) || Error.Contains(TEXT("tls")) || Error.Contains(TEXT("cert")));
+		const FString Client = FString::Printf(TEXT("APPEND_HANDSHAKE_HEADER %d times, %d certificate checks after a plain start; the client %s"), Appends, Verifies, *Outcome(Seen));
+		if (Second.Num() > 0)
+		{
+			return FString::Printf(TEXT("followed: second request %s; %s"), *Second[0][TEXT("target")].AsString(), *Client);
+		}
+		if (Appends > 1 || Verifies > 0 || bTlsError)
+		{
+			return FString::Printf(TEXT("followed, and failed before a second request reached the server; %s"), *Client);
+		}
+		return FString::Printf(TEXT("not followed (no second request, no second attempt at the client); %s"), *Client);
 	}
 
 	FString RedirectPath(const FString& Location, const FString& Key)
 	{
 		return FString::Printf(TEXT("/ws/status/302?location=%s&key=%s"), *UrlValue(Location), *Key);
+	}
+
+	/** One client stash token, as a callback reads it with lws_hdr_copy (libwebsockets.h:4071-4073, :4111, :4139) */
+	FString StashToken(lws* Wsi, lws_token_indexes Token)
+	{
+		char Buffer[512] = {};
+		const int Total = lws_hdr_total_length(Wsi, Token);
+		if (Total <= 0 || Total >= static_cast<int>(sizeof(Buffer)))
+		{
+			return FString::Printf(TEXT("(%d bytes)"), Total);
+		}
+		lws_hdr_copy(Wsi, Buffer, static_cast<int>(sizeof(Buffer)), Token);
+		return Utf8Text(Buffer, FCStringAnsi::Strlen(Buffer));
+	}
+
+	/**
+	 * Records what each APPEND_HANDSHAKE_HEADER can see of the target (review I-5) as a marker "append <n>: ...", and
+	 * optionally vetoes (ruling Q2: a redirected connection fails at the first callback that can): returns 1 in the
+	 * VetoAppend-th APPEND_HANDSHAKE_HEADER (0: never; libwebsockets.h:1316-1343 shows a non-zero return failing the
+	 * handshake), or in FILTER_PRE_ESTABLISH once a second APPEND_HANDSHAKE_HEADER ran (bVetoFilter)
+	 */
+	FHook TargetHook(int32 VetoAppend, bool bVetoFilter)
+	{
+		return [VetoAppend, bVetoFilter](FConn& C, lws* Wsi, int32 Reason, void* User, void* In, size_t Len) -> int32
+		{
+			const FName AppendsKey(TEXT("appends"));
+			if (Reason == LWS_CALLBACK_CLIENT_APPEND_HANDSHAKE_HEADER && Wsi)
+			{
+				int64& Appends = C.Counters.FindOrAdd(AppendsKey);
+				++Appends;
+				C.Rig->Record(C.Id, Marker, Appends, FString::Printf(TEXT("append %lld: host=%s uri=%s peer=%s"), Appends,
+					*StashToken(Wsi, _WSI_TOKEN_CLIENT_HOST), *StashToken(Wsi, _WSI_TOKEN_CLIENT_URI), *StashToken(Wsi, _WSI_TOKEN_CLIENT_PEER_ADDRESS)));
+				if (Appends == VetoAppend)
+				{
+					C.Rig->Record(C.Id, Marker, Appends, TEXT("veto in APPEND_HANDSHAKE_HEADER"));
+					return 1;
+				}
+			}
+			if (Reason == LWS_CALLBACK_CLIENT_FILTER_PRE_ESTABLISH && bVetoFilter && C.Counters.FindRef(AppendsKey) >= 2)
+			{
+				C.Rig->Record(C.Id, Marker, 0, TEXT("veto in FILTER_PRE_ESTABLISH"));
+				return 1;
+			}
+			return KeepDefault;
+		};
+	}
+
+	/** A veto run: where the hook vetoed, what the client saw, and whether a second request reached the server */
+	FString Vetoed(const TArray<FEvent>& Seen, const FVaRestJson& Journal)
+	{
+		const TArray<FString> Vetoes = Marks(Seen, TEXT("veto "));
+		if (Vetoes.Num() == 0)
+		{
+			return FString::Printf(TEXT("not exercised: the hook never vetoed (the redirect was not followed); the client %s"), *Outcome(Seen));
+		}
+		return FString::Printf(TEXT("%s: the client %s; a second request %s the server"), *Vetoes[0], *Outcome(Seen),
+			JournalEvents(Journal, TEXT("request"), 2).Num() > 0 ? TEXT("reached") : TEXT("did not reach"));
+	}
+
+	/** The Host header of a journal's ConnIndex-th request, or "(no request)" */
+	FString HostOf(const FVaRestJson& Journal, int32 ConnIndex)
+	{
+		if (JournalEvents(Journal, TEXT("request"), ConnIndex).Num() == 0)
+		{
+			return TEXT("(no request)");
+		}
+		return TEXT("Host: ") + JournalHeader(Journal, TEXT("Host"), ConnIndex);
+	}
+
+	/** For each reason, whether user and lws_wsi_user(wsi) were the connection's userdata (the first event of that reason) */
+	FString UserByReason(const TArray<FEvent>& Seen)
+	{
+		const int32 Reasons[] = {
+			LWS_CALLBACK_CLIENT_APPEND_HANDSHAKE_HEADER, LWS_CALLBACK_CLIENT_CONNECTION_ERROR, LWS_CALLBACK_CLIENT_ESTABLISHED,
+			LWS_CALLBACK_CLOSED, LWS_CALLBACK_CLIENT_CLOSED, LWS_CALLBACK_WSI_DESTROY,
+		};
+		TArray<FString> Parts;
+		for (const int32 Reason : Reasons)
+		{
+			const FEvent* First = Seen.FindByPredicate([Reason](const FEvent& Each) { return Each.Reason == Reason; });
+			Parts.Add(First
+				? FString::Printf(TEXT("%s user=%s wsi_user=%s"), *ReasonName(Reason), YesNo((First->Flags & UserIsConnection) != 0), YesNo((First->Flags & WsiUserIsConnection) != 0))
+				: FString::Printf(TEXT("%s not seen"), *ReasonName(Reason)));
+		}
+		return FString::Join(Parts, TEXT("; "));
+	}
+
+	/** The claim every StatusInConnectionError case tests */
+	const TCHAR* const StatusSpec = TEXT("WebSocket spec 0.3 (inferred from 4.3) and 2.2: lws_http_client_http_response(wsi) gives the upgrade's status inside CONNECTION_ERROR (documented for ESTABLISHED_CLIENT_HTTP only, libwebsockets.h:3594-3606)");
+
+	/**
+	 * Calls lws_http_client_http_response(wsi) in CONNECTION_ERROR and records what it returned. Without a header table
+	 * it dereferences NULL (client.c.o 0x1294-0x12b2, review C-2): if the process ends here, the PENDING line makes the
+	 * passport say so, and the case's own run (decision 10) keeps every other case's fact
+	 */
+	FHook StatusHook()
+	{
+		return [](FConn& C, lws* Wsi, int32 Reason, void* User, void* In, size_t Len) -> int32
+		{
+			if (Reason == LWS_CALLBACK_CLIENT_CONNECTION_ERROR && Wsi)
+			{
+				C.Rig->Record(C.Id, Marker, static_cast<int64>(lws_http_client_http_response(Wsi)), TEXT("status in CONNECTION_ERROR"));
+			}
+			return KeepDefault;
+		};
+	}
+
+	/** What the call returned inside CONNECTION_ERROR, or -1 when CONNECTION_ERROR never came */
+	int64 StatusMarked(const TArray<FEvent>& Seen)
+	{
+		const FEvent* Marked = Seen.FindByPredicate([](const FEvent& Each) { return Each.Reason == Marker; });
+		return Marked ? Marked->Len : -1;
+	}
+
+	/** One case: agrees when the call returned Expected (0: no status line was parsed); unverified when CONNECTION_ERROR never came */
+	void StatusFact(FAutomationTestBase& Test, const TCHAR* Id, const TArray<FEvent>& Seen, int64 Expected, const TCHAR* Evidence)
+	{
+		const int64 Got = StatusMarked(Seen);
+		const FString Observed = Got < 0
+			? FString::Printf(TEXT("CONNECTION_ERROR never came (%s)"), *CallSequence(Seen))
+			: FString::Printf(TEXT("returned %lld inside CONNECTION_ERROR \"%s\"; the process survived"), Got, *ErrorOf(Seen));
+		Fact(Test, Id, Got < 0 ? EVerdict::Unverified : AgreesIf(Got == Expected), Observed, StatusSpec,
+			FString::Printf(TEXT("%s; expected %lld"), Evidence, Expected));
 	}
 }
 
@@ -4104,15 +4475,11 @@ bool FVaRestLwsProbeSubprotocolsTest::RunTest(const FString& Parameters)
 	TArray<FEvent> UnboundSeen;
 	TArray<FEvent> UnofferedSeen;
 	TArray<FEvent> NoneSeen;
-	bool bAll = true;
-	bAll = Visit(*this, Rig, Bound, BoundSeen) && bAll;
-	bAll = Visit(*this, Rig, Unbound, UnboundSeen) && bAll;
-	bAll = Visit(*this, Rig, Unoffered, UnofferedSeen) && bAll;
-	bAll = Visit(*this, Rig, NoneSelected, NoneSeen) && bAll;
-	if (!bAll)
-	{
-		return false;
-	}
+	// A connection that never ends is noted by Visit, not failed (review M-2)
+	Visit(*this, Rig, Bound, BoundSeen);
+	Visit(*this, Rig, Unbound, UnboundSeen);
+	Visit(*this, Rig, Unoffered, UnofferedSeen);
+	Visit(*this, Rig, NoneSelected, NoneSeen);
 
 	Fact(*this, TEXT("hs.unregistered_selected_bound"), AgreesIf(Opened(BoundSeen) && BoundNote(BoundSeen).Equals(TEXT("bound=varest"), ESearchCase::CaseSensitive)),
 		Outcome(BoundSeen),
@@ -4129,7 +4496,7 @@ bool FVaRestLwsProbeSubprotocolsTest::RunTest(const FString& Parameters)
 	Fact(*this, TEXT("hs.none_selected"), EVerdict::Recorded, Outcome(NoneSeen),
 		TEXT("none"), TEXT("offered chat.v2, the server selected none"));
 	const FVaRestJson Journal = FetchJournal(*this, Site, KeyBound);
-	if (!TestTrue(TEXT("the server's journal ended"), Journal[TEXT("ended")].AsBool()))
+	if (!TestTrue(TEXT("the server's journal arrived"), Journal.IsValid()))
 	{
 		return false;
 	}
@@ -4173,10 +4540,9 @@ bool FVaRestLwsProbeOriginAndHeadersTest::RunTest(const FString& Parameters)
 	TArray<FEvent> RawSeen;
 	TArray<FEvent> PlainSeen;
 	TArray<FEvent> NoneSeen;
-	bool bAll = true;
-	bAll = Visit(*this, Raw, RawSpec, RawSeen) && bAll;
-	bAll = Visit(*this, Plain, PlainSpec, PlainSeen) && bAll;
-	bAll = Visit(*this, Raw, NoneSpec, NoneSeen) && bAll;
+	Visit(*this, Raw, RawSpec, RawSeen);
+	Visit(*this, Plain, PlainSpec, PlainSeen);
+	Visit(*this, Raw, NoneSpec, NoneSeen);
 
 	// The space APPEND_HANDSHAKE_HEADER reports with the context's 32 KiB header buffer, then a header that fills it but 512 bytes
 	const TArray<FEvent> Appends = OfReason(RawSeen, LWS_CALLBACK_CLIENT_APPEND_HANDSHAKE_HEADER);
@@ -4191,17 +4557,12 @@ bool FVaRestLwsProbeOriginAndHeadersTest::RunTest(const FString& Parameters)
 	}
 	FillSpec.AppendHeaders.Add(TEXT("Authorization: Bearer probe-fill-token"));
 	TArray<FEvent> FillSeen;
-	bAll = Visit(*this, Raw, FillSpec, FillSeen) && bAll;
-	if (!bAll)
-	{
-		return false;
-	}
+	Visit(*this, Raw, FillSpec, FillSeen);
 	const FVaRestJson RawJournal = FetchJournal(*this, Site, KeyRaw);
 	const FVaRestJson PlainJournal = FetchJournal(*this, Site, KeyPlain);
 	const FVaRestJson NoneJournal = FetchJournal(*this, Site, KeyNone);
 	const FVaRestJson FillJournal = FetchJournal(*this, Site, KeyFill);
-	if (!TestTrue(TEXT("every server journal ended"), RawJournal[TEXT("ended")].AsBool() && PlainJournal[TEXT("ended")].AsBool()
-		&& NoneJournal[TEXT("ended")].AsBool() && FillJournal[TEXT("ended")].AsBool()))
+	if (!TestTrue(TEXT("every server journal arrived"), RawJournal.IsValid() && PlainJournal.IsValid() && NoneJournal.IsValid() && FillJournal.IsValid()))
 	{
 		return false;
 	}
@@ -4241,6 +4602,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestLwsProbeRefusalsTest, "Probe.VaRest.Lws.
 bool FVaRestLwsProbeRefusalsTest::RunTest(const FString& Parameters)
 {
 	using namespace VaRest::LwsProbe;
+	using namespace VaRest::LwsProbe::VaRestLwsProbeHandshakeTestPrivate;
 	FServer Site;
 	if (!FindServer(*this, Site))
 	{
@@ -4251,7 +4613,6 @@ bool FVaRestLwsProbeRefusalsTest::RunTest(const FString& Parameters)
 	{
 		return false;
 	}
-	bool bAll = true;
 	struct FRefusal
 	{
 		int32 Code;
@@ -4265,22 +4626,34 @@ bool FVaRestLwsProbeRefusalsTest::RunTest(const FString& Parameters)
 		{ 500, TEXT("HS: ws upgrade not 101, was 500") },
 		{ 503, TEXT("HS: ws upgrade not 101, was 503") },
 	};
-	FString RefusalSequence;
+	TArray<FEvent> RefusedSeen403;
 	for (const FRefusal& Case : Cases)
 	{
 		FConnectSpec Spec;
 		Spec.Path = FString::Printf(TEXT("/ws/status/%d?key=%s"), Case.Code, *NewKey());
 		TArray<FEvent> Seen;
-		bAll = Visit(*this, Rig, MoveTemp(Spec), Seen) && bAll;
+		Visit(*this, Rig, MoveTemp(Spec), Seen);
 		const FString Error = ErrorOf(Seen);
 		Fact(*this, FString::Printf(TEXT("hs.refusal_%d"), Case.Code), AgreesIf(Error.Equals(Case.Expected, ESearchCase::CaseSensitive)), Error,
 			FString::Printf(TEXT("T7: \"%s\" (the strings in libwebsockets.a)"), Case.Expected), FString::Printf(TEXT("the upgrade answered %d"), Case.Code));
 		if (Case.Code == 403)
 		{
-			RefusalSequence = CallSequence(Seen);
+			RefusedSeen403 = Seen;
 		}
 	}
-	Fact(*this, TEXT("hs.refusal_sequence"), EVerdict::Recorded, RefusalSequence, TEXT("none"), TEXT("the callbacks of the 403 attempt"));
+	Fact(*this, TEXT("hs.refusal_sequence"), EVerdict::Recorded, CallSequence(RefusedSeen403), TEXT("none"), TEXT("the callbacks of the 403 attempt"));
+
+	// Review M-14: which callbacks carry the connection in user. The engine takes its socket from user for every reason
+	// it handles, WSI_DESTROY included (LwsWebSocketsManager.cpp:434, :458-461, :463-477)
+	FConnectSpec Echo;
+	Echo.Path = TEXT("/ws/echo?key=") + NewKey();
+	TArray<FEvent> EchoSeen;
+	Visit(*this, Rig, MoveTemp(Echo), EchoSeen);
+	TArray<FEvent> Both = RefusedSeen403;
+	Both.Append(EchoSeen);
+	Fact(*this, TEXT("hs.callback_user_by_reason"), EVerdict::Recorded, UserByReason(Both),
+		TEXT("none: libwebsockets.h:1316-1343 says user is NULL in APPEND_HANDSHAKE_HEADER; W1 finds its socket per reason from this row"),
+		TEXT("the first event of each reason across the 403 attempt and an echo connection closed with 1000"));
 
 	struct FBroken
 	{
@@ -4298,7 +4671,7 @@ bool FVaRestLwsProbeRefusalsTest::RunTest(const FString& Parameters)
 		FConnectSpec Spec;
 		Spec.Path = Case.Path;
 		TArray<FEvent> Seen;
-		bAll = Visit(*this, Rig, MoveTemp(Spec), Seen) && bAll;
+		Visit(*this, Rig, MoveTemp(Spec), Seen);
 		const FString Error = ErrorOf(Seen);
 		Fact(*this, Case.Id, AgreesIf(Error.Equals(Case.Expected, ESearchCase::CaseSensitive)), Error,
 			FString::Printf(TEXT("WebSocket spec 2.2: \"%s\" is among the parser tests' strings"), Case.Expected), Case.Path);
@@ -4307,7 +4680,7 @@ bool FVaRestLwsProbeRefusalsTest::RunTest(const FString& Parameters)
 	FConnectSpec NoUpgrade;
 	NoUpgrade.Path = TEXT("/ws/noupgrade");
 	TArray<FEvent> NoUpgradeSeen;
-	bAll = Visit(*this, Rig, MoveTemp(NoUpgrade), NoUpgradeSeen) && bAll;
+	Visit(*this, Rig, MoveTemp(NoUpgrade), NoUpgradeSeen);
 	Fact(*this, TEXT("hs.no_upgrade_response"), EVerdict::Recorded,
 		FString::Printf(TEXT("\"%s\" (connect returned %s)"), *ErrorOf(NoUpgradeSeen), *ConnectResult(NoUpgradeSeen)),
 		TEXT("WebSocket spec 2.2 and 22 A2: NoUpgradeResponse, upgrade sent and the connection closed before any status line; W0 pins the string"),
@@ -4316,10 +4689,10 @@ bool FVaRestLwsProbeRefusalsTest::RunTest(const FString& Parameters)
 	FConnectSpec Refused;
 	Refused.Address = TEXT("127.0.0.1");
 	Refused.Port = 1;
-	TArray<FEvent> RefusedSeen;
-	bAll = Visit(*this, Rig, MoveTemp(Refused), RefusedSeen) && bAll;
+	TArray<FEvent> ConnectRefusedSeen;
+	Visit(*this, Rig, MoveTemp(Refused), ConnectRefusedSeen);
 	Fact(*this, TEXT("hs.connect_refused"), EVerdict::Recorded,
-		FString::Printf(TEXT("\"%s\" (connect returned %s)"), *ErrorOf(RefusedSeen), *ConnectResult(RefusedSeen)),
+		FString::Printf(TEXT("\"%s\" (connect returned %s)"), *ErrorOf(ConnectRefusedSeen), *ConnectResult(ConnectRefusedSeen)),
 		TEXT("WebSocket spec 2.2: \"Could not initialize connection\" is the engine's own text for a null connect (LwsWebSocket.cpp:813-824)"),
 		TEXT("TCP to 127.0.0.1:1, where nothing listens"));
 
@@ -4328,11 +4701,11 @@ bool FVaRestLwsProbeRefusalsTest::RunTest(const FString& Parameters)
 	Unknown.Port = 80;
 	Unknown.Host = TEXT("nonexistent.invalid");
 	TArray<FEvent> UnknownSeen;
-	bAll = Visit(*this, Rig, MoveTemp(Unknown), UnknownSeen) && bAll;
+	Visit(*this, Rig, MoveTemp(Unknown), UnknownSeen);
 	Fact(*this, TEXT("hs.dns_failure"), EVerdict::Recorded,
 		FString::Printf(TEXT("\"%s\" (connect returned %s)"), *ErrorOf(UnknownSeen), *ConnectResult(UnknownSeen)),
 		TEXT("WebSocket spec 3.4: a DNS failure reconnects"), TEXT("nonexistent.invalid (RFC 6761: never resolves)"));
-	return bAll;
+	return true;
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestLwsProbeRedirectsTest, "Probe.VaRest.Lws.Handshake.Redirects",
@@ -4365,58 +4738,99 @@ bool FVaRestLwsProbeRedirectsTest::RunTest(const FString& Parameters)
 	const FString KeyAbsolute = NewKey();
 	const FString KeyToTls = NewKey();
 	const FString KeyDown = NewKey();
+	const FString KeyVetoAppend = NewKey();
+	const FString KeyVetoFilter = NewKey();
 	FConnectSpec Relative;
 	Relative.Path = RedirectPath(TEXT("/ws/echo?key=") + KeyRelative, KeyRelative);
 	Relative.AppendHeaders.Add(TEXT("Authorization: Bearer redirect-probe-token"));
+	Relative.Hook = TargetHook(0, false);
 	FConnectSpec Absolute;
 	Absolute.Path = RedirectPath(FString::Printf(TEXT("ws://%s:%d/ws/echo?key=%s"), *Site.Host, Site.Port, *KeyAbsolute), KeyAbsolute);
+	Absolute.Hook = TargetHook(0, false);
 	FConnectSpec ToTls;
 	ToTls.Path = RedirectPath(FString::Printf(TEXT("wss://%s:%d/ws/echo?key=%s"), *Site.Host, Site.TlsPort, *KeyToTls), KeyToTls);
+	ToTls.Hook = TargetHook(0, false);
 	FConnectSpec Down;
 	Down.bTls = true;
 	Down.SslFlags = LCCSCF_ALLOW_SELFSIGNED | LCCSCF_SKIP_SERVER_CERT_HOSTNAME_CHECK;
 	Down.Path = RedirectPath(FString::Printf(TEXT("ws://%s:%d/ws/echo?key=%s"), *Site.Host, Site.Port, *KeyDown), KeyDown);
+	// Ruling Q2's two veto points, on the relative redirect: the redirected request's APPEND_HANDSHAKE_HEADER, and its FILTER_PRE_ESTABLISH
+	FConnectSpec VetoAppend;
+	VetoAppend.Path = RedirectPath(TEXT("/ws/echo?key=") + KeyVetoAppend, KeyVetoAppend);
+	VetoAppend.Hook = TargetHook(2, false);
+	FConnectSpec VetoFilter;
+	VetoFilter.Path = RedirectPath(TEXT("/ws/echo?key=") + KeyVetoFilter, KeyVetoFilter);
+	VetoFilter.Hook = TargetHook(0, true);
 	TArray<FEvent> RelativeSeen;
 	TArray<FEvent> AbsoluteSeen;
 	TArray<FEvent> ToTlsSeen;
 	TArray<FEvent> DownSeen;
-	bool bAll = true;
-	bAll = Visit(*this, Rig, Relative, RelativeSeen) && bAll;
-	bAll = Visit(*this, Rig, Absolute, AbsoluteSeen) && bAll;
-	bAll = Visit(*this, Rig, ToTls, ToTlsSeen) && bAll;
-	bAll = Visit(*this, Rig, Down, DownSeen) && bAll;
-	if (!bAll)
-	{
-		return false;
-	}
-	// Every client connection has ended: a second request that has not arrived within 3 s is not coming
+	TArray<FEvent> VetoAppendSeen;
+	TArray<FEvent> VetoFilterSeen;
+	Visit(*this, Rig, Relative, RelativeSeen);
+	Visit(*this, Rig, Absolute, AbsoluteSeen);
+	Visit(*this, Rig, ToTls, ToTlsSeen);
+	Visit(*this, Rig, Down, DownSeen);
+	Visit(*this, Rig, VetoAppend, VetoAppendSeen);
+	Visit(*this, Rig, VetoFilter, VetoFilterSeen);
+	// Every client connection has ended or been noted: a second request that has not arrived within 3 s is not coming
 	const FVaRestJson RelativeJournal = FetchJournal(*this, Site, KeyRelative, 2, 3000);
 	const FVaRestJson AbsoluteJournal = FetchJournal(*this, Site, KeyAbsolute, 2, 3000);
 	const FVaRestJson ToTlsJournal = FetchJournal(*this, Site, KeyToTls, 2, 3000);
 	const FVaRestJson DownJournal = FetchJournal(*this, Site, KeyDown, 2, 3000);
-	const FString RedirectSpec = TEXT("WebSocket spec 3.4 row \"upgrade 3xx (redirect not followed or failed)\"; libwebsockets.a holds \"HS: Redirect failed\" and lws_client_reset");
-	Fact(*this, TEXT("hs.redirect_relative"), EVerdict::Recorded, Redirected(RelativeSeen, RelativeJournal), RedirectSpec,
+	const FVaRestJson VetoAppendJournal = FetchJournal(*this, Site, KeyVetoAppend, 2, 3000);
+	const FVaRestJson VetoFilterJournal = FetchJournal(*this, Site, KeyVetoFilter, 2, 3000);
+	if (!TestTrue(TEXT("every server journal arrived"), RelativeJournal.IsValid() && AbsoluteJournal.IsValid() && ToTlsJournal.IsValid()
+		&& DownJournal.IsValid() && VetoAppendJournal.IsValid() && VetoFilterJournal.IsValid()))
+	{
+		return false;
+	}
+	const FString RedirectSpec = TEXT("WebSocket spec 3.4 row \"upgrade 3xx (redirect not followed or failed)\" and ruling Q2 (2026-10-21: VaRest never follows an upgrade redirect); libwebsockets.a holds \"HS: Redirect failed\" and lws_client_reset");
+	Fact(*this, TEXT("hs.redirect_relative"), EVerdict::Recorded, Redirected(RelativeSeen, RelativeJournal, false), RedirectSpec,
 		TEXT("302 with Location: /ws/echo?key=<k>"));
-	Fact(*this, TEXT("hs.redirect_absolute"), EVerdict::Recorded, Redirected(AbsoluteSeen, AbsoluteJournal), RedirectSpec,
+	Fact(*this, TEXT("hs.redirect_absolute"), EVerdict::Recorded, Redirected(AbsoluteSeen, AbsoluteJournal, false), RedirectSpec,
 		TEXT("302 with Location: ws://<host>:<port>/ws/echo?key=<k>"));
 	Fact(*this, TEXT("hs.redirect_reappends_headers"), EVerdict::Recorded,
 		FString::Printf(TEXT("APPEND_HANDSHAKE_HEADER ran %d times; Authorization on the second request: %s"),
 			OfReason(RelativeSeen, LWS_CALLBACK_CLIENT_APPEND_HANDSHAKE_HEADER).Num(), *JournalHeader(RelativeJournal, TEXT("Authorization"), 2)),
-		TEXT("WebSocket spec 3.3: auth headers go on every attempt; a followed redirect must not carry them to another host"),
+		TEXT("WebSocket spec 3.3: auth headers go on every attempt; ruling Q2: they must never reach another host"),
 		TEXT("the relative redirect, with Authorization appended"));
-	Fact(*this, TEXT("hs.redirect_to_tls"), EVerdict::Recorded, Redirected(ToTlsSeen, ToTlsJournal), RedirectSpec,
-		TEXT("ws:// answered 302 with Location: wss://<host>:<tls port>/ws/echo, the test CA trusted"));
-	Fact(*this, TEXT("hs.redirect_downgrade"), EVerdict::Recorded, Redirected(DownSeen, DownJournal),
+	Fact(*this, TEXT("hs.redirect_to_tls"), EVerdict::Recorded, Redirected(ToTlsSeen, ToTlsJournal, false), RedirectSpec,
+		TEXT("ws:// answered 302 with Location: wss://<host>:<tls port>/ws/echo, the test CA trusted; followed is decided from the client's events too (review M-1)"));
+	Fact(*this, TEXT("hs.redirect_downgrade"), EVerdict::Recorded, Redirected(DownSeen, DownJournal, true),
 		TEXT("none: libwebsockets.a holds \"HS: Redirect attempted SSL downgrade\""), TEXT("wss:// answered 302 with Location: ws://<host>:<port>/ws/echo"));
+
+	// Review I-5: what W1 needs to write ruling Q2's rule from evidence
+	const TArray<FString> RelativeTargets = Marks(RelativeSeen, TEXT("append "));
+	const TArray<FString> AbsoluteTargets = Marks(AbsoluteSeen, TEXT("append "));
+	const TArray<FString> ToTlsTargets = Marks(ToTlsSeen, TEXT("append "));
+	Fact(*this, TEXT("hs.redirect_target_visible"), EVerdict::Recorded,
+		FString::Printf(TEXT("relative: [%s]; absolute: [%s]; to wss: [%s]"), *FString::Join(RelativeTargets, TEXT(" | ")),
+			*FString::Join(AbsoluteTargets, TEXT(" | ")), *FString::Join(ToTlsTargets, TEXT(" | "))),
+		TEXT("ruling Q2: the appended-header callback adds nothing once the target differs from the original scheme+host+port; libwebsockets.h:4071-4073 lists the client stash tokens"),
+		TEXT("lws_hdr_copy of _WSI_TOKEN_CLIENT_HOST, _URI and _PEER_ADDRESS in every APPEND_HANDSHAKE_HEADER; the plain redirects stay on the test server's host and port (one listener), so a changed uri shows whether the tokens follow a redirect"));
+	const bool bAppendVetoed = Marks(VetoAppendSeen, TEXT("veto ")).Num() > 0;
+	const bool bFilterVetoed = Marks(VetoFilterSeen, TEXT("veto ")).Num() > 0;
+	Fact(*this, TEXT("hs.redirect_veto"),
+		bAppendVetoed && bFilterVetoed ? AgreesIf(!Opened(VetoAppendSeen) && !Opened(VetoFilterSeen)) : EVerdict::Recorded,
+		FString::Printf(TEXT("in APPEND_HANDSHAKE_HEADER: %s; in FILTER_PRE_ESTABLISH: %s"), *Vetoed(VetoAppendSeen, VetoAppendJournal), *Vetoed(VetoFilterSeen, VetoFilterJournal)),
+		TEXT("ruling Q2: the socket fails a redirected connection at the first callback that can (FILTER_PRE_ESTABLISH or establish) with a redirect error; a non-zero return fails a handshake (libwebsockets.h:1301-1307, :1316-1343)"),
+		TEXT("the relative redirect, the hook returning 1 in the second APPEND_HANDSHAKE_HEADER, and separately in FILTER_PRE_ESTABLISH after a second APPEND_HANDSHAKE_HEADER; the error string and the server's second request recorded"));
+	Fact(*this, TEXT("hs.redirect_host_header"), EVerdict::Recorded,
+		FString::Printf(TEXT("relative: %s (first request %s); absolute: %s (first request %s)"), *HostOf(RelativeJournal, 2), *HostOf(RelativeJournal, 1),
+			*HostOf(AbsoluteJournal, 2), *HostOf(AbsoluteJournal, 1)),
+		TEXT("WebSocket spec 2.2: Host keeps a non-default port; the review (I-5) reads lws_client_reset as given the address as host, dropping the port"),
+		TEXT("the Host header of each redirect's first and second request at the server"));
 	return true;
 }
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestLwsProbeStatusInErrorTest, "Probe.VaRest.Risky.Lws.StatusInConnectionError",
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestLwsProbeStatusInErrorRefusedTest, "Probe.VaRest.Risky.Lws.StatusInConnectionError.Refused",
 	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
 
-bool FVaRestLwsProbeStatusInErrorTest::RunTest(const FString& Parameters)
+bool FVaRestLwsProbeStatusInErrorRefusedTest::RunTest(const FString& Parameters)
 {
 	using namespace VaRest::LwsProbe;
+	using namespace VaRest::LwsProbe::VaRestLwsProbeHandshakeTestPrivate;
 	FServer Site;
 	if (!FindServer(*this, Site))
 	{
@@ -4427,36 +4841,181 @@ bool FVaRestLwsProbeStatusInErrorTest::RunTest(const FString& Parameters)
 	{
 		return false;
 	}
-	// Documented for ESTABLISHED_CLIENT_HTTP only (libwebsockets.h:3596-3607): the header store it reads may be gone in
-	// CONNECTION_ERROR. If this call ends the process, the PENDING line makes the passport say so.
-	Pending(TEXT("hs.status_in_connection_error"));
+	// The status-line parser's errors: the header table is still attached when CONNECTION_ERROR comes
+	Pending(TEXT("hs.status_in_connection_error.refused"));
 	const int32 Codes[] = { 401, 403, 404, 503 };
 	TArray<FString> Parts;
 	bool bAllMatch = true;
-	bool bAll = true;
+	bool bAllCame = true;
 	for (const int32 Code : Codes)
 	{
 		FConnectSpec Spec;
 		Spec.Path = FString::Printf(TEXT("/ws/status/%d?key=%s"), Code, *NewKey());
-		Spec.Hook = [](FConn& C, lws* Wsi, int32 Reason, void* User, void* In, size_t Len) -> int32
-		{
-			if (Reason == LWS_CALLBACK_CLIENT_CONNECTION_ERROR && Wsi)
-			{
-				C.Rig->Record(C.Id, Marker, static_cast<int64>(lws_http_client_http_response(Wsi)), TEXT("status in CONNECTION_ERROR"));
-			}
-			return KeepDefault;
-		};
+		Spec.Hook = StatusHook();
 		TArray<FEvent> Seen;
-		bAll = Visit(*this, Rig, MoveTemp(Spec), Seen) && bAll;
-		const FEvent* Marked = Seen.FindByPredicate([](const FEvent& Each) { return Each.Reason == Marker; });
-		const int64 Got = Marked ? Marked->Len : -1;
+		Visit(*this, Rig, MoveTemp(Spec), Seen);
+		const int64 Got = StatusMarked(Seen);
 		bAllMatch = bAllMatch && Got == Code;
+		bAllCame = bAllCame && Got >= 0;
 		Parts.Add(FString::Printf(TEXT("%d -> %lld"), Code, Got));
 	}
-	Fact(*this, TEXT("hs.status_in_connection_error"), AgreesIf(bAllMatch), FString::Join(Parts, TEXT(", ")),
-		TEXT("WebSocket spec 0.3 (inferred from 4.3) and 2.2: lws_http_client_http_response(wsi) gives the upgrade's status inside CONNECTION_ERROR"),
-		TEXT("refused upgrades; -1: CONNECTION_ERROR never came"));
-	return bAll;
+	Fact(*this, TEXT("hs.status_in_connection_error.refused"), bAllCame ? AgreesIf(bAllMatch) : EVerdict::Unverified,
+		FString::Printf(TEXT("%s; the process survived"), *FString::Join(Parts, TEXT(", "))), StatusSpec,
+		TEXT("upgrades refused with 401, 403, 404, 503 (status-line parser errors); -1: CONNECTION_ERROR never came"));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestLwsProbeStatusInErrorConnectRefusedTest, "Probe.VaRest.Risky.Lws.StatusInConnectionError.ConnectRefused",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestLwsProbeStatusInErrorConnectRefusedTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::LwsProbe;
+	using namespace VaRest::LwsProbe::VaRestLwsProbeHandshakeTestPrivate;
+	FServer Site;
+	if (!FindServer(*this, Site))
+	{
+		return false;
+	}
+	FRig Rig(Site);
+	if (!TestTrue(TEXT("the probe's context exists"), Rig.IsReady()))
+	{
+		return false;
+	}
+	Pending(TEXT("hs.status_in_connection_error.connect_refused"));
+	FConnectSpec Spec;
+	Spec.Address = TEXT("127.0.0.1");
+	Spec.Port = 1;
+	Spec.Hook = StatusHook();
+	TArray<FEvent> Seen;
+	Visit(*this, Rig, MoveTemp(Spec), Seen);
+	StatusFact(*this, TEXT("hs.status_in_connection_error.connect_refused"), Seen, 0, TEXT("TCP to 127.0.0.1:1, where nothing listens: no response at all"));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestLwsProbeStatusInErrorDnsFailureTest, "Probe.VaRest.Risky.Lws.StatusInConnectionError.DnsFailure",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestLwsProbeStatusInErrorDnsFailureTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::LwsProbe;
+	using namespace VaRest::LwsProbe::VaRestLwsProbeHandshakeTestPrivate;
+	FServer Site;
+	if (!FindServer(*this, Site))
+	{
+		return false;
+	}
+	FRig Rig(Site);
+	if (!TestTrue(TEXT("the probe's context exists"), Rig.IsReady()))
+	{
+		return false;
+	}
+	Pending(TEXT("hs.status_in_connection_error.dns_failure"));
+	FConnectSpec Spec;
+	Spec.Address = TEXT("nonexistent.invalid");
+	Spec.Port = 80;
+	Spec.Host = TEXT("nonexistent.invalid");
+	Spec.Hook = StatusHook();
+	TArray<FEvent> Seen;
+	Visit(*this, Rig, MoveTemp(Spec), Seen);
+	StatusFact(*this, TEXT("hs.status_in_connection_error.dns_failure"), Seen, 0, TEXT("nonexistent.invalid (RFC 6761: never resolves): no TCP, no response"));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestLwsProbeStatusInErrorNoUpgradeTest, "Probe.VaRest.Risky.Lws.StatusInConnectionError.NoUpgrade",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestLwsProbeStatusInErrorNoUpgradeTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::LwsProbe;
+	using namespace VaRest::LwsProbe::VaRestLwsProbeHandshakeTestPrivate;
+	FServer Site;
+	if (!FindServer(*this, Site))
+	{
+		return false;
+	}
+	FRig Rig(Site);
+	if (!TestTrue(TEXT("the probe's context exists"), Rig.IsReady()))
+	{
+		return false;
+	}
+	Pending(TEXT("hs.status_in_connection_error.no_upgrade"));
+	FConnectSpec Spec;
+	Spec.Path = TEXT("/ws/noupgrade");
+	Spec.Hook = StatusHook();
+	TArray<FEvent> Seen;
+	Visit(*this, Rig, MoveTemp(Spec), Seen);
+	StatusFact(*this, TEXT("hs.status_in_connection_error.no_upgrade"), Seen, 0, TEXT("/ws/noupgrade reads the request and ends TCP before any status line"));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestLwsProbeStatusInErrorTlsVerifyFailureTest, "Probe.VaRest.Risky.Lws.StatusInConnectionError.TlsVerifyFailure",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestLwsProbeStatusInErrorTlsVerifyFailureTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::LwsProbe;
+	using namespace VaRest::LwsProbe::VaRestLwsProbeHandshakeTestPrivate;
+	FServer Site;
+	if (!FindServer(*this, Site, true))
+	{
+		return false;
+	}
+	// TLS in the context and no trust anchor at all (the rig disables the OS CAs and loads no extra one): the test CA is
+	// untrusted, so the TLS handshake fails before any HTTP
+	FRigOptions Options;
+	Options.Tls = ETls::LwsGlobalInit;
+	FRig Rig(Site, MoveTemp(Options));
+	if (!TestTrue(TEXT("the probe's context exists"), Rig.IsReady()))
+	{
+		return false;
+	}
+	Pending(TEXT("hs.status_in_connection_error.tls_verify_failure"));
+	FConnectSpec Spec;
+	Spec.bTls = true;
+	Spec.Path = TEXT("/ws/echo?key=") + NewKey();
+	Spec.Hook = StatusHook();
+	TArray<FEvent> Seen;
+	Visit(*this, Rig, MoveTemp(Spec), Seen);
+	StatusFact(*this, TEXT("hs.status_in_connection_error.tls_verify_failure"), Seen, 0, TEXT("wss to the TLS listener with its CA untrusted: the certificate check fails, no response"));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestLwsProbeStatusInErrorKilledPendingTest, "Probe.VaRest.Risky.Lws.StatusInConnectionError.KilledPending",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestLwsProbeStatusInErrorKilledPendingTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::LwsProbe;
+	using namespace VaRest::LwsProbe::VaRestLwsProbeHandshakeTestPrivate;
+	FServer Site;
+	if (!FindServer(*this, Site))
+	{
+		return false;
+	}
+	// The short wait, so the kill lands within a second (review C-1)
+	FRigOptions Options;
+	Options.ServiceTimeoutMs = 100;
+	FRig Rig(Site, MoveTemp(Options));
+	if (!TestTrue(TEXT("the probe's context exists"), Rig.IsReady()))
+	{
+		return false;
+	}
+	Pending(TEXT("hs.status_in_connection_error.killed_pending"));
+	FConnectSpec Spec;
+	Spec.Path = TEXT("/ws/hang?ms=60000&key=") + NewKey();
+	Spec.Hook = StatusHook();
+	const int32 Conn = Rig.Connect(MoveTemp(Spec));
+	if (Rig.WaitReason(Conn, ConnectReturned))
+	{
+		// The upgrade is out and unanswered by now: WebSocket spec 2.2's ConnectTimeout kill
+		FPlatformProcess::Sleep(1.0f);
+		Rig.ExecOn(Conn, TEXT("kill"), [](FConn& C) { lws_set_timeout(C.Wsi, PENDING_TIMEOUT_USER_REASON_BASE, LWS_TO_KILL_ASYNC); });
+	}
+	NoteOutcome(*this, TEXT("the killed attempt ended within 25 s"), Rig.WaitEnded(Conn, 25.0));
+	StatusFact(*this, TEXT("hs.status_in_connection_error.killed_pending"), Rig.Events(Conn), 0,
+		TEXT("an attempt to /ws/hang killed with lws_set_timeout(LWS_TO_KILL_ASYNC) 1 s after the upgrade went out: no response"));
+	return true;
 }
 
 #endif // WITH_DEV_AUTOMATION_TESTS
@@ -4465,20 +5024,28 @@ bool FVaRestLwsProbeStatusInErrorTest::RunTest(const FString& Parameters)
 - [ ] **Step 3: Build and run the group**
 
 Run: `Tools/run_tests.sh Probe.VaRest.Lws.Handshake`
-Expected: `run_tests: 4 passed, 0 failed`; `grep -c 'LogVaRestLwsProbe: Display: FACT {"id":"hs\.' /w/Unreal/VaRestHost/Saved/Logs/VaRestTests.log` prints `31`.
+Expected: `run_tests: 4 passed, 0 failed`; `grep -c 'LogVaRestLwsProbe: Display: FACT {"id":"hs\.' /w/Unreal/VaRestHost/Saved/Logs/VaRestTests.log` prints `35`. A test fails only on a harness invariant (decision 3): the server or a journal did not answer, or a rig did not start.
 
-Controls: `hs.raw_origin` and `hs.default_origin` must differ. If they are the same string, the probe did not tell the two contexts apart: stop and find out why before recording. `hs.refusal_403`'s observed text must name 403 somehow ("forbidden" or "403"). If it does not, `ErrorOf` is reading the wrong event.
+Controls: `hs.raw_origin` and `hs.default_origin` must differ. If they are the same string, the probe did not tell the two contexts apart: stop and find out why before recording. `hs.refusal_403`'s observed text must name 403 somehow ("forbidden" or "403"). If it does not, `ErrorOf` is reading the wrong event. `hs.redirect_target_visible` must list at least one `append 1:` entry per redirect; if it lists none, the hook did not run, so fix the rig before recording.
 
-- [ ] **Step 4: Run the risky test on its own**
+- [ ] **Step 4: Run each risky case on its own**
 
-Run: `Tools/run_tests.sh --no-build Probe.VaRest.Risky; cp /w/Unreal/VaRestHost/Saved/Logs/VaRestTests.log /w/Unreal/VaRestHost/Saved/Logs/VaRestProbe-risky.log`
-Expected: either `run_tests: 1 passed, 0 failed` with one `FACT {"id":"hs.status_in_connection_error"` line, or `run_tests: run did not complete (crash?)` with a `PENDING {"id":"hs.status_in_connection_error"}` line and no FACT. Both are results, so record which one you saw. A crash is a valid result for this probe: do not "fix" it.
+Run:
+
+```bash
+for CASE in Refused ConnectRefused DnsFailure NoUpgrade TlsVerifyFailure KilledPending; do
+	Tools/run_tests.sh --no-build "Probe.VaRest.Risky.Lws.StatusInConnectionError.$CASE"
+	cp /w/Unreal/VaRestHost/Saved/Logs/VaRestTests.log "/w/Unreal/VaRestHost/Saved/Logs/VaRestProbe-risky-$CASE.log"
+done
+```
+
+Expected, per case: either `run_tests: 1 passed, 0 failed` with one `FACT {"id":"hs.status_in_connection_error.<case>"` line, or `run_tests: run did not complete (crash?)` with a `PENDING {"id":"hs.status_in_connection_error.<case>"}` line and no FACT (`<case>` is `refused`, `connect_refused`, `dns_failure`, `no_upgrade`, `tls_verify_failure`, `killed_pending`). Both are results, so record which one each case gave. A crash is a valid result for this probe: do not "fix" it. The six logs are passed to the passport in Task 10.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add Source/VaRestTests/Private/LwsProbe/VaRestLwsProbeHandshakeTest.cpp
-git commit -m "tests: LWS 3.0 probe -- subprotocol binding, origin, appended headers, refusal and broken-upgrade strings, redirects, status in CONNECTION_ERROR (WS W0)
+git commit -m "tests: LWS 3.0 probe -- subprotocol binding, origin, appended headers, refusal and broken-upgrade strings, redirects and their veto points, status in CONNECTION_ERROR per case (WS W0)
 
 Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 ```
@@ -4490,7 +5057,7 @@ Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 - Create: `Source/VaRestTests/Private/LwsProbe/VaRestLwsProbeCloseTest.cpp`
 
 **Interfaces:**
-- Consumes (Task 4): `FRig` (`Connect`, `Write`, `WriteText`, `Close`, `WaitFor`, `WaitReason`, `WaitEnded`, `Events`, `Find`), `FRigOptions::TimeoutSecs`, `FConnectSpec::PeerCloseReturn`, `CallSequence`, `OfReason`, `Opened`, `EventText`, `Utf8Bytes`, `HexOf`, `FetchJournal`, `JournalEvents`, `JournalBytes`, `UrlValue`, `Fact`, `AgreesIf`, `YesNo`, pseudo reasons `CloseRequested`, `WriteDone`; server routes `/ws/close/<code>|none|onebyte`, `/ws/echo`, `/ws/noecho`, `/ws/drop`, `/ws/serverping`, `/ws/silent`.
+- Consumes (Task 4): `FRig` (`Connect`, `Write`, `WriteText`, `Close`, `WaitFor`, `WaitReason`, `WaitEnded`, `Events`, `Find`), `FRigOptions` (`TimeoutSecs`, `ServiceTimeoutMs`), `FConnectSpec::PeerCloseReturn`, `CallSequence`, `OfReason`, `Opened`, `EventText`, `Utf8Bytes`, `HexOf`, `FetchJournal`, `JournalEvents`, `JournalBytes`, `UrlValue`, `Fact`, `AgreesIf`, `YesNo`, `NoteOutcome`, pseudo reasons `CloseRequested`, `WriteDone`; server routes `/ws/close/<code>|none|onebyte`, `/ws/echo`, `/ws/noecho`, `/ws/drop`, `/ws/serverping`, `/ws/silent`.
 - Produces facts: `close.rewritten_codes`, `close.echo_on_return_0`, `close.echo_payload`, `close.reason_utf8_bytes`, `close.peer_sequence`, `close.empty_len`, `close.empty_echo`, `close.one_byte`, `close.return_1_echo`, `close.ours_echoed_ms`, `close.ours_noecho_wait_ms`, `close.ours_sequence`, `close.ours_long_reason`, `close.drop_fin_sequence`, `close.drop_rst_sequence`, `close.drop_reports_client_closed`, `ping.auto_pong`, `ping.auto_pong_latency_ms`, `ping.client_sees_server_ping`, `ping.pong_payload_echo`, `ping.rtt_ms`, `ping.max_payload_125`, `ping.unsolicited_pong_delivered`, `ping.silent_no_pong`, `ping.idle_survives_timeout_secs`.
 - Tests: `Probe.VaRest.Lws.Close.PeerCodes`, `.Close.EmptyAndShort`, `.Close.PeerReturnNonZero`, `.Close.Ours`, `.Close.Drops`, `Probe.VaRest.Lws.Ping.ServerPings`, `.Ping.ClientPing`, `.Ping.Silent`.
 
@@ -4508,7 +5075,9 @@ Create `Source/VaRestTests/Private/LwsProbe/VaRestLwsProbeCloseTest.cpp`:
 
 // WebSocket spec 16.4 (W0): what LWS 3.0 hands over and sends when a connection closes -- the peer's codes, empty and
 // short close frames, our own close against an echoing and a non-echoing server, drops -- and how it pings and pongs
-// (WebSocket spec 2.5)
+// (WebSocket spec 2.5). Whether a connection ended is a library outcome, noted and never failed (decision 3, review M-2).
+// Close.Ours and Ping.Silent ask what LWS's own timers do, so their rigs wait 100 ms in lws_service (review C-1: LWS
+// checks its deadlines only when lws_service returns)
 
 #include "VaRestLwsProbe.h"
 
@@ -4637,10 +5206,7 @@ bool FVaRestLwsProbePeerCodesTest::RunTest(const FString& Parameters)
 	{
 		bAll = Rig.WaitEnded(Peer.Conn, 20.0) && bAll;
 	}
-	if (!TestTrue(TEXT("every peer-closed connection ended"), bAll))
-	{
-		return false;
-	}
+	NoteOutcome(*this, TEXT("every peer-closed connection ended within 20 s"), bAll);
 
 	TArray<FString> Rewritten;
 	TArray<FString> EchoNotes;
@@ -4719,10 +5285,7 @@ bool FVaRestLwsProbeEmptyCloseTest::RunTest(const FString& Parameters)
 	TArray<FEvent> OneSeen;
 	bool bAll = RunToEnd(Rig, TEXT("/ws/close/none?key=") + KeyNone, NoneSeen);
 	bAll = RunToEnd(Rig, TEXT("/ws/close/onebyte?key=") + KeyOne, OneSeen) && bAll;
-	if (!TestTrue(TEXT("both connections ended"), bAll))
-	{
-		return false;
-	}
+	NoteOutcome(*this, TEXT("both connections ended within 20 s"), bAll);
 	const FVaRestJson NoneJournal = FetchJournal(*this, Site, KeyNone);
 	const FVaRestJson OneJournal = FetchJournal(*this, Site, KeyOne);
 	const FEvent* NoneClose = PeerClose(NoneSeen);
@@ -4760,10 +5323,7 @@ bool FVaRestLwsProbePeerReturnNonZeroTest::RunTest(const FString& Parameters)
 	}
 	const FString Key = NewKey();
 	TArray<FEvent> Seen;
-	if (!TestTrue(TEXT("the connection ends"), RunToEnd(Rig, TEXT("/ws/close/1000?reason=bye&key=") + Key, Seen, 1)))
-	{
-		return false;
-	}
+	NoteOutcome(*this, TEXT("the connection ended within 20 s"), RunToEnd(Rig, TEXT("/ws/close/1000?reason=bye&key=") + Key, Seen, 1));
 	const FVaRestJson Journal = FetchJournal(*this, Site, Key);
 	Fact(*this, TEXT("close.return_1_echo"), EVerdict::Recorded,
 		FString::Printf(TEXT("the client answered %s; %s"), *ClientCloseHex(Journal), *AfterOpen(Seen)),
@@ -4784,7 +5344,10 @@ bool FVaRestLwsProbeOurCloseTest::RunTest(const FString& Parameters)
 	{
 		return false;
 	}
-	FRig Rig(Site);
+	// The close-ack wait is LWS's own timer: the short service wait, so the value is LWS's and not the rig's (review C-1)
+	FRigOptions Options;
+	Options.ServiceTimeoutMs = 100;
+	FRig Rig(Site, MoveTemp(Options));
 	if (!TestTrue(TEXT("the probe's context exists"), Rig.IsReady()))
 	{
 		return false;
@@ -4795,13 +5358,13 @@ bool FVaRestLwsProbeOurCloseTest::RunTest(const FString& Parameters)
 	const FOurClose Echoed = CloseOurs(Rig, TEXT("/ws/echo?key=") + KeyEcho, 1000, TEXT("bye"), 30.0);
 	const FOurClose Unanswered = CloseOurs(Rig, TEXT("/ws/noecho?key=") + KeyNoEcho, 1000, TEXT("bye"), 45.0);
 	const FOurClose Long = CloseOurs(Rig, TEXT("/ws/echo?key=") + KeyLong, 4000, FString::ChrN(200, TEXT('r')), 30.0);
-	TestTrue(TEXT("our three closes ended"), Echoed.bEnded && Unanswered.bEnded && Long.bEnded);
+	NoteOutcome(*this, TEXT("our three closes ended"), Echoed.bEnded && Unanswered.bEnded && Long.bEnded);
 	const FVaRestJson EchoJournal = FetchJournal(*this, Site, KeyEcho);
 	const FVaRestJson NoEchoJournal = FetchJournal(*this, Site, KeyNoEcho);
 	const FVaRestJson LongJournal = FetchJournal(*this, Site, KeyLong);
 	Fact(*this, TEXT("close.ours_echoed_ms"), EVerdict::Recorded,
 		FString::Printf(TEXT("%.1f ms from our close to WSI_DESTROY against an echoing server"), Echoed.Ms),
-		TEXT("none"), TEXT("lws_close_reason + -1 from WRITEABLE on /ws/echo"));
+		TEXT("none"), TEXT("lws_close_reason + -1 from WRITEABLE on /ws/echo; lws_service waiting up to 100 ms"));
 	const TArray<FVaRestJson> ServerSaw = JournalEvents(NoEchoJournal, TEXT("close"));
 	const TArray<FVaRestJson> ServerEof = JournalEvents(NoEchoJournal, TEXT("eof"));
 	const FString ServerSide = ServerSaw.Num() > 0 && ServerEof.Num() > 0
@@ -4811,7 +5374,7 @@ bool FVaRestLwsProbeOurCloseTest::RunTest(const FString& Parameters)
 		Unanswered.bEnded ? FString::Printf(TEXT("%.1f ms from our close to WSI_DESTROY against a server that never answers; %s"), Unanswered.Ms, *ServerSide)
 			: FString(TEXT("did not end within 45 s")),
 		TEXT("WebSocket spec 0.3 (inferred from 4.3): whether LWS waits for the close echo; 2.5 bounds it with CloseTimeout (5 s)"),
-		TEXT("our close on /ws/noecho, timeout_secs left at LWS's default"));
+		TEXT("our close on /ws/noecho, timeout_secs left at LWS's default; lws_service waiting up to 100 ms"));
 	Fact(*this, TEXT("close.ours_sequence"), EVerdict::Recorded, Echoed.Sequence, TEXT("none"), TEXT("callbacks after our close on /ws/echo"));
 	const TArray<FVaRestJson> LongSaw = JournalEvents(LongJournal, TEXT("close"));
 	const TArray<FVaRestJson> LongFail = JournalEvents(LongJournal, TEXT("fail"));
@@ -4845,10 +5408,7 @@ bool FVaRestLwsProbeDropsTest::RunTest(const FString& Parameters)
 	TArray<FEvent> RstSeen;
 	bool bAll = RunToEnd(Rig, TEXT("/ws/drop?after_ms=200&key=") + NewKey(), FinSeen);
 	bAll = RunToEnd(Rig, TEXT("/ws/drop?after_ms=200&rst=1&key=") + NewKey(), RstSeen) && bAll;
-	if (!TestTrue(TEXT("both dropped connections ended"), bAll))
-	{
-		return false;
-	}
+	NoteOutcome(*this, TEXT("both dropped connections ended within 20 s"), bAll);
 	const TCHAR* const UncleanSpec = TEXT("WebSocket spec 2.5: an unclean end (CLIENT_CLOSED / WSI_DESTROY without a close frame) -> 1006");
 	Fact(*this, TEXT("close.drop_fin_sequence"), EVerdict::Recorded, AfterOpen(FinSeen), UncleanSpec, TEXT("/ws/drop: TCP FIN, no close frame"));
 	Fact(*this, TEXT("close.drop_rst_sequence"), EVerdict::Recorded, AfterOpen(RstSeen), UncleanSpec, TEXT("/ws/drop?rst=1: TCP RST"));
@@ -4889,14 +5449,11 @@ bool FVaRestLwsProbeServerPingsTest::RunTest(const FString& Parameters)
 			return Each.Conn == Conn && Each.Reason == LWS_CALLBACK_CLIENT_RECEIVE && EventText(Each).Equals(TEXT("pings-done"), ESearchCase::CaseSensitive);
 		});
 	}, 15.0);
-	TestTrue(TEXT("the server's pings-done arrives"), bDone);
+	NoteOutcome(*this, TEXT("the server's pings-done arrived"), bDone);
 	Rig.Close(Conn, 1000, TEXT("done"));
-	if (!TestTrue(TEXT("the connection ends"), Rig.WaitEnded(Conn)))
-	{
-		return false;
-	}
+	NoteOutcome(*this, TEXT("the connection ended after our close"), Rig.WaitEnded(Conn));
 	const FVaRestJson Journal = FetchJournal(*this, Site, Key);
-	if (!TestTrue(TEXT("the server's journal ended"), Journal[TEXT("ended")].AsBool()))
+	if (!TestTrue(TEXT("the server's journal arrived"), Journal.IsValid()))
 	{
 		return false;
 	}
@@ -4981,7 +5538,7 @@ bool FVaRestLwsProbeClientPingTest::RunTest(const FString& Parameters)
 	Rig.Write(Conn, LWS_WRITE_PING, Largest);
 	const bool bSecond = Rig.WaitFor([&PongCount](const TArray<FEvent>& All) { return PongCount(All, 2); });
 	Rig.Close(Conn, 1000, TEXT("done"));
-	TestTrue(TEXT("the connection ends"), Rig.WaitEnded(Conn));
+	NoteOutcome(*this, TEXT("the connection ended after our close"), Rig.WaitEnded(Conn));
 	const TArray<FEvent> Pongs = OfReason(Rig.Events(Conn), LWS_CALLBACK_CLIENT_RECEIVE_PONG);
 	const TArray<FEvent> Writes = OfReason(Rig.Events(Conn), WriteDone);
 	const bool bEchoed = bFirst && Pongs.Num() >= 1 && Pongs[0].Bytes == Eight;
@@ -5008,7 +5565,7 @@ bool FVaRestLwsProbeClientPingTest::RunTest(const FString& Parameters)
 		});
 	});
 	Rig.Close(Other, 1000, TEXT("done"));
-	TestTrue(TEXT("the unsolicited-pong connection ends"), Rig.WaitEnded(Other));
+	NoteOutcome(*this, TEXT("the unsolicited-pong connection ended after our close"), Rig.WaitEnded(Other));
 	const TArray<FEvent> OtherPongs = OfReason(Rig.Events(Other), LWS_CALLBACK_CLIENT_RECEIVE_PONG);
 	Fact(*this, TEXT("ping.unsolicited_pong_delivered"), EVerdict::Recorded,
 		bDone ? FString::Printf(TEXT("%d CLIENT_RECEIVE_PONG for an unsolicited PONG \"unsolicited\"%s"), OtherPongs.Num(),
@@ -5030,9 +5587,14 @@ bool FVaRestLwsProbeSilentTest::RunTest(const FString& Parameters)
 	{
 		return false;
 	}
-	// A short timeout_secs: if LWS ends idle connections by itself, it does so inside this test
+	// A short timeout_secs: if LWS ends idle connections by itself, it does so inside this test. The short service wait
+	// and a window past timeout_secs + the wait + 5 s, so an idle kill is seen inside it (review C-1)
+	constexpr uint32 SilentTimeoutSecs = 3;
+	constexpr int32 SilentWaitMs = 100;
+	const double Window = SilentTimeoutSecs + SilentWaitMs / 1000.0 + 5.0;
 	FRigOptions Options;
-	Options.TimeoutSecs = 3;
+	Options.TimeoutSecs = SilentTimeoutSecs;
+	Options.ServiceTimeoutMs = SilentWaitMs;
 	FRig Rig(Site, MoveTemp(Options));
 	if (!TestTrue(TEXT("the probe's context exists"), Rig.IsReady()))
 	{
@@ -5048,23 +5610,23 @@ bool FVaRestLwsProbeSilentTest::RunTest(const FString& Parameters)
 	const double OpenedAt = FPlatformTime::Seconds();
 	Rig.Write(Conn, LWS_WRITE_PING, Utf8Bytes(TEXT("dead?")));
 	// Completion before silence: our PING has left (WriteDone), then 3 s without a PONG
-	TestTrue(TEXT("our PING is written"), Rig.WaitReason(Conn, WriteDone));
+	NoteOutcome(*this, TEXT("our PING was written"), Rig.WaitReason(Conn, WriteDone));
 	const bool bPong = Rig.WaitReason(Conn, LWS_CALLBACK_CLIENT_RECEIVE_PONG, 3.0);
 	Fact(*this, TEXT("ping.silent_no_pong"), AgreesIf(!bPong), bPong ? FString(TEXT("a PONG arrived")) : FString(TEXT("no PONG within 3 s")),
 		TEXT("the control for WebSocket spec 2.5's dead-link detection: /ws/silent never answers"), TEXT("one PING to /ws/silent"));
-	const double Left = FMath::Max(0.0, 8.0 - (FPlatformTime::Seconds() - OpenedAt));
+	const double Left = FMath::Max(0.0, Window - (FPlatformTime::Seconds() - OpenedAt));
 	const bool bDied = Rig.WaitEnded(Conn, Left);
 	FEvent Destroyed;
 	Fact(*this, TEXT("ping.idle_survives_timeout_secs"), AgreesIf(!bDied),
 		bDied && Rig.Find(Conn, LWS_CALLBACK_WSI_DESTROY, Destroyed)
 			? FString::Printf(TEXT("LWS ended the idle connection %.1f s after it opened: %s"), Destroyed.Time - OpenedAt, *CallSequence(Rig.Events(Conn)))
-			: FString(TEXT("still open 8 s after it opened, with timeout_secs = 3")),
+			: FString::Printf(TEXT("still open %.1f s after it opened, with timeout_secs = %u and lws_service waiting up to %d ms"), Window, SilentTimeoutSecs, SilentWaitMs),
 		TEXT("WebSocket spec 2.1: ws_ping_pong_interval = 0, so LWS neither pings nor drops an idle connection; VaRest's own ping decides (2.5)"),
 		TEXT("an open connection to /ws/silent, nothing sent after one PING"));
 	if (!bDied)
 	{
 		Rig.Close(Conn, 1000, TEXT("done"));
-		TestTrue(TEXT("the silent connection ends after our close"), Rig.WaitEnded(Conn, 40.0));
+		NoteOutcome(*this, TEXT("the silent connection ended after our close"), Rig.WaitEnded(Conn, 40.0));
 	}
 	return true;
 }
@@ -5075,7 +5637,7 @@ bool FVaRestLwsProbeSilentTest::RunTest(const FString& Parameters)
 - [ ] **Step 3: Build and run the groups**
 
 Run: `Tools/run_tests.sh Probe.VaRest.Lws.Close && cp /w/Unreal/VaRestHost/Saved/Logs/VaRestTests.log /w/Unreal/VaRestHost/Saved/Logs/VaRestProbe-close.log && Tools/run_tests.sh --no-build Probe.VaRest.Lws.Ping`
-Expected: `run_tests: 5 passed, 0 failed`, then `run_tests: 3 passed, 0 failed`. `grep -c 'FACT {"id":"close\.' /w/Unreal/VaRestHost/Saved/Logs/VaRestProbe-close.log` prints `16`; `grep -c 'FACT {"id":"ping\.' /w/Unreal/VaRestHost/Saved/Logs/VaRestTests.log` prints `9`.
+Expected: `run_tests: 5 passed, 0 failed`, then `run_tests: 3 passed, 0 failed`. A test fails only on a harness invariant (decision 3): the server or a journal did not answer, a rig did not start, or a precondition connection (`/ws/echo`, `/ws/silent`) did not open. `grep -c 'FACT {"id":"close\.' /w/Unreal/VaRestHost/Saved/Logs/VaRestProbe-close.log` prints `16`; `grep -c 'FACT {"id":"ping\.' /w/Unreal/VaRestHost/Saved/Logs/VaRestTests.log` prints `9`.
 
 Control: `close.echo_on_return_0` (return 0) and `close.return_1_echo` (return 1) must not both say the client answered. If they do, the hook return value is not reaching LWS: check `FRig::Handle`'s `WS_PEER_INITIATED_CLOSE` branch before recording.
 
@@ -5095,7 +5657,7 @@ Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 - Create: `Source/VaRestTests/Private/LwsProbe/VaRestLwsProbeDataTest.cpp`
 
 **Interfaces:**
-- Consumes (Task 4): `FRig` (`Connect`, `ExecOn`, `Write`, `WriteNow`, `Close`, `Record`, `WaitFor`, `WaitReason`, `WaitEnded`, `Events`, `Find`), `FConn` (`Outbox`, `Counters`, `Rig`, `Id`, `Wsi`), `FWrite`, `FConnectSpec::Hook`, `KeepDefault`, `Marker`, `WriteDone`, `IsMessageStart`, `WaitBytes`, `OfReason`, `HexOf`, `EventText`, `Utf8Bytes`, `CallSequence`, `FetchJournal`, `JournalEvents`, `JournalBytes`, `Fact`, `AgreesIf`, `YesNo`, flags `FirstFragment`, `FinalFragment`, `BinaryFrame`, `ETls::LwsGlobalInit`; `VaRest::Http::FSha256` (`VaRestSha256.h`); server routes `/ws/fragment`, `/ws/large`, `/ws/order`, `/ws/badutf8`, `/ws/flood`, `/ws/sink`, `/ws/echo`.
+- Consumes (Task 4): `FRig` (`Connect`, `ExecOn`, `Write`, `WriteNow`, `Close`, `Record`, `WaitFor`, `WaitReason`, `WaitEnded`, `Events`, `Find`), `FConn` (`Outbox`, `Counters`, `Rig`, `Id`, `Wsi`), `FWrite`, `FConnectSpec::Hook`, `KeepDefault`, `Marker`, `WriteDone`, `IsMessageStart`, `WaitBytes`, `OfReason`, `HexOf`, `EventText`, `Utf8Bytes`, `CallSequence`, `FetchJournal`, `JournalEvents`, `JournalBytes`, `Fact`, `AgreesIf`, `YesNo`, `NoteOutcome`, flags `FirstFragment`, `FinalFragment`, `BinaryFrame`, `ETls::LwsGlobalInit`; `VaRest::Http::FSha256` (`VaRestSha256.h`); server routes `/ws/fragment`, `/ws/large`, `/ws/order`, `/ws/badutf8`, `/ws/flood`, `/ws/sink`, `/ws/echo`.
 - Produces facts: `rx.frames_split_utf8`, `rx.final_flag`, `rx.first_flag`, `rx.bytes_intact`, `rx.chunk_sizes_single_frame`, `rx.remaining_payload`, `rx.binary_flag_on_continuations`, `rx.control_inside_fragmented`, `rx.order_preserved`, `rx.invalid_utf8_passthrough`, `rx.flow_pause_stops_callbacks`, `rx.flow_resume_from_command`, `rx.flow_resume_form`, `rx.flow_backpressure_reached_server`, `tx.no_fin_frames`, `tx.ping_between_fragments`, `tx.message_intact`, `tx.partial_after_fragment`, `tx.large_write_result`, `tx.large_write_frames`, `tx.large_write_intact`, `tx.two_writes_one_writeable`, `tx.autoreply_between_messages`, `tx.autoreply_delay_ms`, `tx.so_sndbuf_ws`, `tx.so_sndbuf_wss`.
 - Tests: `Probe.VaRest.Lws.Data.ReceiveChunking`, `.Data.FlowControl`, `.Data.FragmentedSend`, `.Data.LargeWrite`, `.Data.TwoWritesPerWriteable`, `.Data.AutoReplyBoundary`, `.Data.SoSndbuf`.
 
@@ -5180,8 +5742,8 @@ namespace VaRest::LwsProbe::VaRestLwsProbeDataTestPrivate
 		return VaRest::Http::FSha256::Hash(Bytes).ToHex();
 	}
 
-	/** Connect, wait until Bytes arrived, close, wait for the end */
-	bool Receive(FAutomationTestBase& Test, FRig& Rig, const FString& Path, int64 Bytes, int32& OutConn)
+	/** Connect, wait until Bytes arrived, close, wait for the end; what happened is noted, never failed (review M-2) */
+	void Receive(FAutomationTestBase& Test, FRig& Rig, const FString& Path, int64 Bytes, int32& OutConn)
 	{
 		FConnectSpec Spec;
 		Spec.Path = Path;
@@ -5189,11 +5751,7 @@ namespace VaRest::LwsProbe::VaRestLwsProbeDataTestPrivate
 		const bool bGot = WaitBytes(Rig, OutConn, Bytes, 20.0);
 		Rig.Close(OutConn, 1000, TEXT("done"));
 		const bool bEnded = Rig.WaitEnded(OutConn, 30.0);
-		if (!bGot || !bEnded)
-		{
-			Test.AddError(FString::Printf(TEXT("%s: %lld bytes %s, connection %s"), *Path, Bytes, bGot ? TEXT("arrived") : TEXT("did not arrive"), bEnded ? TEXT("ended") : TEXT("did not end")));
-		}
-		return bGot && bEnded;
+		NoteOutcome(Test, FString::Printf(TEXT("%s: %lld bytes %s, connection %s"), *Path, Bytes, bGot ? TEXT("arrived") : TEXT("did not arrive"), bEnded ? TEXT("ended") : TEXT("did not end")), bGot && bEnded);
 	}
 
 	/** The client's frames as the server saw them, "op/fin/len" (close frames left out) */
@@ -5232,6 +5790,87 @@ namespace VaRest::LwsProbe::VaRestLwsProbeDataTestPrivate
 		Out.Init(Byte, Num);
 		return Out;
 	}
+
+	/** The flood's size: more than loopback socket buffers hold even with raised tcp_wmem/tcp_rmem (review M-6) */
+	constexpr int64 FloodBytes = 32 * 1024 * 1024;
+
+	struct FFlood
+	{
+		bool bRan = false;
+		int64 PauseReturned = MIN_int64;
+		int64 AfterPause = 0;
+		int32 AfterPauseCalls = 0;
+		int64 ResumeReturned = MIN_int64;
+		bool bResumed = false;
+		bool bFloodLogged = false;
+		double Longest = -1.0;
+		int32 SlowWrites = 0;
+	};
+
+	/**
+	 * One round on its own rig: a flood paused with lws_rx_flow_control(wsi, 0) inside its first CLIENT_RECEIVE (where
+	 * WebSocket spec 2.3 counts undelivered bytes), 2 s of watching, then lws_rx_flow_control(wsi, ResumeArg) from a
+	 * command. bRan is false only when the harness failed (no rig, or the flood's first chunk never came)
+	 */
+	FFlood Flood(FAutomationTestBase& Test, const FServer& Site, int32 ResumeArg)
+	{
+		FFlood Out;
+		FRig Rig(Site);
+		if (!Test.TestTrue(TEXT("the probe's context exists"), Rig.IsReady()))
+		{
+			return Out;
+		}
+		const FString Key = NewKey();
+		FConnectSpec Spec;
+		Spec.Path = FString::Printf(TEXT("/ws/flood?bytes=%lld&chunk=65536&key=%s"), FloodBytes, *Key);
+		Spec.Hook = [](FConn& C, lws* Wsi, int32 Reason, void* User, void* In, size_t Len) -> int32
+		{
+			const FName PausedKey(TEXT("paused"));
+			if (Reason == LWS_CALLBACK_CLIENT_RECEIVE && C.Counters.FindRef(PausedKey) == 0)
+			{
+				C.Counters.Add(PausedKey, 1);
+				C.Rig->Record(C.Id, Marker, lws_rx_flow_control(Wsi, 0), TEXT("paused"));
+			}
+			return KeepDefault;
+		};
+		const int32 Conn = Rig.Connect(MoveTemp(Spec));
+		if (!Test.TestTrue(TEXT("the flood's first chunk arrives"), Rig.WaitReason(Conn, Marker)))
+		{
+			return Out;
+		}
+		Out.bRan = true;
+		FEvent Paused;
+		Rig.Find(Conn, Marker, Paused, TEXT("paused"));
+		Out.PauseReturned = Paused.Len;
+		// Completion before silence: the pause is recorded; now the window in which no more should arrive
+		FPlatformProcess::Sleep(2.0f);
+		for (const FEvent& Each : Rig.Events(Conn))
+		{
+			if (Each.Reason == LWS_CALLBACK_CLIENT_RECEIVE && Each.Time > Paused.Time)
+			{
+				Out.AfterPause += Each.Len;
+				++Out.AfterPauseCalls;
+			}
+		}
+		Rig.ExecOn(Conn, TEXT("resume"), [ResumeArg](FConn& C) { C.Rig->Record(C.Id, Marker, lws_rx_flow_control(C.Wsi, ResumeArg), TEXT("resumed")); });
+		Out.bResumed = WaitBytes(Rig, Conn, FloodBytes, 20.0);
+		FEvent Resumed;
+		if (Rig.Find(Conn, Marker, Resumed, TEXT("resumed")))
+		{
+			Out.ResumeReturned = Resumed.Len;
+		}
+		Rig.Close(Conn, 1000, TEXT("done"));
+		NoteOutcome(Test, TEXT("the flood connection ended after our close"), Rig.WaitEnded(Conn, 30.0));
+		const FVaRestJson Journal = FetchJournal(Test, Site, Key);
+		const TArray<FVaRestJson> Events = JournalEvents(Journal, TEXT("flood"));
+		if (Events.Num() > 0)
+		{
+			Out.bFloodLogged = true;
+			Out.Longest = Events[0][TEXT("longest_write_s")].AsDouble();
+			Out.SlowWrites = Events[0][TEXT("writes_over_100ms")].AsInt();
+		}
+		return Out;
+	}
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestLwsProbeReceiveChunkingTest, "Probe.VaRest.Lws.Data.ReceiveChunking",
@@ -5255,17 +5894,17 @@ bool FVaRestLwsProbeReceiveChunkingTest::RunTest(const FString& Parameters)
 	// A. 5 KiB of Cyrillic in frames cut inside a code point at about 4096 (review item 5, E9)
 	const FString KeyCut = NewKey();
 	int32 Cut = 0;
-	bool bAll = Receive(*this, Rig, TEXT("/ws/fragment?cyrillic=5120&split_inside=4096&key=") + KeyCut, 5120, Cut);
+	Receive(*this, Rig, TEXT("/ws/fragment?cyrillic=5120&split_inside=4096&key=") + KeyCut, 5120, Cut);
 	// B. one 200 000-byte frame
 	int32 Single = 0;
-	bAll = Receive(*this, Rig, TEXT("/ws/large?bytes=200000&ascii=1&key=") + NewKey(), 200000, Single) && bAll;
+	Receive(*this, Rig, TEXT("/ws/large?bytes=200000&ascii=1&key=") + NewKey(), 200000, Single);
 	// C. a binary message in three frames
 	int32 Binary = 0;
-	bAll = Receive(*this, Rig, TEXT("/ws/fragment?bytes=10000&binary=1&at=3000,6000&key=") + NewKey(), 10000, Binary) && bAll;
+	Receive(*this, Rig, TEXT("/ws/fragment?bytes=10000&binary=1&at=3000,6000&key=") + NewKey(), 10000, Binary);
 	// D. a PING from the server between two fragments of a text message
 	const FString KeyPing = NewKey();
 	int32 Pinged = 0;
-	bAll = Receive(*this, Rig, TEXT("/ws/fragment?cyrillic=5120&split_inside=2000&ping_between=1&key=") + KeyPing, 5120, Pinged) && bAll;
+	Receive(*this, Rig, TEXT("/ws/fragment?cyrillic=5120&split_inside=2000&ping_between=1&key=") + KeyPing, 5120, Pinged);
 	// E. 400 small messages, text and binary in turn
 	constexpr int32 OrderCount = 400;
 	int64 OrderBytes = 0;
@@ -5274,14 +5913,10 @@ bool FVaRestLwsProbeReceiveChunkingTest::RunTest(const FString& Parameters)
 		OrderBytes += Index % 2 == 0 ? FString::Printf(TEXT("t%d"), Index).Len() : 4;
 	}
 	int32 Order = 0;
-	bAll = Receive(*this, Rig, FString::Printf(TEXT("/ws/order?n=%d&key=%s"), OrderCount, *NewKey()), OrderBytes, Order) && bAll;
+	Receive(*this, Rig, FString::Printf(TEXT("/ws/order?n=%d&key=%s"), OrderCount, *NewKey()), OrderBytes, Order);
 	// F. invalid UTF-8 in a text message
 	int32 Bad = 0;
-	bAll = Receive(*this, Rig, TEXT("/ws/badutf8?where=text&key=") + NewKey(), 5, Bad) && bAll;
-	if (!bAll)
-	{
-		return false;
-	}
+	Receive(*this, Rig, TEXT("/ws/badutf8?where=text&key=") + NewKey(), 5, Bad);
 
 	const FVaRestJson CutJournal = FetchJournal(*this, Site, KeyCut);
 	const TArray<FVaRestJson> CutSent = JournalEvents(CutJournal, TEXT("message_sent"));
@@ -5307,7 +5942,7 @@ bool FVaRestLwsProbeReceiveChunkingTest::RunTest(const FString& Parameters)
 	Fact(*this, TEXT("rx.final_flag"), AgreesIf(bOnlyLastFinal && Completions == 1),
 		FString::Printf(TEXT("lws_is_final_fragment on chunks %s; final with remaining 0 on %d chunk(s)"), *Where(CutChunks, FinalFragment), Completions),
 		TEXT("WebSocket spec 2.3: a message is complete when lws_is_final_fragment and lws_remaining_packet_payload == 0 (T8)"),
-		TEXT("the same message, three frames"));
+		TEXT("the same message, two frames"));
 	Fact(*this, TEXT("rx.first_flag"), EVerdict::Recorded, FString::Printf(TEXT("lws_is_first_fragment on chunks %s"), *Where(CutChunks, FirstFragment)),
 		TEXT("none"), TEXT("the same message"));
 	Fact(*this, TEXT("rx.bytes_intact"), AgreesIf(CutSent.Num() > 0 && Sha(CutBytes).Equals(CutSent[0][TEXT("sha256")].AsString(), ESearchCase::CaseSensitive)),
@@ -5374,84 +6009,44 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestLwsProbeFlowControlTest, "Probe.VaRest.L
 bool FVaRestLwsProbeFlowControlTest::RunTest(const FString& Parameters)
 {
 	using namespace VaRest::LwsProbe;
+	using namespace VaRest::LwsProbe::VaRestLwsProbeDataTestPrivate;
 	FServer Site;
 	if (!FindServer(*this, Site))
 	{
 		return false;
 	}
-	FRig Rig(Site);
-	if (!TestTrue(TEXT("the probe's context exists"), Rig.IsReady()))
+	// Round 1: the bool form, as the engine and WebSocket spec 2.3 write it. Round 2, its own rig and flood: the explicit
+	// form for a change made outside the connection's callback (libwebsockets.h:5192-5194). lws_rx_flow_control turns a
+	// bool into APPLIES | USER_BOOL | (enable << 13), and only APPLIES_ENABLE_BIT clears the bitmap (libwebsockets.c.o
+	// 0x2570-0x25b6, review I-2), so the explicit resume is APPLIES_ENABLE, not APPLIES_DISABLE (libwebsockets.h:5164-5173)
+	const FFlood BoolRound = Flood(*this, Site, 1);
+	if (!BoolRound.bRan)
 	{
 		return false;
 	}
-	constexpr int64 Total = 8 * 1024 * 1024;
-	const FString Key = NewKey();
-	FConnectSpec Spec;
-	Spec.Path = FString::Printf(TEXT("/ws/flood?bytes=%lld&chunk=65536&key=%s"), Total, *Key);
-	// The first chunk stops reading from inside its own RECEIVE, where WebSocket spec 2.3 counts undelivered bytes
-	Spec.Hook = [](FConn& C, lws* Wsi, int32 Reason, void* User, void* In, size_t Len) -> int32
-	{
-		const FName PausedKey(TEXT("paused"));
-		if (Reason == LWS_CALLBACK_CLIENT_RECEIVE && C.Counters.FindRef(PausedKey) == 0)
-		{
-			C.Counters.Add(PausedKey, 1);
-			C.Rig->Record(C.Id, Marker, lws_rx_flow_control(Wsi, 0), TEXT("paused"));
-		}
-		return KeepDefault;
-	};
-	const int32 Conn = Rig.Connect(MoveTemp(Spec));
-	if (!TestTrue(TEXT("reading pauses after the first chunk"), Rig.WaitReason(Conn, Marker)))
+	const FFlood NowRound = Flood(*this, Site, LWS_RXFLOW_REASON_APPLIES_ENABLE | LWS_RXFLOW_REASON_USER_BOOL | LWS_RXFLOW_REASON_FLAG_PROCESS_NOW);
+	if (!NowRound.bRan)
 	{
 		return false;
 	}
-	FEvent Paused;
-	Rig.Find(Conn, Marker, Paused, TEXT("paused"));
-	// Completion before silence: the pause is recorded; now the window in which no more should arrive
-	FPlatformProcess::Sleep(2.0f);
-	int64 AfterPause = 0;
-	int32 AfterPauseCalls = 0;
-	for (const FEvent& Each : Rig.Events(Conn))
-	{
-		if (Each.Reason == LWS_CALLBACK_CLIENT_RECEIVE && Each.Time > Paused.Time)
-		{
-			AfterPause += Each.Len;
-			++AfterPauseCalls;
-		}
-	}
-	Fact(*this, TEXT("rx.flow_pause_stops_callbacks"), AgreesIf(AfterPause <= 256 * 1024),
-		FString::Printf(TEXT("%lld bytes in %d CLIENT_RECEIVE calls in the 2 s after lws_rx_flow_control(wsi, 0)"), AfterPause, AfterPauseCalls),
+	Fact(*this, TEXT("rx.flow_pause_stops_callbacks"), AgreesIf(BoolRound.AfterPause <= 256 * 1024),
+		FString::Printf(TEXT("%lld bytes in %d CLIENT_RECEIVE calls in the 2 s after lws_rx_flow_control(wsi, 0) (returned %lld); round 2: %lld bytes"),
+			BoolRound.AfterPause, BoolRound.AfterPauseCalls, BoolRound.PauseReturned, NowRound.AfterPause),
 		TEXT("T11 and WebSocket spec 2.3: lws_rx_flow_control(wsi, 0) stops reading, so TCP pushes back"),
-		TEXT("/ws/flood: 8 MiB as 64 KiB binary messages; paused inside the first CLIENT_RECEIVE"));
-
-	// Resume from a command, i.e. from EVENT_WAIT_CANCELLED: outside the connection's own callback
-	Rig.ExecOn(Conn, TEXT("resume"), [](FConn& C) { C.Rig->Record(C.Id, Marker, lws_rx_flow_control(C.Wsi, 1), TEXT("resumed")); });
-	bool bResumed = WaitBytes(Rig, Conn, Total, 10.0);
-	FString Form = TEXT("lws_rx_flow_control(wsi, 1) from EVENT_WAIT_CANCELLED resumed reading");
-	if (!bResumed)
-	{
-		// libwebsockets.h:5192-5194: "used when you are changing a wsi flow control state from outside a callback on that wsi"
-		Rig.ExecOn(Conn, TEXT("resume now"), [](FConn& C)
-		{
-			C.Rig->Record(C.Id, Marker, lws_rx_flow_control(C.Wsi, LWS_RXFLOW_REASON_APPLIES_DISABLE | LWS_RXFLOW_REASON_USER_BOOL | LWS_RXFLOW_REASON_FLAG_PROCESS_NOW), TEXT("resumed now"));
-		});
-		bResumed = WaitBytes(Rig, Conn, Total, 10.0);
-		Form = bResumed ? TEXT("only the explicit form with LWS_RXFLOW_REASON_FLAG_PROCESS_NOW resumed reading") : TEXT("neither form resumed reading within 10 s each");
-	}
-	Fact(*this, TEXT("rx.flow_resume_from_command"), AgreesIf(bResumed), FString::Printf(TEXT("all %lld bytes arrived: %s"), Total, YesNo(bResumed)),
-		TEXT("WebSocket spec 2.3: reading resumes (below half) from the service thread"), TEXT("the resume as a command"));
-	Fact(*this, TEXT("rx.flow_resume_form"), EVerdict::Recorded, Form, TEXT("none"), TEXT("lws_rx_flow_control's return values are the Marker events' Len"));
-	Rig.Close(Conn, 1000, TEXT("done"));
-	if (!TestTrue(TEXT("the flood connection ends"), Rig.WaitEnded(Conn, 30.0)))
-	{
-		return false;
-	}
-	const FVaRestJson Journal = FetchJournal(*this, Site, Key);
-	const TArray<FVaRestJson> Flood = JournalEvents(Journal, TEXT("flood"));
-	const double Longest = Flood.Num() > 0 ? Flood[0][TEXT("longest_write_s")].AsDouble() : -1.0;
-	Fact(*this, TEXT("rx.flow_backpressure_reached_server"), AgreesIf(Longest >= 1.0),
-		Flood.Num() > 0 ? FString::Printf(TEXT("the server's longest write blocked %.2f s; %d writes blocked over 100 ms"), Longest, Flood[0][TEXT("writes_over_100ms")].AsInt())
+		FString::Printf(TEXT("/ws/flood: %lld bytes as 64 KiB binary messages; paused inside the first CLIENT_RECEIVE"), FloodBytes));
+	Fact(*this, TEXT("rx.flow_resume_from_command"), AgreesIf(BoolRound.bResumed || NowRound.bResumed),
+		FString::Printf(TEXT("all %lld bytes arrived after a resume from a command: bool form %s, explicit form %s"), FloodBytes, YesNo(BoolRound.bResumed), YesNo(NowRound.bResumed)),
+		TEXT("WebSocket spec 2.3: reading resumes (below half) from the service thread"), TEXT("the resume as a command, i.e. from EVENT_WAIT_CANCELLED, 2 s after the pause"));
+	Fact(*this, TEXT("rx.flow_resume_form"), EVerdict::Recorded,
+		FString::Printf(TEXT("lws_rx_flow_control(wsi, 1): %s (returned %lld); lws_rx_flow_control(wsi, APPLIES_ENABLE | USER_BOOL | FLAG_PROCESS_NOW): %s (returned %lld)"),
+			BoolRound.bResumed ? TEXT("resumed reading") : TEXT("did not resume within 20 s"), BoolRound.ResumeReturned,
+			NowRound.bResumed ? TEXT("resumed reading") : TEXT("did not resume within 20 s"), NowRound.ResumeReturned),
+		TEXT("none"), TEXT("two rounds, each its own rig and flood; the return values are lws_rx_flow_control's"));
+	Fact(*this, TEXT("rx.flow_backpressure_reached_server"), AgreesIf(BoolRound.Longest >= 1.0),
+		BoolRound.bFloodLogged ? FString::Printf(TEXT("the server's longest write blocked %.2f s; %d writes blocked over 100 ms"), BoolRound.Longest, BoolRound.SlowWrites)
 			: FString(TEXT("no flood event in the journal")),
-		TEXT("WebSocket spec 2.3: with reading paused, TCP pushes back on the server"), TEXT("the server's flood event"));
+		TEXT("WebSocket spec 2.3: with reading paused, TCP pushes back on the server"),
+		FString::Printf(TEXT("the server's flood event, round 1 (%lld bytes: more than loopback socket buffers hold, review M-6)"), FloodBytes));
 	return true;
 }
 
@@ -5486,17 +6081,14 @@ bool FVaRestLwsProbeFragmentedSendTest::RunTest(const FString& Parameters)
 	Rig.Write(Conn, LWS_WRITE_PING, Utf8Bytes(TEXT("between")));
 	Rig.Write(Conn, LWS_WRITE_CONTINUATION | LWS_WRITE_NO_FIN, Filled(50000, 'c'));
 	Rig.Write(Conn, LWS_WRITE_CONTINUATION, Filled(50000, 'd'));
-	TestTrue(TEXT("all five writes are done"), Rig.WaitFor([Conn](const TArray<FEvent>& All)
+	NoteOutcome(*this, TEXT("all five writes were done"), Rig.WaitFor([Conn](const TArray<FEvent>& All)
 	{
 		return All.FilterByPredicate([Conn](const FEvent& Each) { return Each.Conn == Conn && Each.Reason == WriteDone; }).Num() >= 5;
 	}));
 	Rig.Close(Conn, 1000, TEXT("done"));
-	if (!TestTrue(TEXT("the connection ends"), Rig.WaitEnded(Conn)))
-	{
-		return false;
-	}
+	NoteOutcome(*this, TEXT("the connection ended after our close"), Rig.WaitEnded(Conn));
 	const FVaRestJson Journal = FetchJournal(*this, Site, Key);
-	if (!TestTrue(TEXT("the server's journal ended"), Journal[TEXT("ended")].AsBool()))
+	if (!TestTrue(TEXT("the server's journal arrived"), Journal.IsValid()))
 	{
 		return false;
 	}
@@ -5551,13 +6143,14 @@ bool FVaRestLwsProbeLargeWriteTest::RunTest(const FString& Parameters)
 	// One lws_write of 1 MiB: more than rx_buffer_size, which caps one send when tx_packet_size is 0 (libwebsockets.h:2346-2353)
 	const TArray<uint8> Big = Filled(1024 * 1024, 'x');
 	Rig.Write(Conn, LWS_WRITE_TEXT, Big);
-	TestTrue(TEXT("the write is done"), Rig.WaitReason(Conn, WriteDone));
+	NoteOutcome(*this, TEXT("the write was done"), Rig.WaitReason(Conn, WriteDone));
 	Rig.Close(Conn, 1000, TEXT("done"));
-	if (!TestTrue(TEXT("the connection ends"), Rig.WaitEnded(Conn, 30.0)))
+	NoteOutcome(*this, TEXT("the connection ended after our close"), Rig.WaitEnded(Conn, 30.0));
+	const FVaRestJson Journal = FetchJournal(*this, Site, Key);
+	if (!TestTrue(TEXT("the server's journal arrived"), Journal.IsValid()))
 	{
 		return false;
 	}
-	const FVaRestJson Journal = FetchJournal(*this, Site, Key);
 	FEvent Written;
 	Rig.Find(Conn, WriteDone, Written);
 	Fact(*this, TEXT("tx.large_write_result"), EVerdict::Recorded, FString::Printf(TEXT("lws_write(1 MiB): %s"), *Written.Note),
@@ -5608,16 +6201,17 @@ bool FVaRestLwsProbeTwoWritesTest::RunTest(const FString& Parameters)
 		return false;
 	}
 	Rig.ExecOn(Conn, TEXT("kick"), [](FConn& C) { lws_callback_on_writable(C.Wsi); });
-	TestTrue(TEXT("both writes ran"), Rig.WaitFor([Conn](const TArray<FEvent>& All)
+	NoteOutcome(*this, TEXT("both writes ran"), Rig.WaitFor([Conn](const TArray<FEvent>& All)
 	{
 		return All.FilterByPredicate([Conn](const FEvent& Each) { return Each.Conn == Conn && Each.Reason == WriteDone; }).Num() >= 2;
 	}));
 	Rig.Close(Conn, 1000, TEXT("done"));
-	if (!TestTrue(TEXT("the connection ends"), Rig.WaitEnded(Conn)))
+	NoteOutcome(*this, TEXT("the connection ended after our close"), Rig.WaitEnded(Conn));
+	const FVaRestJson Journal = FetchJournal(*this, Site, Key);
+	if (!TestTrue(TEXT("the server's journal arrived"), Journal.IsValid()))
 	{
 		return false;
 	}
-	const FVaRestJson Journal = FetchJournal(*this, Site, Key);
 	TArray<FString> Notes;
 	for (const FEvent& Each : OfReason(Rig.Events(Conn), WriteDone))
 	{
@@ -5665,14 +6259,20 @@ bool FVaRestLwsProbeAutoReplyTest::RunTest(const FString& Parameters)
 			lws_callback_on_writable(Wsi);
 			return KeepDefault;
 		}
-		if (Reason == LWS_CALLBACK_CLIENT_WRITEABLE && C.Counters.FindRef(Reply) == 1 && (C.Outbox.Num() == 0 || IsMessageStart(C.Outbox[0].Protocol)))
+		if (Reason == LWS_CALLBACK_CLIENT_WRITEABLE && C.Counters.FindRef(Reply) == 1)
 		{
-			C.Counters.Add(Reply, 2);
-			const uint8 Three = '3';
-			C.Rig->WriteNow(C, Wsi, LWS_WRITE_TEXT, TConstArrayView<uint8>(&Three, 1), TEXT("reply"));
-			QueueTextMessage(C.Outbox, 'B', AutoReplyFragmentBytes, AutoReplyFragments);
+			if (C.Outbox.Num() == 0 || IsMessageStart(C.Outbox[0].Protocol))
+			{
+				C.Counters.Add(Reply, 2);
+				const uint8 Three = '3';
+				C.Rig->WriteNow(C, Wsi, LWS_WRITE_TEXT, TConstArrayView<uint8>(&Three, 1), TEXT("reply"));
+				QueueTextMessage(C.Outbox, 'B', AutoReplyFragmentBytes, AutoReplyFragments);
+				lws_callback_on_writable(Wsi);
+				return 0;
+			}
+			// Review I-1: inside A the default write below sends the next fragment, and FRig::WriteNext re-arms only while
+			// its outbox is non-empty; one more WRITEABLE, so this check runs again after A's last fragment
 			lws_callback_on_writable(Wsi);
-			return 0;
 		}
 		return KeepDefault;
 	};
@@ -5691,13 +6291,14 @@ bool FVaRestLwsProbeAutoReplyTest::RunTest(const FString& Parameters)
 	{
 		return All.FilterByPredicate([Conn](const FEvent& Each) { return Each.Conn == Conn && Each.Reason == WriteDone; }).Num() >= Expected;
 	}, 30.0);
-	TestTrue(TEXT("A, the reply and B are all written"), bWritten);
+	NoteOutcome(*this, TEXT("A, the reply and B were all written"), bWritten);
 	Rig.Close(Conn, 1000, TEXT("done"));
-	if (!TestTrue(TEXT("the connection ends"), Rig.WaitEnded(Conn, 30.0)))
+	NoteOutcome(*this, TEXT("the connection ended after our close"), Rig.WaitEnded(Conn, 30.0));
+	const FVaRestJson Journal = FetchJournal(*this, Site, Key);
+	if (!TestTrue(TEXT("the server's journal arrived"), Journal.IsValid()))
 	{
 		return false;
 	}
-	const FVaRestJson Journal = FetchJournal(*this, Site, Key);
 	const TArray<FVaRestJson> Messages = JournalEvents(Journal, TEXT("message"));
 	TArray<FString> Order;
 	for (const FVaRestJson& Each : Messages)
@@ -5709,11 +6310,16 @@ bool FVaRestLwsProbeAutoReplyTest::RunTest(const FString& Parameters)
 		&& Messages[1][TEXT("text")].AsString().Equals(TEXT("3"), ESearchCase::CaseSensitive) && Messages[2][TEXT("len")].AsInt64() == MessageBytes;
 	FEvent Push;
 	FEvent Replied;
-	const bool bTimed = Rig.Find(Conn, Marker, Push, TEXT("push")) && Rig.Find(Conn, WriteDone, Replied, TEXT("reply"));
-	Fact(*this, TEXT("tx.autoreply_between_messages"), AgreesIf(bBetween),
-		FString::Printf(TEXT("messages at the server: %s; the push arrived with %lld of A's %d fragments still queued"), *FString::Join(Order, TEXT(", ")), Push.Len, AutoReplyFragments),
+	const bool bPushed = Rig.Find(Conn, Marker, Push, TEXT("push"));
+	const bool bTimed = bPushed && Rig.Find(Conn, WriteDone, Replied, TEXT("reply"));
+	// Review I-1: the boundary is exercised only when the push lands while fragments of A are still queued
+	const bool bExercised = bPushed && Push.Len > 0;
+	const FString AtServer = FString::Printf(TEXT("messages at the server: %s"), *FString::Join(Order, TEXT(", ")));
+	Fact(*this, TEXT("tx.autoreply_between_messages"), bExercised ? AgreesIf(bBetween) : EVerdict::Recorded,
+		bExercised ? FString::Printf(TEXT("%s; the push arrived with %lld of A's %d fragments still queued"), *AtServer, Push.Len, AutoReplyFragments)
+			: FString::Printf(TEXT("%s; push arrived after A (%s): boundary not exercised"), *AtServer, bPushed ? TEXT("no fragment of A queued") : TEXT("no push seen")),
 		TEXT("WebSocket spec 2.4 rev 2 (22 SW-5): a reply is written at the next message boundary, never inside a fragmented message"),
-		TEXT("A and B: 2 MiB text in 32 fragments each; the reply \"3\" to the server's \"2\""));
+		TEXT("A and B: 2 MiB text in 32 fragments each; the reply \"3\" to the server's \"2\"; the boundary rule is the rig's own (the hook writes the reply only when the outbox head starts a message), so the row checks LWS's write order and the delay"));
 	Fact(*this, TEXT("tx.autoreply_delay_ms"), EVerdict::Recorded,
 		bTimed ? FString::Printf(TEXT("%.1f ms from the push to the reply's lws_write"), (Replied.Time - Push.Time) * 1000.0) : FString(TEXT("not measured")),
 		TEXT("none"), TEXT("bounded by the fragments of A still queued"));
@@ -5762,13 +6368,13 @@ bool FVaRestLwsProbeSoSndbufTest::RunTest(const FString& Parameters)
 	Tls.Hook = SetSndbuf;
 	TArray<FEvent> PlainSeen;
 	TArray<FEvent> TlsSeen;
-	bool bAll = Visit(*this, Rig, Plain, PlainSeen);
-	bAll = Visit(*this, Rig, Tls, TlsSeen) && bAll;
+	Visit(*this, Rig, Plain, PlainSeen);
+	Visit(*this, Rig, Tls, TlsSeen);
 	const FEvent* PlainMark = PlainSeen.FindByPredicate([](const FEvent& Each) { return Each.Reason == Marker; });
 	const FEvent* TlsMark = TlsSeen.FindByPredicate([](const FEvent& Each) { return Each.Reason == Marker; });
 	Fact(*this, TEXT("tx.so_sndbuf_ws"), EVerdict::Recorded, PlainMark ? PlainMark->Note : FString::Printf(TEXT("never opened: %s"), *ErrorOf(PlainSeen)), SndbufSpec, TEXT("ws://, in CLIENT_ESTABLISHED"));
 	Fact(*this, TEXT("tx.so_sndbuf_wss"), EVerdict::Recorded, TlsMark ? TlsMark->Note : FString::Printf(TEXT("never opened: %s"), *ErrorOf(TlsSeen)), SndbufSpec, TEXT("wss:// (the TCP socket under TLS), in CLIENT_ESTABLISHED"));
-	return bAll;
+	return true;
 #else
 	Fact(*this, TEXT("tx.so_sndbuf_ws"), EVerdict::Unverified, TEXT("unverified here; release-pass item (Win64): setsockopt takes a SOCKET and a char* there"), SndbufSpec, TEXT("this platform"));
 	Fact(*this, TEXT("tx.so_sndbuf_wss"), EVerdict::Unverified, TEXT("unverified here; release-pass item (Win64)"), SndbufSpec, TEXT("this platform"));
@@ -5782,7 +6388,7 @@ bool FVaRestLwsProbeSoSndbufTest::RunTest(const FString& Parameters)
 - [ ] **Step 3: Build and run the group**
 
 Run: `Tools/run_tests.sh Probe.VaRest.Lws.Data`
-Expected: `run_tests: 7 passed, 0 failed`; `grep -c 'FACT {"id":"\(rx\|tx\)\.' /w/Unreal/VaRestHost/Saved/Logs/VaRestTests.log` prints `26`.
+Expected: `run_tests: 7 passed, 0 failed` (a test fails only on a harness invariant, decision 3); `grep -c 'FACT {"id":"\(rx\|tx\)\.' /w/Unreal/VaRestHost/Saved/Logs/VaRestTests.log` prints `26`.
 
 Controls: `rx.bytes_intact` must agree. If it does not, the rig's byte copies are wrong (`FRig::CopyBytes`), and no other `rx.` row can be trusted until that is fixed. `tx.message_intact` must agree too, or the outbox is mangling buffers.
 
@@ -5802,8 +6408,8 @@ Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 - Create: `Source/VaRestTests/Private/LwsProbe/VaRestLwsProbeTlsTest.cpp`
 
 **Interfaces:**
-- Consumes (Task 4): `FRig` (`UsedSslModuleContext`, `Connect`, `WriteText`, `Close`, `WaitFor`, `WaitEnded`, `Events`, `Record`, `GetServer`), `FRigOptions` (`Tls`, `ProvidedSslContext`, `OnLoadExtraClientVerifyCerts`, `OnVerifyServerCert`), `ETls`, `FConn`, `FConnectSpec` (`bTls`, `SslFlags`, `Address`, `Host`, `Hook`), `Visit`, `Opened`, `ErrorOf`, `EventText`, `OfReason`, `FetchBytes`, `AddPemToStore`, `Fact`, `AgreesIf`, `YesNo`, `Marker`, `ConnectReturned`, `KeepDefault`; engine: `FSslModule::Get()` (`SSL_API`), `ISslCertificateManager::AddCertificatesToSslContext`, `VerifySslCertificates(X509_STORE_CTX*, const FString&)` (`Runtime/Online/SSL/Public/Interfaces/ISslCertificateManager.h:28`, `:66`), `FWebSocketsModule` via `FModuleManager::LoadModuleChecked` (virtual `CreateWebSocket`, `WebSocketsModule.h:72`), `IWebSocket` (`Connect`, `Send`, `Close`, `OnConnected`, `OnMessage`, `OnConnectionError`, `OnClosed`; `IWebSocket.h:16-70`); `VaRest::Http::Testing::FLogCapture`.
-- Produces facts: `tls.ssl_module_ctx`, `tls.load_extra_fired`, `tls.insecure_localhost`, `tls.insecure_ip_host`, `tls.insecure_skip_hostname`, `tls.version`, `tls.untrusted_rejected`, `tls.trusted_ca_verified`, `tls.hostname_with_port`, `tls.hostname_ip_literal`, `tls.verify_callback_calls`, `tls.provided_ctx_connects`, `tls.provided_ctx_load_extra_fired`, `coexist.shared_lws_state`, `coexist.lws_symbol_owner`, `coexist.both_ws`, `coexist.both_wss`, `coexist.engine_after_probe_teardown`, `coexist.engine_lws_log_routed`.
+- Consumes (Task 4): `FRig` (`UsedSslModuleContext`, `Connect`, `WriteText`, `Close`, `WaitFor`, `WaitEnded`, `Events`, `Record`, `GetServer`), `FRigOptions` (`Tls`, `ProvidedSslContext`, `OnLoadExtraClientVerifyCerts`, `OnVerifyServerCert`), `ETls`, `FConn`, `FConnectSpec` (`bTls`, `SslFlags`, `Address`, `Host`, `Hook`), `Visit`, `Opened`, `ErrorOf`, `EventText`, `OfReason`, `FetchBytes`, `AddPemToStore`, `Fact`, `AgreesIf`, `YesNo`, `Marker`, `ConnectReturned`, `KeepDefault`; `openssl_websocket_private_data_index` (libwebsockets.a `ssl.c.o`, Linux only, decision 16); engine: `FSslModule::Get()` (`SSL_API`), `ISslCertificateManager::AddCertificatesToSslContext`, `VerifySslCertificates(X509_STORE_CTX*, const FString&)` (`Runtime/Online/SSL/Public/Interfaces/ISslCertificateManager.h:28`, `:66`), `FWebSocketsModule` via `FModuleManager::LoadModuleChecked` (virtual `CreateWebSocket`, `WebSocketsModule.h:72`), `IWebSocket` (`Connect`, `Send`, `Close`, `OnConnected`, `OnMessage`, `OnConnectionError`, `OnClosed`; `IWebSocket.h:16-70`); `VaRest::Http::Testing::FLogCapture`.
+- Produces facts: `tls.ssl_module_ctx`, `tls.load_extra_fired`, `tls.insecure_localhost`, `tls.insecure_ip_host`, `tls.insecure_skip_hostname`, `tls.version`, `tls.untrusted_rejected`, `tls.trusted_ca_verified`, `tls.hostname_with_port`, `tls.hostname_ip_literal`, `tls.verify_callback_calls`, `tls.provided_ctx_connects`, `tls.provided_ctx_load_extra_fired`, `coexist.shared_lws_state`, `coexist.lws_symbol_owner`, `coexist.both_ws`, `coexist.both_wss`, `coexist.engine_after_probe_teardown`, `coexist.engine_lws_log_routed`, `coexist.context_create_reallocates_ssl_index`.
 - Tests: `Probe.VaRest.Lws.Tls.EnginePath`, `.Tls.Verification`, `.Tls.ProvidedContext`, `Probe.VaRest.Lws.Coexist.EngineWebSocket`.
 
 - [ ] **Step 1: Run the filter to see it match nothing**
@@ -5833,6 +6439,7 @@ Create `Source/VaRestTests/Private/LwsProbe/VaRestLwsProbeTlsTest.cpp`:
 #include "Misc/CoreDelegates.h"
 #include "Misc/Paths.h"
 #include "Misc/ScopeExit.h"
+#include "Misc/StringOutputDevice.h"
 #include "Modules/ModuleManager.h"
 #include "Ssl.h"
 #include "VaRestHttpTesting.h"
@@ -5840,6 +6447,10 @@ Create `Source/VaRestTests/Private/LwsProbe/VaRestLwsProbeTlsTest.cpp`:
 
 #if PLATFORM_LINUX
 #include <dlfcn.h>
+
+// libwebsockets.a's ssl.c.o defines this as a common symbol (nm: C) and declares it in no header; lws_context_init_ssl_library
+// stores a fresh CRYPTO_get_ex_new_index into it on every lws_create_context (WS W0 decision 16, review I-3)
+extern "C" int openssl_websocket_private_data_index;
 #endif
 
 namespace VaRest::LwsProbe::VaRestLwsProbeTlsTestPrivate
@@ -5989,6 +6600,33 @@ namespace VaRest::LwsProbe::VaRestLwsProbeTlsTestPrivate
 		return bBothOpen && bEchoed && bEnded;
 	}
 
+	/**
+	 * A log category's current verbosity as "Log list <cat>" prints it ("%-40s  %-12s", LogSuppressionInterface.cpp:593-614),
+	 * or empty when it is not listed or exec commands are compiled out
+	 */
+	FString LogVerbosityOf(const TCHAR* Category)
+	{
+		FString Out;
+#if UE_ALLOW_EXEC_COMMANDS
+		FStringOutputDevice Listing;
+		Listing.SetAutoEmitLineTerminator(true);
+		GEngine->Exec(nullptr, *FString::Printf(TEXT("Log list %s"), Category), Listing);
+		TArray<FString> Lines;
+		Listing.ParseIntoArrayLines(Lines);
+		for (const FString& Line : Lines)
+		{
+			TArray<FString> Tokens;
+			Line.ParseIntoArrayWS(Tokens);
+			// "Log list" matches substrings: take only the category itself
+			if (Tokens.Num() >= 2 && Tokens[0].Equals(Category, ESearchCase::CaseSensitive))
+			{
+				Out = Tokens[1];
+			}
+		}
+#endif
+		return Out;
+	}
+
 	/** lwsl_visible reads this module's copy of LWS's log level (libwebsockets.h:434-443) */
 	FString LogBits()
 	{
@@ -6031,9 +6669,10 @@ bool FVaRestLwsProbeTlsEnginePathTest::RunTest(const FString& Parameters)
 	TArray<FEvent> LocalSeen;
 	TArray<FEvent> IpSeen;
 	TArray<FEvent> SkipSeen;
-	bool bAll = Visit(*this, Rig, Tls(Site, TEXT("localhost"), LCCSCF_ALLOW_SELFSIGNED), LocalSeen);
-	bAll = Visit(*this, Rig, Tls(Site, Site.Host, LCCSCF_ALLOW_SELFSIGNED), IpSeen) && bAll;
-	bAll = Visit(*this, Rig, Tls(Site, Site.Host, LCCSCF_ALLOW_SELFSIGNED | LCCSCF_SKIP_SERVER_CERT_HOSTNAME_CHECK), SkipSeen) && bAll;
+	// A refused handshake, or a connection that never ends, is a fact (Visit notes it), not a failure (review M-2)
+	Visit(*this, Rig, Tls(Site, TEXT("localhost"), LCCSCF_ALLOW_SELFSIGNED), LocalSeen);
+	Visit(*this, Rig, Tls(Site, Site.Host, LCCSCF_ALLOW_SELFSIGNED), IpSeen);
+	Visit(*this, Rig, Tls(Site, Site.Host, LCCSCF_ALLOW_SELFSIGNED | LCCSCF_SKIP_SERVER_CERT_HOSTNAME_CHECK), SkipSeen);
 	const FString InsecureSpec = TEXT("WebSocket spec 2.2: wss+insecure means self-signed allowed (LCCSCF_ALLOW_SELFSIGNED, as LwsWebSocket.cpp:747-750); 16.3: the test server is reached that way");
 	Fact(*this, TEXT("tls.insecure_localhost"), EVerdict::Recorded, TlsOutcome(LocalSeen), InsecureSpec,
 		TEXT("LCCSCF_ALLOW_SELFSIGNED, Host localhost:<port>, the chain leaf + test CA, the engine's roots and verify step"));
@@ -6053,7 +6692,7 @@ bool FVaRestLwsProbeTlsEnginePathTest::RunTest(const FString& Parameters)
 	}
 	Fact(*this, TEXT("tls.version"), EVerdict::Recorded, Version, TEXT("none (ESslTlsProtocol stops at TLSv1_2, ISslManager.h:14-33; OpenSSL 1.1.1 also speaks 1.3)"),
 		TEXT("SSL_get_version(lws_get_ssl(wsi)) at ESTABLISHED"));
-	return bAll;
+	return true;
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestLwsProbeTlsVerificationTest, "Probe.VaRest.Lws.Tls.Verification",
@@ -6080,14 +6719,14 @@ bool FVaRestLwsProbeTlsVerificationTest::RunTest(const FString& Parameters)
 	Untrusting.OnLoadExtraClientVerifyCerts = &EngineRoots;
 	Untrusting.OnVerifyServerCert = &EngineVerify;
 	TArray<FEvent> UntrustedSeen;
-	bool bAll = true;
+	// One TLS rig alive at a time (decision 16)
 	{
 		FRig Rig(Site, MoveTemp(Untrusting));
 		if (!TestTrue(TEXT("the untrusting context exists"), Rig.IsReady()))
 		{
 			return false;
 		}
-		bAll = Visit(*this, Rig, Tls(Site, TEXT("localhost"), 0), UntrustedSeen) && bAll;
+		Visit(*this, Rig, Tls(Site, TEXT("localhost"), 0), UntrustedSeen);
 	}
 	// Trusted: the same, with the test CA in the store
 	FRigOptions Trusting;
@@ -6106,8 +6745,8 @@ bool FVaRestLwsProbeTlsVerificationTest::RunTest(const FString& Parameters)
 		{
 			return false;
 		}
-		bAll = Visit(*this, Rig, Tls(Site, TEXT("localhost"), 0), TrustedSeen) && bAll;
-		bAll = Visit(*this, Rig, Tls(Site, Site.Host, 0), IpSeen) && bAll;
+		Visit(*this, Rig, Tls(Site, TEXT("localhost"), 0), TrustedSeen);
+		Visit(*this, Rig, Tls(Site, Site.Host, 0), IpSeen);
 	}
 	Fact(*this, TEXT("tls.untrusted_rejected"), AgreesIf(!Opened(UntrustedSeen)), TlsOutcome(UntrustedSeen),
 		TEXT("WebSocket spec 2.2: wss verifies the chain (engine roots, VerifySslCertificates); a chain from an unknown CA is refused"),
@@ -6135,7 +6774,7 @@ bool FVaRestLwsProbeTlsVerificationTest::RunTest(const FString& Parameters)
 	Fact(*this, TEXT("tls.verify_callback_calls"), EVerdict::Recorded, Calls.Num() > 0 ? FString::Join(Calls, TEXT("; ")) : FString(TEXT("PERFORM_SERVER_CERT_VERIFICATION never called")),
 		TEXT("WebSocket spec 2.2: PERFORM_SERVER_CERT_VERIFICATION -> VerifySslCertificates, with the user-data remap (LwsWebSocketsManager.cpp:447-456)"),
 		TEXT("the trusted and the untrusted connection"));
-	return bAll;
+	return true;
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestLwsProbeTlsProvidedContextTest, "Probe.VaRest.Lws.Tls.ProvidedContext",
@@ -6171,7 +6810,6 @@ bool FVaRestLwsProbeTlsProvidedContextTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("the test CA is in the provided context's store"), AddPemToStore(Provided, Ca), 1);
 	TArray<FEvent> Seen;
 	bool bLoadExtra = false;
-	bool bAll = true;
 	{
 		FRigOptions Options;
 		Options.Tls = ETls::ProvidedContext;
@@ -6182,7 +6820,7 @@ bool FVaRestLwsProbeTlsProvidedContextTest::RunTest(const FString& Parameters)
 			return false;
 		}
 		bLoadExtra = LoadExtraFired(Rig);
-		bAll = Visit(*this, Rig, Tls(Site, TEXT("localhost"), 0), Seen);
+		Visit(*this, Rig, Tls(Site, TEXT("localhost"), 0), Seen);
 	}
 	Fact(*this, TEXT("tls.provided_ctx_connects"), EVerdict::Recorded, TlsOutcome(Seen),
 		TEXT("T15: TLS through a provided SSL_CTX (provided_client_ssl_ctx, libwebsockets.h:2764-2772); WebSocket spec 2.1's monolithic path"),
@@ -6190,7 +6828,7 @@ bool FVaRestLwsProbeTlsProvidedContextTest::RunTest(const FString& Parameters)
 	Fact(*this, TEXT("tls.provided_ctx_load_extra_fired"), EVerdict::Recorded, YesNo(bLoadExtra),
 		TEXT("WebSocket spec 2.2 relies on LOAD_EXTRA_CLIENT_VERIFY_CERTS for the engine's roots; with a provided context they come from CreateSslContext itself (bAddCertificates, ISslManager.h:46-47, SslManager.cpp:114-117)"),
 		TEXT("the provided-context rig's callbacks during lws_create_context"));
-	return bAll;
+	return true;
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestLwsProbeCoexistTest, "Probe.VaRest.Lws.Coexist.EngineWebSocket",
@@ -6230,8 +6868,13 @@ bool FVaRestLwsProbeCoexistTest::RunTest(const FString& Parameters)
 	{
 		OwnerFile = FPaths::GetCleanFilename(UTF8_TO_TCHAR(Info.dli_fname));
 	}
-	FString EngineCopy = TEXT("libUnrealEditor-WebSockets.so is not loaded");
-	if (void* EngineLib = dlopen("libUnrealEditor-WebSockets.so", RTLD_LAZY | RTLD_NOLOAD))
+	// Review M-4: the engine module's own path, from its object's vtable pointer (the Itanium ABI puts it first, in the
+	// module's .so), not a bare soname that depends on the search path
+	FString EngineCopy = TEXT("the WebSockets module's object was not found in any loaded file");
+	Dl_info ModuleInfo = {};
+	void* EngineLib = dladdr(*reinterpret_cast<void**>(&Module), &ModuleInfo) != 0 && ModuleInfo.dli_fname
+		? dlopen(ModuleInfo.dli_fname, RTLD_LAZY | RTLD_NOLOAD) : nullptr;
+	if (EngineLib)
 	{
 		void* EngineSymbol = dlsym(EngineLib, "lws_create_context");
 		EngineCopy = !EngineSymbol ? TEXT("the engine module exports no lws_create_context")
@@ -6240,18 +6883,84 @@ bool FVaRestLwsProbeCoexistTest::RunTest(const FString& Parameters)
 		// RTLD_NOLOAD took a reference: give it back
 		dlclose(EngineLib);
 	}
-	Fact(*this, TEXT("coexist.lws_symbol_owner"), EVerdict::Recorded, FString::Printf(TEXT("this module's lws_create_context is in %s; %s"), *OwnerFile, *EngineCopy),
-		TEXT("WebSocket spec 1.2: libUnrealEditor-WebSockets.so exports 185 lws_* functions"), TEXT("dladdr, dlopen(RTLD_NOLOAD) + dlsym"));
+	const FString EngineFile = ModuleInfo.dli_fname ? FPaths::GetCleanFilename(UTF8_TO_TCHAR(ModuleInfo.dli_fname)) : FString(TEXT("(unknown)"));
+	Fact(*this, TEXT("coexist.lws_symbol_owner"), EVerdict::Recorded,
+		FString::Printf(TEXT("this module's lws_create_context is in %s; the WebSockets module is %s: %s"), *OwnerFile, *EngineFile, *EngineCopy),
+		TEXT("WebSocket spec 1.2: libUnrealEditor-WebSockets.so exports 185 lws_* functions"),
+		TEXT("dladdr of lws_create_context; dladdr of the FWebSocketsModule object's vtable, then dlopen(that path, RTLD_NOLOAD) + dlsym"));
 #else
 	Fact(*this, TEXT("coexist.lws_symbol_owner"), EVerdict::Unverified,
 		TEXT("unverified here; release-pass item (Win64, Mac): separate DLL / two-level-namespace copies by construction"),
 		TEXT("WebSocket spec 1.2"), TEXT("this platform"));
 #endif
 
-	// Decision 11: the engine's leg skips its certificate check for this test only, so an IP URL is not failed by the
-	// host-name check; read again on a config change (LwsWebSocketsManager.cpp:91-93, WebSocketsModule.cpp:47, :68-74)
+	// 1b. Review I-3: does creating a context re-allocate the OpenSSL ex-data index this LWS copy's verify callback reads?
+	// Rigs made one after another, no TLS connection in flight (decision 16)
+#if PLATFORM_LINUX
+	const int32 IndexBefore = openssl_websocket_private_data_index;
+	int32 IndexAfterPlain = IndexBefore;
+	int32 IndexAfterTls = IndexBefore;
+	{
+		FRig PlainRig(Site);
+		if (!TestTrue(TEXT("the plain probe context exists"), PlainRig.IsReady()))
+		{
+			return false;
+		}
+		IndexAfterPlain = openssl_websocket_private_data_index;
+	}
+	{
+		FRigOptions TlsOptions;
+		TlsOptions.Tls = ETls::LwsGlobalInit;
+		FRig TlsRig(Site, MoveTemp(TlsOptions));
+		if (!TestTrue(TEXT("the TLS probe context exists"), TlsRig.IsReady()))
+		{
+			return false;
+		}
+		IndexAfterTls = openssl_websocket_private_data_index;
+	}
+	Dl_info IndexInfo = {};
+	const FString IndexFile = dladdr(reinterpret_cast<void*>(&openssl_websocket_private_data_index), &IndexInfo) != 0 && IndexInfo.dli_fname
+		? FPaths::GetCleanFilename(UTF8_TO_TCHAR(IndexInfo.dli_fname)) : FString(TEXT("(unknown)"));
+	Fact(*this, TEXT("coexist.context_create_reallocates_ssl_index"), AgreesIf(IndexBefore == IndexAfterPlain && IndexAfterPlain == IndexAfterTls),
+		FString::Printf(TEXT("openssl_websocket_private_data_index (in %s) was %d, %d after a plain context, %d after a TLS context (DO_SSL_GLOBAL_INIT)"),
+			*IndexFile, IndexBefore, IndexAfterPlain, IndexAfterTls),
+		TEXT("WebSocket spec 1.2: \"Contexts are independent. All connection state lives in the lws_context\""),
+		TEXT("the global read around two lws_create_context calls in VaRestTests' copy; statically, lws_context_init_ssl_library stores a new CRYPTO_get_ex_new_index on both paths (ssl.c.o 0x1f4, 0x23a) and OpenSSL_client_verify_callback dereferences SSL_get_ex_data under it without a null check (openssl-client.c.o 0x1c8-0x1d6): a TLS handshake in flight across a context creation in the same copy reads NULL"));
+#else
+	Fact(*this, TEXT("coexist.context_create_reallocates_ssl_index"), EVerdict::Unverified,
+		TEXT("unverified here (static evidence only); release-pass item (Win64, Mac): the global is read on Linux only"),
+		TEXT("WebSocket spec 1.2: \"Contexts are independent. All connection state lives in the lws_context\""),
+		TEXT("ssl.c.o 0x1f4, 0x23a and openssl-client.c.o 0x1c8-0x1d6 (review I-3)"));
+#endif
+
+	// Decision 11 (ruling Q4): the engine's leg skips its certificate check for this test only, and connects only to the
+	// local test server while it does. The flag leaves wss at LCCSCF_ALLOW_SELFSIGNED (LwsWebSocket.cpp:741-743); the
+	// verify callback then sets X509_V_OK and accepts (:554-568), which is what lets an IP URL past the host-name check
+	// (review M-9). The engine reads the key again on a config change (LwsWebSocketsManager.cpp:91-93, WebSocketsModule.cpp:47, :68-74).
+	// The restore is armed before anything changes, so every exit path runs it (review M-3)
 	bool bWasDisabled = false;
-	GConfig->GetBool(TEXT("LwsWebSocket"), TEXT("bDisableCertValidation"), bWasDisabled, GEngineIni);
+	const bool bHadKey = GConfig->GetBool(TEXT("LwsWebSocket"), TEXT("bDisableCertValidation"), bWasDisabled, GEngineIni);
+	const FString OldVerbosity = LogVerbosityOf(TEXT("LogWebSockets"));
+	ON_SCOPE_EXIT
+	{
+		if (bHadKey)
+		{
+			GConfig->SetBool(TEXT("LwsWebSocket"), TEXT("bDisableCertValidation"), bWasDisabled, GEngineIni);
+		}
+		else
+		{
+			// Absent before: removed, never written into the host's ini as False
+			GConfig->RemoveKey(TEXT("LwsWebSocket"), TEXT("bDisableCertValidation"), GEngineIni);
+		}
+		FCoreDelegates::TSOnConfigSectionsChanged().Broadcast(GEngineIni, TSet<FString>{ TEXT("LwsWebSocket") });
+#if UE_ALLOW_EXEC_COMMANDS
+		if (!OldVerbosity.IsEmpty())
+		{
+			// The verbosity read above, not LogWebSockets' declared one
+			GEngine->Exec(nullptr, *FString::Printf(TEXT("Log LogWebSockets %s"), *OldVerbosity));
+		}
+#endif
+	};
 	GConfig->SetBool(TEXT("LwsWebSocket"), TEXT("bDisableCertValidation"), true, GEngineIni);
 	FCoreDelegates::TSOnConfigSectionsChanged().Broadcast(GEngineIni, TSet<FString>{ TEXT("LwsWebSocket") });
 #if UE_ALLOW_EXEC_COMMANDS
@@ -6259,15 +6968,6 @@ bool FVaRestLwsProbeCoexistTest::RunTest(const FString& Parameters)
 	// the log suppression's Exec_Runtime (LogSuppressionInterface.cpp:589-591)
 	GEngine->Exec(nullptr, TEXT("Log LogWebSockets Verbose"));
 #endif
-	ON_SCOPE_EXIT
-	{
-		GConfig->SetBool(TEXT("LwsWebSocket"), TEXT("bDisableCertValidation"), bWasDisabled, GEngineIni);
-		FCoreDelegates::TSOnConfigSectionsChanged().Broadcast(GEngineIni, TSet<FString>{ TEXT("LwsWebSocket") });
-#if UE_ALLOW_EXEC_COMMANDS
-		// LogWebSockets' declared verbosity (WebSocketsLog.h:6)
-		GEngine->Exec(nullptr, TEXT("Log LogWebSockets Warning"));
-#endif
-	};
 
 	// 2. ws and wss, an engine socket and a probe connection open at once
 	FString WsWhy;
@@ -6324,7 +7024,8 @@ bool FVaRestLwsProbeCoexistTest::RunTest(const FString& Parameters)
 		FString::Printf(TEXT("%d libwebsockets lines in LogWebSockets during this test (Verbose on)"), LwsLines),
 		TEXT("WebSocket spec 1.2 and D30: the engine's routing to LogWebSockets (LwsWebSocketsManager.cpp:174-176) stays; VaRest never calls lws_set_log_level when WebSockets is loaded"),
 		TEXT("FLogCapture over the engine sockets above"));
-	return bWs && bWss;
+	// A leg that did not echo is a fact (coexist.both_ws / both_wss say which side), not a failure (review M-2)
+	return true;
 #else
 	Fact(*this, TEXT("coexist.shared_lws_state"), EVerdict::Unverified, TEXT("unverified here: WITH_WEBSOCKETS is 0 on this platform"), TEXT("WebSocket spec 1.2"), TEXT("this platform"));
 	Fact(*this, TEXT("coexist.lws_symbol_owner"), EVerdict::Unverified, TEXT("unverified here: WITH_WEBSOCKETS is 0"), TEXT("WebSocket spec 1.2"), TEXT("this platform"));
@@ -6332,6 +7033,7 @@ bool FVaRestLwsProbeCoexistTest::RunTest(const FString& Parameters)
 	Fact(*this, TEXT("coexist.both_wss"), EVerdict::Unverified, TEXT("unverified here: WITH_WEBSOCKETS is 0"), TEXT("WebSocket spec 1.2"), TEXT("this platform"));
 	Fact(*this, TEXT("coexist.engine_after_probe_teardown"), EVerdict::Unverified, TEXT("unverified here: WITH_WEBSOCKETS is 0"), TEXT("WebSocket spec 1.2"), TEXT("this platform"));
 	Fact(*this, TEXT("coexist.engine_lws_log_routed"), EVerdict::Unverified, TEXT("unverified here: WITH_WEBSOCKETS is 0"), TEXT("WebSocket spec 1.2"), TEXT("this platform"));
+	Fact(*this, TEXT("coexist.context_create_reallocates_ssl_index"), EVerdict::Unverified, TEXT("unverified here: WITH_WEBSOCKETS is 0"), TEXT("WebSocket spec 1.2"), TEXT("this platform"));
 	return true;
 #endif
 }
@@ -6342,9 +7044,9 @@ bool FVaRestLwsProbeCoexistTest::RunTest(const FString& Parameters)
 - [ ] **Step 3: Build and run the group**
 
 Run: `Tools/run_tests.sh Probe.VaRest.Lws.Tls && cp /w/Unreal/VaRestHost/Saved/Logs/VaRestTests.log /w/Unreal/VaRestHost/Saved/Logs/VaRestProbe-tls.log && Tools/run_tests.sh --no-build Probe.VaRest.Lws.Coexist`
-Expected: `run_tests: 3 passed, 0 failed` (a `Tls.*` test may fail only on a harness error; a refused handshake is a fact, not a failure), then `run_tests: 1 passed, 0 failed`. `grep -c 'FACT {"id":"tls\.' /w/Unreal/VaRestHost/Saved/Logs/VaRestProbe-tls.log` prints `13`; `grep -c 'FACT {"id":"coexist\.' /w/Unreal/VaRestHost/Saved/Logs/VaRestTests.log` prints `6`.
+Expected: `run_tests: 3 passed, 0 failed` (a `Tls.*` test may fail only on a harness error; a refused handshake is a fact, not a failure), then `run_tests: 1 passed, 0 failed`. After the coexist run, check the host's ini was left alone: `grep -n bDisableCertValidation /w/Unreal/VaRestHost/Saved/Config/*/Engine.ini /w/Unreal/VaRestHost/Config/DefaultEngine.ini` shows nothing the test wrote (ruling Q4). `grep -c 'FACT {"id":"tls\.' /w/Unreal/VaRestHost/Saved/Logs/VaRestProbe-tls.log` prints `13`; `grep -c 'FACT {"id":"coexist\.' /w/Unreal/VaRestHost/Saved/Logs/VaRestTests.log` prints `7`.
 
-`Coexist.EngineWebSocket` returns false when an engine or probe leg did not echo, so a red result is a finding. Read its `coexist.both_ws` and `coexist.both_wss` rows (they say which side failed) before deciding whether it is the harness or the libraries. If the engine leg failed with `Invalid Domain`, the host project has an `[Online.HttpManager]` allowlist: add `127.0.0.1` to it in `/w/Unreal/VaRestHost/Config/DefaultEngine.ini` (outside this repository, a test-host setting) and re-run.
+`Coexist.EngineWebSocket` fails only on a harness invariant (decision 3): the server, a rig or the module did not start. A leg that did not echo is a fact: read the `coexist.both_ws` and `coexist.both_wss` rows (they say which side failed) before deciding whether it is the harness or the libraries. If the engine leg failed with `Invalid Domain`, the host project has an `[Online.HttpManager]` allowlist: add `127.0.0.1` to it in `/w/Unreal/VaRestHost/Config/DefaultEngine.ini` (outside this repository, a test-host setting) and re-run.
 
 Controls: `tls.untrusted_rejected` must agree, because LWS must refuse a CA it does not trust. If it differs, stop: the probe's verify mirror would be accepting anything, and no `tls.` row is evidence until that is understood; file a P0 bead for it in Task 11.
 
@@ -6366,7 +7068,7 @@ Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: the FACT/PENDING lines of Tasks 5–9 (`LogVaRestLwsProbe: Display: FACT {json}`, `... PENDING {json}`) in the run logs; `Engine/Build/Build.version`.
-- Produces: `python3 -I Tools/lws_probe_passport.py --log <file> [--log <file> ...] --out <md> [--engine <dir>]` (exit 0 when every `EXPECTED` id was recorded, 1 with the missing ids listed otherwise) and `--selftest`. The passport sections are, in order: "Machine and build", "How the probe works", "Summary", "Missing facts" (only when ids are missing), "Differs from the spec", "Crashed", "Results" (one table per id prefix), "Re-run". Task 11 reads the "Differs" list and the `observed` column.
+- Produces: `python3 -I Tools/lws_probe_passport.py --log <file> [<file> ...] [--log ...] --out <md> [--engine <dir>]` (exit 0 when every `EXPECTED` id was recorded, 1 with the missing ids listed otherwise) and `--selftest`. The passport sections are, in order: "Machine and build", "How the probe works", "Summary", "Missing facts" (only when ids are missing), "Differs from the spec", "Crashed", "Results" (one table per id prefix), "Re-run". Task 11 reads the "Differs" list and the `observed` column.
 
 - [ ] **Step 1: Run the selftest to see it fail**
 
@@ -6382,12 +7084,13 @@ Create `Tools/lws_probe_passport.py`:
 # Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 """Writes the libwebsockets 3.0 probe passport (WebSocket spec 16.4, milestone W0) from the FACT lines of probe runs.
 
-    python3 -I Tools/lws_probe_passport.py --log <log> [--log <log> ...] --out docs/passport/<date>-lws30-probe.md
+    python3 -I Tools/lws_probe_passport.py --log <log> [<log> ...] --out docs/passport/<date>-lws30-probe.md
     python3 -I Tools/lws_probe_passport.py --selftest
 
 The probe tests (Source/VaRestTests/Private/LwsProbe/) log one line per fact,
     LogVaRestLwsProbe: Display: FACT {"id", "verdict", "observed", "spec", "evidence", "test"}
-and "PENDING {"id"}" right before a call that may end the process: a PENDING id with no FACT becomes "crashed". Every
+and "PENDING {"id"}" right before a call that may end the process: a PENDING id with no FACT becomes "crashed" (the
+Probe.VaRest.Risky.* cases run one per process, so each has its own log). Every
 id in EXPECTED must be present, or the exit status is 1 and the missing ones are listed, so a probe that stopped
 recording cannot pass unnoticed. Ids starting with "rig." are the harness's own checks and are left out.
 """
@@ -6407,18 +7110,22 @@ EXPECTED = (
     "env.lws_version", "env.openssl_version", "env.build", "env.websockets_loaded_at_start",
     "release.win64", "release.mac", "release.android_ios",
     "svc.commands_inside_wait_cancelled", "svc.commands_between_service_calls", "svc.cancel_wake_ms",
-    "svc.timer_latency_ms", "svc.kill_async_ms", "svc.kill_async_sequence", "svc.kill_async_close_frame",
-    "timeout.default_secs", "timeout.configured_secs", "timeout.kill_pending_ms", "timeout.kill_pending_sequence",
-    "timeout.tcp_connect_blackhole",
+    "svc.timer_latency_ms", "svc.kill_async_ms", "svc.kill_async_ms_short_wait", "svc.kill_async_sequence",
+    "svc.kill_async_close_frame",
+    "timeout.default_secs", "timeout.configured_secs", "timeout.kill_pending_ms", "timeout.kill_pending_ms_short_wait",
+    "timeout.kill_pending_sequence", "timeout.tcp_connect_blackhole", "timeout.default_secs_blackhole",
     "hs.unregistered_selected_bound", "hs.selected_protocol_in_filter", "hs.unregistered_selected_unbound",
     "hs.unoffered_selected", "hs.none_selected", "hs.offered_header",
     "hs.raw_origin", "hs.default_origin", "hs.origin_omitted", "hs.append_header_space", "hs.append_header_user",
     "hs.append_header_fill", "hs.host_header",
     "hs.refusal_401", "hs.refusal_403", "hs.refusal_404", "hs.refusal_429", "hs.refusal_500", "hs.refusal_503",
-    "hs.refusal_sequence", "hs.no_upgrade_response", "hs.bad_accept", "hs.missing_upgrade", "hs.missing_connection",
-    "hs.connect_refused", "hs.dns_failure",
+    "hs.refusal_sequence", "hs.callback_user_by_reason", "hs.no_upgrade_response", "hs.bad_accept",
+    "hs.missing_upgrade", "hs.missing_connection", "hs.connect_refused", "hs.dns_failure",
     "hs.redirect_relative", "hs.redirect_absolute", "hs.redirect_reappends_headers", "hs.redirect_to_tls",
-    "hs.redirect_downgrade", "hs.status_in_connection_error",
+    "hs.redirect_downgrade", "hs.redirect_target_visible", "hs.redirect_veto", "hs.redirect_host_header",
+    "hs.status_in_connection_error.refused", "hs.status_in_connection_error.connect_refused",
+    "hs.status_in_connection_error.dns_failure", "hs.status_in_connection_error.no_upgrade",
+    "hs.status_in_connection_error.tls_verify_failure", "hs.status_in_connection_error.killed_pending",
     "close.rewritten_codes", "close.echo_on_return_0", "close.echo_payload", "close.reason_utf8_bytes",
     "close.peer_sequence", "close.empty_len", "close.empty_echo", "close.one_byte", "close.return_1_echo",
     "close.ours_echoed_ms", "close.ours_noecho_wait_ms", "close.ours_sequence", "close.ours_long_reason",
@@ -6439,7 +7146,11 @@ EXPECTED = (
     "tls.provided_ctx_load_extra_fired",
     "coexist.monolithic", "coexist.shared_lws_state", "coexist.lws_symbol_owner", "coexist.both_ws",
     "coexist.both_wss", "coexist.engine_after_probe_teardown", "coexist.engine_lws_log_routed",
+    "coexist.context_create_reallocates_ssl_index",
 )
+# Probe.VaRest.Risky.Lws.StatusInConnectionError.<case>: one run each (WS W0 decision 10); the id is the snake-case name
+RISKY_CASES = ("Refused", "ConnectRefused", "DnsFailure", "NoUpgrade", "TlsVerifyFailure", "KilledPending")
+LOGS = "/w/Unreal/VaRestHost/Saved/Logs"
 VERDICTS = ("differs", "crashed", "agrees", "recorded", "unverified")
 LINE = re.compile(r"LogVaRestLwsProbe: Display: (FACT|PENDING) (\{.*\})\s*$")
 SECTIONS = (
@@ -6462,6 +7173,12 @@ METHOD = (
     "One service thread per context, waiting up to 10 s in `lws_service` and woken by `lws_cancel_service`; game-thread "
     "commands (connect, write, close, kill, flow control) run inside `LWS_CALLBACK_EVENT_WAIT_CANCELLED` "
     "(`svc.commands_*` compares that with the engine's between-calls placement).",
+    "Facts about LWS's own timers (handshake, close-ack and idle timeouts, the blackholes) wait at most 100 ms instead: "
+    "LWS checks its deadlines only when `lws_service` returns. Each kill latency is measured with both waits "
+    "(`*_short_wait` rows).",
+    "Library outcomes (a connection that opened, ended or echoed) are facts, never failed tests; a test fails only when "
+    "the harness did not run. Calls that may end the process (`Probe.VaRest.Risky.*`) run one case per process after "
+    "a `PENDING` line.",
     "Every callback is recorded in order with its length, flags and a copy of its bytes; the server side comes from "
     "`ws.py`'s journal (`GET /ws/journal`) over HTTP, never through the library under test.",
     "TLS against the test server's committed throwaway CA (`Tools/testserver/certs/`).",
@@ -6537,7 +7254,7 @@ def render(facts, logs, machine, today, missing):
     for name, value in machine:
         lines.append("| %s | %s |" % (name, cell(value)))
     lines.append("| libwebsockets | %s |" % cell(observed("env.lws_version")))
-    lines.append("| OpenSSL (VaRestTests' copy) | %s |" % cell(observed("env.openssl_version")))
+    lines.append("| OpenSSL (as VaRestTests' calls resolve) | %s |" % cell(observed("env.openssl_version")))
     lines.append("| Build | %s |" % cell(observed("env.build")))
     lines.append("| Logs | %s |" % cell(", ".join(os.path.basename(path) for path in logs)))
     lines += ["", "## How the probe works", ""] + ["- " + text for text in METHOD]
@@ -6566,17 +7283,20 @@ def render(facts, logs, machine, today, missing):
             lines.append("| `%s` | %s | %s | %s | %s |" % (key, record.get("verdict", ""), cell(record.get("observed", "")),
                                                            cell(record.get("spec", "")), cell(record.get("evidence", ""))))
     lines += ["", "## Re-run", "", "```",
-              "Tools/run_tests.sh Probe.VaRest.Lws; cp /w/Unreal/VaRestHost/Saved/Logs/VaRestTests.log /w/Unreal/VaRestHost/Saved/Logs/VaRestProbe-main.log",
-              "Tools/run_tests.sh --no-build Probe.VaRest.Risky; cp /w/Unreal/VaRestHost/Saved/Logs/VaRestTests.log /w/Unreal/VaRestHost/Saved/Logs/VaRestProbe-risky.log",
-              "python3 -I Tools/lws_probe_passport.py --log /w/Unreal/VaRestHost/Saved/Logs/VaRestProbe-main.log \\",
-              "    --log /w/Unreal/VaRestHost/Saved/Logs/VaRestProbe-risky.log --out docs/passport/$(date +%F)-lws30-probe.md",
+              "Tools/run_tests.sh Probe.VaRest.Lws; cp %s/VaRestTests.log %s/VaRestProbe-main.log" % (LOGS, LOGS),
+              "for CASE in %s; do" % " ".join(RISKY_CASES),
+              "\tTools/run_tests.sh --no-build \"Probe.VaRest.Risky.Lws.StatusInConnectionError.$CASE\"",
+              "\tcp %s/VaRestTests.log \"%s/VaRestProbe-risky-$CASE.log\"" % (LOGS, LOGS),
+              "done",
+              "python3 -I Tools/lws_probe_passport.py --log %s/VaRestProbe-main.log %s/VaRestProbe-risky-*.log \\" % (LOGS, LOGS),
+              "\t--out docs/passport/$(date +%F)-lws30-probe.md",
               "```", ""]
     return "\n".join(lines)
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="libwebsockets 3.0 probe passport")
-    parser.add_argument("--log", action="append", default=[], help="a run log with FACT lines (repeatable)")
+    parser.add_argument("--log", action="extend", nargs="+", default=[], help="run logs with FACT lines (one or more; repeatable)")
     parser.add_argument("--out", help="the passport to write")
     parser.add_argument("--engine", default=os.environ.get("VAREST_ENGINE", "/w/Unreal/UnrealEngine"))
     parser.add_argument("--selftest", action="store_true")
@@ -6619,26 +7339,26 @@ class SelfTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             log = self.write_log(directory, [
                 self.fact("hs.raw_origin", "differs", "Origin: http://x | y"),
-                "[...]LogVaRestLwsProbe: Display: PENDING " + json.dumps({"id": "hs.status_in_connection_error"}),
+                "[...]LogVaRestLwsProbe: Display: PENDING " + json.dumps({"id": "hs.status_in_connection_error.no_upgrade"}),
                 self.fact("rig.fact_line"),
                 "LogSomethingElse: Display: FACT {not ours}",
             ])
             facts = read_facts([log])
-        self.assertEqual(sorted(facts), ["hs.raw_origin", "hs.status_in_connection_error"])
-        self.assertEqual(facts["hs.status_in_connection_error"]["verdict"], "crashed")
+        self.assertEqual(sorted(facts), ["hs.raw_origin", "hs.status_in_connection_error.no_upgrade"])
+        self.assertEqual(facts["hs.status_in_connection_error.no_upgrade"]["verdict"], "crashed")
         text = render(facts, [log], [("Date", "2026-10-21")], "2026-10-21", ["env.lws_version"])
         self.assertIn("| `hs.raw_origin` | differs | Origin: http://x \\| y |", text)
         self.assertIn("## Missing facts", text)
-        self.assertIn("- `hs.status_in_connection_error`: the process ended inside the probed call", text)
+        self.assertIn("- `hs.status_in_connection_error.no_upgrade`: the process ended inside the probed call", text)
 
     def test_a_pending_line_with_its_fact_is_not_a_crash(self):
         with tempfile.TemporaryDirectory() as directory:
             log = self.write_log(directory, [
-                "[...]LogVaRestLwsProbe: Display: PENDING " + json.dumps({"id": "hs.status_in_connection_error"}),
-                self.fact("hs.status_in_connection_error", "differs", "401 -> 0"),
+                "[...]LogVaRestLwsProbe: Display: PENDING " + json.dumps({"id": "hs.status_in_connection_error.refused"}),
+                self.fact("hs.status_in_connection_error.refused", "differs", "401 -> 0"),
             ])
             facts = read_facts([log])
-        self.assertEqual(facts["hs.status_in_connection_error"]["verdict"], "differs")
+        self.assertEqual(facts["hs.status_in_connection_error.refused"]["verdict"], "differs")
 
     def test_missing_ids_fail_the_run(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -6647,13 +7367,27 @@ class SelfTest(unittest.TestCase):
             self.assertEqual(main(["--log", log, "--out", out]), 1)
             with open(out, encoding="utf-8") as stream:
                 self.assertIn("`svc.cancel_wake_ms`", stream.read())
-            log = self.write_log(directory, [self.fact(key) for key in EXPECTED])
-            self.assertEqual(main(["--log", log, "--out", out]), 0)
+            # One --log with several files (the per-case risky logs): every id from either file counts
+            first = os.path.join(directory, "first.log")
+            second = os.path.join(directory, "second.log")
+            half = len(EXPECTED) // 2
+            with open(first, "w", encoding="utf-8") as stream:
+                stream.write("\n".join(self.fact(key) for key in EXPECTED[:half]) + "\n")
+            with open(second, "w", encoding="utf-8") as stream:
+                stream.write("\n".join(self.fact(key) for key in EXPECTED[half:]) + "\n")
+            self.assertEqual(main(["--log", first, second, "--out", out]), 0)
 
     def test_expected_ids_are_unique_and_sectioned(self):
         self.assertEqual(len(EXPECTED), len(set(EXPECTED)))
         prefixes = {prefix for prefix, _ in SECTIONS}
         self.assertEqual(sorted({key.split(".", 1)[0] for key in EXPECTED} - prefixes), [])
+
+    def test_every_risky_case_has_its_id(self):
+        ids = ["hs.status_in_connection_error." + re.sub(r"(?<!^)(?=[A-Z])", "_", case).lower() for case in RISKY_CASES]
+        self.assertEqual([key for key in ids if key not in EXPECTED], [])
+        self.assertEqual(sorted(key for key in EXPECTED if key.startswith("hs.status_in_connection_error.")), sorted(ids))
+        text = render({}, [], [], "2026-10-21", [])
+        self.assertIn("Probe.VaRest.Risky.Lws.StatusInConnectionError.$CASE", text)
 
 
 if __name__ == "__main__":
@@ -6664,7 +7398,7 @@ if __name__ == "__main__":
 - [ ] **Step 3: Run the selftest to see it pass**
 
 Run: `python3 -I Tools/lws_probe_passport.py --selftest`
-Expected: `Ran 4 tests ... OK`, exit 0.
+Expected: `Ran 5 tests ... OK`, exit 0.
 
 - [ ] **Step 4: Run the whole probe**
 
@@ -6672,10 +7406,13 @@ No editor may be running. Run:
 
 ```bash
 Tools/run_tests.sh Probe.VaRest.Lws; cp /w/Unreal/VaRestHost/Saved/Logs/VaRestTests.log /w/Unreal/VaRestHost/Saved/Logs/VaRestProbe-main.log
-Tools/run_tests.sh --no-build Probe.VaRest.Risky; cp /w/Unreal/VaRestHost/Saved/Logs/VaRestTests.log /w/Unreal/VaRestHost/Saved/Logs/VaRestProbe-risky.log
+for CASE in Refused ConnectRefused DnsFailure NoUpgrade TlsVerifyFailure KilledPending; do
+	Tools/run_tests.sh --no-build "Probe.VaRest.Risky.Lws.StatusInConnectionError.$CASE"
+	cp /w/Unreal/VaRestHost/Saved/Logs/VaRestTests.log "/w/Unreal/VaRestHost/Saved/Logs/VaRestProbe-risky-$CASE.log"
+done
 ```
 
-Expected: the first prints `run_tests: 34 passed, 0 failed`. That count is the four rig tests and 30 probe tests: `Service` 3, `Timeout` 4, `Handshake` 4, `Close` 5, `Ping` 3, `Data` 7, `Tls` 3, `Coexist` 1. A failed `Coexist.EngineWebSocket` (33 passed, 1 failed) is a finding, so read its rows (Task 9 Step 3); a harness failure in any other test must be fixed and the run repeated. The second prints `1 passed` or `run did not complete (crash?)`, and both are results (Task 6 Step 4).
+Expected: the first prints `run_tests: 34 passed, 0 failed`. That count is the four rig tests and 30 probe tests: `Service` 3, `Timeout` 4, `Handshake` 4, `Close` 5, `Ping` 3, `Data` 7, `Tls` 3, `Coexist` 1. It takes several minutes. A failed test is a harness failure and nothing else (decision 3, review M-2 ruling): the test server, a journal, a rig or a precondition connection did not work, and every library outcome is a fact and an `outcome:` info line instead. Fix the harness and repeat the run. Each risky case prints `1 passed` or `run did not complete (crash?)`, and both are results (Task 6 Step 4).
 
 - [ ] **Step 5: Generate the passport**
 
@@ -6683,12 +7420,12 @@ Run:
 
 ```bash
 python3 -I Tools/lws_probe_passport.py --log /w/Unreal/VaRestHost/Saved/Logs/VaRestProbe-main.log \
-	--log /w/Unreal/VaRestHost/Saved/Logs/VaRestProbe-risky.log --out docs/passport/$(date +%F)-lws30-probe.md
+	/w/Unreal/VaRestHost/Saved/Logs/VaRestProbe-risky-*.log --out docs/passport/$(date +%F)-lws30-probe.md
 ```
 
-Expected: `passport: 122 facts -> docs/passport/<date>-lws30-probe.md`, exit 0. On exit 1 the missing ids are printed: find which test did not log them (it failed before its `Fact` calls), fix the harness, and re-run Step 4.
+Expected: `passport: 135 facts -> docs/passport/<date>-lws30-probe.md`, exit 0 (a risky case that crashed counts as its `crashed` fact). On exit 1 the missing ids are printed: find which test did not log them (it failed before its `Fact` calls), fix the harness, and re-run Step 4.
 
-Read the generated file end to end. Check that its "Summary" counts add up to 122 and that every "Differs" entry has an `observed` text that a reader can act on without the log. Note in the task report every row whose verdict surprised you.
+Read the generated file end to end. Check that its "Summary" counts add up to 135 and that every "Differs" entry has an `observed` text that a reader can act on without the log. Note in the task report every row whose verdict surprised you.
 
 - [ ] **Step 6: Commit**
 
@@ -6700,16 +7437,17 @@ Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 ```
 
 ---
-### Task 11: Spec corrections (§0.3, §2), beads for the rest, final verification
+### Task 11: Spec corrections (§0.3, §2, and per ruling Q3 §1.2, D30, §3.4's 1002 row), CLAUDE.md, beads, final verification
 
-W0's exit row: "probe recorded; §0.3/§2 corrected where needed". This task edits **only** §0.3 and §2 of `docs/superpowers/specs/2026-10-20-varest2-websocket-design.md`, and only as the table below says. A finding that contradicts any other section becomes a bead (Step 4). Every inserted citation names the passport row, written `[<id>]`, and the passport file `docs/passport/<date>-lws30-probe.md` (the date of Task 10's run). "Observed" below means the passport's `observed` cell for that id, copied (shortened to its first clause when it runs over a line).
+W0's exit row: "probe recorded; §0.3/§2 corrected where needed". This task edits `docs/superpowers/specs/2026-10-20-varest2-websocket-design.md` only as the tables below say: §0.3 (Step 1), §2 (Step 2) and, per ruling Q3, §1.2, D30 in §20 and §3.4's 1002 row (Step 3, rows S1–S4). Each row is applied only when its condition holds on an unambiguous fact. A fact that is ambiguous or `unverified` for a row becomes a bead (Step 6), and so does a finding that contradicts any other section. Every inserted citation names the passport row, written `[<id>]`, and the passport file `docs/passport/<date>-lws30-probe.md` (the date of Task 10's run). "Observed" below means the passport's `observed` cell for that id, copied (shortened to its first clause when it runs over a line). The task also adds the probe's commands to `CLAUDE.md` (Step 5, ruling Q1).
 
 **Files:**
-- Modify: `docs/superpowers/specs/2026-10-20-varest2-websocket-design.md` (§0.3, §2 only)
+- Modify: `docs/superpowers/specs/2026-10-20-varest2-websocket-design.md` (§0.3, §1.2, §2, §3.4's table, the D30 row in §20; nothing else)
+- Modify: `CLAUDE.md` (Build & Test block: three lines)
 
 **Interfaces:**
 - Consumes: the Task 10 passport (`## Differs from the spec`, `## Crashed`, the `observed` cells).
-- Produces: the corrected spec; beads for out-of-scope findings.
+- Produces: the corrected spec; three `CLAUDE.md` lines; beads for ambiguous, unverified and out-of-scope findings.
 
 - [ ] **Step 1: Replace §0.3's "inferred" paragraph with the pinned facts**
 
@@ -6728,34 +7466,37 @@ Replace it with the paragraph and table below. Each `Fact` cell is the text for 
 ```
 Pinned by the W0 probe on Linux (`docs/passport/<date>-lws30-probe.md`; passport rows in brackets), where the
 list above was inferred from LWS 4.3. Win64 and Mac re-run the probe in the release pass; Android and iOS cannot
-run it (W1's transport suite on devices covers them).
+run it (W1's transport suite on devices covers them). Timeouts were measured with `lws_service` waiting at most
+100 ms, so they are LWS's own and not the wait's.
 
 | # | Fact (LWS 3.0, measured) | Passport |
 | --- | --- | --- |
 ```
 
-Then one row per line, in this order:
+Then one row per line, in this order. `CEIC` below abbreviates the six ids `hs.status_in_connection_error.{refused,connect_refused,dns_failure,no_upgrade,tls_verify_failure,killed_pending}`.
 
-| Row | `hs`/`close`/... verdict | Fact cell |
+| Row | Verdict | Fact cell |
 | --- | --- | --- |
-| T17 | `hs.unregistered_selected_bound` agrees | A server-selected subprotocol the context does not register is accepted when `local_protocol_name` pre-binds the connection; `FILTER_PRE_ESTABLISH` reads the selected name: <`hs.selected_protocol_in_filter` observed> |
-| T17 | ... differs | A server-selected subprotocol the context does not register is refused even when `local_protocol_name` pre-binds the connection: <observed> |
-| T18 | `hs.status_in_connection_error` agrees | `lws_http_client_http_response(wsi)` returns the upgrade's status inside `CONNECTION_ERROR` |
-| T18 | ... differs | `lws_http_client_http_response(wsi)` does not return the status inside `CONNECTION_ERROR` (<observed>): the error strings are the only source |
-| T18 | ... crashed | Calling `lws_http_client_http_response(wsi)` inside `CONNECTION_ERROR` ends the process: never call it there |
+| T17 | `hs.unregistered_selected_bound` agrees | A server-selected subprotocol the context does not register is accepted when `local_protocol_name` pre-binds the connection, which stays bound to `varest`; `FILTER_PRE_ESTABLISH` reads the selected name: <`hs.selected_protocol_in_filter` observed> |
+| T17 | ... differs, observed starts with "refused" | A server-selected subprotocol the context does not register is refused even when `local_protocol_name` pre-binds the connection: <observed> |
+| T17 | ... differs, observed starts with "established" | A server-selected subprotocol the context does not register is accepted, but the connection is bound to another protocol than `local_protocol_name` names: <observed> |
+| T18 | all six CEIC agree | `lws_http_client_http_response(wsi)` is safe inside `CONNECTION_ERROR` in every case probed (refused upgrade, connect refused, DNS failure, no upgrade response, TLS verify failure, a kill while pending): the status after a status line, 0 otherwise |
+| T18 | `.refused` agrees, another CEIC case crashed, differs or is unverified | Inside `CONNECTION_ERROR`, `lws_http_client_http_response(wsi)` returns the status only when the status-line parser failed (<`.refused` observed>); <for each other case: "<case>: crashed" \| "<case>: returned N" \| "<case>: not reached">. Without a header table it dereferences NULL (`client.c.o` `lws_http_client_http_response` 0x1294-0x12b2), so it is never called elsewhere |
+| T18 | `.refused` differs, crashed or is unverified | `lws_http_client_http_response(wsi)` does not give the status inside `CONNECTION_ERROR` (<`.refused` observed>): the error strings are the only source |
 | T19 | `close.rewritten_codes` (recorded) | Received close codes: <observed>. Returning 0 from `WS_PEER_INITIATED_CLOSE` echoes the close: <`close.echo_on_return_0` observed> |
 | T20 | `close.ours_noecho_wait_ms` (recorded) | After our close, against a server that never echoes: <observed> |
-| T21 | `timeout.default_secs` (recorded) | Default `timeout_secs`: <observed>; a set `timeout_secs` bounds the handshake: <`timeout.configured_secs` observed> |
+| T21 | `timeout.default_secs` (recorded) | Default `timeout_secs`, an unanswered upgrade: <observed>; a connect to a blackhole address: <`timeout.default_secs_blackhole` observed>. A set `timeout_secs` bounds the handshake: <`timeout.configured_secs` observed>, and a TCP connect: <`timeout.tcp_connect_blackhole` observed> |
 | T22 | `ping.auto_pong` agrees | LWS answers server PINGs with a PONG of the same payload, and raises no callback for them (<`ping.client_sees_server_ping` observed>) |
 | T22 | ... differs | LWS does not answer server PINGs: <observed> |
 | T23 | `tls.ssl_module_ctx` (any) | In modular builds the SSL module gives no `SSL_CTX` (`InitializeSsl()` is false, `Runtime/Online/SSL/Private/SslManager.cpp:26-55`, `:76-131`); LWS makes its own (`LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT`) and raises `LOAD_EXTRA_CLIENT_VERIFY_CERTS`: <`tls.load_extra_fired` observed>. A provided `SSL_CTX` (the monolithic path's mechanics): <`tls.provided_ctx_connects` observed>; `LOAD_EXTRA_CLIENT_VERIFY_CERTS` then: <`tls.provided_ctx_load_extra_fired` observed> |
 | T24 | `svc.commands_inside_wait_cancelled` (any) | Connect, write and close from inside `EVENT_WAIT_CANCELLED`: <observed>; `lws_cancel_service` ends a 10 s wait in <`svc.cancel_wake_ms` observed> |
-| T25 | `hs.redirect_relative` (recorded) | A 3xx upgrade answer: <observed>; on the redirected request: <`hs.redirect_reappends_headers` observed>; a redirect from wss to ws: <`hs.redirect_downgrade` observed> |
-| T26 | `svc.kill_async_ms` (recorded) | `LWS_TO_KILL_ASYNC` on an open connection: <observed>; on a pending attempt: <`timeout.kill_pending_ms` observed> (<`timeout.kill_pending_sequence` observed>) |
+| T25 | `hs.redirect_relative` (recorded) | A 3xx upgrade answer: <observed>; to wss: <`hs.redirect_to_tls` observed>; on the redirected request: <`hs.redirect_reappends_headers` observed>, the callback sees <`hs.redirect_target_visible` observed>, a non-zero return gives <`hs.redirect_veto` observed>, and `Host` is <`hs.redirect_host_header` observed>; a redirect from wss to ws: <`hs.redirect_downgrade` observed> |
+| T26 | `svc.kill_async_ms` (recorded) | `LWS_TO_KILL_ASYNC` on an open connection: <observed> (with a 100 ms wait: <`svc.kill_async_ms_short_wait` observed>); on a pending attempt: <`timeout.kill_pending_ms` observed> (with a 100 ms wait: <`timeout.kill_pending_ms_short_wait` observed>; <`timeout.kill_pending_sequence` observed>) |
 | T27 | `rx.final_flag` (any) | Receive: <observed>; one frame larger than `rx_buffer_size`: <`rx.chunk_sizes_single_frame` observed> |
-| T28 | `rx.flow_pause_stops_callbacks` (any) | Flow control: <observed>; resume: <`rx.flow_resume_form` observed> |
+| T28 | `rx.flow_pause_stops_callbacks` (any) | Flow control: <observed>; resume from a command: <`rx.flow_resume_form` observed> |
+| T29 | `hs.callback_user_by_reason` (recorded) | Which callbacks carry the connection's userdata in `user` (and in `lws_wsi_user(wsi)`): <observed> |
 
-The Passport column holds the bracketed ids each row used, e.g. `[hs.unregistered_selected_bound, hs.selected_protocol_in_filter]`.
+The Passport column holds the bracketed ids each row used, e.g. `[hs.unregistered_selected_bound, hs.selected_protocol_in_filter]`; for T18, the CEIC ids it names.
 
 Also in the T table above: for every row whose claim a passport row contradicts (verdict `differs`, and the `spec` cell names that T row), append to that row's Fact cell ` — W0: <observed> [<id>]`. The T rows a fact can contradict are T1 (`env.lws_version`), T4 (`hs.raw_origin`), T5 (`hs.append_header_space`), T6 (`hs.selected_protocol_in_filter`), T7 (`hs.refusal_*`), T9 (`ping.pong_payload_echo`), T10 (`tx.no_fin_frames`), T11 (`rx.flow_pause_stops_callbacks`), T12 (`close.echo_on_return_0`), T13 (`svc.cancel_wake_ms`) and T14 (`svc.timer_latency_ms`).
 
@@ -6766,27 +7507,31 @@ Apply each row whose condition holds; leave the passage as it is otherwise. The 
 | # | Condition | Find (in §2) | Replace with |
 | --- | --- | --- | --- |
 | E1 | always (from the engine source; `tls.ssl_module_ctx` confirms it in the editor) | `` `PEER_CERT_NOT_REQUIRED \| DISABLE_OS_CA_CERTS`, `SSL_CTX` from`` ⏎ `` `ISslManager::CreateSslContext` (`Runtime/Online/SSL/Public/Interfaces/ISslManager.h:64-81`), `` | `` `PEER_CERT_NOT_REQUIRED \| DISABLE_OS_CA_CERTS`; the `SSL_CTX` from `ISslManager::CreateSslContext` (`Runtime/Online/SSL/Public/Interfaces/ISslManager.h:64-81`) where `InitializeSsl` succeeds, which is in monolithic builds only (`Runtime/Online/SSL/Private/SslManager.cpp:26-55`, `:76-131`); elsewhere, every editor included, LWS makes its own with `LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT` and `LOAD_EXTRA_CLIENT_VERIFY_CERTS` adds the engine's roots, as the engine does (`LwsWebSocketsManager.cpp:205-225`, `:441-446`) [tls.ssl_module_ctx, tls.load_extra_fired], `` |
-| E1b | `tls.load_extra_fired` differs | the text E1 inserted, from `and LOAD_EXTRA_CLIENT_VERIFY_CERTS adds` to `[tls.ssl_module_ctx, tls.load_extra_fired]` | `` but LWS 3.0 raises no `LOAD_EXTRA_CLIENT_VERIFY_CERTS` for it [tls.load_extra_fired]: VaRest then makes the context itself (`SSL_CTX_new(TLS_client_method())`, `AddCertificatesToSslContext`) and provides it, which works [tls.provided_ctx_connects] `` (if `tls.provided_ctx_connects` shows it does not work, file the P0 bead of Step 4 instead of this edit) |
+| E1b | `tls.load_extra_fired` differs | the text E1 inserted, from `and LOAD_EXTRA_CLIENT_VERIFY_CERTS adds` to `[tls.ssl_module_ctx, tls.load_extra_fired]` | `` but LWS 3.0 raises no `LOAD_EXTRA_CLIENT_VERIFY_CERTS` for it [tls.load_extra_fired]: VaRest then makes the context itself (`SSL_CTX_new(TLS_client_method())`, `AddCertificatesToSslContext`) and provides it, which works [tls.provided_ctx_connects] `` (if `tls.provided_ctx_connects` shows it does not work, file the P0 bead of Step 6 instead of this edit) |
 | E2 | `svc.commands_inside_wait_cancelled` differs and `svc.commands_between_service_calls` shows a working round trip | `` the service thread drains them in`` ⏎ `` `LWS_CALLBACK_EVENT_WAIT_CANCELLED` (T13). `` | `` the service thread drains them between `lws_service` calls, as the engine does (`LwsWebSocketsManager.cpp:485-509`): from inside `LWS_CALLBACK_EVENT_WAIT_CANCELLED` they do not work on LWS 3.0 [svc.commands_inside_wait_cancelled]; `lws_cancel_service` ends the wait (T13). `` |
-| E3 | `svc.kill_async_ms` or `timeout.kill_pending_ms` observed over 1500 ms | `` and checks per-connection deadlines after each return. `` | `` and checks per-connection deadlines after each return. A `LWS_TO_KILL_ASYNC` is acted on at LWS's next timeout check, which a long wait postpones (<`svc.kill_async_ms` observed> [svc.kill_async_ms]), so after a kill the next `lws_service` wait is at most 1 s. `` |
+| E3 | `svc.kill_async_ms` observed over 1500 ms and `svc.kill_async_ms_short_wait` observed under 1500 ms (the delay is the wait, decision 9) | `` and checks per-connection deadlines after each return. `` | `` and checks per-connection deadlines after each return. LWS's own timers (a `LWS_TO_KILL_ASYNC`, the close-ack and handshake timeouts) run only when `lws_service` returns, which a long wait postpones (a kill took <`svc.kill_async_ms` observed> with a 10 s wait, <`svc.kill_async_ms_short_wait` observed> with 100 ms [svc.kill_async_ms, svc.kill_async_ms_short_wait]), so the wait is capped at 1 s. `` |
 | E4 | `hs.unregistered_selected_bound` agrees | `` The selected protocol is read in `FILTER_PRE_ESTABLISH` (T6) into `FVaRestSocketOpen::Protocol`. `` ⏎ `` If W0 shows LWS 3.0 still demands a registered name, the context registers every subprotocol named `` ⏎ `` in settings and assets at creation, and an unknown code-only name gets a clear `Config` error. `` | `` The selected protocol is read in `FILTER_PRE_ESTABLISH` (T6) into `FVaRestSocketOpen::Protocol`. LWS 3.0 accepts a selected name the context does not register [hs.unregistered_selected_bound, hs.selected_protocol_in_filter]. `` |
-| E4b | `hs.unregistered_selected_bound` differs | the same Find text | `` The selected protocol is read in `FILTER_PRE_ESTABLISH` (T6) into `FVaRestSocketOpen::Protocol`. LWS 3.0 still demands a registered name (<observed> [hs.unregistered_selected_bound]), so the context registers every subprotocol named in settings and assets at creation, and an unknown code-only name gets a clear `Config` error. `` |
+| E4b | `hs.unregistered_selected_bound` differs and its observed starts with "refused" | the same Find text | `` The selected protocol is read in `FILTER_PRE_ESTABLISH` (T6) into `FVaRestSocketOpen::Protocol`. LWS 3.0 still demands a registered name (<observed> [hs.unregistered_selected_bound]), so the context registers every subprotocol named in settings and assets at creation, and an unknown code-only name gets a clear `Config` error. `` (observed starting with "established": the connection opened bound to another protocol; no edit, a bead in Step 6) |
 | E4c | `hs.selected_protocol_in_filter` differs | `` The selected protocol is read in `FILTER_PRE_ESTABLISH` (T6) into `FVaRestSocketOpen::Protocol`. `` (as E4/E4b left it) | `` LWS 3.0 does not give the selected protocol in `FILTER_PRE_ESTABLISH` (<observed> [hs.selected_protocol_in_filter]): `FVaRestSocketOpen::Protocol` is the protocol the connection is bound to, `lws_get_protocol(wsi)->name`. `` |
 | E5 | `hs.raw_origin` differs | `` non-default port), sent raw (T4); `` | `` non-default port); LWS 3.0 does not send it raw even with `JUST_USE_RAW_ORIGIN` (<observed> [hs.raw_origin]), so W1 appends `Origin` itself in `APPEND_HANDSHAKE_HEADER` and passes no `.origin`; `` |
-| E6 | `hs.append_header_user` shows the user argument is not the connection's userdata | `` (T5); not enough space → the attempt fails with `Config`, never an overrun (E19). `` | `` (T5), the connection found through `lws_wsi_user(wsi)`: the callback's `user` is not it there (<observed> [hs.append_header_user]); not enough space → the attempt fails with `Config`, never an overrun (E19). `` |
+| E6 | `hs.append_header_user` shows the user argument is not the connection's userdata | `` (T5); not enough space → the attempt fails with `Config`, never an overrun (E19). `` | `` (T5), the connection found through `lws_wsi_user(wsi)`: the callback's `user` is not it there (<observed> [hs.append_header_user, hs.callback_user_by_reason]); not enough space → the attempt fails with `Config`, never an overrun (E19). `` |
 | E7 | `hs.append_header_fill` differs | `` with the remaining length checked per header `` (the end of the **Headers** bullet's first line) | `` with the remaining length checked per header, kept 1 KiB below what LWS 3.0 reports, which did not all fit (<observed> [hs.append_header_fill]), `` |
 | E8 | `tls.insecure_ip_host` refused and `tls.insecure_skip_hostname` established | `` and outside Shipping `wss+insecure` `` ⏎ `` (self-signed allowed, as `LwsWebSocket.cpp:733-769`). `` | `` and outside Shipping `wss+insecure` (self-signed allowed and the host name not checked, `LCCSCF_ALLOW_SELFSIGNED \| LCCSCF_SKIP_SERVER_CERT_HOSTNAME_CHECK`: with `ALLOW_SELFSIGNED` alone, as the engine sets it at `LwsWebSocket.cpp:747-750`, an IP URL fails the host-name check [tls.insecure_ip_host, tls.insecure_skip_hostname]). `` |
-| E9 | `timeout.kill_pending_ms` over 1500 ms, or `timeout.kill_pending_sequence` without `WSI_DESTROY` | `` `lws_set_timeout(…, LWS_TO_KILL_ASYNC)` (T14), so a hitching game thread cannot cause it. `` | `` `lws_set_timeout(…, LWS_TO_KILL_ASYNC)` (T14), so a hitching game thread cannot cause it; a pending attempt ends <`timeout.kill_pending_ms` observed> after the kill (<`timeout.kill_pending_sequence` observed>) [timeout.kill_pending_ms], and the context's `timeout_secs` is set to `ConnectTimeout` as the backstop [timeout.configured_secs]. `` |
-| E10 | `hs.status_in_connection_error` agrees | `` and from `lws_http_client_http_response(wsi)` if W0 shows `` ⏎ `` it is valid there. `` | `` and from `lws_http_client_http_response(wsi)`, which is valid there [hs.status_in_connection_error]. `` |
-| E10b | ... differs or crashed | the same Find text | `` and not from `lws_http_client_http_response(wsi)`, which is <not valid there (differs) \| fatal there (crashed)> [hs.status_in_connection_error]: the strings are the only source. `` |
+| E9 | `timeout.kill_pending_ms` over 1500 ms, or `timeout.kill_pending_sequence` without `WSI_DESTROY` | `` `lws_set_timeout(…, LWS_TO_KILL_ASYNC)` (T14), so a hitching game thread cannot cause it. `` | `` `lws_set_timeout(…, LWS_TO_KILL_ASYNC)` (T14), so a hitching game thread cannot cause it; a pending attempt ends <`timeout.kill_pending_ms` observed> after the kill with a 10 s wait, <`timeout.kill_pending_ms_short_wait` observed> with 100 ms (<`timeout.kill_pending_sequence` observed>) [timeout.kill_pending_ms, timeout.kill_pending_ms_short_wait]. `` |
+| E9b | `timeout.configured_secs` agrees | the sentence ending `so a hitching game thread cannot cause it` (as E9 left it, or the original) | that sentence, then: `` The context's `timeout_secs` is set to the default `ConnectTimeout` as a backstop [timeout.configured_secs]: it is the vhost's, so context-wide for VaRest's one context ("various processes involving network roundtrips", `libwebsockets.h:2791-2795`), and it backs only the default; a socket with its own `ConnectTimeout` relies on the kill. `` |
+| E10 | all six CEIC agree | `` and from `lws_http_client_http_response(wsi)` if W0 shows `` ⏎ `` it is valid there. `` | `` and from `lws_http_client_http_response(wsi)`, which is valid there in every case W0 probed: refused upgrade, connect refused, DNS failure, no upgrade response, TLS verify failure, a kill while pending [hs.status_in_connection_error.refused, …connect_refused, …dns_failure, …no_upgrade, …tls_verify_failure, …killed_pending]. `` |
+| E10c | `.refused` agrees, and another CEIC case crashed, differs or is unverified | the same Find text | `` and from `lws_http_client_http_response(wsi)` only when the error comes from the status-line parser (the strings `HS: ws upgrade …`) [hs.status_in_connection_error.refused]; never elsewhere: without a header table it dereferences NULL (`client.c.o` `lws_http_client_http_response` 0x1294-0x12b2) [<the CEIC ids that crashed, differ or are unverified>]. `` |
+| E10b | `.refused` differs, crashed or is unverified | the same Find text | `` and not from `lws_http_client_http_response(wsi)`, which is <not valid there (differs) \| fatal there (crashed) \| not reached in W0 (unverified)> [hs.status_in_connection_error.refused]: the strings are the only source. `` |
 | E11 | any `hs.refusal_*` differs | `` (T7: "not 101, was N"; `` ⏎ `` "unauthorized" = 401; "forbidden" = 403) `` | `` (T7, as LWS 3.0 sends them [hs.refusal_401, hs.refusal_403, hs.refusal_404]: 401 <observed>, 403 <observed>, other codes <hs.refusal_404 observed with 404 replaced by N>) `` |
 | E12 | always | `` reports it as its own failure reason, `NoUpgradeResponse`; W0 pins the LWS 3.0 error string. `` | `` reports it as its own failure reason, `NoUpgradeResponse`; LWS 3.0 reports it as <`hs.no_upgrade_response` observed> [hs.no_upgrade_response]. `` |
-| E13 | `hs.redirect_relative` or `hs.redirect_absolute` observed starts with "followed" | (insert a new bullet right after the **No upgrade response** bullet) | `` * **Redirects**: LWS 3.0 follows a 3xx upgrade answer itself [hs.redirect_relative, hs.redirect_absolute] and runs `APPEND_HANDSHAKE_HEADER` again for the new request (<`hs.redirect_reappends_headers` observed>); a redirect from wss to ws is <`hs.redirect_downgrade` observed> [hs.redirect_downgrade]. VaRest appends auth headers to a redirected request only when its host and port are the original's. `` |
-| E13b | neither starts with "followed" | (insert the same place) | `` * **Redirects**: LWS 3.0 does not follow a 3xx upgrade answer (<`hs.redirect_relative` observed> [hs.redirect_relative]); it is an upgrade refusal (§3.4). `` |
+| E13 | any of `hs.redirect_relative`, `hs.redirect_absolute`, `hs.redirect_to_tls` observed starts with "followed", and `hs.redirect_veto` agrees | (insert a new bullet right after the **No upgrade response** bullet) | `` * **Redirects** are refused (ruling Q2): VaRest never follows a 3xx to the upgrade, as browsers do not (the WHATWG WebSockets standard fetches with redirect mode "error"; RFC 6455 §4.1 only permits following). LWS 3.0 follows one itself [hs.redirect_relative, hs.redirect_absolute, hs.redirect_to_tls] and runs `APPEND_HANDSHAKE_HEADER` again for the new request (<`hs.redirect_reappends_headers` observed>), where the callback sees <`hs.redirect_target_visible` observed> [hs.redirect_target_visible] and the request carries <`hs.redirect_host_header` observed> [hs.redirect_host_header]. So the appended-header callback adds nothing (no auth, no custom headers) once the connection's target differs from the original scheme+host+port, which the second `APPEND_HANDSHAKE_HEADER` of an attempt marks, and the socket fails the connection at the first callback that can (`APPEND_HANDSHAKE_HEADER`, else `FILTER_PRE_ESTABLISH`: a non-zero return gives <`hs.redirect_veto` observed> [hs.redirect_veto]) with a redirect error; the W1 plan names the error kind. A redirect from wss to ws is <`hs.redirect_downgrade` observed> [hs.redirect_downgrade]. `` |
+| E13c | E13's "followed" condition holds and `hs.redirect_veto` differs (a non-zero return did not fail it) | (insert the same place) | E13's bullet with its sentence from `and the socket fails the connection` replaced by: `` and the socket fails the connection: a non-zero return from those callbacks does not (<`hs.redirect_veto` observed> [hs.redirect_veto]), so it kills the attempt with `lws_set_timeout(…, LWS_TO_KILL_ASYNC)` (T14) from the second `APPEND_HANDSHAKE_HEADER`, reported as a redirect error; the W1 plan names the error kind. `` |
+| E13b | none of the three starts with "followed" | (insert the same place) | `` * **Redirects** are refused (ruling Q2: VaRest never follows a 3xx to the upgrade, as browsers do not). LWS 3.0 does not follow one either (<`hs.redirect_relative` observed> [hs.redirect_relative, hs.redirect_absolute, hs.redirect_to_tls]); it is an upgrade refusal, §3.4's "upgrade 3xx" row. `` |
 | E14 | `rx.final_flag` or `rx.remaining_payload` differs | `` complete when `lws_is_final_fragment` and `` ⏎ `` `lws_remaining_packet_payload == 0` (T8). `` | `` complete as LWS 3.0 marks it (<`rx.final_flag` observed>; <`rx.remaining_payload` observed> [rx.final_flag, rx.remaining_payload]): W1's rule is the observed one, pinned by the transport suite's fragment tests. `` |
-| E15 | `rx.flow_resume_from_command` agrees only with the PROCESS_NOW form (`rx.flow_resume_form`) | `` Reading resumes below half. `` | `` Reading resumes below half, with `LWS_RXFLOW_REASON_FLAG_PROCESS_NOW`, because the resume runs outside the connection's own callback (`libwebsockets.h:5192-5194`) [rx.flow_resume_form]. `` |
+| E15 | `rx.flow_resume_form` shows the explicit form resumed reading and the bool form did not | `` Reading resumes below half. `` | `` Reading resumes below half, with `lws_rx_flow_control(wsi, LWS_RXFLOW_REASON_APPLIES_ENABLE \| LWS_RXFLOW_REASON_USER_BOOL \| LWS_RXFLOW_REASON_FLAG_PROCESS_NOW)`: the resume runs outside the connection's own callback (`libwebsockets.h:5192-5194`), where the bool form does not resume it on LWS 3.0 [rx.flow_resume_form]. `` (neither form resumed, `rx.flow_resume_from_command` differs: no edit, the P1 bead of Step 6) |
 | E15b | `rx.flow_pause_stops_callbacks` differs | `` the transport stops reading`` ⏎ `` (`lws_rx_flow_control(wsi, 0)`, T11), `` | `` the transport stops reading (`lws_rx_flow_control(wsi, 0)`, T11; LWS 3.0 still delivers <observed> after it [rx.flow_pause_stops_callbacks], which the count includes), `` |
-| E16 | `tx.no_fin_frames` or `tx.ping_between_fragments` differs | `` one per WRITEABLE callback, so PINGs and the close frame can be interleaved between fragments `` | `` one per WRITEABLE callback; LWS 3.0 writes them as <`tx.ping_between_fragments` observed> [tx.no_fin_frames, tx.ping_between_fragments], so a PING goes only between whole messages `` |
+| E16 | `tx.ping_between_fragments` differs | `` one per WRITEABLE callback, so PINGs and the close frame can be interleaved between fragments `` | `` one per WRITEABLE callback; LWS 3.0 writes a PING queued between them as <`tx.ping_between_fragments` observed> [tx.ping_between_fragments], so a PING goes only between whole messages `` |
+| E16b | `tx.no_fin_frames` differs | `` * Messages over 64 KiB go out as fragments (`LWS_WRITE_NO_FIN`, then `LWS_WRITE_CONTINUATION`, T10), `` | `` * Messages over 64 KiB go out as fragments (`LWS_WRITE_NO_FIN`, then `LWS_WRITE_CONTINUATION`, T10; on LWS 3.0 four such writes reach the server as <`tx.no_fin_frames` observed> [tx.no_fin_frames], which W1's transport suite pins), `` |
 | E17 | `tx.autoreply_between_messages` differs | `` it is written at the next`` ⏎ `` message boundary, ahead of every queued data message, `` | `` it is written at the next message boundary, ahead of every queued data message (on LWS 3.0: <observed> [tx.autoreply_between_messages]), `` |
 | E18 | always | `` Connections with rules get `SO_SNDBUF` 256 KiB`` ⏎ `` (`lws_get_socket_fd` + `setsockopt`), `` | `` Connections with rules get `SO_SNDBUF` 256 KiB (`lws_get_socket_fd` + `setsockopt`; on Linux: <`tx.so_sndbuf_ws` observed> [tx.so_sndbuf_ws, tx.so_sndbuf_wss]), `` |
 | E19 | `ping.pong_payload_echo` differs | `` `CLIENT_RECEIVE_PONG` (T9) matches the payload and yields an RTT `` | `` `CLIENT_RECEIVE_PONG` (T9) does not hand the payload back on LWS 3.0 (<observed> [ping.pong_payload_echo]), so PONGs are matched by order and yield an RTT `` |
@@ -6796,37 +7541,121 @@ Apply each row whose condition holds; leave the passage as it is otherwise. The 
 | E23 | `close.echo_on_return_0` differs | `` The callback returns 0 so LWS`` ⏎ `` echoes the close, as RFC 6455 §5.5.1 requires `` | `` LWS 3.0 does not echo even when the callback returns 0 (<observed> [close.echo_on_return_0]), so VaRest answers with `lws_close_reason` and a non-zero return, as RFC 6455 §5.5.1 requires `` |
 | E24 | always | `` * **Unclean end** (`CLIENT_CLOSED` / `WSI_DESTROY` without a close frame, or a read/write error) →`` ⏎ `` 1006, `bWasClean = false`. `` | `` * **Unclean end** (`CLIENT_CLOSED` / `WSI_DESTROY` without a close frame, or a read/write error) → 1006, `bWasClean = false`. On LWS 3.0 a dropped connection gives <`close.drop_reports_client_closed` observed> [close.drop_fin_sequence, close.drop_rst_sequence]. `` |
 
-In the table, `⏎` stands for the line break and two-space indent of the spec's text as it is now; a `\|` is a literal `|`. After each edit, rewrap the bullet to the spec's width (about 100 columns).
+In the tables of Steps 2 and 3, `⏎` stands for the line break and two-space indent of the spec's text as it is now; a `\|` is a literal `|`. After each edit, rewrap the bullet to the spec's width (about 100 columns).
 
-- [ ] **Step 3: Check the edit stayed inside §0.3 and §2**
+- [ ] **Step 3: Correct §1.2, D30 and §3.4's 1002 row where the passport is unambiguous (ruling Q3)**
 
-Run: `git diff -U0 docs/superpowers/specs/2026-10-20-varest2-websocket-design.md | grep '^@@'`
-Expected: every hunk starts between the `### 0.3` heading's line and the `## 3. Connection (client layer)` heading's line (find both with `grep -n '^### 0.3\|^## 3\.' docs/superpowers/specs/2026-10-20-varest2-websocket-design.md`). A hunk outside that range is a mistake: undo it.
+| # | Condition | Find | Replace with |
+| --- | --- | --- | --- |
+| S1 | `coexist.lws_symbol_owner` observed says "has its own copy at another address" and `coexist.shared_lws_state` differs | §1.2: `` * **Linux interposition is benign.** `libUnrealEditor-WebSockets.so` exports 185 `lws_*` functions`` ⏎ `` (`nm -D --defined-only`, verified on this host), so ELF resolves both modules' calls to whichever`` ⏎ `` copy loaded first. Both copies come from the identical archive, so behaviour is identical.`` ⏎ `` Windows DLLs and Mac two-level-namespace dylibs keep separate copies. Monolithic builds have one. `` | `` * **Each module keeps its own copy, on Linux too.** `libUnrealEditor-WebSockets.so` exports 185 `lws_*` functions (`nm -D --defined-only`), but UE loads modules with `RTLD_LOCAL` (`Runtime/Core/Private/Unix/UnixPlatformProcess.cpp:107-148`), so each module's calls stay in its own copy (<`coexist.lws_symbol_owner` observed> [coexist.lws_symbol_owner, coexist.shared_lws_state]). Both copies come from the identical archive, so behaviour is identical. Windows DLLs and Mac two-level-namespace dylibs keep separate copies too. Monolithic builds have one. `` |
+| S2 | S1's condition | §1.2: `` * **The only shared state is process-global** (T16): log level/emitter and allocator. VaRest never`` ⏎ `` calls `lws_set_allocator`, and calls `lws_set_log_level(LLL_ERR \| LLL_WARN, VaRestLwsLog)` only if`` ⏎ `` the engine's `WebSockets` module is not loaded; otherwise the engine's routing to `LogWebSockets` `` ⏎ `` (`LwsWebSocketsManager.cpp:174-176`) stays. Never both, so no one's logs are hijacked. `` | `` * **Process-global state is per copy** (T16): log level/emitter and allocator. VaRest never calls `lws_set_allocator`. In modular builds its copy's log state is its own [coexist.shared_lws_state], so there VaRest always calls `lws_set_log_level(LLL_ERR \| LLL_WARN, VaRestLwsLog)`, and the engine's routing to `LogWebSockets` (`LwsWebSocketsManager.cpp:174-176`) stays in the engine's copy (<`coexist.engine_lws_log_routed` observed> [coexist.engine_lws_log_routed]). In a monolithic build the copy is shared, so there VaRest calls it only if the engine's `WebSockets` module is not loaded (at VaRestTests' startup in the editor it was loaded: <`env.websockets_loaded_at_start` observed> [env.websockets_loaded_at_start]). Never both in one copy, so no one's logs are hijacked. `` |
+| S2b | S1's condition | §20: `` \| D30 \| `lws_set_log_level` only when the engine `WebSockets` module is not loaded; never `lws_set_allocator` \| `` | `` \| D30 \| `lws_set_log_level` on VaRest's own copy (modular builds) always, and on the one shared copy of a monolithic build only when the engine `WebSockets` module is not loaded (§1.2, [coexist.shared_lws_state]); never `lws_set_allocator` \| `` |
+| S3 | `close.rewritten_codes` observed is "none: every code arrived as sent" | §3.4: `` \| 1002, 1003, 1007, 1010 from the server \| stop — unless W0 shows LWS 3.0 rewrites codes to 1002, then 1002 reconnects and stops after 3 in a row \| `Server` \| `` | `` \| 1002, 1003, 1007, 1010 from the server \| stop (LWS 3.0 hands every received code over unchanged [close.rewritten_codes]) \| `Server` \| `` |
+| S3b | `close.rewritten_codes` observed lists rewrites, at least one of them `-> 1002`, and none `-> no code` | the same Find text | two rows: `` \| 1003, 1007, 1010 from the server \| stop \| `Server` \| `` and `` \| 1002 from the server \| reconnect; stop after 3 in a row (LWS 3.0 rewrites <the codes listed with "-> 1002"> to 1002 [close.rewritten_codes]) \| `Server` \| `` |
+| S3c | `close.rewritten_codes` observed lists rewrites, none `-> 1002` and none `-> no code` | the same Find text | `` \| 1002, 1003, 1007, 1010 from the server \| stop (LWS 3.0 rewrites only <observed>, none to 1002 [close.rewritten_codes]) \| `Server` \| `` |
+| S4 | `coexist.context_create_reallocates_ssl_index` differs | §1.2: `` * **Contexts are independent.** All connection state lives in the `lws_context`; VaRest creates`` ⏎ `` its own and never touches the engine's. `` | `` * **Contexts are independent, except for one TLS global.** All connection state lives in the `lws_context`; VaRest creates its own and never touches the engine's. But every `lws_create_context` re-allocates its LWS copy's process-global `openssl_websocket_private_data_index`, which the client verify callback dereferences without a null check (<observed> [coexist.context_create_reallocates_ssl_index]): a context created while another context of the same copy has a TLS handshake in flight crashes that handshake. In a monolithic build VaRest's context shares the copy with `WebSockets`, `WebSocketServer`, `WebSocketNetworking` and `HttpNetworkReplayStreaming`, so W1 decides how VaRest's context creation stays out of that window. `` |
 
-- [ ] **Step 4: File beads for what lies outside §0.3/§2**
+When a row's facts disagree with each other (S1/S2: one coexist row says one copy, the other two) or are `unverified`, or `close.rewritten_codes` lists a `-> no code` entry, leave that passage and file Step 6's bead for it.
 
-Always:
+- [ ] **Step 4: Check the edits stayed inside the allowed ranges**
+
+Run:
 
 ```bash
-bd create "WS spec §3.4: resolve the 1002 row ('unless W0 shows LWS 3.0 rewrites codes to 1002') from the W0 passport" -t task -p 2 \
-	--deps discovered-from:VaRest-81s -d "Passport docs/passport/<date>-lws30-probe.md row close.rewritten_codes: <observed>. §3.4's 1002/1003/1007/1010 row is conditional on it; W0 may edit only §0.3/§2."
+git diff -U0 docs/superpowers/specs/2026-10-20-varest2-websocket-design.md | python3 -I -c '
+import re, sys
+lines = open("docs/superpowers/specs/2026-10-20-varest2-websocket-design.md", encoding="utf-8").read().split("\n")
+def at(prefix):
+    return next(index + 1 for index, line in enumerate(lines) if line.startswith(prefix))
+# §0.3, §1.2, §2, §3.4 and the D30 row (ruling Q3), as line ranges of the edited file: [first, next heading)
+allowed = [(at("### 0.3 "), at("### 0.4 ")), (at("### 1.2 "), at("### 1.3 ")), (at("## 2. "), at("## 3. ")),
+           (at("### 3.4 "), at("### 3.5 ")), (at("| D30 |"), at("| D30 |") + 1)]
+outside = []
+for hunk in sys.stdin:
+    match = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", hunk)
+    if match:
+        first = int(match.group(1))
+        last = first + max(int(match.group(2) or 1), 1) - 1
+        if not any(low <= first and last < high for low, high in allowed):
+            outside.append(hunk.strip())
+print("\n".join(outside) or "every hunk is inside §0.3, §1.2, §2, §3.4 or the D30 row")
+sys.exit(1 if outside else 0)
+'
+```
+
+Expected: `every hunk is inside §0.3, §1.2, §2, §3.4 or the D30 row`, exit 0. A hunk it prints is a mistake: undo it.
+
+- [ ] **Step 5: Add the probe's commands to CLAUDE.md (ruling Q1)**
+
+In `CLAUDE.md`'s Build & Test block, replace the line
+
+```
+python3 -I Tools/testserver/selftest.py   # the HTTP test server's own tests (stdlib only)
+```
+
+with
+
+```
+python3 -I Tools/testserver/selftest.py   # the HTTP test server's own tests (stdlib only)
+python3 -I Tools/testserver/ws_selftest.py  # the WebSocket test server's own tests (ws.py, the TLS listener; stdlib only)
+Tools/run_tests.sh Probe.VaRest.Lws         # LWS 3.0 probe (WS W0): minutes long, host-dependent, outside the default ^VaRest filter
+Tools/run_tests.sh --no-build Probe.VaRest.Risky.Lws.StatusInConnectionError.Refused  # may crash: one case per run; also ConnectRefused, DnsFailure, NoUpgrade, TlsVerifyFailure, KilledPending
+```
+
+Then `grep -n 'ws_selftest\|Probe.VaRest' CLAUDE.md` prints the three new lines and nothing else changed (`git diff --stat CLAUDE.md`: `1 file changed, 3 insertions(+)`).
+
+- [ ] **Step 6: File beads**
+
+Always (ruling Q2: written with the probe facts whatever LWS does):
+
+```bash
+bd create "WS W1: refuse WebSocket upgrade redirects (ruling Q2), from the W0 redirect facts" -t task -p 1 \
+	--deps discovered-from:VaRest-81s -d "Ruling Q2 (2026-10-21): VaRest does not follow upgrade redirects; a 3xx fails the connection (browser behaviour: the WHATWG WebSockets standard fetches with redirect mode error; RFC 6455 4.1 only permits following). Auth headers must never reach another host, and refusing is simpler to explain than a same-origin exception. Passport docs/passport/<date>-lws30-probe.md: hs.redirect_relative <observed>; hs.redirect_to_tls <observed>; hs.redirect_reappends_headers <observed>; hs.redirect_target_visible <observed>; hs.redirect_veto <observed>; hs.redirect_host_header <observed>. Spec 2.2 (corrected in W0, E13/E13b/E13c) states the rule. W1: when LWS follows, the appended-header callback adds nothing once the target differs from the original scheme+host+port and the socket fails the connection at the first callback that can, with a redirect error whose kind the W1 plan names; the transport suite covers /ws/status/302 to the same and to another port."
 bd create "WS W1: monolithic coexistence and the SSL-module TLS context in a monolithic game (W0 could not run them)" -t task -p 2 \
 	--deps discovered-from:VaRest-81s -d "Passport rows coexist.monolithic, tls.ssl_module_ctx: VaRestTests is UncookedOnly (ModuleDescriptor.cs:792-793); the first Runtime module linking LWS is W1's VaRestWebSocket. W1 exit: engine IWebSocket and a VaRest socket at once, ws and wss, in VaRestHost Linux Development, both logs intact."
-bd update VaRest-b4d --append-notes "WS W0: run Tools/run_tests.sh Probe.VaRest.Lws and Probe.VaRest.Risky on Win64 and Mac, then Tools/lws_probe_passport.py; diff the passport against docs/passport/<date>-lws30-probe.md (rows release.*)."
+bd update VaRest-b4d --append-notes "WS W0: on Win64 and Mac run Tools/run_tests.sh Probe.VaRest.Lws, then each Probe.VaRest.Risky.Lws.StatusInConnectionError.<Case> in its own run (Refused, ConnectRefused, DnsFailure, NoUpgrade, TlsVerifyFailure, KilledPending), then Tools/lws_probe_passport.py with all seven logs; diff the passport against docs/passport/<date>-lws30-probe.md (rows release.*)."
 ```
 
-When `coexist.shared_lws_state` differs, or `coexist.lws_symbol_owner` shows two copies:
+When `coexist.context_create_reallocates_ssl_index` differs or is `unverified` (review I-3):
 
 ```bash
-bd create "WS spec §1.2/D30: two LWS copies on Linux do not share state (W0 passport coexist.*)" -t task -p 2 \
-	--deps discovered-from:VaRest-81s -d "§1.2 says ELF resolves both modules' lws_* calls to one copy; UE dlopens modules RTLD_LOCAL (UnixPlatformProcess.cpp:107-148) and the probe saw: <coexist.shared_lws_state observed>; <coexist.lws_symbol_owner observed>. D30's rule (set the log level only without the engine module) is then moot in modular builds, and VaRest's copy logs to stderr at LWS's default level unless VaRest sets its own emitter. Decide and correct §1.2/D30."
+bd create "WS W1: LWS context creation re-allocates the OpenSSL ex-data index -- one LWS context per process copy, or context creation serialised against handshakes" -t task -p 1 \
+	--deps discovered-from:VaRest-81s -d "Passport row coexist.context_create_reallocates_ssl_index: <observed>. Every lws_create_context stores a new CRYPTO_get_ex_new_index into the copy's openssl_websocket_private_data_index (ssl.c.o 0x1f4, 0x23a), and OpenSSL_client_verify_callback dereferences SSL_get_ex_data under it without a null check (openssl-client.c.o 0x1c8-0x1d6): a TLS handshake in flight across a context creation in the same copy crashes. In a monolithic game one copy serves WebSockets, WebSocketServer, WebSocketNetworking, HttpNetworkReplayStreaming and VaRest's lazily created context (spec 2.1). W1 designs which: one LWS context per process copy, or context creation serialised against handshakes; the W1 monolithic coexistence test opens an engine wss while VaRest's context is created."
 ```
 
-When `hs.redirect_relative` or `hs.redirect_absolute` observed starts with "followed":
+When S1/S2 could not be applied because the coexist rows disagree or are `unverified`:
 
 ```bash
-bd create "WS W1: LWS 3.0 follows upgrade redirects and re-sends appended headers -- redirect policy for auth" -t task -p 1 \
-	--deps discovered-from:VaRest-81s -d "Passport rows hs.redirect_relative, hs.redirect_reappends_headers: <observed>. Auth headers must never reach another host; §2.2 (corrected in W0) says VaRest appends them only when host and port are the original's. W1 implements and tests it (/ws/status/302 with Location to another port)."
+bd create "WS spec §1.2/D30: LWS copies and their log state on Linux are ambiguous in the W0 passport" -t task -p 2 \
+	--deps discovered-from:VaRest-81s -d "Passport rows coexist.shared_lws_state <observed>; coexist.lws_symbol_owner <observed>; env.websockets_loaded_at_start <observed>. UE dlopens modules RTLD_LOCAL (Runtime/Core/Private/Unix/UnixPlatformProcess.cpp:107-148). Decide whether VaRest's copy is its own and correct §1.2's interposition and log-level bullets and D30."
+```
+
+When none of S3/S3b/S3c applied (`close.rewritten_codes` has a `-> no code` entry):
+
+```bash
+bd create "WS spec §3.4: resolve the 1002 row from the W0 passport (close.rewritten_codes is ambiguous)" -t task -p 2 \
+	--deps discovered-from:VaRest-81s -d "Passport docs/passport/<date>-lws30-probe.md row close.rewritten_codes: <observed>. Some codes never reached WS_PEER_INITIATED_CLOSE, so whether LWS 3.0 rewrites them to 1002 is open; §3.4's 1002/1003/1007/1010 row stays conditional until W1's transport suite pins it."
+```
+
+When `hs.unregistered_selected_bound` differs with an observed that starts with "established" (opened, bound to another protocol):
+
+```bash
+bd create "WS W1: LWS 3.0 binds a connection with an unregistered selected subprotocol to another protocol than local_protocol_name" -t task -p 2 \
+	--deps discovered-from:VaRest-81s -d "Passport row hs.unregistered_selected_bound: <observed>. Spec 2.2's subprotocol paragraph (E4) was left as it was; W1 decides how the transport finds its handler (lws_get_protocol(wsi), or registering every subprotocol)."
+```
+
+When `svc.kill_async_ms` and `svc.kill_async_ms_short_wait` are both over 1500 ms (E3 not applied: the delay is LWS's own):
+
+```bash
+bd create "WS W1: LWS_TO_KILL_ASYNC takes over 1.5 s even with a 100 ms service wait (W0 passport)" -t task -p 2 \
+	--deps discovered-from:VaRest-81s -d "Passport rows svc.kill_async_ms <observed>, svc.kill_async_ms_short_wait <observed>, timeout.kill_pending_ms_short_wait <observed>. Spec 2.2's ConnectTimeout and 2.5's ping-timeout kill rely on it; W1 measures and bounds it (close the socket fd, or an earlier kill)."
+```
+
+When `rx.flow_resume_from_command` differs (neither resume form worked):
+
+```bash
+bd create "WS W1: reading cannot be resumed from a command on LWS 3.0 (W0 passport rx.flow_resume_form)" -t bug -p 1 \
+	--deps discovered-from:VaRest-81s -d "Passport rows rx.flow_resume_from_command <observed>, rx.flow_resume_form <observed>. Spec 2.3's flow control resumes from the service thread outside the connection's callback; W1 must find a working resume (e.g. lws_callback_on_writable then resume inside the callback) before flow control ships."
 ```
 
 When `tls.untrusted_rejected` differs, or E1b's condition holds and `tls.provided_ctx_connects` shows no connection:
@@ -6838,7 +7667,7 @@ bd create "WS: LWS 3.0 TLS verification does not behave as the engine glue assum
 
 Each `<observed>` is the passport's cell for that id.
 
-- [ ] **Step 5: Final verification**
+- [ ] **Step 7: Final verification**
 
 Run, one after the other (no editor running):
 
@@ -6849,13 +7678,13 @@ Tools/run_tests.sh VaRest
 git status --short
 ```
 
-Expected: all three selftests OK. The default suite passes with the same count as before W0 plus zero; probes never run in it (`grep -c 'Path={Probe\.' /w/Unreal/VaRestHost/Saved/Logs/VaRestTests.log` prints `0`). The monolithic game builds (`Result: Succeeded`). `git status` shows only the spec as modified, plus `.superpowers/` and other agents' files: no `__pycache__`, no `*.tmp`, no generated certificate scratch.
+Expected: all three selftests OK. The default suite passes with the same count as before W0 plus zero; probes never run in it (`grep -c 'Path={Probe\.' /w/Unreal/VaRestHost/Saved/Logs/VaRestTests.log` prints `0`). The monolithic game builds (`Result: Succeeded`). `git status` shows the spec and `CLAUDE.md` as modified, plus `.superpowers/` and other agents' files: no `__pycache__`, no `*.tmp`, no generated certificate scratch.
 
-- [ ] **Step 6: Commit the spec corrections**
+- [ ] **Step 8: Commit the spec corrections and the CLAUDE.md lines**
 
 ```bash
-git add docs/superpowers/specs/2026-10-20-varest2-websocket-design.md
-git commit -m "spec: WebSocket §0.3/§2 corrected from the W0 libwebsockets 3.0 probe (passport <date>-lws30-probe)
+git add docs/superpowers/specs/2026-10-20-varest2-websocket-design.md CLAUDE.md
+git commit -m "spec: WebSocket §0.3/§1.2/§2/§3.4/D30 corrected from the W0 libwebsockets 3.0 probe (passport <date>-lws30-probe); CLAUDE.md: probe commands
 
 Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 ```
@@ -6864,36 +7693,38 @@ Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 
 ## Self-review
 
-**1. Spec coverage** (§17 W0 row, §16.3, §16.4, §22.2 W0 additions, the brief):
+**1. Spec coverage** (§17 W0 row, §16.3, §16.4, §22.2 W0 additions, the brief, the rulings):
 
 | Requirement | Task |
 | --- | --- |
 | `ws.py`: stdlib, `python3 -I`, plugged into server.py's hook, one process and port, shared tokens, runs alone, hand-written RFC 6455 (Accept, subprotocols, refusals, 7/16/64-bit lengths, masking with big-integer XOR, continuations, control frames, PING→PONG, close echo, strict UTF-8 → 1007, server fragments at chosen offsets) | 1 |
 | §16.3 scenarios: echo, status, close/<code>?msg, close/none, close/1012, drop, silent, serverping, fragment?at, large?bytes&ascii, order, headers, auth, protocol?select, flaky, slowupgrade, noecho, badutf8 | 1, 2 (`/ws/route`, `/ws/apping` deferred to W4/W3, decision 7) |
 | `ws_selftest.py` | 1, 2, 3 |
-| TLS listener with a committed self-signed test certificate, reached with `wss+insecure` (ALLOW_SELFSIGNED) or the CA | 3 |
-| Bounded inputs, no traversal, server leaves with the runner | 1 (bounds tests), 3 (TLS lifecycle) |
+| TLS listener with a committed self-signed test certificate (`test-ca.pem`, `test-server.pem`, `test-server.key`, README; ruling Q5), reached with `wss+insecure` (ALLOW_SELFSIGNED) or the CA | 3 |
+| Bounded inputs (control frames ≤ 125 bytes before reading, message totals before appending, 2 000 journal events per key), no traversal, server leaves with the runner, a missing certificate named on stderr | 1 (bounds tests), 3 (TLS lifecycle) |
 | §16.4: `local_protocol_name` with an unregistered selection; selected protocol in `FILTER_PRE_ESTABLISH` | 6 |
-| `lws_http_client_http_response` in `CONNECTION_ERROR` for 401/403/404/503 vs the strings | 6 (risky run + `hs.refusal_*`) |
+| `lws_http_client_http_response` in `CONNECTION_ERROR` for 401/403/404/503 vs the strings, and in the cases without a status line | 6 (six risky cases, one per run, decision 10; `hs.refusal_*`) |
 | empty close, codes 1004/1012/1013/1014/2000/4001/5000 as received | 7 |
-| close echo timing against `/ws/noecho`; `CLIENT_CLOSED` vs `WSI_DESTROY` order | 7 |
+| close echo timing against `/ws/noecho`; `CLIENT_CLOSED` vs `WSI_DESTROY` order | 7 (100 ms service wait, decision 9) |
 | auto-PONG to server PINGs; `RECEIVE_PONG` payload echo | 7 |
 | receive chunking (fragment boundaries, 64 KiB); `NO_FIN` sends | 8 |
-| default `timeout_secs` (blackhole) and `LWS_TO_KILL_ASYNC` | 5 |
+| default `timeout_secs` (blackhole) and `LWS_TO_KILL_ASYNC` | 5 (`timeout.default_secs_blackhole`; kills with 10 s and 100 ms waits) |
 | raw origin; `APPEND_HANDSHAKE_HEADER` length with 32 KiB | 6 |
-| `rx_flow_control` pause/resume | 8 |
+| `rx_flow_control` pause/resume | 8 (both resume forms, each its own round) |
 | TLS through the SSL module context on Linux | 9 (`tls.ssl_module_ctx`: null in modular builds, so it records the fallback and stands in a provided context, decision 13) |
-| redirects (3xx) | 6 |
-| coexistence with an engine `IWebSocket` (editor, ws and wss, both logs intact) | 9; monolithic: `unverified`, W1 (decision 8, bead in Task 11) |
+| redirects (3xx), and the facts ruling Q2's rule needs | 6 (followed or not from both sides, target visibility, veto, `Host`) |
+| coexistence with an engine `IWebSocket` (editor, ws and wss, both logs intact); the TLS index hazard | 9; monolithic: `unverified`, W1 (decision 8, bead in Task 11); `coexist.context_create_reallocates_ssl_index` (decision 16) |
 | §22.2: `NoUpgradeResponse` string, `SO_SNDBUF` via `lws_get_socket_fd`, an auto-reply between two large messages | 6, 8, 8 |
 | Passport `docs/passport/<date>-lws30-probe.md` | 10 |
-| §0.3/§2 corrected where the probe disagrees, as a separate commit | 11 |
-| Platform items that cannot run here: "unverified here; release-pass item" | 5 (`release.*`, `coexist.monolithic`), 8 (`tx.so_sndbuf_*` off Linux/Mac), 9 (`coexist.lws_symbol_owner` off Linux) |
+| §0.3/§2 corrected where the probe disagrees, as a separate commit; §1.2, D30 and §3.4's 1002 row when unambiguous (ruling Q3) | 11 (Steps 1–4) |
+| The probe commands in CLAUDE.md (ruling Q1) | 11 (Step 5) |
+| `bDisableCertValidation` scoped and restored on every path, local server only (ruling Q4) | 9 (decision 11) |
+| Platform items that cannot run here: "unverified here; release-pass item" | 5 (`release.*`, `coexist.monolithic`), 8 (`tx.so_sndbuf_*` off Linux/Mac), 9 (`coexist.lws_symbol_owner`, `coexist.context_create_reallocates_ssl_index` off Linux) |
 
-Not covered, on purpose: the client proxy (`http_proxy_address`). §16.4 does not list it, and the release pass owns it per platform (§18). It is in the writer report.
+Not covered, on purpose: the client proxy (`http_proxy_address`). §16.4 does not list it, and the release pass owns it per platform (§18). It is in the writer report. Not done either: a risky probe that creates a second rig in the middle of a TLS handshake (review I-3's optional item); the static evidence and the index fact decide the bead, and a crash probe would add only the crash.
 
-**2. Placeholder scan.** No TBD or TODO. The angle-bracket values in Task 11 (`<observed>`, `<date>`) are runtime results that the plan cannot know: each one names the exact passport cell it is copied from. The only conditional plan text is the fallback in Task 5 Step 3 (if the inside-callback command path does not work, flip the rig default), which states its trigger and its edit.
+**2. Placeholder scan.** No TBD or TODO. The angle-bracket values in Task 11 (`<observed>`, `<date>`) are runtime results that the plan cannot know: each one names the exact passport cell it is copied from. The only conditional plan text is the fallback in Task 4 Step 7 and Task 5 Step 3 (if the inside-callback command path does not work, flip the rig default), which states its trigger and its edit.
 
-**3. Type consistency.** Checked across Tasks 4–9: `FRig::Find(ConnId, Reason, Out, NotePrefix)` matches by prefix, so `TEXT("kill")` also finds `"kill: no wsi"`, and Task 5 checks `Note.Equals("kill")` for that reason. `WriteNow` notes start with their label (`reply`, `first`), and `WriteNext` notes with `outbox`. `FHook`'s signature is the same in every test (`FConn&, lws*, int32, void*, void*, size_t`). The `ETls` values are used as declared. Every fact id a test logs appears in `EXPECTED` (122), and every `EXPECTED` id is logged by exactly one test (counted per prefix in Steps 3 of Tasks 5–9: 15+5, 31+1, 16+9, 26, 13+6).
+**3. Type consistency.** Checked across Tasks 4–9: `FRig::Find(ConnId, Reason, Out, NotePrefix)` matches by prefix, so `TEXT("kill")` also finds `"kill: no wsi"`, and Task 5's `Kill` checks `Note.Equals("kill")` before it measures (review M-12). `WriteNow` notes start with their label (`reply`, `first`), and `WriteNext` notes with `outbox`. `FHook`'s signature is the same in every test (`FConn&, lws*, int32, void*, void*, size_t`); Task 6's `TargetHook` and `StatusHook` return one. Hook markers are told apart by their note prefixes (`append `, `veto `, `status `, `paused`, `resumed`, `push`). `NoteOutcome` replaces every assertion on a library outcome; `TestTrue` stays on the server, the journals, the rigs and the precondition connections. The `ETls` values are used as declared. Every fact id a test logs appears in `EXPECTED` (135), and every `EXPECTED` id is logged by exactly one test (counted per prefix in Steps 3 of Tasks 5–9: 16+7, 35+6, 16+9, 26, 13+7). Tests: 4 rig, 30 probe, 6 risky; all 40 names start with `Probe.`.
 
 **4. Review Focus.** Five lines, each with its test in the owning task: Task 4 `Rig.TeardownWithOpenConnection` (restore-the-bug) and `Rig.SequentialConnections`; Task 1 `test_protocol_errors_close_1002_and_the_server_goes_on` and `test_lengths_over_the_limit_close_1009`; Task 3 `test_tls_listener_in_the_ready_file_and_gone_with_the_parent` and `test_a_stalled_or_plain_client_does_not_block_others` (restore-the-bug).
