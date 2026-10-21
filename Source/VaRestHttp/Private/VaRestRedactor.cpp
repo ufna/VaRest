@@ -74,6 +74,87 @@ namespace VaRest::Http::RedactorPrivate
 		return Need > Back ? End - Back - 1 : End;
 	}
 
+	/** %XX with the hex digits lower-case: RFC 3986 2.1 makes %2b and %2B the same octet, and a server may echo either */
+	FString LowerHexEscapes(const FString& Escaped)
+	{
+		FString Out = Escaped;
+		for (int32 i = 0; i + 2 < Out.Len(); ++i)
+		{
+			if (Out[i] == TEXT('%'))
+			{
+				Out[i + 1] = FChar::ToLower(Out[i + 1]);
+				Out[i + 2] = FChar::ToLower(Out[i + 2]);
+				i += 2;
+			}
+		}
+		return Out;
+	}
+
+	TConstArrayView<TCHAR> NeedleView(const FString& Needle)
+	{
+		return TConstArrayView<TCHAR>(*Needle, Needle.Len());
+	}
+
+	TConstArrayView<uint8> NeedleView(const TArray<uint8>& Needle)
+	{
+		return TConstArrayView<uint8>(Needle);
+	}
+
+	/**
+	 * Replaces every occurrence of every needle by "***". The match ranges of all needles are collected first and merged,
+	 * then the text is written once (review M5): replacing needle after needle would leave the tail of a second secret
+	 * that overlaps the first (AAAABBBB then BBBBCCCC over AAAABBBBCCCC leaves CCCC), and would rebuild the buffer
+	 * for needles that never hit. Out is untouched when nothing matched.
+	 */
+	template <typename ElementType, typename NeedleArrayType>
+	bool ScrubRanges(TArray<ElementType>& Text, const NeedleArrayType& Needles)
+	{
+		TArray<TPair<int32, int32>> Ranges;
+		for (const auto& Needle : Needles)
+		{
+			const TConstArrayView<ElementType> View = NeedleView(Needle);
+			if (View.Num() == 0 || View.Num() > Text.Num())
+			{
+				continue;
+			}
+			for (int32 i = 0; i + View.Num() <= Text.Num(); ++i)
+			{
+				if (Text[i] == View[0] && FMemory::Memcmp(Text.GetData() + i, View.GetData(), View.Num() * sizeof(ElementType)) == 0)
+				{
+					Ranges.Emplace(i, i + View.Num());
+				}
+			}
+		}
+		if (Ranges.Num() == 0)
+		{
+			return false;
+		}
+		Ranges.Sort([](const TPair<int32, int32>& A, const TPair<int32, int32>& B) { return A.Key < B.Key; });
+		TArray<ElementType> Scrubbed;
+		Scrubbed.Reserve(Text.Num());
+		int32 Written = 0;
+		int32 RangeEnd = 0;
+		for (int32 Index = 0; Index < Ranges.Num();)
+		{
+			const int32 RangeStart = Ranges[Index].Key;
+			RangeEnd = Ranges[Index].Value;
+			++Index;
+			while (Index < Ranges.Num() && Ranges[Index].Key < RangeEnd)
+			{
+				RangeEnd = FMath::Max(RangeEnd, Ranges[Index].Value);
+				++Index;
+			}
+			Scrubbed.Append(Text.GetData() + Written, RangeStart - Written);
+			Scrubbed.Add(static_cast<ElementType>('*'));
+			Scrubbed.Add(static_cast<ElementType>('*'));
+			Scrubbed.Add(static_cast<ElementType>('*'));
+			Written = RangeEnd;
+		}
+		Scrubbed.Append(Text.GetData() + Written, Text.Num() - Written);
+		Text = MoveTemp(Scrubbed);
+		return true;
+	}
+
 	TSharedPtr<const TArray<uint8>, ESPMode::ThreadSafe> Share(TArray<uint8>&& Bytes)
 	{
 		return MakeShared<TArray<uint8>, ESPMode::ThreadSafe>(MoveTemp(Bytes));
@@ -141,7 +222,11 @@ TArray<FString> FVaRestSecretSet::GetActive(double Now) const
 	{
 		if (VaRest::Json::Utf8Length(Value) >= MinBytes)
 		{
-			Out.AddUnique(Value);
+			// FString's operator== ignores case: two tokens that differ only in case are two secrets
+			if (!Out.ContainsByPredicate([&Value](const FString& Known) { return Known.Equals(Value, ESearchCase::CaseSensitive); }))
+			{
+				Out.Add(Value);
+			}
 		}
 	};
 	for (const TPair<FName, FString>& Pair : Current)
@@ -179,70 +264,81 @@ void FVaRestSecretSet::Prune(double Now)
 
 FVaRestRedactor::FVaRestRedactor(FVaRestRedactRules InRules, TArray<FString> InSecrets)
 	: Rules(MoveTemp(InRules))
+	, InputSecrets(InSecrets)
 {
-	for (FString& Secret : InSecrets)
+	using namespace VaRest::Http::RedactorPrivate;
+	// FString's operator== ignores case, so AddUnique would drop the lower-case hex forms as duplicates of the upper-case ones
+	auto AddNeedle = [this](const FString& Needle)
+	{
+		if (!Secrets.ContainsByPredicate([&Needle](const FString& Known) { return Known.Equals(Needle, ESearchCase::CaseSensitive); }))
+		{
+			Secrets.Add(Needle);
+		}
+	};
+	for (const FString& Secret : InSecrets)
 	{
 		if (VaRest::Json::Utf8Length(Secret) >= FVaRestSecretSet::MinBytes)
 		{
-			// Review M6: the forms a secret takes on the wire -- percent-encoded by Path()/Query() (base64's + / =) and
-			// JSON-escaped in a body ('"', '\') -- are needles too, when they differ
+			// Review M6: the forms a secret takes on the wire are needles too, when they differ: percent-encoded by
+			// Path()/Query() (base64's + / =), form-encoded by FVaRestForm (space as '+', '~' as %7E, '*' kept: FormEncode
+			// and PercentEncode differ on those three, VaRestUrl.cpp), either with lower-case hex (RFC 3986 2.1), and
+			// JSON-escaped in a body (quote and backslash)
 			const FString Percent = VaRest::Http::PercentEncode(Secret);
-			FString Escaped = Secret.Replace(TEXT("\\"), TEXT("\\\\")).Replace(TEXT("\""), TEXT("\\\""));
-			Secrets.AddUnique(Percent);
-			Secrets.AddUnique(MoveTemp(Escaped));
-			Secrets.AddUnique(MoveTemp(Secret));
+			const FString Form = VaRest::Http::FormEncode(Secret);
+			AddNeedle(Secret);
+			AddNeedle(Percent);
+			AddNeedle(Form);
+			AddNeedle(LowerHexEscapes(Percent));
+			AddNeedle(LowerHexEscapes(Form));
+			AddNeedle(Secret.Replace(TEXT("\\"), TEXT("\\\\")).Replace(TEXT("\""), TEXT("\\\"")));
 		}
 	}
 	Secrets.Sort([](const FString& A, const FString& B) { return A.Len() > B.Len(); });
-	for (const FString& Secret : Secrets)
+	for (const FString& Needle : Secrets)
 	{
-		SecretsUtf8.Add(VaRest::Http::RedactorPrivate::ToUtf8(Secret));
+		SecretsUtf8.Add(ToUtf8(Needle));
 	}
 }
 
 bool FVaRestRedactor::ScrubInPlace(FString& Text) const
 {
-	bool bAny = false;
-	for (const FString& Secret : Secrets)
+	if (Secrets.Num() == 0)
 	{
-		bAny |= Text.ReplaceInline(*Secret, TEXT("***"), ESearchCase::CaseSensitive) > 0;
+		return false;
 	}
-	return bAny;
+	TArray<TCHAR> Chars(Text.GetCharArray());
+	if (!VaRest::Http::RedactorPrivate::ScrubRanges(Chars, Secrets))
+	{
+		return false;
+	}
+	Text = FString(Chars.GetData());
+	return true;
 }
 
 bool FVaRestRedactor::ScrubUtf8(TArray<uint8>& Utf8) const
 {
 	// "a memmem of a few needles over at most the cap" (Inspector 2.2 layer 3)
-	bool bAny = false;
+	return VaRest::Http::RedactorPrivate::ScrubRanges(Utf8, SecretsUtf8);
+}
+
+bool FVaRestRedactor::TrimNeedleTail(TArray<uint8>& Utf8) const
+{
+	// Review I1: a cap can cut a known secret in two, and the half before the cut matches no needle. The caller copied
+	// exactly the cap, so nothing past it can be scrubbed; instead drop the longest tail that begins a needle.
+	int32 Drop = 0;
 	for (const TArray<uint8>& Needle : SecretsUtf8)
 	{
-		if (Needle.Num() == 0 || Needle.Num() > Utf8.Num())
+		for (int32 Length = FMath::Min(Needle.Num() - 1, Utf8.Num()); Length > Drop; --Length)
 		{
-			continue;
-		}
-		TArray<uint8> Out;
-		bool bHit = false;
-		int32 i = 0;
-		while (i < Utf8.Num())
-		{
-			if (i + Needle.Num() <= Utf8.Num() && FMemory::Memcmp(Utf8.GetData() + i, Needle.GetData(), Needle.Num()) == 0)
+			if (FMemory::Memcmp(Utf8.GetData() + Utf8.Num() - Length, Needle.GetData(), Length) == 0)
 			{
-				Out.Append(reinterpret_cast<const uint8*>("***"), 3);
-				i += Needle.Num();
-				bHit = true;
+				Drop = Length;
+				break;
 			}
-			else
-			{
-				Out.Add(Utf8[i++]);
-			}
-		}
-		if (bHit)
-		{
-			Utf8 = MoveTemp(Out);
-			bAny = true;
 		}
 	}
-	return bAny;
+	Utf8.SetNum(Utf8.Num() - Drop);
+	return Drop > 0;
 }
 
 FString FVaRestRedactor::ScrubText(FStringView Text) const
@@ -253,25 +349,38 @@ FString FVaRestRedactor::ScrubText(FStringView Text) const
 	return Out;
 }
 
+bool FVaRestRedactor::IsSecretPair(FStringView Piece, EVaRestRedactKeyKind Kind) const
+{
+	int32 Equals = INDEX_NONE;
+	if (!Piece.FindChar(TEXT('='), Equals))
+	{
+		return false;
+	}
+	FStringView Key = Piece.Left(Equals);
+	// Review M1: "#/callback?code=X" -- a hash router puts a query inside the fragment, so the key is what follows the last '?'
+	int32 Question = INDEX_NONE;
+	if (Key.FindLastChar(TEXT('?'), Question))
+	{
+		Key = Key.RightChop(Question + 1);
+	}
+	return Rules.ShouldRedact(FStringView(VaRest::Http::PercentDecode(Key, true)), Kind);
+}
+
 void FVaRestRedactor::AppendRedactedPairs(FStringView Pairs, EVaRestRedactKeyKind Kind, FString& Out) const
 {
+	// Review M2: ';' separates pairs for some servers (HTML 4.01 B.2.2), so a key after one is judged too; the output keeps
+	// the separators as sent
 	int32 Start = 0;
-	bool bFirst = true;
 	while (Start <= Pairs.Len())
 	{
 		int32 End = Start;
-		while (End < Pairs.Len() && Pairs[End] != TEXT('&'))
+		while (End < Pairs.Len() && Pairs[End] != TEXT('&') && Pairs[End] != TEXT(';'))
 		{
 			++End;
 		}
 		const FStringView Piece = Pairs.Mid(Start, End - Start);
-		if (!bFirst)
-		{
-			Out.AppendChar(TEXT('&'));
-		}
-		bFirst = false;
 		int32 Equals = INDEX_NONE;
-		if (Piece.FindChar(TEXT('='), Equals) && Rules.ShouldRedact(FStringView(VaRest::Http::PercentDecode(Piece.Left(Equals), true)), Kind))
+		if (IsSecretPair(Piece, Kind) && Piece.FindChar(TEXT('='), Equals))
 		{
 			Out += Piece.Left(Equals);
 			Out += TEXT("=***");
@@ -280,14 +389,64 @@ void FVaRestRedactor::AppendRedactedPairs(FStringView Pairs, EVaRestRedactKeyKin
 		{
 			Out += Piece;
 		}
+		if (End < Pairs.Len())
+		{
+			Out.AppendChar(Pairs[End]);
+		}
 		Start = End + 1;
 	}
 }
 
-FString FVaRestRedactor::RedactUrlUncounted(FStringView Url) const
+void FVaRestRedactor::AppendRedactedPath(FStringView Path, FString& Out) const
+{
+	// Review M2: path parameters (";jsessionid=X") are "name=value" pairs too
+	int32 Start = 0;
+	while (Start < Path.Len())
+	{
+		if (Path[Start] != TEXT(';'))
+		{
+			int32 SegmentEnd = Start;
+			while (SegmentEnd < Path.Len() && Path[SegmentEnd] != TEXT(';'))
+			{
+				++SegmentEnd;
+			}
+			Out += Path.Mid(Start, SegmentEnd - Start);
+			Start = SegmentEnd;
+			continue;
+		}
+		int32 End = Start + 1;
+		while (End < Path.Len() && Path[End] != TEXT(';') && Path[End] != TEXT('/'))
+		{
+			++End;
+		}
+		const FStringView Param = Path.Mid(Start + 1, End - Start - 1);
+		int32 Equals = INDEX_NONE;
+		Out.AppendChar(TEXT(';'));
+		if (IsSecretPair(Param, EVaRestRedactKeyKind::Query) && Param.FindChar(TEXT('='), Equals))
+		{
+			Out += Param.Left(Equals);
+			Out += TEXT("=***");
+		}
+		else
+		{
+			Out += Param;
+		}
+		Start = End;
+	}
+}
+
+FString FVaRestRedactor::RedactUrlUncounted(FStringView Whole) const
 {
 	FString Out;
-	Out.Reserve(Url.Len());
+	Out.Reserve(Whole.Len());
+	// Review M3: leading controls and spaces are skipped, as the WHATWG URL parser does, so " https://u:p@h" is still a URL
+	int32 Lead = 0;
+	while (Lead < Whole.Len() && Whole[Lead] <= TEXT(' '))
+	{
+		++Lead;
+	}
+	Out += Whole.Left(Lead);
+	const FStringView Url = Whole.RightChop(Lead);
 	int32 Pos = 0;
 	// Review C2: "://" ends a scheme only when everything before it is one (RFC 3986: ALPHA *( ALPHA / DIGIT / "+" /
 	// "-" / "." )). Otherwise "/cb?code=SECRET&redirect_uri=https://app/done" would take its whole query for a scheme
@@ -333,6 +492,26 @@ FString FVaRestRedactor::RedactUrlUncounted(FStringView Url) const
 		}
 		Pos = AuthorityEnd;
 	}
+	else
+	{
+		// Review M3: no scheme and no "//": a "user:pass@host/x" still carries userinfo, which ends at the last '@' before
+		// the first '/', '?' or '#'
+		int32 Boundary = Url.Len();
+		for (int32 i = 0; i < Url.Len(); ++i)
+		{
+			if (Url[i] == TEXT('/') || Url[i] == TEXT('?') || Url[i] == TEXT('#'))
+			{
+				Boundary = i;
+				break;
+			}
+		}
+		int32 At = INDEX_NONE;
+		if (Url.Left(Boundary).FindLastChar(TEXT('@'), At))
+		{
+			Out += TEXT("***@");
+			Pos = At + 1;
+		}
+	}
 	int32 QueryStart = INDEX_NONE;
 	int32 FragmentStart = INDEX_NONE;
 	for (int32 i = Pos; i < Url.Len(); ++i)
@@ -348,7 +527,7 @@ FString FVaRestRedactor::RedactUrlUncounted(FStringView Url) const
 		}
 	}
 	const int32 PathEnd = QueryStart != INDEX_NONE ? QueryStart : FragmentStart != INDEX_NONE ? FragmentStart : Url.Len();
-	Out += Url.Mid(Pos, PathEnd - Pos);
+	AppendRedactedPath(Url.Mid(Pos, PathEnd - Pos), Out);
 	if (QueryStart != INDEX_NONE)
 	{
 		const int32 QueryEnd = FragmentStart != INDEX_NONE ? FragmentStart : Url.Len();
@@ -378,11 +557,45 @@ FString FVaRestRedactor::RedactHeaderValue(FStringView Name, FStringView Value) 
 	{
 		return TEXT("***");
 	}
-	if (Name.Equals(TEXTVIEW("Location"), ESearchCase::IgnoreCase) || Name.Equals(TEXTVIEW("Content-Location"), ESearchCase::IgnoreCase))
+	if (Name.Equals(TEXTVIEW("Location"), ESearchCase::IgnoreCase) || Name.Equals(TEXTVIEW("Content-Location"), ESearchCase::IgnoreCase)
+		|| Name.Equals(TEXTVIEW("Referer"), ESearchCase::IgnoreCase))
 	{
 		return RedactUrlUncounted(Value);
 	}
-	FString Out(Value);
+	FString Out;
+	if (Name.Equals(TEXTVIEW("Refresh"), ESearchCase::IgnoreCase))
+	{
+		// "5; url=https://app/cb?code=X": the part after url= is a URL
+		const int32 UrlAt = FString(Value).Find(TEXT("url="), ESearchCase::IgnoreCase);
+		if (UrlAt != INDEX_NONE)
+		{
+			Out += Value.Left(UrlAt + 4);
+			Out += RedactUrlUncounted(Value.RightChop(UrlAt + 4));
+			ScrubInPlace(Out);
+			return Out;
+		}
+	}
+	else if (Name.Equals(TEXTVIEW("Link"), ESearchCase::IgnoreCase))
+	{
+		// RFC 8288: "<target>; rel=next, <target>; ...": every target is a URL
+		int32 Pos = 0;
+		while (Pos < Value.Len())
+		{
+			int32 Open = INDEX_NONE;
+			int32 Close = INDEX_NONE;
+			if (!Value.RightChop(Pos).FindChar(TEXT('<'), Open) || !Value.RightChop(Pos + Open + 1).FindChar(TEXT('>'), Close))
+			{
+				break;
+			}
+			Out += Value.Mid(Pos, Open + 1);
+			Out += RedactUrlUncounted(Value.Mid(Pos + Open + 1, Close));
+			Pos += Open + 1 + Close;
+		}
+		Out += Value.RightChop(Pos);
+		ScrubInPlace(Out);
+		return Out;
+	}
+	Out = FString(Value);
 	ScrubInPlace(Out);
 	return Out;
 }
@@ -476,6 +689,11 @@ FVaRestTraceExcerpt FVaRestRedactor::RedactBody(FStringView ContentType, TConstA
 		return Excerpt;
 	}
 	Excerpt.bRedacted |= ScrubUtf8(Out);
+	if (!bWhole)
+	{
+		// Review I1: the cap may have cut a known secret in two
+		Excerpt.bRedacted |= TrimNeedleTail(Out);
+	}
 	Excerpt.Bytes = Share(MoveTemp(Out));
 	return Excerpt;
 }
@@ -487,9 +705,20 @@ FVaRestTraceExcerpt FVaRestRedactor::DescribeMultipart(TConstArrayView<FVaRestMu
 	FVaRestTraceExcerpt Excerpt;
 	Excerpt.Kind = EVaRestExcerptKind::Multipart;
 	Excerpt.TotalBytes = TotalBytes;
+	const int32 CapBytes = FMath::Max(Cap, 0);
+	// Review M6: nothing past the cap plus the longest needle can reach the excerpt, so a large text part is read no further
+	int32 Reach = CapBytes;
+	for (const TArray<uint8>& Needle : SecretsUtf8)
+	{
+		Reach = FMath::Max(Reach, CapBytes + Needle.Num());
+	}
 	FString Text;
 	for (const FVaRestMultipartPart& Part : Parts)
 	{
+		if (Text.Len() > Reach)
+		{
+			break;
+		}
 		if (!Text.IsEmpty())
 		{
 			Text.AppendChar(TEXT('\n'));
@@ -498,7 +727,7 @@ FVaRestTraceExcerpt FVaRestRedactor::DescribeMultipart(TConstArrayView<FVaRestMu
 		{
 			const bool bSecret = Rules.ShouldRedact(FStringView(Part.Name), EVaRestRedactKeyKind::Part);
 			Excerpt.bRedacted |= bSecret;
-			Text += FString::Printf(TEXT("part \"%s\": %s"), *Part.Name, bSecret ? TEXT("***") : *ToText(Part.Bytes));
+			Text += FString::Printf(TEXT("part \"%s\": %s"), *Part.Name, bSecret ? TEXT("***") : *ToText(TConstArrayView<uint8>(Part.Bytes).Left(Reach)));
 		}
 		else
 		{
@@ -507,9 +736,9 @@ FVaRestTraceExcerpt FVaRestRedactor::DescribeMultipart(TConstArrayView<FVaRestMu
 	}
 	Excerpt.bRedacted |= ScrubInPlace(Text);
 	TArray<uint8> Out = ToUtf8(Text);
-	if (Cap >= 0 && Out.Num() > Cap)
+	if (Out.Num() > CapBytes)
 	{
-		Out.SetNum(WholeCharacters(TConstArrayView<uint8>(Out).Left(Cap)));
+		Out.SetNum(WholeCharacters(TConstArrayView<uint8>(Out).Left(CapBytes)));
 		Excerpt.bTruncated = true;
 		Excerpt.StopReason = TEXT("cap");
 	}

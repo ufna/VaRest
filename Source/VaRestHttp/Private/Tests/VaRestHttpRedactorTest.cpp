@@ -44,6 +44,21 @@ bool FVaRestHttpRedactUrlTest::RunTest(const FString& Parameters)
 	// Review M6: a secret percent-encoded by Path()/Query() (base64 +/=) is scrubbed in that form too
 	const FVaRestRedactor Encoded(FVaRestRedactRules(), { TEXT("canary+b64/value==") });
 	TestEqualSensitive(TEXT("a percent-encoded known secret"), Encoded.RedactUrl(TEXT("https://h/u/canary%2Bb64%2Fvalue%3D%3D/x")), FString(TEXT("https://h/u/***/x")));
+	// Review I2: VaRest's own form encoding (space '+', '~' %7E, '*' kept) and lower-case hex are needles too
+	const FVaRestRedactor Odd(FVaRestRedactRules(), { TEXT("canary tok~en*1"), TEXT("canary+b64/value==") });
+	TestEqualSensitive(TEXT("a form-encoded known secret in a query value"), Odd.RedactUrl(TEXT("https://h/x?note=canary+tok%7Een*1&a=2")), FString(TEXT("https://h/x?note=***&a=2")));
+	TestEqualSensitive(TEXT("a percent-encoded known secret with a space"), Odd.RedactUrl(TEXT("https://h/u/canary%20tok~en%2A1/x")), FString(TEXT("https://h/u/***/x")));
+	TestEqualSensitive(TEXT("lower-case hex digits"), Odd.RedactUrl(TEXT("https://h/u/canary%2bb64%2fvalue%3d%3d/x")), FString(TEXT("https://h/u/***/x")));
+	// Review M1: a hash router's query inside the fragment
+	TestEqualSensitive(TEXT("a query inside a fragment"), Redactor.RedactUrl(TEXT("https://h/#/callback?code=X&state=Y")), FString(TEXT("https://h/#/callback?code=***&state=Y")));
+	// Review M2: ';' as a pair separator and path parameters
+	TestEqualSensitive(TEXT("a semicolon-separated pair"), Redactor.RedactUrl(TEXT("https://h/x?a=1;token=X")), FString(TEXT("https://h/x?a=1;token=***")));
+	TestEqualSensitive(TEXT("a path parameter"), Redactor.RedactUrl(TEXT("/p;jsessionid=X")), FString(TEXT("/p;jsessionid=***")));
+	TestEqualSensitive(TEXT("a plain path parameter is kept"), Redactor.RedactUrl(TEXT("/p;v=2/q?a=1")), FString(TEXT("/p;v=2/q?a=1")));
+	// Review M3: leading whitespace, and userinfo without a scheme
+	TestEqualSensitive(TEXT("leading space"), Redactor.RedactUrl(TEXT(" https://u:p@h/x")), FString(TEXT(" https://***@h/x")));
+	TestEqualSensitive(TEXT("userinfo without a scheme"), Redactor.RedactUrl(TEXT("u:pw@h/x?a=1")), FString(TEXT("***@h/x?a=1")));
+	TestEqualSensitive(TEXT("an '@' after the first '/' is not userinfo"), Redactor.RedactUrl(TEXT("/a@b")), FString(TEXT("/a@b")));
 	return true;
 }
 
@@ -78,6 +93,16 @@ bool FVaRestHttpRedactHeadersTest::RunTest(const FString& Parameters)
 	Relative.Set(TEXT("Location"), TEXT("/cb?code=canary-rel&next=https://app.test/done"));
 	TestEqualSensitive(TEXT("a relative Location with a URL in its query (review C2)"), Redactor.RedactHeaders(Relative).Get(TEXT("Location")),
 		FString(TEXT("/cb?code=***&next=https://app.test/done")));
+	// Review M9: other headers that carry URLs
+	FVaRestHeaders Urls;
+	Urls.Add(TEXT("Referer"), TEXT("https://app.test/p?token=canary-ref&a=1"));
+	Urls.Add(TEXT("Refresh"), TEXT("0; url=https://app.test/cb?code=canary-rf"));
+	Urls.Add(TEXT("Link"), TEXT("<https://api.test/x?page=2&sig=canary-l1>; rel=\"next\", </y?token=canary-l2>; rel=\"prev\""));
+	const FVaRestHeaders UrlsOut = Redactor.RedactHeaders(Urls);
+	TestEqualSensitive(TEXT("Referer is a URL"), UrlsOut.Get(TEXT("Referer")), FString(TEXT("https://app.test/p?token=***&a=1")));
+	TestEqualSensitive(TEXT("Refresh's url="), UrlsOut.Get(TEXT("Refresh")), FString(TEXT("0; url=https://app.test/cb?code=***")));
+	TestEqualSensitive(TEXT("every Link target"), UrlsOut.Get(TEXT("Link")),
+		FString(TEXT("<https://api.test/x?page=2&sig=***>; rel=\"next\", </y?token=***>; rel=\"prev\"")));
 	return true;
 }
 
@@ -106,6 +131,10 @@ bool FVaRestHttpRedactBodiesTest::RunTest(const FString& Parameters)
 	const FVaRestTraceExcerpt Cut = Run(TEXT("application/json"), R"({"a":"0123456789","password":"canary-cut"})", 22);
 	TestTrue(TEXT("a capped JSON body is truncated with reason cap"), Cut.bTruncated && Cut.StopReason == TEXT("cap"));
 	TestFalse(TEXT("... and no canary"), Cut.ToText().Contains(TEXT("canary")));
+	// Review M4: the cap falls inside the sensitive value ("can" is the part before the cut)
+	const FVaRestTraceExcerpt Inside = Run(TEXT("application/json"), R"({"a":"0123456789","password":"canary-cut"})", 33);
+	TestTrue(TEXT("a cap inside a secret value is a cap stop"), Inside.bTruncated && Inside.StopReason == TEXT("cap"));
+	TestFalse(TEXT("... with none of the value"), Inside.ToText().Contains(TEXT("can")));
 
 	const FVaRestTraceExcerpt Form = Run(TEXT("application/x-www-form-urlencoded"), "a=1&password=canary-6&b=2");
 	TestTrue(TEXT("form kind"), Form.Kind == EVaRestExcerptKind::Form);
@@ -119,6 +148,34 @@ bool FVaRestHttpRedactBodiesTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("... kind Text, redacted"), Text.Kind == EVaRestExcerptKind::Text && Text.bRedacted);
 	const TConstArrayView<uint8> Utf8Text = Bytes("ab\xC3\xA9");
 	TestEqualSensitive(TEXT("text is cut at a character boundary"), Redactor.RedactBody(TEXT("text/plain"), Utf8Text, 4, 3).ToText(), FString(TEXT("ab")));
+
+	// Review I1: a known secret across the cap shows no part of itself, wherever the cap falls
+	const FString Hello = FString::Printf(TEXT("hello %s world"), Bearer);
+	const FTCHARToUTF8 HelloUtf8(*Hello);
+	const TConstArrayView<uint8> HelloBytes(reinterpret_cast<const uint8*>(HelloUtf8.Get()), HelloUtf8.Length());
+	const FString Secret(Bearer);
+	for (int32 CapAt = 1; CapAt < HelloBytes.Num(); ++CapAt)
+	{
+		const FString Excerpt = Redactor.RedactBody(TEXT("text/plain"), HelloBytes.Left(CapAt), HelloBytes.Num(), CapAt).ToText();
+		for (int32 Length = 1; Length < Secret.Len(); ++Length)
+		{
+			if (Excerpt.EndsWith(Secret.Left(Length), ESearchCase::CaseSensitive))
+			{
+				AddError(FString::Printf(TEXT("cap %d leaves %d bytes of the secret: '%s'"), CapAt, Length, *Excerpt));
+				break;
+			}
+		}
+	}
+	TestEqualSensitive(TEXT("a cap inside the secret drops its beginning"), Redactor.RedactBody(TEXT("text/plain"), HelloBytes.Left(16), HelloBytes.Num(), 16).ToText(), FString(TEXT("hello ")));
+	// Review M5: overlapping known secrets are one range
+	const FVaRestRedactor Overlap(FVaRestRedactRules(), { TEXT("AAAABBBB"), TEXT("BBBBCCCC") });
+	TestEqualSensitive(TEXT("overlapping secrets in text"), Overlap.ScrubText(TEXT("x AAAABBBBCCCC y")), FString(TEXT("x *** y")));
+	TestEqualSensitive(TEXT("... in a body"), Overlap.RedactBody(TEXT("text/plain"), Bytes("x AAAABBBBCCCC y"), 16, 4096).ToText(), FString(TEXT("x *** y")));
+	// Review I2: a form-encoded known secret in a form body
+	const FVaRestRedactor Odd(FVaRestRedactRules(), { TEXT("canary tok~en*1") });
+	TestEqualSensitive(TEXT("a form-encoded known secret in a form body"), Odd.RedactBody(TEXT("application/x-www-form-urlencoded"), Bytes("note=canary+tok%7Een*1&b=2"), 26, 4096).ToText(), FString(TEXT("note=***&b=2")));
+	// Review M7: GetSecrets() is what was passed in
+	TestEqual(TEXT("GetSecrets is the input"), Odd.GetSecrets().Num(), 1);
 
 	// Layer 4: binary is never copied; protobuf stores strings verbatim
 	const uint8 Proto[] = { 0x0A, 0x08, 'p', 'a', 's', 's', 'w', 'o', 'r', 'd', 0x12, 0x02, 0x01, 0x02 };
@@ -188,6 +245,22 @@ bool FVaRestHttpSecretSetTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("... and then it is forgotten"), Set.GetActive(700.0).Num(), 1);
 	TestTrue(TEXT("an expired value is no longer pending (review C1)"), Set.NextExpiry(700.0) < 0.0);
 	TestTrue(TEXT("... nor one a hair before its expiry: clocks round (review N-2)"), Set.NextExpiry(700.0 - 1e-7) < 0.0);
+	{
+		// Review M4: Prune forgets what expired and keeps the rest (GetActive at time 0 would list a value that is still stored)
+		FVaRestSecretSet Pruned;
+		Pruned.Set(TEXT("bearer"), TEXT("token-v1-abcdef"), 0.0);
+		Pruned.Set(TEXT("bearer"), TEXT("token-v2-abcdef"), 100.0);
+		Pruned.Prune(100.0);
+		TestEqual(TEXT("Prune keeps a live previous value"), Pruned.GetActive(0.0).Num(), 2);
+		Pruned.Prune(700.0);
+		TestEqual(TEXT("Prune forgets an expired one"), Pruned.GetActive(0.0).Num(), 1);
+	}
+	{
+		FVaRestSecretSet Cased;
+		Cased.Set(TEXT("a"), TEXT("TokenValue-1"), 0.0);
+		Cased.Set(TEXT("b"), TEXT("tokenvalue-1"), 0.0);
+		TestEqual(TEXT("secrets that differ only in case are two secrets"), Cased.GetActive(0.0).Num(), 2);
+	}
 	for (int32 i = 0; i < 6; ++i)
 	{
 		Set.Set(TEXT("bearer"), FString::Printf(TEXT("rotated-token-%d"), i), 200.0 + i);
@@ -207,6 +280,8 @@ bool FVaRestHttpSecretSetTest::RunTest(const FString& Parameters)
 	(void)Redactor.RedactUrl(TEXT("https://h/x"));
 	(void)Redactor.ScrubText(TEXT("x"));
 	TestEqual(TEXT("each redactor call is counted (IN-11)"), FVaRestTrace::Counters().RedactorCalls.load(), Before + 2);
+	const FVaRestRedactor WithSecret(FVaRestRedactRules(), { VaRest::Http::RedactorTestPrivate::Bearer });
+	TestEqualSensitive(TEXT("ScrubText replaces a known secret (an error message)"), WithSecret.ScrubText(FString::Printf(TEXT("failed for %s: 401"), VaRest::Http::RedactorTestPrivate::Bearer)), FString(TEXT("failed for ***: 401")));
 	return true;
 }
 

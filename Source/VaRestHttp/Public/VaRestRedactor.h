@@ -59,7 +59,8 @@ private:
  * alike. Immutable once built: a client publishes a new one when its rules or secrets change, and any thread may use a
  * published one. Bodies are never redacted on the game thread (Inspector 7): RedactBody and Describe* run on a background
  * task (VaRest::Http::GetRedactionPipe). What stays uncovered, as documented there: a secret that is not a known value and
- * sits in a path segment, in a text body under no key, or in opt-in binary.
+ * sits in a path segment, in a text body under no key, or in opt-in binary; and a known value shorter than
+ * FVaRestSecretSet::MinBytes, which is never scrubbed (a 7-character key or PIN).
  */
 class VARESTHTTP_API FVaRestRedactor
 {
@@ -68,12 +69,16 @@ public:
 	FVaRestRedactor(FVaRestRedactRules InRules, TArray<FString> InSecrets);
 
 	const FVaRestRedactRules& GetRules() const { return Rules; }
-	const TArray<FString>& GetSecrets() const { return Secrets; }
+	/** The secrets as passed to the constructor (not the expanded wire forms) */
+	const TArray<FString>& GetSecrets() const { return InputSecrets; }
 
 	/** Userinfo becomes ***; values of secret query and fragment keys become *** (keys matched percent-decoded); then the scrub */
 	FString RedactUrl(FStringView Url) const;
 
-	/** *** for a secret header name; Location and Content-Location are redacted as URLs; every other value is scrubbed */
+	/**
+	 * *** for a secret header name; Location, Content-Location and Referer are redacted as URLs, so are the target of Refresh
+	 * ("5; url=...") and every <target> of Link; every other value is scrubbed
+	 */
 	FString RedactHeaderValue(FStringView Name, FStringView Value) const;
 
 	/** Every header through RedactHeaderValue; names and order kept */
@@ -83,14 +88,16 @@ public:
 	FString ScrubText(FStringView Text) const;
 
 	/**
-	 * An excerpt of at most Cap bytes of a body whose first bytes are Prefix and whose size is TotalBytes. JSON (by type,
+	 * An excerpt built from at most Cap bytes (a negative Cap is 0) of a body whose first bytes are Prefix and whose size is TotalBytes. JSON (by type,
 	 * or sniffed: any text type or none, and '{' or '[' first) through VaRest::Json::RedactPrefix; a form pair by pair,
 	 * dropping a pair the cap may have cut; other text up to the cap, cut at a character boundary; anything else a
-	 * descriptor (size, type, and the SHA-256 prefix when Prefix is the whole body). Then the value scrub.
+	 * descriptor (size, type, and the SHA-256 prefix when Prefix is the whole body). Then the value scrub, and, for a cut
+	 * body, the tail that begins a known secret is dropped. The output is not bounded by Cap: a short value becomes ***,
+	 * and invalid UTF-8 is repaired with U+FFFD (3 bytes each).
 	 */
 	FVaRestTraceExcerpt RedactBody(FStringView ContentType, TConstArrayView<uint8> Prefix, int64 TotalBytes, int32 Cap) const;
 
-	/** A multipart request body: one line per part; a text part's value by its name's rules, then scrubbed; binary as a descriptor */
+	/** A multipart request body (a negative Cap is 0): one line per part; a text part's value by its name's rules, then scrubbed; binary as a descriptor */
 	FVaRestTraceExcerpt DescribeMultipart(TConstArrayView<FVaRestMultipartPart> Parts, int64 TotalBytes, int32 Cap) const;
 
 	/** A streamed file upload: its path (relative to the project when inside it), size and type */
@@ -101,9 +108,15 @@ private:
 	void AppendRedactedPairs(FStringView Pairs, EVaRestRedactKeyKind Kind, FString& Out) const;
 	bool ScrubInPlace(FString& Text) const;
 	bool ScrubUtf8(TArray<uint8>& Utf8) const;
+	/** Drops the tail of a capped excerpt that begins a known secret; true when it dropped anything */
+	bool TrimNeedleTail(TArray<uint8>& Utf8) const;
+	bool IsSecretPair(FStringView Piece, EVaRestRedactKeyKind Kind) const;
+	void AppendRedactedPath(FStringView Path, FString& Out) const;
 
 	FVaRestRedactRules Rules;
-	/** Longest first */
+	/** The secrets as passed in */
+	TArray<FString> InputSecrets;
+	/** What is scrubbed, longest first: each secret of at least MinBytes and its wire forms (percent, form, lower-case hex, JSON-escaped) */
 	TArray<FString> Secrets;
 	TArray<TArray<uint8>> SecretsUtf8;
 };
