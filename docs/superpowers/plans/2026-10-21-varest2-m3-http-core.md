@@ -22,21 +22,30 @@
 8. **`OnProgress` takes `const FVaRestProgress&`** (`BytesSent`, `BytesReceived`, `UploadTotal`, `DownloadTotal`) instead of `(sent, received, total)`: one total is ambiguous when a request both uploads and downloads.
 9. **`SaveTo()` compiles only for `T = void` or `T = FVaRestResponse`** (enforcement by shape): a body written to a file has nothing to decode.
 10. **Path parameters: a missing, empty or unknown one is a `Config` error**, so `/users/{id}` never silently becomes `/users/`.
-11. **Header names and values are validated (RFC 9110 token; no CR, LF or NUL)**; a bad one is a `Config` error at `Send`, never a transport call (header injection).
+11. **Header names and values are validated (RFC 9110 token; no CR, LF or NUL)**; a bad one is a `Config` error at `Send`, never a transport call (header injection). The final attempt headers are checked again right before the transport, because a custom `PerAttempt` stage edits them after every builder check, and a multipart boundary must be 1-70 RFC 2046 characters (review I3).
 12. **The body is moved into `SetContent(TArray<uint8>&&)` unless a stage declares `MayReissue()`**, which makes the transport copy it so a later attempt still has it (M4's retry declares it).
 13. **Custom `Outer` stages run first, before the attempt boundary**, so they see every logical request once; M4 places its built-in Outer stages (offline queue, cache, retry) after them.
 14. **The test server is owned by the runner**: `Tools/run_tests.sh` starts `Tools/testserver/server.py` on an OS-chosen port, passes `-VaRestTestServer=<url>`, and stops it on exit. An integration test run without that argument **fails** with instructions (a skip would be a false green).
 15. **Test types live in a new UncookedOnly module `VaRestTests`**, so HTTP test USTRUCTs never ship in a game's reflection data (`VaRest-rfd`). VaRestJson's existing test types stay where they are in M3 (moving them means moving M1/M2 tests that include private headers); a bead tracks the move.
 16. **`UVaRestHttpSettings` lands in M3 with the six fields M3 reads** (log level, redaction keys, max concurrent, total and activity timeout, max JSON response bytes), because IN-13 puts project-wide redaction additions there. M5 adds the rest of spec §5.5.
-17. **`RedactPrefix` takes a `bWholeInput` flag** (default false). IN-13's rule "a scalar ending exactly at the cap is never written" is only right for a cut input; a whole body ending in a number must keep it.
+17. **`RedactPrefix` takes a `bWholeInput` flag** (default false). IN-13's rule "a scalar ending exactly at the cap is never written" is only right for a cut input; a whole body ending in a number must keep it. The rule is applied to numbers only: a string or a literal the reader delivers is complete by construction (its closing quote or last letter was read), so only a number can look complete and be cut. A genuine syntax error in a cut input's last 4 bytes is reported as `Cap` (the excerpt is the same). A leading UTF-8 BOM is skipped, as the parser does.
 18. **The redactor's added keys match exactly (after normalisation)**, not as substrings; the built-in substring set stays as specified.
 19. **Activity timeouts report `Kind=Connection`**, as the engine does (`HttpRequestCommon.cpp:303-305`; curl's `CURLE_OPERATION_TIMEDOUT` → `ConnectionError`, `CurlHttp.cpp:1320-1329`). Only the total timeout reports `Kind=Timeout`.
-20. **JSON response bodies are capped at 32 MiB by default** (controller ruling from the M2 final review, recommendation 4). The arena DOM is about 4.2x its input, so the cap bounds a decode at about 135 MB. It is a setting (`MaxJsonResponseBytes`), a client option (`WithMaxJsonBytes`) and a request option (`MaxJsonBytes`), 0 meaning none, and it reaches `ParseOwned` as `FVaRestJsonParseOptions::MaxInputBytes`, which rejects before allocating. The same options parse JSON error bodies. The raw body itself is still received (bounded by `TArray`'s int32 size, as the engine's is).
+20. **JSON response bodies are capped at 32 MiB by default** (controller ruling from the M2 final review, recommendation 4). The arena DOM is about 4.2x its input, so the cap bounds a decode at about 135 MB. It is a setting (`MaxJsonResponseBytes`), a client option (`WithMaxJsonBytes`) and a request option (`MaxJsonBytes`), 0 meaning none, and it reaches `ParseOwned` as `FVaRestJsonParseOptions::MaxInputBytes`, which rejects before allocating. The same options parse JSON error bodies. The HTTP transport applies it while the body arrives (reviews M-6, M13): for a JSON result the body sink fails the transfer once more bytes came (`Kind=Decode`, detail `ResponseTooLarge`, not retryable; an error status stays `Kind=Http` without its body), and no sink reserves more than `max(cap, 8 MiB) + 1` up front, so a lying `Content-Length` costs nothing.
 21. **Hash flooding** (controller ruling, recommendation 4b): objects with more than 8 members get an index over an unseeded `CityHash32`, so keys crafted to collide make every index build O(n²) on a server parsing client JSON. M3 is where untrusted network JSON arrives, and seeding is a three-line change, so Task 1 does it (bead VaRest-sj2) instead of waiting for M7.
 22. **M3 decodes only into C++ result types** (`T` is a compile-time type, so a Blueprint `UUserDefinedStruct` cannot be one). A decode off the game thread into a Blueprint struct — M5's `FInstancedStruct` carrier for *Call Endpoint* — must keep the struct alive across garbage collection for the whole decode (`TStrongObjectPtr<const UScriptStruct>`, or an `FGCObject` that reports it) and decode into memory the task owns (the `FInstancedStruct` itself, moved back to the game thread), never into memory a Blueprint frame owns (controller ruling, recommendation 4c). `VaRest::Http::DecodeStruct` (Task 8) states that contract for any caller passing a non-native struct, and "After M3" carries it to M5.
 23. **A client rename emits `Client{Created}` again for the same id.** IN-8 lists only `Created` and `Destroyed`, but `FVaRestClient::Make(Url).WithName(...)` is the normal order, so the first event names the base URL; a store treats a second `Created` for a known id as an update. The base URL is URL-redacted in the event (it may carry userinfo).
 24. **`AttemptEnded` is not emitted after `Completed`.** A cancel can finish a request while the transport's answer is already queued for the game thread; Inspector §2.3 seals a completed record, so the late attempt is dropped from the trace (the log still has its line).
 25. **Log lines are `#<id> <verb> <redacted url> -> <status> (<ms>, <down>, <up>)`**, with `>`/`<` lines for headers and bodies at the higher levels (Task 14). A status of 400 or more and a transport failure other than a cancel log as `Warning`; everything else as `Log`. Spec §4.5 fixes the content of each level, not the format or verbosity.
+26. **A JSON body parsed in place keeps a 4 KiB diagnostic, not the bytes** (review I5). Spec §3.2's release rule says raw bytes are "kept on error for diagnostics", but `ParseOwned` parses in situ (zero copy, spec §2.1), so after a syntax error or a struct mismatch the bytes are gone. Before the parse the first 4 KiB are copied (one `memcpy` per JSON response); a syntax error keeps them as `RawBody`, a struct mismatch keeps the parsed DOM as `Error.Body`, and `KeepBody()` keeps everything (a copy before the parse). Cost if wrong: diagnostics show only 4 KiB of a broken body unless `KeepBody()`.
+27. **The configuration snapshot is taken at `Send()`**, on the sending thread under the state's read lock (spec §3.1 verbatim; reviews I-7, I6, M11). `Enter` fills it only for an exchange made another way. A struct body was already encoded in `Body()` with the naming of that moment.
+28. **`Owner()` with `OnHttpThread()` pins the owner for the delivery** (review C-5): the owner is checked on the game thread, then held by a `TStrongObjectPtr` until the worker's callbacks return, which 5.8.1 allows (the release is an atomic decrement with a lock-free root mark, `StrongObjectPtrTemplates.h:47-50`, `:122-131`; `UObjectArray.h:375-386`; `GarbageCollection.cpp:701-719`). Not a `Config` error: a widget may want a decoded payload off the game thread. Cost: the owner outlives its destruction by one callback.
+29. **Upload progress goes through a counting archive, only when it is asked for** (review I-2). Under `CompleteOnHttpThread` curl reports progress only on receive and at the finish (`CurlHttp.cpp:453-467`, `:1274`). When `OnProgress` is bound or a trace sink wants metadata, the body goes through `FCountingUpload` and `SetContentFromStream`: curl reads it with its read callback on the HTTP thread, into its own buffer (the same one copy an in-memory body makes), and sends `TotalSize()` as `Content-Length`, not chunked (`CurlHttp.cpp:896-902`, `:952-987`; `HttpRequestPayload.cpp:53-97`). The default path stays `SetContent(TArray&&)`. Cost: one wrapper archive on progress-watched uploads.
+30. **A total timeout without an activity timeout also sets the engine's activity timeout to the total** (review I-5). Otherwise the engine's own idle default (`[HTTP] HttpActivityTimeout`, 30 s, `HttpRequestCommon.cpp:733-736`) fires first, as a connection error, and the request's total timeout (spec §4.7) does not govern. Apple's 30 s connection timeout still bounds silence there (documented in `docs/dev/http-thread-completion.md`).
+31. **`SaveTo` writes its temp file on the HTTP thread** (review M-11), as the engine's own `SetResponseBodyReceiveStream` to a file archive does. Spec §1's `UE::Tasks` list names cache and offline-queue IO, not download streaming; the rename runs on a worker. Cost if wrong: a slow disk stalls the shared HTTP thread; a bounded pipe can go behind the sink later without an API change.
+32. **Deliveries are game-thread tasks** (review M-12): spec §1 says "on the game thread", which they are, but the game thread also runs its task queue between tick groups, so a callback can run mid-frame (v1 delivered from the core ticker). All deliveries go through one helper (`PipelinePrivate::OnGameThread`); M5's Blueprint async actions decide whether to defer to a frame boundary. Cost if wrong: one helper changes in M5.
+33. **A base URL may carry a query, not a fragment** (review M22). The path is joined before the base's `?`, and the base query comes first, before the request's own pairs (`https://h/v1?key=k` + `/pets?limit=2` → `https://h/v1/pets?key=k&limit=2`). A base URL with a fragment logs an Error where it is set and makes each request a `Config` error. Cost if wrong: one more join case.
+34. **`EVaRestQueryStyle {Repeat, Csv, Ssv, Pipes}` and an array `Query` overload land in M3** (review I7): OpenAPI N9's builder half is "repeated query keys append; the array styles", and OpenAPI codegen and M5 call it. A UENUM, frozen from M5 with the other pin types. Cost if wrong: one small public enum frozen early.
 
 ## Global Constraints
 
@@ -49,8 +58,8 @@
 - Public types: `FVaRest*`, `EVaRest*`, `IVaRest*`, `TVaRest*`, `UVaRest*`. Internals: namespace `VaRest::Http`; file-local helpers in `namespace VaRest::Http::<FileStem>Private`. **Never reuse a v1 header name** (module include paths are shared): `VaRest.h`, `VaRestDefines.h`, `VaRestJsonObject.h`, `VaRestJsonValue.h`, `VaRestLibrary.h`, `VaRestRequestJSON.h`, `VaRestSettings.h`, `VaRestSubsystem.h`, `VaRestTypes.h`, `VaRestJsonParser.h`.
 - **JSON keys are case-sensitive; HTTP header names are not.** JSON keys: byte compares, `ESearchCase::CaseSensitive`, `TestEqualSensitive`. Header names: always `ESearchCase::IgnoreCase`, explicitly.
 - Unity builds: no file-scope `using namespace` and no anonymous namespaces in `.cpp` files. Block-scope `using namespace` inside a function body is fine.
-- MSVC-clean by construction (only Linux clang builds here): no local or parameter named like a member — data **or function** — of the enclosing class (C4458). Builder methods of `TVaRestRequest` are named `Path`, `Query`, `Header`, `Body`, `BodyFile`, `Tag`, `Priority`, `Owner`, `Timeout`, `Naming`, `SaveTo`, `Idempotent`, `KeepBody`, `OnHttpThread`, `StrictDecode`, `OnSuccess`, `OnError`, `OnComplete`, `OnProgress`, `Send`, `Handler`: no parameter or local in that class may use those names (write `InTag`, `FilePath`, `InPriority`). In `FVaRestExchange`, `FClientState` and `FVaRestClient` member functions, no local is named `Config`, `State`, `Url`, `Verb`, `Body`, `Tag`, `Priority`, `Owner`, `Attempt`, `InFlight` or `Limiter`. No local hides a namespace-scope variable (clang `-Wshadow`).
-- Lambda init-captures never reuse an enclosing name (`[Result = MoveTemp(Result)]`): clang's `-Wshadow` lets it pass, but MSVC's shadowing warnings (C4456/C4458, errors in this build: `CppCompileWarnings.cs:88-90`) are not checked here. Give the capture its own name (`[Moved = MoveTemp(Result)]`).
+- MSVC-clean by construction (only Linux clang builds here): no local or parameter named like a member — data **or function** — of the enclosing class (C4458). Builder methods of `TVaRestRequest` are named `Path`, `Query`, `Header`, `Body`, `BodyFile`, `Tag`, `Priority`, `Owner`, `Timeout`, `Naming`, `SaveTo`, `Idempotent`, `KeepBody`, `OnHttpThread`, `MaxJsonBytes`, `StrictDecode`, `OnSuccess`, `OnError`, `OnComplete`, `OnProgress`, `Send`, `Handler`: no parameter or local in that class may use those names (write `InTag`, `FilePath`, `InPriority`). In `FVaRestExchange`, `FClientState` and `FVaRestClient` member functions, no local is named `Config`, `State`, `Url`, `Verb`, `Body`, `Tag`, `Priority`, `Owner`, `Attempt`, `InFlight` or `Limiter`. No local hides a namespace-scope variable (clang `-Wshadow`).
+- Lambda init-captures never reuse an enclosing name (`[Result = MoveTemp(Result)]`), and a local declared inside a lambda body never takes the name of a local of the function around it (`FBodySink& Sink` in a lambda of a function with a `Sink`, review I2): clang's `-Wshadow` lets both pass (the second needs `-Wshadow-uncaptured-local`), but MSVC's shadowing warnings (C4456/C4458, errors in this build: `CppCompileWarnings.cs:88-90`) are not checked here. Give each its own name (`[Moved = MoveTemp(Result)]`, `Received`). Task 17's sweep looks for both.
 - `UE_LOG` format arguments are string literals (no `?:` between two `TEXT()`s). Every core log line about a request includes `#<RequestId>` (IN-16).
 - Tests: `IMPLEMENT_SIMPLE_AUTOMATION_TEST`, inside `#if WITH_DEV_AUTOMATION_TESTS`, flags `EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter`. Unit tests: `Source/VaRestHttp/Private/Tests/`, names `VaRest.Http.*`; tests that need reflected test types and the integration suite: `Source/VaRestTests/Private/`, names `VaRest.Http.*` / `VaRest.Integration.*`; benchmarks `Bench.VaRest.*` with `EAutomationTestFlags::PerfFilter`. JSON tests stay `VaRest.Json.*` in `Source/VaRestJson/Private/Tests/`.
 - **Request callbacks in tests never capture stack locals by reference**: a test that times out returns while a callback is still pending. Capture `TSharedRef` state (`TVaRestTestOutcome`, Task 8). Every test drains what it sends (pump until done, or cancel).
@@ -64,7 +73,7 @@
 
 ## Review Focus
 
-- **A request sent from a worker thread while the game thread edits the client** (`WithHeader` in a loop): no data race, and each request carries one consistent configuration. Test owner: Task 8 (`VaRest.Http.Pipeline.ConfigEditedWhileSending`).
+- **A request sent from a worker thread while the game thread edits the client** (edits interleaved with sends): no data race, each request carries one whole configuration (two headers edited together arrive together), and it is the configuration of its `Send()` (decision 27). Test owner: Task 8 (`VaRest.Http.Pipeline.ConfigEditedWhileSending`, restore-the-bug: split the edit).
 - **A hundred responses completing at once on worker threads**: every request gets exactly one `OnComplete`, on the game thread. Test owner: Task 8 (`VaRest.Http.Pipeline.ManyConcurrent`).
 - **Every `FVaRestClient` handle dropped while requests are in flight**: the requests still finish and call back; the client state dies afterwards. Test owner: Task 8 (`VaRest.Http.Pipeline.ClientDroppedInFlight`).
 - **A path parameter holding `/`, `?`, `#`, a space or non-ASCII text, and a base URL with a trailing slash joined to a path without a leading one**: one percent-encoded segment, exactly one `/` at the join. Test owner: Task 3 (`VaRest.Http.Url.PathTemplate`, `VaRest.Http.Url.Join`).
@@ -73,7 +82,16 @@
 - **`SaveTo` onto an existing file when the download fails**: the existing file is untouched and no `.part` file is left behind. Test owner: Task 10 (`VaRest.Http.Decode.SaveToKeepsOldFileOnError`).
 - **A callback that sends a new request and cancels another one from inside itself**: no deadlock, no lost callback. Test owner: Task 11 (`VaRest.Http.Cancel.FromCallback`).
 - **An owner destroyed while its request waits in the limiter queue**: never dispatched, no callbacks, and the slot is not leaked. Test owner: Task 12 (`VaRest.Http.Limiter.OwnerGoneWhileQueued`).
+- **An `Owner()` request with `OnHttpThread()` whose owner is collected while its callback runs on a worker**: the owner lives until the callbacks return, then the pin is dropped (decision 28). Test owner: Task 10 (`VaRest.Http.Decode.OnHttpThreadPinsOwner`).
 - **Secrets in places no key rule names**: a bearer token echoed in a URL path and a `text/plain` body, a `refresh_token` inside a 5xx JSON error body, an OAuth `code` in a `Location` header — none appear in any log line at `Body` level. Test owner: Task 14 (`VaRest.Http.Log.Canaries`).
+- **A widget that cancels its request in `EndPlay` and is then destroyed**, or that shows progress with `.Owner(this).OnProgress([this]...)`: no callback of any kind runs into the dead owner. Test owners: Task 11 (`VaRest.Http.Cancel.CancelThenOwnerGone`), Task 13 (`VaRest.Http.Progress.NotAfterOwnerGone`, restore-the-bug in Step 7b).
+- **A custom stage (M4's auth, retry) that holds an outcome while `Cancel()` runs, or reports it twice**: exactly one `OnError(Canceled)` and one `OnComplete`, no crash. Test owners: Task 11 (`VaRest.Http.Cancel.WhileOutcomeHeld`), Task 8 (`VaRest.Http.Pipeline.OutcomeTwice`).
+- **The engine never calls back** (HTTP module shutdown, `[HTTP] bUseNullHttp`): the request still finishes once and its limiter slot comes back. Test owners: Task 8 (`VaRest.Http.Pipeline.DroppedCompletion`), Task 12 (`VaRest.Http.Limiter.DroppedCompletionFreesSlot`).
+- **A server that lies in `Content-Length` or sends a JSON body far over `MaxJsonBytes`**: no gigabyte reserve, the transfer stops at the cap, `Kind=Decode`, not retryable. Test owners: Task 7 (`VaRest.Http.Transport.MemorySinkSlack`, restore-the-bug in Step 8), Task 16 (`VaRest.Integration.Http.ChunkedRedirectCap`).
+- **The last reference to a client dropped while a worker or the HTTP thread holds a request**: the client state, its stages and its clock die on the game thread. Test owner: Task 8 (`VaRest.Http.Pipeline.ClientDroppedInFlight`).
+- **A relative `Location` carrying a URL in its query** (`/cb?code=…&redirect_uri=https://…`), and a secret percent-encoded or JSON-escaped: redacted like any other. Test owner: Task 5 (`VaRest.Http.Redactor.Url`, `.Headers`, `.Bodies`).
+- **A token rotated twice, the second time after the first one's 10 minutes**: no timer spin, nothing left armed. Test owner: Task 14 (`VaRest.Http.Log.SecretRotation`) and Task 5 (`VaRest.Http.Redactor.SecretSet`).
+- **Upload progress on curl** (a 16 MiB `POST` with `OnProgress`): `BytesSent` moves during the upload, not only at the end. Test owner: Task 16 (`VaRest.Integration.Http.UploadProgress`).
 
 ---
 
@@ -109,7 +127,7 @@ Source/VaRestHttp/
   Private/VaRestTrace.cpp                                                (Task 4)
   Private/VaRestRedactor.cpp, VaRestRedactionPipe.h                     (Task 5)
   Private/VaRestClock.cpp, VaRestFakeTransport.cpp, VaRestHttpTesting.cpp (Task 6)
-  Private/VaRestBodySink.h/.cpp, VaRestHttpTransport.cpp                 (Task 7)
+  Private/VaRestBodySink.h/.cpp, VaRestHttpTransportInternal.h, VaRestHttpTransport.cpp (Task 7)
   Private/VaRestClientState.h/.cpp, VaRestPipeline.cpp, VaRestDecode.h/.cpp, VaRestClient.cpp (Task 8)
   Private/VaRestLimiter.h/.cpp                                           (Task 12)
   Private/VaRestLogStage.cpp                                             (Task 14)
@@ -136,15 +154,15 @@ IN-13 puts the JSON half of the redactor in VaRestJson: "one new public VaRestJs
 - Create: `Source/VaRestJson/Public/VaRestJsonRedact.h`, `Source/VaRestJson/Private/VaRestJsonRedact.cpp`
 - Modify: `Source/VaRestJson/Private/VaRestJsonNode.h` (`HashKey`, the `FStr::Hash` comment), `Source/VaRestJson/Private/VaRestJsonDocument.cpp` (`GetHashSeed`), `Source/VaRestJson/Private/VaRestJsonArena.h` (class comment), `Source/VaRestJson/Private/VaRestJsonReader.cpp` (one `check`)
 - Test: `Source/VaRestJson/Private/Tests/VaRestJsonRedactTest.cpp` (new), `Source/VaRestJson/Private/Tests/VaRestJsonDocumentTest.cpp` (one test appended)
-- Modify (Step 1, M2 final re-review residuals): `Source/VaRestJson/Private/Tests/VaRestJsonApiTest.cpp`, `Source/VaRestJson/Public/VaRestJsonWriterInternal.h`, `Source/VaRestJson/Private/Tests/VaRestJsonConvertEncodeTest.cpp`, `Source/VaRestJson/Private/VaRestJsonConvertDecode.cpp`, `docs/superpowers/specs/2026-10-20-varest2-socketio-design.md`
+- Modify (Step 1, M2 final re-review residuals, bead VaRest-z0y): `Source/VaRestJson/Private/Tests/VaRestJsonApiTest.cpp`, `Source/VaRestJson/Public/VaRestJsonWriterInternal.h`, `Source/VaRestJson/Private/Tests/VaRestJsonConvertEncodeTest.cpp`, `docs/superpowers/specs/2026-10-20-varest2-socketio-design.md`
 
 **Interfaces:**
 - Consumes: `VaRest::Json::FUtf8Sink`, `FWriterAllocator`, `FCondensedWriter`, `FPrettyWriter` (`VaRestJsonWriterInternal.h`); `VaRest::Json::ConvertForDocument`, `FUtf8Scratch` (`VaRestJsonUtf8.h`); `VaRest::Json::MaxDepth`.
 - Produces (public, `VaRestJsonRedact.h`): `enum class EVaRestRedactKeyKind : uint8 { Json, Form, Header, Query, Part }`; `class VARESTJSON_API FVaRestRedactRules { void AddKey(FStringView Key); bool ShouldRedact(FUtf8StringView Key, EVaRestRedactKeyKind Kind) const; bool ShouldRedact(FStringView Key, EVaRestRedactKeyKind Kind) const; static void Normalize(FUtf8StringView Key, TArray<UTF8CHAR, TInlineAllocator<64>>& Out); }`; `enum class EVaRestRedactStop : uint8 { Complete, Cap, ParseError }`; `struct FVaRestRedactResult { bool bRedacted; EVaRestRedactStop StopReason; FString Error; int64 ErrorOffset; }`; `VARESTJSON_API FVaRestRedactResult VaRest::Json::RedactPrefix(FUtf8StringView Prefix, const FVaRestRedactRules& Rules, EVaRestJsonFormat Format, TArray<uint8>& Out, bool bWholeInput = false)` (appends to `Out`). Private: `uint64 VaRest::Json::GetHashSeed()`; `HashKey` now seeded.
 
-- [ ] **Step 1: The five M2 final re-review residuals** (controller ruling; `.superpowers/sdd/2026-10-20-varest2-m2-convert-bp/final-rereview.md`, "New Breakage" 1-5; the controller files the bead)
+- [ ] **Step 1: The M2 final re-review residuals** (controller ruling; bead VaRest-z0y)
 
-Each is a one-line class of change; they are committed on their own before the redaction work.
+Each is a one-line class of change; they are committed on their own before the redaction work. VaRest-z0y lists five; the fifth (two `SoftObjectPath.cpp` citations "one line off") is not applied: in UE 5.8.1 `SoftObjectPath.cpp:189` is the `if (Path.IsEmpty() || Path.Equals(TEXT("None")…))` test (block 189-193) and `:200` is `if (!Path.StartsWith('/')` (rejection 200-217), so the current `189-193` and `200-217` are right. Close VaRest-z0y with that reason after this step's commit.
 
 1. `Source/VaRestJson/Private/Tests/VaRestJsonApiTest.cpp` (`VaRest.Json.Api.TextIsCultureInvariant`): `SetCurrentCulture` "will set both the language and locale, as well as clear out any asset group cultures" (`Internationalization.h:46-51`), so restoring the language name alone leaves the locale changed for every later test. Replace
 
@@ -223,17 +241,15 @@ with
 
 replace `` `GetConvertedFieldsInternal(Struct)` `` with `` `GetConvertedFieldsInternal(Struct, Options)`, with the same `Options` as the encode side (the naming policy decides which of two colliding fields is kept) ``.
 
-5. `Source/VaRestJson/Private/VaRestJsonConvertDecode.cpp`, `ParseObjectPath`'s comment: `(SoftObjectPath.cpp:189-193)` becomes `(SoftObjectPath.cpp:188-192)` (the `""`/`"None"` test is at `:188`), and `(SoftObjectPath.cpp:200-217)` becomes `(SoftObjectPath.cpp:199-216)` (the rejection test starts at `:199`).
-
-Run `Tools/run_tests.sh VaRest.Json`; expected `0 failed`. Commit:
+Run `Tools/run_tests.sh VaRest.Json`; expected `0 failed`. Commit, then close the bead:
 
 ```bash
 git add Source/VaRestJson/Private/Tests/VaRestJsonApiTest.cpp Source/VaRestJson/Public/VaRestJsonWriterInternal.h \
-  Source/VaRestJson/Private/Tests/VaRestJsonConvertEncodeTest.cpp Source/VaRestJson/Private/VaRestJsonConvertDecode.cpp \
-  docs/superpowers/specs/2026-10-20-varest2-socketio-design.md
-git commit -m "json: M2 final re-review residuals -- culture state restore, converted-field lifetime, writer contract in a test, J-2 options, citations
+  Source/VaRestJson/Private/Tests/VaRestJsonConvertEncodeTest.cpp docs/superpowers/specs/2026-10-20-varest2-socketio-design.md
+git commit -m "json: M2 final re-review residuals -- culture state restore, converted-field lifetime, writer contract in a test, J-2 options
 
 Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
+bd close VaRest-z0y --reason="Items 1-4 fixed in M3 Task 1 Step 1. Item 5 not applied: SoftObjectPath.cpp:189-193 and :200-217 are already right in UE 5.8.1 (M3 plan review M1)."
 ```
 
 - [ ] **Step 2: Write the failing tests** — `Source/VaRestJson/Private/Tests/VaRestJsonRedactTest.cpp`
@@ -334,6 +350,10 @@ bool FVaRestJsonRedactWholeTest::RunTest(const FString& Parameters)
 
 	TestEqualSensitive(TEXT("a whole input's final number is complete"), Redact(V("42"), true, R), FString(TEXT("42")));
 	TestTrue(TEXT("... Complete"), R.StopReason == EVaRestRedactStop::Complete);
+
+	// The parser skips a UTF-8 BOM (VaRestJsonReader.cpp, BomLength); the excerpt does too (review M5)
+	TestEqualSensitive(TEXT("a leading BOM is skipped"), Redact(V("\xEF\xBB\xBF{\"password\":\"x\"}"), true, R), FString(TEXT(R"({"password":"***"})")));
+	TestTrue(TEXT("... and the excerpt is complete"), R.StopReason == EVaRestRedactStop::Complete);
 
 	const FString Pretty = Redact(V(R"({"a":[1,2],"password":"x"})"), true, R, EVaRestJsonFormat::Pretty);
 	TestEqualSensitive(TEXT("pretty: two-space indent, like ToString"), Pretty,
@@ -794,6 +814,10 @@ FVaRestRedactResult VaRest::Json::RedactPrefix(FUtf8StringView Prefix, const FVa
 	TArray<uint8>& Out, bool bWholeInput)
 {
 	using namespace RedactPrivate;
+	// The document parser skips a UTF-8 BOM (VaRestJsonReader.cpp, BomLength); so does the excerpt, or a body with one
+	// would excerpt as "parse error at byte 0". Offsets below stay relative to the input as given.
+	const int32 Bom = Prefix.StartsWith(FUtf8StringView(reinterpret_cast<const UTF8CHAR*>("\xEF\xBB\xBF"), 3)) ? 3 : 0;
+	Prefix.RightChopInline(Bom);
 	// MemoryStream: a bounded byte stream whose Peek() is '\0' at the end (memorystream.h:42-47), so the view needs
 	// neither a terminator nor a copy
 	rapidjson::MemoryStream Stream(reinterpret_cast<const char*>(Prefix.GetData()), static_cast<size_t>(Prefix.Len()));
@@ -832,7 +856,7 @@ FVaRestRedactResult VaRest::Json::RedactPrefix(FUtf8StringView Prefix, const FVa
 	{
 		return Result;
 	}
-	const int64 Offset = static_cast<int64>(Parsed.Offset());
+	const int64 Offset = static_cast<int64>(Parsed.Offset()) + Bom;
 	if (bTooDeep)
 	{
 		Result.StopReason = EVaRestRedactStop::ParseError;
@@ -841,8 +865,10 @@ FVaRestRedactResult VaRest::Json::RedactPrefix(FUtf8StringView Prefix, const FVa
 		return Result;
 	}
 	// A cut input runs out mid-token. RapidJSON reports that at the end of the input -- or, inside a multi-byte
-	// character, at its first byte, up to 3 bytes before the end (kParseErrorStringInvalidEncoding).
-	if (!bWholeInput && (bStoppedAtCut || Offset + 4 >= Prefix.Len()))
+	// character, at its first byte, up to 3 bytes before the end (kParseErrorStringInvalidEncoding). So a genuine
+	// syntax error within the last 4 bytes of a cut input is reported as Cap too: the excerpt is the same (it ends at
+	// the last complete token) and only the stop reason is less precise (review M4).
+	if (!bWholeInput && (bStoppedAtCut || Offset - Bom + 4 >= Prefix.Len()))
 	{
 		Result.StopReason = EVaRestRedactStop::Cap;
 		return Result;
@@ -945,7 +971,7 @@ In `TRedactHandler::RawNumber`, temporarily replace the condition with `if (fals
 
 - [ ] **Step 10: Restore-the-bug (normalised keys, Inspector R11)**
 
-In `FVaRestRedactRules::ShouldRedact(FUtf8StringView, ...)`, temporarily call `MatchesNormalized(Key, Kind)` without normalising. Run `Tools/run_tests.sh VaRest.Json.Redact`; expected FAIL in `VaRest.Json.Redact.Keys` (`accessToken`, `refresh_token`, `X-Api-Key` among the failures). Restore; PASS. Report both runs.
+In `FVaRestRedactRules::ShouldRedact(FUtf8StringView, ...)`, temporarily call `MatchesNormalized(Key, Kind)` without normalising. Run `Tools/run_tests.sh VaRest.Json.Redact`; expected FAIL in `VaRest.Json.Redact.Keys`: `Password`, `accessToken`, `clientSecret`, `idToken`, `X-Api-Key`, `ACCESS.TOKEN` and the added-key check `playerPin` fail (`refresh_token` still passes: it contains `token` as written). Restore; PASS. Report both runs.
 
 - [ ] **Step 11: Restore-the-bug (seeded hash)**
 
@@ -980,7 +1006,7 @@ The module the rest of M3 builds in (spec §1: Runtime, `PreDefault`, the five p
 
 **Interfaces:**
 - Consumes: `FVaRestJson`, `FVaRestJsonError` (VaRestJson).
-- Produces: `EVaRestPriority { Highest, High, Normal, Low }`, `EVaRestLogLevel { None, Basic, Headers, Body }`, `EVaRestErrorKind { None, Canceled, Connection, Timeout, Http, Server, Decode, Auth, Offline, Config }` (UENUMs); `EVaRestStageSlot { Outer, PerAttempt }`, `EVaRestTransportFailure { None, Connection, Timeout, Canceled, Other }`, `EVaRestCancelReason { None, User, OwnerGone, Shutdown }`; `FVaRestHeaders` (`Set`, `Add`, `Remove`, `Find`, `Get`, `Contains`, `Num`, `IsEmpty`, `GetPairs`, `begin/end`, `static FromLines(TConstArrayView<FString>)`); `FVaRestError` (USTRUCT: `Kind`, `HttpStatus`, `Code`, `Message`, `Body`, `RawBody`, `Path`, `Attempts`, `bRetryable`, `Tag`, `Url`; `IsError()`, `Describe()`, `static DefaultMessage(EVaRestErrorKind, int32)`, `static IsRetryableStatus(int32)`); `FVaRestProgress { BytesSent, BytesReceived, UploadTotal, DownloadTotal }`; `FVaRestResponse { RequestId, Status, Headers, EffectiveUrl, ContentType, Elapsed, Attempts, bFromCache, Body, SavedFile, DecodeWarnings, BytesUp, BytesDown }`; `TVaRestResult<T> { TOptional<T> Value; FVaRestError Error; FVaRestResponse Response; IsSuccess(); GetValue(); }` and `TVaRestResult<void>`; `LexToString(EVaRestErrorKind)`, `LexToString(EVaRestTransportFailure)`, `LexToString(EVaRestLogLevel)`; `VaRest::Http::IsJsonContentType(FStringView)`, `VaRest::Http::IsSuccessStatus(int32)`; `VaRest::Http::FSha256` (`Update`, `Finalize`, `static Hash`) and `FSha256Digest::ToHex()`; `UVaRestHttpSettings` (`LogLevel`, `RedactKeys`, `MaxConcurrent`, `Timeout`, `ActivityTimeout`, `int64 MaxJsonResponseBytes = 32 MiB`); log category `LogVaRestHttp` (private header).
+- Produces: `EVaRestPriority { Highest, High, Normal, Low }`, `EVaRestLogLevel { None, Basic, Headers, Body }`, `EVaRestErrorKind { None, Canceled, Connection, Timeout, Http, Server, Decode, Auth, Offline, Config }`, `EVaRestQueryStyle { Repeat, Csv, Ssv, Pipes }` (UENUMs; the last for Task 3, decision 34); `EVaRestStageSlot { Outer, PerAttempt }`, `EVaRestTransportFailure { None, Connection, Timeout, Canceled, Other }`, `EVaRestCancelReason { None, User, OwnerGone, Shutdown }`; `FVaRestHeaders` (`Set`, `Add`, `Remove`, `Find`, `Get`, `Contains`, `Num`, `IsEmpty`, `GetPairs`, `begin/end`, `static FromLines(TConstArrayView<FString>)`); `FVaRestError` (USTRUCT: `Kind`, `HttpStatus`, `Code`, `Message`, `Body`, `RawBody`, `Path`, `Attempts`, `bRetryable`, `Tag`, `Url`; `IsError()`, `Describe()`, `static DefaultMessage(EVaRestErrorKind, int32)`, `static IsRetryableStatus(int32)`); `FVaRestProgress { BytesSent, BytesReceived, UploadTotal, DownloadTotal }`; `FVaRestResponse { RequestId, Status, Headers, EffectiveUrl, ContentType, Elapsed, Attempts, bFromCache, Body, SavedFile, DecodeWarnings, BytesUp, BytesDown }`; `TVaRestResult<T> { TOptional<T> Value; FVaRestError Error; FVaRestResponse Response; IsSuccess(); GetValue(); }` and `TVaRestResult<void>`; `LexToString(EVaRestErrorKind)`, `LexToString(EVaRestTransportFailure)`, `LexToString(EVaRestLogLevel)`; `VaRest::Http::IsJsonContentType(FStringView)`, `VaRest::Http::IsSuccessStatus(int32)`; `VaRest::Http::FSha256` (`Update`, `Finalize`, `static Hash`) and `FSha256Digest::ToHex()`; `UVaRestHttpSettings` (`LogLevel`, `RedactKeys`, `MaxConcurrent`, `Timeout`, `ActivityTimeout`, `int64 MaxJsonResponseBytes = 32 MiB`); log category `LogVaRestHttp` (private header).
 
 - [ ] **Step 1: Write the failing tests** — `Source/VaRestHttp/Private/Tests/VaRestHttpModuleTest.cpp`
 
@@ -1253,7 +1279,8 @@ public:
 
 	/**
 	 * Extra keys whose values are redacted in logs and traces, on top of the built-in rules (Inspector IN-13). Matched
-	 * exactly after normalisation: lower case, '_', '-' and '.' removed (so player_pin also covers playerPin).
+	 * exactly after normalisation: lower case, '_', '-' and '.' removed (so player_pin also covers playerPin). Read when a
+	 * client is made (FVaRestClient::Make): an edit in the editor reaches clients made afterwards (review M20).
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Logging")
 	TArray<FString> RedactKeys;
@@ -1266,15 +1293,20 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Requests", meta = (ClampMin = "0"))
 	float Timeout = 0.f;
 
-	/** Seconds without any transfer before an attempt fails; 0 = the engine's default ([HTTP] HttpActivityTimeout, 30) */
+	/**
+	 * Seconds without any transfer before an attempt fails. 0 = the total timeout when there is one (decision 30: the
+	 * engine's own 30 s idle default would otherwise fire first, as a connection error), else the engine's default
+	 * ([HTTP] HttpActivityTimeout, 30).
+	 */
 	UPROPERTY(config, EditAnywhere, Category = "Requests", meta = (ClampMin = "0"))
 	float ActivityTimeout = 0.f;
 
 	/**
 	 * Largest response body parsed as JSON, in bytes; 0 = no limit. The arena DOM is about 4.2x its input (M2 final
-	 * review), so this bounds a decode's memory: 32 MiB of JSON is about 135 MB of DOM. A larger body fails with
-	 * Kind=Decode before anything is parsed, and its raw bytes are kept (FVaRestJsonParseOptions::MaxInputBytes rejects
-	 * up front). Per client: FVaRestClient::WithMaxJsonBytes; per request: MaxJsonBytes().
+	 * review), so this bounds a decode's memory: 32 MiB of JSON is about 135 MB of DOM. The HTTP transport stops a larger
+	 * body as it arrives (Kind=Decode, nothing kept; an error response stays Kind=Http without its body); a transport that
+	 * does not, fails it before anything is parsed (FVaRestJsonParseOptions::MaxInputBytes). Per client:
+	 * FVaRestClient::WithMaxJsonBytes; per request: MaxJsonBytes().
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Requests", meta = (ClampMin = "0"))
 	int64 MaxJsonResponseBytes = 32 * 1024 * 1024;
@@ -1355,6 +1387,19 @@ enum class EVaRestErrorKind : uint8
 	Offline,
 	/** The request is invalid: a bad URL, path parameter, header or body */
 	Config
+};
+
+/**
+ * OpenAPI N9: how an array-valued query parameter is written (decision 34). Repeat: tag=a&tag=b; the others one pair,
+ * the values joined before encoding: Csv "a,b", Ssv "a b", Pipes "a|b". A UENUM because M5's nodes take it.
+ */
+UENUM(BlueprintType)
+enum class EVaRestQueryStyle : uint8
+{
+	Repeat,
+	Csv,
+	Ssv,
+	Pipes
 };
 
 /** Where a custom stage goes (spec 4) */
@@ -1506,7 +1551,13 @@ struct FVaRestResponse
 	double Elapsed = 0.0;
 	int32 Attempts = 0;
 	bool bFromCache = false;
-	/** Raw bytes: kept on error, for raw results and with KeepBody(); released after a successful decode (spec 3.2) */
+	/**
+	 * Raw bytes (spec 3.2's release rule, decision 26): kept for raw results, with KeepBody(), and on an error that left
+	 * them intact (an HTTP error, a non-JSON Content-Type, a body over MaxJsonBytes refused before parsing). A JSON body
+	 * is parsed in place (zero copy), so after a syntax error or a struct mismatch the bytes are gone: the error keeps
+	 * the first 4 KiB as RawBody (copied before the parse) and, for a mismatch, the parsed DOM as Body. KeepBody() keeps
+	 * all of it (a copy before the parse). Released after a successful decode.
+	 */
 	TArray<uint8> Body;
 	/** SaveTo(): where the body was written */
 	FString SavedFile;
@@ -1985,8 +2036,8 @@ Spec §3.2: "base URL + path; an absolute URL in `Path` overrides the base. Whit
 - Test: `Source/VaRestHttp/Private/Tests/VaRestHttpUrlTest.cpp`
 
 **Interfaces:**
-- Consumes: `VaRest::Json::ConvertForDocument`, `AppendRepairedUtf8`, `FUtf8Scratch` (`VaRestJsonUtf8.h`); `LogVaRestHttp`.
-- Produces (`VaRestUrl.h`, namespace `VaRest::Http`, all `VARESTHTTP_API`): `FString PercentEncode(FStringView)`; `FString FormEncode(FStringView)`; `FString PercentDecode(FStringView, bool bPlusIsSpace = false)`; `bool IsAbsoluteHttpUrl(FStringView)`; `FString JoinUrl(FStringView BaseUrl, FStringView Path)`; `TValueOrError<FString, FString> ExpandPathTemplate(FStringView Template, TConstArrayView<TPair<FString, FString>> Params)`; `void AppendQuery(FString& Url, TConstArrayView<TPair<FString, FString>> Query)`; `bool IsValidHeaderName(FStringView)`; `bool IsValidHeaderValue(FStringView)`.
+- Consumes: `VaRest::Json::ConvertForDocument`, `AppendRepairedUtf8`, `FUtf8Scratch` (`VaRestJsonUtf8.h`); `LogVaRestHttp`; `EVaRestQueryStyle` (Task 2).
+- Produces (`VaRestUrl.h`, namespace `VaRest::Http`, all `VARESTHTTP_API`): `FString PercentEncode(FStringView)`; `FString FormEncode(FStringView)`; `FString PercentDecode(FStringView, bool bPlusIsSpace = false)`; `bool IsAbsoluteHttpUrl(FStringView)`; `FString JoinUrl(FStringView BaseUrl, FStringView Path)`; `TValueOrError<FString, FString> ExpandPathTemplate(FStringView Template, TConstArrayView<TPair<FString, FString>> Params)`; `void AppendQuery(FString& Url, TConstArrayView<TPair<FString, FString>> Query)`; `void AddQueryValues(TArray<TPair<FString, FString>>& Query, FStringView Name, TConstArrayView<FString> Values, EVaRestQueryStyle Style)` (decision 34); `bool IsValidHeaderName(FStringView)`; `bool IsValidHeaderValue(FStringView)`. `JoinUrl` keeps a base URL's query (decision 33); `FromMultipart` refuses an invalid boundary (review I3).
 - Produces (`VaRestBody.h`): `FVaRestForm` (`Add(Name, Value)` `&`/`&&`, `GetFields()`, `TArray<uint8> Encode() const`); `struct FVaRestMultipartPart { FString Name, FileName, ContentType; TArray<uint8> Bytes; FString FilePath; int64 Size; bool bField; }`; `FVaRestMultipart` (default ctor: random boundary; `explicit FVaRestMultipart(FStringView Boundary)`; `AddField`, `AddBytes`, `AddFile` `&`/`&&`; `GetBoundary`, `GetParts`, `GetContentType`, `HasFiles`, `GetError`; `TArray<FVaRestBodySegment> Encode() const`); `struct FVaRestBodySegment { TArray<uint8> Bytes; FString FilePath; int64 FileSize; int64 Size() const; }`; `class FVaRestSegmentStream final : public FArchive` (`explicit FVaRestSegmentStream(TArray<FVaRestBodySegment>)`); `enum class EVaRestBodyKind : uint8 { None, Json, Text, Form, Multipart, Binary, Stream }`; `struct FVaRestRequestBody { EVaRestBodyKind Kind; FString ContentType; TArray<uint8> Bytes; FString FilePath; TArray<FVaRestBodySegment> Segments; TArray<FVaRestMultipartPart> PartDescriptors; int64 ContentLength; IsEmpty(); IsStreamed(); static FromBytes(TArray<uint8>&&, EVaRestBodyKind, FStringView ContentType); static FromForm(const FVaRestForm&); static TValueOrError<FVaRestRequestBody, FString> FromMultipart(const FVaRestMultipart&); static TValueOrError<FVaRestRequestBody, FString> FromFile(FStringView FilePath, FStringView ContentType); }`.
 
 - [ ] **Step 1: Write the failing tests** — `Source/VaRestHttp/Private/Tests/VaRestHttpUrlTest.cpp`
@@ -2063,6 +2114,12 @@ bool FVaRestHttpJoinTest::RunTest(const FString& Parameters)
 		{ TEXT("  https://h/v1 \t"), TEXT("  /pets \n"), TEXT("https://h/v1/pets") },
 		{ TEXT("https://h/v1"), TEXT("?a=1"), TEXT("https://h/v1?a=1") },
 		{ TEXT(""), TEXT("/pets"), TEXT("/pets") },
+		// Decision 33 (review M22): a base URL's query stays, first
+		{ TEXT("https://h/v1?key=k"), TEXT("/pets"), TEXT("https://h/v1/pets?key=k") },
+		{ TEXT("https://h/v1/?key=k"), TEXT("/pets?limit=2"), TEXT("https://h/v1/pets?key=k&limit=2") },
+		{ TEXT("https://h/v1?key=k"), TEXT(""), TEXT("https://h/v1?key=k") },
+		{ TEXT("https://h/v1?key=k"), TEXT("?a=1"), TEXT("https://h/v1?key=k&a=1") },
+		{ TEXT("https://h/v1?key=k"), TEXT("/p#top"), TEXT("https://h/v1/p?key=k#top") },
 	};
 	for (const FCase& Case : Cases)
 	{
@@ -2132,6 +2189,19 @@ bool FVaRestHttpQueryTest::RunTest(const FString& Parameters)
 	Url = TEXT("https://h/x#frag");
 	AppendQuery(Url, FPairs{ { TEXT("a"), TEXT("1") } });
 	TestEqualSensitive(TEXT("the query goes before the fragment"), Url, FString(TEXT("https://h/x?a=1#frag")));
+
+	// OpenAPI N9's array styles (review I7, decision 34)
+	FPairs Styled;
+	const TArray<FString> Tags = { TEXT("a b"), TEXT("c") };
+	AddQueryValues(Styled, TEXT("tag"), Tags, EVaRestQueryStyle::Repeat);
+	AddQueryValues(Styled, TEXT("csv"), Tags, EVaRestQueryStyle::Csv);
+	AddQueryValues(Styled, TEXT("ssv"), Tags, EVaRestQueryStyle::Ssv);
+	AddQueryValues(Styled, TEXT("pipes"), Tags, EVaRestQueryStyle::Pipes);
+	AddQueryValues(Styled, TEXT("none"), TArray<FString>(), EVaRestQueryStyle::Csv);
+	Url = TEXT("https://h/x");
+	AppendQuery(Url, Styled);
+	TestEqualSensitive(TEXT("Repeat, Csv, Ssv and Pipes; joined before encoding; no values, no pair"), Url,
+		FString(TEXT("https://h/x?tag=a%20b&tag=c&csv=a%20b%2Cc&ssv=a%20b%20c&pipes=a%20b%7Cc")));
 
 	Url = TEXT("https://h/x");
 	AppendQuery(Url, FPairs());
@@ -2289,6 +2359,7 @@ Expected: the build fails on `VaRestBody.h` / `VaRestUrl.h` (no such file).
 
 #include "CoreMinimal.h"
 #include "Templates/ValueOrError.h"
+#include "VaRestHttpTypes.h"
 
 namespace VaRest::Http
 {
@@ -2320,6 +2391,12 @@ namespace VaRest::Http
 
 	/** Appends ?k=v&... (or &k=v when Url has a query), each key and value PercentEncode'd, in order, repeats kept (OpenAPI N9), before any '#' */
 	VARESTHTTP_API void AppendQuery(FString& Url, TConstArrayView<TPair<FString, FString>> Query);
+
+	/**
+	 * OpenAPI N9's array styles (decision 34): adds Values to Query as Style says -- Repeat one pair per value, Csv/Ssv/Pipes
+	 * one pair with the values joined by ',', ' ' or '|' (encoded later, by AppendQuery). No values: no pair.
+	 */
+	VARESTHTTP_API void AddQueryValues(TArray<TPair<FString, FString>>& Query, FStringView Name, TConstArrayView<FString> Values, EVaRestQueryStyle Style);
 
 	/** RFC 9110 5.6.2 token: one or more of ALPHA DIGIT !#$%&'*+-.^_`|~ */
 	VARESTHTTP_API bool IsValidHeaderName(FStringView Name);
@@ -2484,29 +2561,61 @@ FString VaRest::Http::JoinUrl(FStringView BaseUrl, FStringView Path)
 	{
 		return FString(Rest);
 	}
-	if (Rest.IsEmpty())
+	// Decision 33 (review M22): a base URL's query stays, after the joined path and before the request's own pairs
+	// ("https://h/v1?key=k" + "/pets?limit=2" -> "https://h/v1/pets?key=k&limit=2"). A base with a fragment is refused
+	// before this (Resolve, Kind=Config).
+	FStringView BaseQuery;
+	int32 BaseQueryAt = INDEX_NONE;
+	if (Base.FindChar(TEXT('?'), BaseQueryAt))
 	{
-		return FString(Base);
+		BaseQuery = Base.RightChop(BaseQueryAt + 1);
+		Base = Base.Left(BaseQueryAt);
 	}
-	if (Rest[0] == TEXT('?') || Rest[0] == TEXT('#'))
+	// The request's own tail: its query and fragment, after its path
+	FStringView Tail;
+	for (int32 i = 0; i < Rest.Len(); ++i)
 	{
-		FString Out(Base);
-		Out += Rest;
-		return Out;
-	}
-	while (Base.EndsWith(TEXT('/')))
-	{
-		Base.LeftChopInline(1);
-	}
-	while (Rest.StartsWith(TEXT('/')))
-	{
-		Rest.RightChopInline(1);
+		if (Rest[i] == TEXT('?') || Rest[i] == TEXT('#'))
+		{
+			Tail = Rest.RightChop(i);
+			Rest = Rest.Left(i);
+			break;
+		}
 	}
 	FString Out;
-	Out.Reserve(Base.Len() + 1 + Rest.Len());
-	Out += Base;
-	Out.AppendChar(TEXT('/'));
-	Out += Rest;
+	Out.Reserve(Base.Len() + 1 + Rest.Len() + 1 + BaseQuery.Len() + Tail.Len());
+	if (Rest.IsEmpty())
+	{
+		Out += Base;
+	}
+	else
+	{
+		while (Base.EndsWith(TEXT('/')))
+		{
+			Base.LeftChopInline(1);
+		}
+		while (Rest.StartsWith(TEXT('/')))
+		{
+			Rest.RightChopInline(1);
+		}
+		Out += Base;
+		Out.AppendChar(TEXT('/'));
+		Out += Rest;
+	}
+	if (!BaseQuery.IsEmpty())
+	{
+		Out.AppendChar(TEXT('?'));
+		Out += BaseQuery;
+		if (Tail.StartsWith(TEXT('?')))
+		{
+			Tail.RightChopInline(1);
+			if (!Tail.IsEmpty() && Tail[0] != TEXT('#'))
+			{
+				Out.AppendChar(TEXT('&'));
+			}
+		}
+	}
+	Out += Tail;
 	return Out;
 }
 
@@ -2610,6 +2719,24 @@ void VaRest::Http::AppendQuery(FString& Url, TConstArrayView<TPair<FString, FStr
 		Url += PercentEncode(Pair.Value);
 	}
 	Url += Fragment;
+}
+
+void VaRest::Http::AddQueryValues(TArray<TPair<FString, FString>>& Query, FStringView Name, TConstArrayView<FString> Values, EVaRestQueryStyle Style)
+{
+	if (Values.Num() == 0)
+	{
+		return;
+	}
+	if (Style == EVaRestQueryStyle::Repeat)
+	{
+		for (const FString& Value : Values)
+		{
+			Query.Emplace(FString(Name), Value);
+		}
+		return;
+	}
+	const TCHAR* Joiner = Style == EVaRestQueryStyle::Csv ? TEXT(",") : Style == EVaRestQueryStyle::Ssv ? TEXT(" ") : TEXT("|");
+	Query.Emplace(FString(Name), FString::Join(Values, Joiner));
 }
 
 bool VaRest::Http::IsValidHeaderName(FStringView Name)
@@ -3112,6 +3239,19 @@ TValueOrError<FVaRestRequestBody, FString> FVaRestRequestBody::FromMultipart(con
 	if (!Multipart.GetError().IsEmpty())
 	{
 		return MakeError(Multipart.GetError());
+	}
+	// Review I3: the boundary goes into the Content-Type header -- 1 to 70 RFC 2046 bchars (2046 5.1.1), so no CR/LF
+	// (header injection) and no '"'. The text is not repeated in the message: it may hold control characters.
+	const FString& Boundary = Multipart.GetBoundary();
+	bool bValidBoundary = Boundary.Len() >= 1 && Boundary.Len() <= 70 && !Boundary.EndsWith(TEXT(" "));
+	for (const TCHAR C : Boundary)
+	{
+		const bool bAlnum = (C >= TEXT('0') && C <= TEXT('9')) || (C >= TEXT('a') && C <= TEXT('z')) || (C >= TEXT('A') && C <= TEXT('Z'));
+		bValidBoundary &= bAlnum || FCString::Strchr(TEXT("'()+_,-./:=? "), C) != nullptr;
+	}
+	if (!bValidBoundary)
+	{
+		return MakeError(FString(TEXT("the multipart boundary must be 1-70 characters of digits, letters and '()+_,-./:=? (no space at the end; RFC 2046 5.1.1)")));
 	}
 	FVaRestRequestBody Out;
 	Out.Kind = EVaRestBodyKind::Multipart;
@@ -3798,8 +3938,12 @@ public:
 private:
 	friend class FVaRestScopedSinkIsolation;
 
-	/** Under the registry's write lock: the mask and caps of List */
-	static void Publish(const FSinkList* List);
+	/**
+	 * Game thread. Publishes Next with its mask and caps. The caps are merged before the lock is taken and the old list is
+	 * released after it is dropped (review M-8): a sink's GetDetail may call GetDetailSettings or GetSinks, and a sink's
+	 * destructor may drop a client whose Client{Destroyed} calls GetSinks -- FRWLock is not recursive.
+	 */
+	static void Swap(TSharedPtr<const FSinkList, ESPMode::ThreadSafe> Next);
 
 	static std::atomic<uint32> DetailMask;
 };
@@ -3818,15 +3962,49 @@ std::atomic<uint32> FVaRestTrace::DetailMask{ 0 };
 
 namespace VaRest::Http::TracePrivate
 {
-	/** Guards the list pointer, the caps and the isolation stack. The list itself is immutable once published (IN-12). */
-	FRWLock Lock;
-	TSharedPtr<const FVaRestTrace::FSinkList, ESPMode::ThreadSafe> Sinks;
-	FVaRestTraceDetailSettings Settings;
-	/** Lists saved by FVaRestScopedSinkIsolation, innermost last */
-	TArray<TSharedPtr<const FVaRestTrace::FSinkList, ESPMode::ThreadSafe>> Saved;
+	/**
+	 * The sink list, the merged caps and the isolation stack. The list itself is immutable once published (IN-12). Leaked
+	 * on purpose (review I-4): nothing in VaRestHttp may run at static destruction, where a client state dying late (a
+	 * global FVaRestClient) or a sink still registered (ShutdownModule never runs in an automation session) would lock a
+	 * destroyed lock or read a freed list.
+	 */
+	struct FRegistry
+	{
+		FRWLock Lock;
+		TSharedPtr<const FVaRestTrace::FSinkList, ESPMode::ThreadSafe> Sinks;
+		FVaRestTraceDetailSettings Settings;
+		/** Lists saved by FVaRestScopedSinkIsolation, innermost last */
+		TArray<TSharedPtr<const FVaRestTrace::FSinkList, ESPMode::ThreadSafe>> Saved;
+	};
+
+	FRegistry& Registry()
+	{
+		static FRegistry* Instance = new FRegistry();
+		return *Instance;
+	}
+
+	// Trivially destructible: safe as statics
 	std::atomic<uint64> NextSeq{ 1 };
 	std::atomic<uint64> NextRequest{ 1 };
 	std::atomic<uint64> NextClient{ 1 };
+
+	/** Outside any lock: GetDetail is the sink's code (review M-8) */
+	FVaRestTraceDetailSettings Merge(const FVaRestTrace::FSinkList* List)
+	{
+		FVaRestTraceDetailSettings Merged;
+		if (List)
+		{
+			for (const FVaRestTrace::FSinkRef& Sink : *List)
+			{
+				const FVaRestTraceDetailSettings One = Sink->GetDetail();
+				Merged.Flags |= One.Flags;
+				Merged.BodyCap = FMath::Max(Merged.BodyCap, One.BodyCap);
+				Merged.BinaryCap = FMath::Max(Merged.BinaryCap, One.BinaryCap);
+				Merged.FrameCap = FMath::Max(Merged.FrameCap, One.FrameCap);
+			}
+		}
+		return Merged;
+	}
 }
 
 FString FVaRestTraceExcerpt::ToText() const
@@ -3834,70 +4012,67 @@ FString FVaRestTraceExcerpt::ToText() const
 	return Bytes.IsValid() ? FString::ConstructFromPtrSize(reinterpret_cast<const UTF8CHAR*>(Bytes->GetData()), Bytes->Num()) : FString();
 }
 
-void FVaRestTrace::Publish(const FSinkList* List)
+void FVaRestTrace::Swap(TSharedPtr<const FSinkList, ESPMode::ThreadSafe> Next)
 {
-	FVaRestTraceDetailSettings Merged;
-	if (List)
+	using namespace VaRest::Http::TracePrivate;
+	check(IsInGameThread());
+	const FVaRestTraceDetailSettings Merged = Merge(Next.Get());
+	TSharedPtr<const FSinkList, ESPMode::ThreadSafe> Old;
 	{
-		for (const FSinkRef& Sink : *List)
-		{
-			const FVaRestTraceDetailSettings One = Sink->GetDetail();
-			Merged.Flags |= One.Flags;
-			Merged.BodyCap = FMath::Max(Merged.BodyCap, One.BodyCap);
-			Merged.BinaryCap = FMath::Max(Merged.BinaryCap, One.BinaryCap);
-			Merged.FrameCap = FMath::Max(Merged.FrameCap, One.FrameCap);
-		}
+		FWriteScopeLock WriteLock(Registry().Lock);
+		Old = MoveTemp(Registry().Sinks);
+		Registry().Sinks = MoveTemp(Next);
+		Registry().Settings = Merged;
+		DetailMask.store(static_cast<uint32>(Merged.Flags), std::memory_order_relaxed);
 	}
-	VaRest::Http::TracePrivate::Settings = Merged;
-	DetailMask.store(static_cast<uint32>(Merged.Flags), std::memory_order_relaxed);
+	// Old goes here, after the lock is released
 }
 
 FVaRestTraceDetailSettings FVaRestTrace::GetDetailSettings()
 {
-	FReadScopeLock ReadLock(VaRest::Http::TracePrivate::Lock);
-	return VaRest::Http::TracePrivate::Settings;
+	using namespace VaRest::Http::TracePrivate;
+	FReadScopeLock ReadLock(Registry().Lock);
+	return Registry().Settings;
 }
 
 void FVaRestTrace::AddSink(const FSinkRef& Sink)
 {
-	using namespace VaRest::Http::TracePrivate;
 	check(IsInGameThread());
-	// IN-12: a late sink (Record after Pause, a module loading after the PreDefault core) learns what already exists
+	// IN-12: a late sink (Record after Pause, a module loading after the PreDefault core) learns what already exists.
+	// A client the snapshot pinned can die only after this function returns: FClientState::ForEachLive releases its pins
+	// from a later game-thread task, so that client's Client{Destroyed} reaches this sink after OnAttached (review M-9).
 	Sink->OnAttached(BuildSnapshot());
-	FWriteScopeLock WriteLock(Lock);
-	TSharedRef<FSinkList, ESPMode::ThreadSafe> Next = MakeShared<FSinkList, ESPMode::ThreadSafe>(Sinks.IsValid() ? *Sinks : FSinkList());
+	TSharedPtr<const FSinkList, ESPMode::ThreadSafe> Current = GetSinks();
+	TSharedRef<FSinkList, ESPMode::ThreadSafe> Next = MakeShared<FSinkList, ESPMode::ThreadSafe>(Current.IsValid() ? *Current : FSinkList());
 	Next->AddUnique(Sink);
-	Sinks = Next;
-	Publish(&Next.Get());
+	Swap(Next);
 }
 
 void FVaRestTrace::RemoveSink(const FSinkRef& Sink)
 {
-	using namespace VaRest::Http::TracePrivate;
 	check(IsInGameThread());
-	FWriteScopeLock WriteLock(Lock);
-	if (!Sinks.IsValid())
+	TSharedPtr<const FSinkList, ESPMode::ThreadSafe> Current = GetSinks();
+	if (!Current.IsValid())
 	{
 		return;
 	}
-	TSharedRef<FSinkList, ESPMode::ThreadSafe> Next = MakeShared<FSinkList, ESPMode::ThreadSafe>(*Sinks);
+	TSharedRef<FSinkList, ESPMode::ThreadSafe> Next = MakeShared<FSinkList, ESPMode::ThreadSafe>(*Current);
 	Next->RemoveAll([&Sink](const FSinkRef& Existing) { return Existing == Sink; });
-	Sinks = Next;
-	Publish(&Next.Get());
+	Current.Reset();
+	Swap(Next);
 }
 
 void FVaRestTrace::RefreshDetail()
 {
-	using namespace VaRest::Http::TracePrivate;
 	check(IsInGameThread());
-	FWriteScopeLock WriteLock(Lock);
-	Publish(Sinks.Get());
+	Swap(GetSinks());
 }
 
 TSharedPtr<const FVaRestTrace::FSinkList, ESPMode::ThreadSafe> FVaRestTrace::GetSinks()
 {
-	FReadScopeLock ReadLock(VaRest::Http::TracePrivate::Lock);
-	return VaRest::Http::TracePrivate::Sinks;
+	using namespace VaRest::Http::TracePrivate;
+	FReadScopeLock ReadLock(Registry().Lock);
+	return Registry().Sinks;
 }
 
 void FVaRestTrace::Emit(EVaRestTraceKind Kind, double Time, FVaRestTracePayload&& Payload, EVaRestTraceSource Source)
@@ -3922,8 +4097,9 @@ void FVaRestTrace::Emit(EVaRestTraceKind Kind, double Time, FVaRestTracePayload&
 
 TMulticastDelegate<void(FVaRestTraceSnapshot&)>& FVaRestTrace::OnBuildSnapshot()
 {
-	static TMulticastDelegate<void(FVaRestTraceSnapshot&)> Delegate;
-	return Delegate;
+	// Leaked on purpose (review I-4)
+	static TMulticastDelegate<void(FVaRestTraceSnapshot&)>* Delegate = new TMulticastDelegate<void(FVaRestTraceSnapshot&)>();
+	return *Delegate;
 }
 
 FVaRestTraceSnapshot FVaRestTrace::BuildSnapshot()
@@ -3949,27 +4125,32 @@ uint64 FVaRestTrace::NewClientId()
 
 FVaRestTraceCounters& FVaRestTrace::Counters()
 {
-	static FVaRestTraceCounters Instance;
-	return Instance;
+	// Leaked on purpose (review I-4): atomics, but read by trace points that may run late
+	static FVaRestTraceCounters* Instance = new FVaRestTraceCounters();
+	return *Instance;
 }
 
 FVaRestScopedSinkIsolation::FVaRestScopedSinkIsolation()
 {
 	using namespace VaRest::Http::TracePrivate;
 	check(IsInGameThread());
-	FWriteScopeLock WriteLock(Lock);
-	Saved.Push(Sinks);
-	Sinks.Reset();
-	FVaRestTrace::Publish(nullptr);
+	{
+		FWriteScopeLock WriteLock(Registry().Lock);
+		Registry().Saved.Push(Registry().Sinks);
+	}
+	FVaRestTrace::Swap(nullptr);
 }
 
 FVaRestScopedSinkIsolation::~FVaRestScopedSinkIsolation()
 {
 	using namespace VaRest::Http::TracePrivate;
 	check(IsInGameThread());
-	FWriteScopeLock WriteLock(Lock);
-	Sinks = Saved.Pop();
-	FVaRestTrace::Publish(Sinks.Get());
+	TSharedPtr<const FVaRestTrace::FSinkList, ESPMode::ThreadSafe> Restored;
+	{
+		FWriteScopeLock WriteLock(Registry().Lock);
+		Restored = Registry().Saved.Pop();
+	}
+	FVaRestTrace::Swap(MoveTemp(Restored));
 }
 ```
 
@@ -4000,7 +4181,7 @@ Inspector §2.2: "**The rule.** A sink never receives a byte that was not redact
 
 **Interfaces:**
 - Consumes: `FVaRestRedactRules`, `EVaRestRedactKeyKind`, `VaRest::Json::RedactPrefix` (Task 1); `FVaRestHeaders`, `VaRest::Http::IsJsonContentType`, `FSha256` (Task 2); `PercentDecode` (Task 3); `FVaRestMultipartPart` (Task 3); `FVaRestTraceExcerpt`, `EVaRestExcerptKind`, `FVaRestTrace::Counters()` (Task 4).
-- Produces: `FVaRestSecretSet` (`MinBytes = 8`, `MaxPrevious = 4`, `PreviousLifetime = 600.0`; `Set(FName Slot, const FString& Value, double Now)`, `ClearAll()`, `TArray<FString> GetActive(double Now) const`, `double NextExpiry() const`); `FVaRestRedactor` (`FVaRestRedactor()`, `FVaRestRedactor(FVaRestRedactRules, TArray<FString> Secrets)`, `GetRules()`, `GetSecrets()`, `RedactUrl(FStringView)`, `RedactHeaderValue(FStringView Name, FStringView Value)`, `RedactHeaders(const FVaRestHeaders&)`, `ScrubText(FStringView)`, `RedactBody(FStringView ContentType, TConstArrayView<uint8> Prefix, int64 TotalBytes, int32 Cap)`, `DescribeMultipart(TConstArrayView<FVaRestMultipartPart>, int64 TotalBytes, int32 Cap)`, `DescribeStream(FStringView FilePath, FStringView ContentType, int64 TotalBytes)`); private `UE::Tasks::FPipe* VaRest::Http::GetRedactionPipe()`, `StartRedactionPipe()`, `StopRedactionPipe()`.
+- Produces: `FVaRestSecretSet` (`MinBytes = 8`, `MaxPrevious = 4`, `PreviousLifetime = 600.0`; `Set(FName Slot, const FString& Value, double Now)`, `ClearAll()`, `TArray<FString> GetActive(double Now) const`, `double NextExpiry(double Now) const`, `void Prune(double Now)`); `FVaRestRedactor` (`FVaRestRedactor()`, `FVaRestRedactor(FVaRestRedactRules, TArray<FString> Secrets)`, `GetRules()`, `GetSecrets()`, `RedactUrl(FStringView)`, `RedactHeaderValue(FStringView Name, FStringView Value)`, `RedactHeaders(const FVaRestHeaders&)`, `ScrubText(FStringView)`, `RedactBody(FStringView ContentType, TConstArrayView<uint8> Prefix, int64 TotalBytes, int32 Cap)`, `DescribeMultipart(TConstArrayView<FVaRestMultipartPart>, int64 TotalBytes, int32 Cap)`, `DescribeStream(FStringView FilePath, FStringView ContentType, int64 TotalBytes)`); private `UE::Tasks::FPipe* VaRest::Http::GetRedactionPipe()`, `StartRedactionPipe()`, `StopRedactionPipe()`.
 
 - [ ] **Step 1: Write the failing tests** — `Source/VaRestHttp/Private/Tests/VaRestHttpRedactorTest.cpp`
 
@@ -4011,6 +4192,7 @@ Inspector §2.2: "**The rule.** A sink never receives a byte that was not redact
 
 #include "Misc/AutomationTest.h"
 #include "Misc/Paths.h"
+#include "VaRestRedactionPipe.h"
 #include "VaRestRedactor.h"
 #include "VaRestSha256.h"
 
@@ -4043,6 +4225,13 @@ bool FVaRestHttpRedactUrlTest::RunTest(const FString& Parameters)
 	TestEqualSensitive(TEXT("a known secret in the path is scrubbed"),
 		Redactor.RedactUrl(FString::Printf(TEXT("https://h/u/%s/x"), Bearer)), FString(TEXT("https://h/u/***/x")));
 	TestEqualSensitive(TEXT("a relative URL works too"), Redactor.RedactUrl(TEXT("/users?password=x")), FString(TEXT("/users?password=***")));
+	// Review C2: a "://" inside the query is not a scheme
+	TestEqualSensitive(TEXT("a relative URL carrying a URL in its query"), Redactor.RedactUrl(TEXT("/cb?code=canary-r&redirect_uri=https://app.test/x")),
+		FString(TEXT("/cb?code=***&redirect_uri=https://app.test/x")));
+	TestEqualSensitive(TEXT("a protocol-relative URL's userinfo"), Redactor.RedactUrl(TEXT("//u:canary-u@h/x")), FString(TEXT("//***@h/x")));
+	// Review M6: a secret percent-encoded by Path()/Query() (base64 +/=) is scrubbed in that form too
+	const FVaRestRedactor Encoded(FVaRestRedactRules(), { TEXT("canary+b64/value==") });
+	TestEqualSensitive(TEXT("a percent-encoded known secret"), Encoded.RedactUrl(TEXT("https://h/u/canary%2Bb64%2Fvalue%3D%3D/x")), FString(TEXT("https://h/u/***/x")));
 	return true;
 }
 
@@ -4073,6 +4262,10 @@ bool FVaRestHttpRedactHeadersTest::RunTest(const FString& Parameters)
 	TestEqualSensitive(TEXT("plain headers are kept"), Out.Get(TEXT("Content-Type")), FString(TEXT("application/json")));
 	TestEqualSensitive(TEXT("Location is redacted as a URL (layer 5)"), Out.Get(TEXT("Location")), FString(TEXT("https://app.test/cb?code=***&state=1")));
 	TestEqualSensitive(TEXT("a known secret in any value is scrubbed (layer 3)"), Out.Get(TEXT("X-Echo")), FString(TEXT("seen ***")));
+	FVaRestHeaders Relative;
+	Relative.Set(TEXT("Location"), TEXT("/cb?code=canary-rel&next=https://app.test/done"));
+	TestEqualSensitive(TEXT("a relative Location with a URL in its query (review C2)"), Redactor.RedactHeaders(Relative).Get(TEXT("Location")),
+		FString(TEXT("/cb?code=***&next=https://app.test/done")));
 	return true;
 }
 
@@ -4122,6 +4315,14 @@ bool FVaRestHttpRedactBodiesTest::RunTest(const FString& Parameters)
 	TestEqualSensitive(TEXT("... with the SHA-256 prefix of the whole body"), Binary.Sha256Prefix, VaRest::Http::FSha256::Hash(TConstArrayView<uint8>(Proto, 14)).ToHex().Left(8));
 	TestTrue(TEXT("... named in the text"), Binary.ToText().Contains(TEXT("14 bytes")) && Binary.ToText().Contains(Binary.Sha256Prefix));
 	TestTrue(TEXT("a partial binary body gets no hash"), Redactor.RedactBody(TEXT("image/png"), TConstArrayView<uint8>(Proto, 4), 14, 4096).Sha256Prefix.IsEmpty());
+	// Review I4: the protobuf above is valid UTF-8 without NUL; without a Content-Type it must still be a descriptor
+	TestTrue(TEXT("untyped non-JSON is binary (layer 4)"), Redactor.RedactBody(TEXT(""), TConstArrayView<uint8>(Proto, 14), 14, 4096).Kind == EVaRestExcerptKind::Binary);
+	// Review M5: the parser skips a UTF-8 BOM; the sniffing and the excerpt do too
+	TestEqualSensitive(TEXT("a JSON body with a BOM"), Run(TEXT("application/json"), "\xEF\xBB\xBF{\"token\":\"canary-bom\"}").ToText(), FString(TEXT(R"({"token":"***"})")));
+	// Review M6: a JSON string escapes '"' and '\\': the known secret is scrubbed in its escaped form too
+	const FVaRestRedactor Escaping(FVaRestRedactRules(), { TEXT("can\"ary\\quote") });
+	const TConstArrayView<uint8> Echo = Bytes(R"({"echo":"can\"ary\\quote"})");
+	TestFalse(TEXT("a JSON-escaped known secret"), Escaping.RedactBody(TEXT("application/json"), Echo, Echo.Num(), 4096).ToText().Contains(TEXT("ary")));
 	return true;
 }
 
@@ -4163,8 +4364,9 @@ bool FVaRestHttpSecretSetTest::RunTest(const FString& Parameters)
 	TArray<FString> Active = Set.GetActive(100.0);
 	TestEqual(TEXT("after a rotation the old value stays known (Inspector D21)"), Active.Num(), 2);
 	TestEqualSensitive(TEXT("longest first, so a value containing another is replaced whole"), Active[0], FString(TEXT("token-v2-abcdef-longer")));
-	TestEqual(TEXT("next expiry is 10 minutes after the rotation"), Set.NextExpiry(), 700.0);
+	TestEqual(TEXT("next expiry is 10 minutes after the rotation"), Set.NextExpiry(100.0), 700.0);
 	TestEqual(TEXT("... and then it is forgotten"), Set.GetActive(700.0).Num(), 1);
+	TestTrue(TEXT("an expired value is no longer pending (review C1)"), Set.NextExpiry(700.0) < 0.0);
 	for (int32 i = 0; i < 6; ++i)
 	{
 		Set.Set(TEXT("bearer"), FString::Printf(TEXT("rotated-token-%d"), i), 200.0 + i);
@@ -4172,8 +4374,13 @@ bool FVaRestHttpSecretSetTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("current + at most 4 previous values"), Set.GetActive(206.0).Num(), 1 + FVaRestSecretSet::MaxPrevious);
 	Set.ClearAll();
 	TestEqual(TEXT("logout forgets everything"), Set.GetActive(206.0).Num(), 0);
-	TestTrue(TEXT("... and nothing expires"), Set.NextExpiry() < 0.0);
+	TestTrue(TEXT("... and nothing expires"), Set.NextExpiry(206.0) < 0.0);
 
+	// Review M9: a process-wide counter -- let an earlier test's body log lines (the redaction pipe) land first
+	if (UE::Tasks::FPipe* Pipe = VaRest::Http::GetRedactionPipe())
+	{
+		Pipe->WaitUntilEmpty();
+	}
 	const uint64 Before = FVaRestTrace::Counters().RedactorCalls;
 	const FVaRestRedactor Redactor;
 	(void)Redactor.RedactUrl(TEXT("https://h/x"));
@@ -4223,8 +4430,13 @@ public:
 	void ClearAll();
 	/** The values to scrub at Now: current ones and unexpired previous ones of at least MinBytes UTF-8 bytes, longest first */
 	TArray<FString> GetActive(double Now) const;
-	/** When the next previous value expires; negative when none will */
-	double NextExpiry() const;
+	/**
+	 * When the next previous value still pending at Now expires; negative when none will. Values already expired at Now
+	 * do not count: a timer re-armed for one would be due at once, forever (review C1).
+	 */
+	double NextExpiry(double Now) const;
+	/** Forgets the previous values expired at Now */
+	void Prune(double Now);
 
 private:
 	struct FPrevious
@@ -4306,6 +4518,8 @@ namespace VaRest::Http
 	/**
 	 * Core's redaction pipe (Inspector 7): body excerpts for logs (and M4's trace excerpts) are redacted there, in order,
 	 * never on the game thread. Null before StartupModule and after ShutdownModule; callers skip body excerpts then.
+	 * Game thread only (it checks): StopRedactionPipe deletes the pipe, so a launch from another thread could race the
+	 * delete (review M-10). M4's decode-task excerpts must make it an atomic with a shutdown flag first.
 	 */
 	UE::Tasks::FPipe* GetRedactionPipe();
 	void StartRedactionPipe();
@@ -4354,6 +4568,11 @@ namespace VaRest::Http::RedactorPrivate
 
 	uint8 FirstNonSpace(TConstArrayView<uint8> Bytes)
 	{
+		// Review M5: a UTF-8 BOM before the JSON is skipped, as the parser does
+		if (Bytes.Num() >= 3 && Bytes[0] == 0xEF && Bytes[1] == 0xBB && Bytes[2] == 0xBF)
+		{
+			Bytes = Bytes.RightChop(3);
+		}
 		for (const uint8 Byte : Bytes)
 		{
 			if (Byte != ' ' && Byte != '\t' && Byte != '\r' && Byte != '\n')
@@ -4396,6 +4615,7 @@ namespace VaRest::Http::RedactorPrivate
 
 UE::Tasks::FPipe* VaRest::Http::GetRedactionPipe()
 {
+	check(IsInGameThread()); // review M-10: only the game thread launches on it
 	return RedactorPrivate::Pipe;
 }
 
@@ -4472,14 +4692,22 @@ TArray<FString> FVaRestSecretSet::GetActive(double Now) const
 	return Out;
 }
 
-double FVaRestSecretSet::NextExpiry() const
+double FVaRestSecretSet::NextExpiry(double Now) const
 {
 	double Next = -1.0;
 	for (const FPrevious& Old : Previous)
 	{
-		Next = Next < 0.0 ? Old.ExpiresAt : FMath::Min(Next, Old.ExpiresAt);
+		if (Old.ExpiresAt > Now)
+		{
+			Next = Next < 0.0 ? Old.ExpiresAt : FMath::Min(Next, Old.ExpiresAt);
+		}
 	}
 	return Next;
+}
+
+void FVaRestSecretSet::Prune(double Now)
+{
+	Previous.RemoveAll([Now](const FPrevious& Old) { return Old.ExpiresAt <= Now; });
 }
 
 FVaRestRedactor::FVaRestRedactor(FVaRestRedactRules InRules, TArray<FString> InSecrets)
@@ -4489,6 +4717,12 @@ FVaRestRedactor::FVaRestRedactor(FVaRestRedactRules InRules, TArray<FString> InS
 	{
 		if (VaRest::Json::Utf8Length(Secret) >= FVaRestSecretSet::MinBytes)
 		{
+			// Review M6: the forms a secret takes on the wire -- percent-encoded by Path()/Query() (base64's + / =) and
+			// JSON-escaped in a body ('"', '\') -- are needles too, when they differ
+			const FString Percent = VaRest::Http::PercentEncode(Secret);
+			FString Escaped = Secret.Replace(TEXT("\\"), TEXT("\\\\")).Replace(TEXT("\""), TEXT("\\\""));
+			Secrets.AddUnique(Percent);
+			Secrets.AddUnique(MoveTemp(Escaped));
 			Secrets.AddUnique(MoveTemp(Secret));
 		}
 	}
@@ -4588,10 +4822,26 @@ FString FVaRestRedactor::RedactUrlUncounted(FStringView Url) const
 	FString Out;
 	Out.Reserve(Url.Len());
 	int32 Pos = 0;
-	const int32 SchemeEnd = Url.Find(TEXTVIEW("://"));
-	if (SchemeEnd != INDEX_NONE)
+	// Review C2: "://" ends a scheme only when everything before it is one (RFC 3986: ALPHA *( ALPHA / DIGIT / "+" /
+	// "-" / "." )). Otherwise "/cb?code=SECRET&redirect_uri=https://app/done" would take its whole query for a scheme
+	// and copy it verbatim. A leading "//" (protocol-relative) starts an authority too.
+	int32 SchemeEnd = INDEX_NONE;
+	for (int32 i = 0; i < Url.Len(); ++i)
 	{
-		const int32 AuthorityStart = SchemeEnd + 3;
+		const TCHAR C = Url[i];
+		if (C == TEXT(':'))
+		{
+			SchemeEnd = (i > 0 && Url.Mid(i).StartsWith(TEXTVIEW("://"))) ? i : INDEX_NONE;
+			break;
+		}
+		if (!(FChar::IsAlpha(C) || (i > 0 && (FChar::IsDigit(C) || C == TEXT('+') || C == TEXT('-') || C == TEXT('.')))))
+		{
+			break;
+		}
+	}
+	const int32 AuthorityStart = SchemeEnd != INDEX_NONE ? SchemeEnd + 3 : (Url.StartsWith(TEXTVIEW("//")) ? 2 : INDEX_NONE);
+	if (AuthorityStart != INDEX_NONE)
+	{
 		int32 AuthorityEnd = Url.Len();
 		for (int32 i = AuthorityStart; i < Url.Len(); ++i)
 		{
@@ -4734,8 +4984,7 @@ FVaRestTraceExcerpt FVaRestRedactor::RedactBody(FStringView ContentType, TConstA
 		Excerpt.Kind = EVaRestExcerptKind::Multipart;
 		Out = ToUtf8(FString::Printf(TEXT("<multipart body, %lld bytes>"), TotalBytes));
 	}
-	else if (IsTextual(Type) || (Type.IsEmpty() && VaRest::Json::IsValidUtf8(FUtf8StringView(reinterpret_cast<const UTF8CHAR*>(Head.GetData()), Head.Num()))
-		&& !Head.Contains(0)))
+	else if (IsTextual(Type))
 	{
 		Excerpt.Kind = EVaRestExcerptKind::Text;
 		const TConstArrayView<uint8> Whole = bWhole ? Head : Head.Left(WholeCharacters(Head));
@@ -4841,7 +5090,7 @@ Expected: `0 failed`, including the five `VaRest.Http.Redactor.*` tests.
 
 - [ ] **Step 7: Restore-the-bug (value scrub, Inspector R13)**
 
-Make `FVaRestRedactor::ScrubInPlace` temporarily `return false;` without replacing. Run `Tools/run_tests.sh VaRest.Http.Redactor`; expected FAIL in `VaRest.Http.Redactor.Url` ("a known secret in the path is scrubbed") and `VaRest.Http.Redactor.Headers` ("a known secret in any value"). Restore; PASS. Report both runs.
+Make `FVaRestRedactor::ScrubInPlace` temporarily `return false;` without replacing. Run `Tools/run_tests.sh VaRest.Http.Redactor`; expected FAIL in `VaRest.Http.Redactor.Url` ("a known secret in the path is scrubbed", "a percent-encoded known secret"), `VaRest.Http.Redactor.Headers` ("a known secret in any value") and `VaRest.Http.Redactor.MultipartAndStream` (the `t=***` text field). Restore; PASS. Report both runs.
 
 - [ ] **Step 8: Commit**
 
@@ -4868,7 +5117,7 @@ Spec §7.1: "`VaRest.Http.*` on the fake transport and virtual clock". §4.1: "T
 
 **Interfaces:**
 - Consumes: `FVaRestHeaders`, `EVaRestPriority`, `EVaRestTransportFailure` (Task 2); `FVaRestBodySegment`, `FVaRestSegmentStream` (Task 3); `FVaRestTrace::Counters()` (Task 4); `VaRest::Http::GetRedactionPipe()` (Task 5).
-- Produces: `struct FVaRestTimerHandle { uint64 Id; IsValid(); Invalidate(); }`; `class IVaRestClock { double Now() const; FVaRestTimerHandle SetTimer(double DelaySeconds, TUniqueFunction<void()>&& Callback); void ClearTimer(FVaRestTimerHandle&); }`; `FVaRestRealClock` (`static TSharedRef<FVaRestRealClock, ESPMode::ThreadSafe> Get()`); `FVaRestVirtualClock` (`Advance(double)`, `NumPendingTimers()`); `struct FVaRestTransportProbe { atomics BytesSent, BytesReceived, UploadTotal, DownloadTotal (-1), UploadDoneAt (-1), StatusAt (-1) }`; `struct FVaRestTransportRequest { RequestId, Attempt, Verb, Url, Headers, Body, BodyFile, BodySegments, Timeout, ActivityTimeout, Priority, ResponseFile, bReportProgress, bReportStatusTime, Probe, Clock }`; `struct FVaRestTransportResult { Status, Headers, EffectiveUrl, ContentType, Body, bBodyInFile, Failure, FailureDetail, BytesUp, BytesDown, TransportDoneAt }`; `class IVaRestTransportCall { void Cancel(); }`; `using FVaRestTransportComplete = TUniqueFunction<void(FVaRestTransportResult&&)>`; `class IVaRestTransport { TSharedRef<IVaRestTransportCall, ESPMode::ThreadSafe> Start(FVaRestTransportRequest&&, FVaRestTransportComplete&&); }`; `struct FVaRestFakeResponse { Status, Headers, Body, EffectiveUrl, Failure, FailureDetail, Delay; static Json(int32, FUtf8StringView), Text(int32, FStringView, FStringView ContentType), Bytes(int32, TArray<uint8>, FStringView ContentType), Failed(EVaRestTransportFailure, FName), Manual() }`; `FVaRestFakeTransport` (`explicit FVaRestFakeTransport(TSharedRef<FVaRestVirtualClock, ESPMode::ThreadSafe>)`, `SetResponder`, `Enqueue`, `bCompleteOnWorker`, `struct FCall { Request, StartedAt, bCompleted, bCanceled, BodyData, BodyNum }`, `NumCalls`, `GetCall`, `NumInFlight`, `NumCanceled`, `ReadBody`, `Complete`, `ReportProgress`); `namespace VaRest::Http::Testing { bool PumpUntil(TFunctionRef<bool()>, double TimeoutSeconds = 5.0, bool bTickCoreTicker = false); void FlushRedactionPipe(); FString GetTestServerUrl(); struct FTestCounters { DecodesOnGameThread, DecodesOffGameThread }; FTestCounters& Counters(); class FLogCapture { Contains, Count, GetLines }; }`.
+- Produces: `struct FVaRestTimerHandle { uint64 Id; IsValid(); Invalidate(); }`; `uint64 VaRest::Http::NewTimerId()` (process-wide, any thread); `class IVaRestClock { double Now() const; FVaRestTimerHandle SetTimer(double DelaySeconds, TUniqueFunction<void()>&& Callback); void ClearTimer(FVaRestTimerHandle&); }`; `FVaRestRealClock` (`static TSharedRef<FVaRestRealClock, ESPMode::ThreadSafe> Get()`); `FVaRestVirtualClock` (integer nanoseconds inside; `Advance(double)`, `NumPendingTimers()`, `static int64 ToNanos(double)`); `struct FVaRestTransportProbe { atomics BytesSent, BytesReceived, UploadTotal, DownloadTotal (-1), UploadDoneAt (-1), StatusAt (-1) }`; `struct FVaRestTransportRequest { RequestId, Attempt, Verb, Url, Headers, Body, BodyFile, BodySegments, Timeout, ActivityTimeout, Priority, ResponseFile, MaxBodyBytes, bReportProgress, bReportStatusTime, Probe, Clock }`; `struct FVaRestTransportResult { Status, Headers, EffectiveUrl, ContentType, Body, bBodyInFile, Failure, FailureDetail, BytesUp, BytesDown, TransportDoneAt }`; `class IVaRestTransportCall { void Cancel(); }`; `using FVaRestTransportComplete = TUniqueFunction<void(FVaRestTransportResult&&)>`; `class IVaRestTransport { TSharedRef<IVaRestTransportCall, ESPMode::ThreadSafe> Start(FVaRestTransportRequest&&, FVaRestTransportComplete&&); }`; `struct FVaRestFakeResponse { Status, Headers, Body, EffectiveUrl, Failure, FailureDetail, Delay; static Json(int32, FUtf8StringView), Text(int32, FStringView, FStringView ContentType), Bytes(int32, TArray<uint8>, FStringView ContentType), Failed(EVaRestTransportFailure, FName), Manual() }`; `FVaRestFakeTransport` (`explicit FVaRestFakeTransport(TSharedRef<FVaRestVirtualClock, ESPMode::ThreadSafe>)`, `SetResponder`, `Enqueue`, `bCompleteOnWorker`, `struct FCall { Request, StartedAt, bCompleted, bCanceled, BodyData, BodyNum }`, `NumCalls`, `GetCall`, `NumInFlight`, `NumCanceled`, `ReadBody`, `Complete`, `ReportProgress`, `Drop`; `WITH_DEV_AUTOMATION_TESTS` only); `namespace VaRest::Http::Testing { bool PumpUntil(TFunctionRef<bool()>, double TimeoutSeconds = 5.0, bool bTickCoreTicker = false); void FlushRedactionPipe(); FString GetTestServerUrl(); struct FTestCounters { DecodesOnGameThread, DecodesOffGameThread, ClientStatesDestroyedOffGameThread }; FTestCounters& Counters(); (both !UE_BUILD_SHIPPING); class FLogCapture { Contains, Count, GetLines }; }`.
 
 - [ ] **Step 1: Write the failing tests** — `Source/VaRestHttp/Private/Tests/VaRestHttpClockTest.cpp`
 
@@ -4909,6 +5158,19 @@ bool FVaRestHttpVirtualClockTest::RunTest(const FString& Parameters)
 	TestEqualSensitive(TEXT("a cleared timer never fires"), FString::Join(Fired, TEXT(",")), FString(TEXT("B,C,C+0,A")));
 	TestEqual(TEXT("Now"), Clock->Now(), 6.0);
 	TestEqual(TEXT("nothing pending"), Clock->NumPendingTimers(), 0);
+
+	// Review I1: a tick re-armed at Now() + 0.1 must fall due exactly when 0.1 + 0.1 + 0.05 + 0.05 is reached
+	TSharedRef<FVaRestVirtualClock, ESPMode::ThreadSafe> Ticking = MakeShared<FVaRestVirtualClock, ESPMode::ThreadSafe>();
+	int32 Ticks = 0;
+	TFunction<void()> Arm;
+	Arm = [&Arm, &Ticks, &Ticking] { ++Ticks; Ticking->SetTimer(0.1, [&Arm] { Arm(); }); };
+	Ticking->SetTimer(0.1, [&Arm] { Arm(); });
+	Ticking->Advance(0.1);
+	Ticking->Advance(0.1);
+	Ticking->Advance(0.05);
+	Ticking->Advance(0.05);
+	TestEqual(TEXT("three ticks by 0.3: integer nanoseconds, no drift"), Ticks, 3);
+	TestEqual(TEXT("... and Now is 0.3 as written"), Ticking->Now(), 0.3);
 	return true;
 }
 
@@ -4968,9 +5230,10 @@ bool FVaRestHttpLogCaptureTest::RunTest(const FString& Parameters)
 
 namespace VaRest::Http::FakeTestPrivate
 {
+	/** Written on a worker, polled on the game thread: bDone is atomic and set last (review M17) */
 	struct FDone
 	{
-		bool bDone = false;
+		std::atomic<bool> bDone{ false };
 		bool bOnGameThread = true;
 		FVaRestTransportResult Result;
 	};
@@ -5015,7 +5278,7 @@ bool FVaRestHttpFakeRespondsTest::RunTest(const FString& Parameters)
 	FVaRestTransportRequest Request = Get(TEXT("https://api.test/a"));
 	Request.Headers.Set(TEXT("X-Test"), TEXT("1"));
 	Rig.Fake->Start(MoveTemp(Request), Into(First));
-	TestTrue(TEXT("completes"), VaRest::Http::Testing::PumpUntil([First] { return First->bDone; }));
+	TestTrue(TEXT("completes"), VaRest::Http::Testing::PumpUntil([First] { return First->bDone.load(); }));
 	TestFalse(TEXT("off the game thread, as the HTTP thread completes"), First->bOnGameThread);
 	TestEqual(TEXT("the enqueued response first"), First->Result.Status, 201);
 	TestEqualSensitive(TEXT("content type from the headers"), First->Result.ContentType, FString(TEXT("application/json")));
@@ -5026,7 +5289,7 @@ bool FVaRestHttpFakeRespondsTest::RunTest(const FString& Parameters)
 
 	FDoneRef Second = MakeShared<FDone, ESPMode::ThreadSafe>();
 	Rig.Fake->Start(Get(TEXT("https://api.test/b")), Into(Second));
-	VaRest::Http::Testing::PumpUntil([Second] { return Second->bDone; });
+	VaRest::Http::Testing::PumpUntil([Second] { return Second->bDone.load(); });
 	TestEqual(TEXT("then the responder"), Second->Result.Status, 404);
 	TestEqual(TEXT("two calls"), Rig.Fake->NumCalls(), 2);
 
@@ -5141,6 +5404,23 @@ bool FVaRestHttpFakeCancelTest::RunTest(const FString& Parameters)
 	Rig.Fake->Start(MoveTemp(Watched), Into(W));
 	TestEqual(TEXT("progress and status binds are counted like the HTTP transport's (IN-11)"), FVaRestTrace::Counters().DelegateBinds.load(), Binds + 2);
 	TestTrue(TEXT("status time is stamped"), Rig.Fake->GetCall(3).Request.Probe->StatusAt.load() >= 0.0 && W->Result.TransportDoneAt >= 0.0);
+
+	// Reviews M-6, M13: past MaxBodyBytes the sink stops the transfer and keeps nothing
+	Rig.Fake->Enqueue(FVaRestFakeResponse::Json(200, FUtf8StringView(UTF8TEXT(R"({"padding":"0123456789"})"))));
+	FVaRestTransportRequest Capped = Get(TEXT("https://api.test/big"));
+	Capped.MaxBodyBytes = 8;
+	FDoneRef Big = MakeShared<FDone, ESPMode::ThreadSafe>();
+	Rig.Fake->Start(MoveTemp(Capped), Into(Big));
+	TestTrue(TEXT("over MaxBodyBytes: ResponseTooLarge, no body"), Big->bDone && Big->Result.Failure == EVaRestTransportFailure::Other
+		&& Big->Result.FailureDetail == FName(TEXT("ResponseTooLarge")) && Big->Result.Body.Num() == 0 && Big->Result.Status == 200);
+
+	// Review I-3: a dropped completion is destroyed uncalled
+	Rig.Fake->Enqueue(FVaRestFakeResponse::Manual());
+	FDoneRef Lost = MakeShared<FDone, ESPMode::ThreadSafe>();
+	Rig.Fake->Start(Get(TEXT("https://api.test/lost")), Into(Lost));
+	Rig.Fake->Drop(5);
+	TestFalse(TEXT("Drop never calls the completion"), Lost->bDone.load());
+	TestEqual(TEXT("... and the call is no longer in flight"), Rig.Fake->NumInFlight(), 0);
 	return true;
 }
 
@@ -5173,6 +5453,15 @@ struct FVaRestTimerHandle
 	bool IsValid() const { return Id != 0; }
 	void Invalidate() { Id = 0; }
 };
+
+namespace VaRest::Http
+{
+	/**
+	 * Any thread: a timer id unique in the process (review M-7). Per-clock counters would let a handle kept across a
+	 * WithClock cancel an unrelated timer on the new clock.
+	 */
+	VARESTHTTP_API uint64 NewTimerId();
+}
 
 /**
  * Time and timers for the HTTP core, injectable so tests run on virtual time (spec 4.1). M3 times progress, the fake's
@@ -5207,14 +5496,17 @@ public:
 private:
 	/** Game thread */
 	TMap<uint64, FTSTicker::FDelegateHandle> Pending;
-	uint64 NextId = 1;
 };
 
-/** Virtual time for tests (spec 7.1): nothing fires until Advance */
+/**
+ * Virtual time for tests (spec 7.1): nothing fires until Advance. Time is kept in integer nanoseconds (review I1): in
+ * doubles a tick re-armed at Now() + 0.1 falls due at 0.30000000000000004 while 0.1 + 0.1 + 0.05 + 0.05 reaches only 0.3,
+ * so a timer due "now" would not fire. M4's backoff tests need the same determinism.
+ */
 class VARESTHTTP_API FVaRestVirtualClock final : public IVaRestClock
 {
 public:
-	virtual double Now() const override { return Seconds.load(std::memory_order_acquire); }
+	virtual double Now() const override { return static_cast<double>(Nanos.load(std::memory_order_acquire)) / 1e9; }
 	virtual FVaRestTimerHandle SetTimer(double DelaySeconds, TUniqueFunction<void()>&& Callback) override;
 	virtual void ClearTimer(FVaRestTimerHandle& Handle) override;
 
@@ -5226,17 +5518,19 @@ public:
 
 	int32 NumPendingTimers() const { return Timers.Num(); }
 
+	/** Seconds to whole nanoseconds; negative is 0 */
+	static int64 ToNanos(double InSeconds) { return FMath::RoundToInt64(FMath::Max(InSeconds, 0.0) * 1e9); }
+
 private:
 	struct FTimer
 	{
 		uint64 Id = 0;
-		double Due = 0.0;
+		int64 Due = 0;
 		TUniqueFunction<void()> Callback;
 	};
 
-	std::atomic<double> Seconds{ 0.0 };
+	std::atomic<int64> Nanos{ 0 };
 	TArray<FTimer> Timers;
-	uint64 NextId = 1;
 };
 ```
 
@@ -5248,6 +5542,13 @@ private:
 #include "VaRestClock.h"
 
 #include "HAL/PlatformTime.h"
+
+uint64 VaRest::Http::NewTimerId()
+{
+	// Trivially destructible: safe at static destruction (review I-4)
+	static std::atomic<uint64> Next{ 1 };
+	return Next.fetch_add(1, std::memory_order_relaxed);
+}
 
 TSharedRef<FVaRestRealClock, ESPMode::ThreadSafe> FVaRestRealClock::Get()
 {
@@ -5263,7 +5564,7 @@ double FVaRestRealClock::Now() const
 FVaRestTimerHandle FVaRestRealClock::SetTimer(double DelaySeconds, TUniqueFunction<void()>&& Callback)
 {
 	check(IsInGameThread());
-	const uint64 Id = NextId++;
+	const uint64 Id = VaRest::Http::NewTimerId();
 	TWeakPtr<FVaRestRealClock, ESPMode::ThreadSafe> Weak = AsShared();
 	Pending.Add(Id, FTSTicker::GetCoreTicker().AddTicker(TEXT("VaRest.Timer"), static_cast<float>(FMath::Max(DelaySeconds, 0.0)),
 		[Weak, Id, Fn = MoveTemp(Callback)](float) mutable
@@ -5293,8 +5594,8 @@ FVaRestTimerHandle FVaRestVirtualClock::SetTimer(double DelaySeconds, TUniqueFun
 {
 	check(IsInGameThread());
 	FTimer& Timer = Timers.AddDefaulted_GetRef();
-	Timer.Id = NextId++;
-	Timer.Due = Now() + FMath::Max(DelaySeconds, 0.0);
+	Timer.Id = VaRest::Http::NewTimerId();
+	Timer.Due = Nanos.load(std::memory_order_acquire) + ToNanos(DelaySeconds);
 	Timer.Callback = MoveTemp(Callback);
 	return FVaRestTimerHandle{ Timer.Id };
 }
@@ -5309,7 +5610,7 @@ void FVaRestVirtualClock::ClearTimer(FVaRestTimerHandle& Handle)
 void FVaRestVirtualClock::Advance(double DeltaSeconds)
 {
 	check(IsInGameThread());
-	const double Target = Now() + FMath::Max(DeltaSeconds, 0.0);
+	const int64 Target = Nanos.load(std::memory_order_acquire) + ToNanos(DeltaSeconds);
 	for (;;)
 	{
 		int32 Next = INDEX_NONE;
@@ -5327,10 +5628,10 @@ void FVaRestVirtualClock::Advance(double DeltaSeconds)
 		}
 		FTimer Fired = MoveTemp(Timers[Next]);
 		Timers.RemoveAt(Next);
-		Seconds.store(FMath::Max(Now(), Fired.Due), std::memory_order_release);
+		Nanos.store(FMath::Max(Nanos.load(std::memory_order_acquire), Fired.Due), std::memory_order_release);
 		Fired.Callback();
 	}
-	Seconds.store(Target, std::memory_order_release);
+	Nanos.store(Target, std::memory_order_release);
 }
 ```
 
@@ -5379,12 +5680,21 @@ struct FVaRestTransportRequest
 	FString BodyFile;
 	/** Multipart with file parts, streamed with IHttpRequest::SetContentFromStream */
 	TArray<FVaRestBodySegment> BodySegments;
-	/** Seconds; 0 = the engine's default (spec 4.7) */
+	/**
+	 * Seconds; 0 = VaRest sets none (spec 4.7). With Timeout > 0 and ActivityTimeout 0 the HTTP transport also sets the
+	 * engine's activity timeout to Timeout, so the engine's 30 s idle default never fires first (review I-5).
+	 */
 	float Timeout = 0.f;
 	float ActivityTimeout = 0.f;
 	EVaRestPriority Priority = EVaRestPriority::Normal;
 	/** Non-empty: stream the response body into this file (SaveTo's temp file) instead of memory */
 	FString ResponseFile;
+	/**
+	 * The result's JSON cap (MaxJsonBytes, decision 20); 0 for results that are not JSON or have no cap. The body sink
+	 * stops the transfer once more arrived (Failure Other, detail ResponseTooLarge) and reserves at most
+	 * max(MaxBodyBytes, 8 MiB) + 1 up front, so a lying Content-Length costs nothing (reviews M-6, M13).
+	 */
+	int64 MaxBodyBytes = 0;
 	/** Bind progress reporting (a progress callback or trace metadata) */
 	bool bReportProgress = false;
 	/** Bind the status-code callback and stamp transport times (trace metadata only, IN-11) */
@@ -5407,7 +5717,11 @@ struct FVaRestTransportResult
 	/** The body went to the request's ResponseFile */
 	bool bBodyInFile = false;
 	EVaRestTransportFailure Failure = EVaRestTransportFailure::None;
-	/** The transport's own reason (LexToString(EHttpFailureReason), "ActivityTimeout"...) */
+	/**
+	 * The transport's own reason: LexToString(EHttpFailureReason), "ActivityTimeout", and VaRest's "ResponseTooLarge"
+	 * (MaxBodyBytes), "ResponseFileWriteFailed", "ResponseBodyRejected", "BodyRejected", "InvalidHeader",
+	 * "TransportDropped" (the transport never called back)
+	 */
 	FName FailureDetail;
 	int64 BytesUp = 0;
 	int64 BytesDown = 0;
@@ -5434,7 +5748,9 @@ public:
 
 	/**
 	 * Game thread. OnComplete runs exactly once, on any thread (the HTTP thread for FHttpModule), possibly before Start
-	 * returns; the core moves the result to the game thread itself (spec 1).
+	 * returns; the core moves the result to the game thread itself (spec 1). A transport that destroys OnComplete without
+	 * calling it (the engine does at HTTP module shutdown and with NullHttp) still finishes the request: the core wraps
+	 * OnComplete so that its destruction reports Failure Other, detail TransportDropped (review I-3).
 	 */
 	virtual TSharedRef<IVaRestTransportCall, ESPMode::ThreadSafe> Start(FVaRestTransportRequest&& Request, FVaRestTransportComplete&& OnComplete) = 0;
 };
@@ -5450,6 +5766,8 @@ public:
 #include "CoreMinimal.h"
 #include "VaRestClock.h"
 #include "VaRestTransport.h"
+
+#if WITH_DEV_AUTOMATION_TESTS
 
 /** A scripted response */
 struct VARESTHTTP_API FVaRestFakeResponse
@@ -5474,8 +5792,9 @@ struct VARESTHTTP_API FVaRestFakeResponse
 /**
  * The fake transport of spec 7.1, on a virtual clock. Mirrors the real transport where the core depends on it:
  * completion from a background task (bCompleteOnWorker), a body with one byte of slack, a total timeout as Timeout and an
- * activity timeout as Connection (HttpRequestCommon.cpp:299-305), the probe, ResponseFile, and IN-11's bind counting.
- * Game thread, except completions with bCompleteOnWorker.
+ * activity timeout as Connection (HttpRequestCommon.cpp:299-305), the probe, ResponseFile, MaxBodyBytes (a body over it is
+ * Failure Other, detail ResponseTooLarge, nothing kept), and IN-11's bind counting. Game thread, except completions with
+ * bCompleteOnWorker. Compiled with WITH_DEV_AUTOMATION_TESTS only (review M15): it is not for games.
  */
 class VARESTHTTP_API FVaRestFakeTransport final : public IVaRestTransport, public TSharedFromThis<FVaRestFakeTransport, ESPMode::ThreadSafe>
 {
@@ -5513,6 +5832,8 @@ public:
 	void Complete(int32 Index, FVaRestFakeResponse Response);
 	/** Writes the call's probe as the HTTP thread would, and counts as activity for its activity timeout */
 	void ReportProgress(int32 Index, int64 BytesSent, int64 BytesReceived, int64 DownloadTotal = -1);
+	/** Destroys the call's completion without calling it, as the engine does at HTTP module shutdown and with NullHttp (review I-3) */
+	void Drop(int32 Index);
 
 	virtual TSharedRef<IVaRestTransportCall, ESPMode::ThreadSafe> Start(FVaRestTransportRequest&& Request, FVaRestTransportComplete&& OnComplete) override;
 
@@ -5538,6 +5859,8 @@ private:
 	TArray<FVaRestFakeResponse> Queue;
 	TArray<TSharedRef<FEntry>> Entries;
 };
+
+#endif // WITH_DEV_AUTOMATION_TESTS
 ```
 
 `Source/VaRestHttp/Private/VaRestFakeTransport.cpp`:
@@ -5546,6 +5869,8 @@ private:
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 
 #include "VaRestFakeTransport.h"
+
+#if WITH_DEV_AUTOMATION_TESTS
 
 #include "Misc/FileHelper.h"
 #include "Tasks/Task.h"
@@ -5766,6 +6091,21 @@ void FVaRestFakeTransport::ReportProgress(int32 Index, int64 BytesSent, int64 By
 	}
 }
 
+void FVaRestFakeTransport::Drop(int32 Index)
+{
+	check(IsInGameThread());
+	FEntry& Entry = *Entries[Index];
+	if (Entry.Call.bCompleted)
+	{
+		return;
+	}
+	Entry.Call.bCompleted = true;
+	Clock->ClearTimer(Entry.DelayTimer);
+	Clock->ClearTimer(Entry.TimeoutTimer);
+	Clock->ClearTimer(Entry.ActivityTimer);
+	Entry.OnComplete.Reset(); // destroyed uncalled
+}
+
 void FVaRestFakeTransport::ArmActivity(int32 Index)
 {
 	FEntry& Entry = *Entries[Index];
@@ -5826,6 +6166,13 @@ void FVaRestFakeTransport::Finish(int32 Index, FVaRestFakeResponse&& Response)
 			Result.bBodyInFile = true;
 			Result.BytesDown = Response.Body.Num();
 		}
+		else if (Req.MaxBodyBytes > 0 && Response.Body.Num() > Req.MaxBodyBytes)
+		{
+			// As the HTTP transport's sink: the transfer stops past the JSON cap, nothing is kept (reviews M-6, M13)
+			Result.Failure = EVaRestTransportFailure::Other;
+			Result.FailureDetail = TEXT("ResponseTooLarge");
+			Result.BytesDown = Req.MaxBodyBytes + 1;
+		}
 		else
 		{
 			// As the HTTP transport's memory sink: one byte of slack for ParseOwned's terminator (spec 2.1)
@@ -5859,6 +6206,8 @@ void FVaRestFakeTransport::Finish(int32 Index, FVaRestFakeResponse&& Response)
 		Callback(MoveTemp(Result));
 	}
 }
+
+#endif // WITH_DEV_AUTOMATION_TESTS
 ```
 
 - [ ] **Step 6: Test helpers** — `Source/VaRestHttp/Public/VaRestHttpTesting.h`
@@ -5874,15 +6223,35 @@ void FVaRestFakeTransport::Finish(int32 Index, FVaRestFakeResponse&& Response)
 
 #include <atomic>
 
-/** Helpers for VaRest's automation tests, and for other modules' (Inspector, WebSocket). Not for game code. */
+#if !UE_BUILD_SHIPPING
+namespace VaRest::Http::Testing
+{
+	/** Where decode steps ran (the decode-off-the-game-thread proof, Task 10). Not in Shipping (review M15). */
+	struct FTestCounters
+	{
+		std::atomic<int32> DecodesOnGameThread{ 0 };
+		std::atomic<int32> DecodesOffGameThread{ 0 };
+		/** ~FClientState off the game thread (review I-1: it must not happen) */
+		std::atomic<int32> ClientStatesDestroyedOffGameThread{ 0 };
+	};
+	VARESTHTTP_API FTestCounters& Counters();
+}
+#endif
+
+#if WITH_DEV_AUTOMATION_TESTS
+/**
+ * Helpers for VaRest's automation tests, and for other modules' (Inspector, WebSocket). Not for game code: compiled with
+ * WITH_DEV_AUTOMATION_TESTS only (review M15).
+ */
 namespace VaRest::Http::Testing
 {
 	/**
 	 * Game thread, from a test body. Runs game-thread tasks until Done() is true or TimeoutSeconds of real time pass;
 	 * true when Done() became true. Automation runs tests from FEngineLoop::Tick outside any task
 	 * (LaunchEngineLoop.cpp:6036-6045), so ProcessThreadUntilIdle's recursion guard holds (TaskGraph.cpp:700-708); never
-	 * call this from inside a game-thread task or a ticker. bTickCoreTicker also ticks FTSTicker::GetCoreTicker() (real
-	 * clock timers, the engine's HTTP manager).
+	 * call this from inside a game-thread task or a ticker: it checks, because a nested core-ticker Tick trips
+	 * Ticker.cpp:102 with a message that does not name the cause (review M-17). bTickCoreTicker also ticks
+	 * FTSTicker::GetCoreTicker() (real clock timers, the engine's HTTP manager).
 	 */
 	VARESTHTTP_API bool PumpUntil(TFunctionRef<bool()> Done, double TimeoutSeconds = 5.0, bool bTickCoreTicker = false);
 
@@ -5891,14 +6260,6 @@ namespace VaRest::Http::Testing
 
 	/** -VaRestTestServer=<url>, which Tools/run_tests.sh passes; empty when absent */
 	VARESTHTTP_API FString GetTestServerUrl();
-
-	/** Where decode steps ran (the decode-off-the-game-thread proof, Task 10) */
-	struct FTestCounters
-	{
-		std::atomic<int32> DecodesOnGameThread{ 0 };
-		std::atomic<int32> DecodesOffGameThread{ 0 };
-	};
-	VARESTHTTP_API FTestCounters& Counters();
 
 	/** Collects every log line written while it lives, from any thread, as "Category: text" */
 	class VARESTHTTP_API FLogCapture final : public FOutputDevice
@@ -5920,7 +6281,10 @@ namespace VaRest::Http::Testing
 		mutable FCriticalSection Lock;
 		TArray<FString> Lines;
 	};
+
+	// Task 8 appends TTestOutcome, MakeOutcome, Observe and FTestRig here, inside this block
 }
+#endif // WITH_DEV_AUTOMATION_TESTS
 ```
 
 `Source/VaRestHttp/Private/VaRestHttpTesting.cpp`:
@@ -5940,9 +6304,23 @@ namespace VaRest::Http::Testing
 #include "Misc/ScopeLock.h"
 #include "VaRestRedactionPipe.h"
 
+#if !UE_BUILD_SHIPPING
+VaRest::Http::Testing::FTestCounters& VaRest::Http::Testing::Counters()
+{
+	static FTestCounters Instance;
+	return Instance;
+}
+#endif
+
+#if WITH_DEV_AUTOMATION_TESTS
 bool VaRest::Http::Testing::PumpUntil(TFunctionRef<bool()> Done, double TimeoutSeconds, bool bTickCoreTicker)
 {
 	check(IsInGameThread());
+	// Review M-17: from inside a task, a ticker or a callback that PumpUntil itself runs, the nested Tick would trip
+	// Ticker.cpp:102 ("Invalid state") or recurse into the task graph: name the misuse instead
+	static bool bPumping = false;
+	checkf(!bPumping, TEXT("Testing::PumpUntil is not re-entrant: call it from a test body, never from a callback, a task or a ticker it runs"));
+	TGuardValue<bool> Pumping(bPumping, true);
 	const double Deadline = FPlatformTime::Seconds() + TimeoutSeconds;
 	double LastTick = FPlatformTime::Seconds();
 	for (;;)
@@ -5982,12 +6360,6 @@ FString VaRest::Http::Testing::GetTestServerUrl()
 	return Url;
 }
 
-VaRest::Http::Testing::FTestCounters& VaRest::Http::Testing::Counters()
-{
-	static FTestCounters Instance;
-	return Instance;
-}
-
 VaRest::Http::Testing::FLogCapture::FLogCapture()
 {
 	GLog->AddOutputDevice(this);
@@ -6025,9 +6397,10 @@ TArray<FString> VaRest::Http::Testing::FLogCapture::GetLines() const
 	FScopeLock ScopeLock(&Lock);
 	return Lines;
 }
+#endif // WITH_DEV_AUTOMATION_TESTS
 ```
 
-(add `#include "String/Find.h"` for `UE::String::FindFirst`).
+(add `#include "String/Find.h"` for `UE::String::FindFirst`; `TGuardValue` comes from `Templates/UnrealTemplate.h`, which `CoreMinimal.h` includes).
 
 - [ ] **Step 7: Run and pass**
 
@@ -6050,16 +6423,16 @@ Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 
 ### Task 7: The `FHttpModule` transport — HTTP-thread completion, body sinks with slack, file sinks
 
-Spec §1: "Transport completes on the HTTP thread (`EHttpRequestDelegateThreadPolicy::CompleteOnHttpThread`); the completion only moves bytes and dispatches work." Bead VaRest-6zo: "Response bodies must reserve one byte of slack so ParseOwned is zero-copy (curl reserves exactly Content-Length, CurlHttp.cpp:633)". So the response body never lands in the engine's buffer: `SetResponseBodyReceiveStreamDelegateV2` (`IHttpRequest.h:273-284`, "Once set, the data will no longer be cached in response") feeds `FBodySink`, which reserves `Content-Length + 1` on the first chunk (decision 5). The same sink writes `SaveTo`'s temp file instead (spec §3.2: "streams the body to a temp file"). Uploads use `SetContent(TArray<uint8>&&)`, `SetContentAsStreamedFile` and `SetContentFromStream` (`IHttpRequest.h:223-257`). Progress and status delegates are bound only when asked (IN-11).
+Spec §1: "Transport completes on the HTTP thread (`EHttpRequestDelegateThreadPolicy::CompleteOnHttpThread`); the completion only moves bytes and dispatches work." Bead VaRest-6zo: "Response bodies must reserve one byte of slack so ParseOwned is zero-copy (curl reserves exactly Content-Length, CurlHttp.cpp:633)". So the response body never lands in the engine's buffer: `SetResponseBodyReceiveStreamDelegateV2` (`IHttpRequest.h:273-284`, "Once set, the data will no longer be cached in response") feeds `FBodySink`, which reserves `Content-Length + 1` on the first chunk (decision 5), capped at `max(MaxBodyBytes, 8 MiB) + 1` because a `Content-Length` is a claim (reviews M-6, M13), and which stops a JSON result's transfer past its cap. The same sink writes `SaveTo`'s temp file instead (spec §3.2: "streams the body to a temp file"); those writes run on the HTTP thread, as the engine's own `SetResponseBodyReceiveStream` to a file archive does (decision 31). The sink has its own lock and is sealed by the completion: on Apple the body arrives on NSURLSession's delegate queue while the completion runs on the HTTP thread, and nothing in the engine orders the two (review C-4). Uploads use `SetContent(TArray<uint8>&&)`, `SetContentAsStreamedFile` and `SetContentFromStream` (`IHttpRequest.h:223-257`); when progress is asked for they go through a counting archive instead, because curl reports no progress while it uploads under `CompleteOnHttpThread` (decision 29). Progress and status delegates are bound only when asked (IN-11). A total timeout without an activity timeout also sets the engine's activity timeout, so the engine's 30 s idle default never fires first (decision 30, review I-5). A completion the engine drops (HTTP module shutdown, NullHttp) still finishes the request (review I-3).
 
 **Files:**
-- Create: `Source/VaRestHttp/Private/VaRestBodySink.h`, `Source/VaRestHttp/Private/VaRestBodySink.cpp`, `Source/VaRestHttp/Private/VaRestHttpTransport.cpp`
+- Create: `Source/VaRestHttp/Private/VaRestBodySink.h`, `Source/VaRestHttp/Private/VaRestBodySink.cpp`, `Source/VaRestHttp/Private/VaRestHttpTransportInternal.h`, `Source/VaRestHttp/Private/VaRestHttpTransport.cpp`
 - Modify: `Source/VaRestHttp/Public/VaRestTransport.h` (declare `GetDefaultTransport`)
 - Test: `Source/VaRestHttp/Private/Tests/VaRestHttpTransportTest.cpp`
 
 **Interfaces:**
-- Consumes: `IVaRestTransport`, `FVaRestTransportRequest`, `FVaRestTransportResult`, `FVaRestTransportProbe`, `IVaRestTransportCall` (Task 6); `FVaRestSegmentStream` (Task 3); `FVaRestHeaders::FromLines` (Task 2); `FVaRestTrace::Counters()` (Task 4).
-- Produces: `VARESTHTTP_API TSharedRef<IVaRestTransport, ESPMode::ThreadSafe> VaRest::Http::GetDefaultTransport()` (public); private `VaRest::Http::FBodySink` (`FBodySink()`, `explicit FBodySink(FString FilePath)`, `bool Write(const void* Data, int64 Length, int64 ContentLength)`, `TArray<uint8> TakeBytes()`, `bool CloseFile()`, `int64 Num() const`, `bool IsFile() const`, `bool HasError() const`, `const uint8* GetDataInternal() const` for tests).
+- Consumes: `IVaRestTransport`, `FVaRestTransportRequest` (with `MaxBodyBytes`), `FVaRestTransportResult`, `FVaRestTransportProbe`, `IVaRestTransportCall`, `IVaRestClock` (Task 6); `FVaRestSegmentStream` (Task 3); `FVaRestHeaders::FromLines` (Task 2); `FVaRestTrace::Counters()` (Task 4).
+- Produces: `VARESTHTTP_API TSharedRef<IVaRestTransport, ESPMode::ThreadSafe> VaRest::Http::GetDefaultTransport()` (public); private `VaRest::Http::FBodySink` (`FBodySink()`, `explicit FBodySink(int64 MaxBytes)`, `explicit FBodySink(FString FilePath, int64 MaxBytes = 0)`, `bool Write(const void* Data, int64 Length, int64 ContentLength)`, `TArray<uint8> TakeBytes()`, `bool CloseFile()`, `int64 Num() const`, `bool IsFile() const`, `bool HasError() const`, `bool IsTooLarge() const`, `static constexpr int64 ReserveCap = 8 MiB`; tests: `GetDataInternal()`, `GetCapacityInternal()`); private (`VaRestHttpTransportInternal.h`) `float VaRest::Http::EffectiveActivityTimeout(float Total, float Activity)`, `class VaRest::Http::FCountingUpload final : public FArchive` (three constructors: owned bytes, an inner archive, a file path; each with the probe, clock and `bStamp`).
 
 - [ ] **Step 1: Write the failing tests** — `Source/VaRestHttp/Private/Tests/VaRestHttpTransportTest.cpp`
 
@@ -6069,11 +6442,14 @@ Spec §1: "Transport completes on the HTTP thread (`EHttpRequestDelegateThreadPo
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "HAL/FileManager.h"
+#include "HAL/IConsoleManager.h"
 #include "Misc/AutomationTest.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "VaRestBodySink.h"
+#include "VaRestClock.h"
 #include "VaRestHttpTesting.h"
+#include "VaRestHttpTransportInternal.h"
 #include "VaRestTransport.h"
 
 namespace VaRest::Http::TransportTestPrivate
@@ -6108,6 +6484,7 @@ bool FVaRestHttpMemorySinkTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("the whole body"), Body.Num(), 1024);
 	TestTrue(TEXT("one byte of slack: ParseOwned appends its terminator without reallocating (spec 2.1)"), Body.Max() > Body.Num());
 	TestTrue(TEXT("TakeBytes moves the buffer it filled"), Body.GetData() == FirstBuffer);
+	TestFalse(TEXT("review C-4: TakeBytes seals the sink; a later write fails"), Sink.Write(Chunk.GetData(), 1, -1));
 
 	FBodySink Chunked; // no Content-Length (chunked transfer, or compressed)
 	for (int32 i = 0; i < 20; ++i)
@@ -6121,6 +6498,19 @@ bool FVaRestHttpMemorySinkTest::RunTest(const FString& Parameters)
 	Wrong.Write(Chunk.GetData(), Chunk.Num(), 10);
 	TArray<uint8> Larger = Wrong.TakeBytes();
 	TestTrue(TEXT("a wrong Content-Length still ends with slack"), Larger.Num() == 256 && Larger.Max() > Larger.Num());
+
+	// Review M-6: a Content-Length is a claim; a lying one must not allocate gigabytes up front
+	FBodySink Liar;
+	Liar.Write(Chunk.GetData(), Chunk.Num(), 2000000000);
+	TestTrue(TEXT("a huge Content-Length reserves at most ReserveCap + 1"), Liar.GetCapacityInternal() <= FBodySink::ReserveCap + 1);
+	TestTrue(TEXT("... and the body still ends with slack"), Liar.TakeBytes().Max() > Chunk.Num());
+
+	// Review M13: a JSON result's cap stops the transfer instead of receiving the whole body first
+	FBodySink Capped(300);
+	TestTrue(TEXT("within the cap"), Capped.Write(Chunk.GetData(), Chunk.Num(), 1024));
+	TestTrue(TEXT("the reserve follows Content-Length under the 8 MiB cap"), Capped.GetCapacityInternal() == 1025);
+	TestFalse(TEXT("past the cap the write fails"), Capped.Write(Chunk.GetData(), Chunk.Num(), -1));
+	TestTrue(TEXT("... and says why"), Capped.IsTooLarge() && Capped.HasError());
 
 	FBodySink Empty;
 	TArray<uint8> Nothing = Empty.TakeBytes();
@@ -6145,6 +6535,7 @@ bool FVaRestHttpFileSinkTest::RunTest(const FString& Parameters)
 		TestTrue(TEXT("write"), Sink.Write(A, 3, -1) && Sink.Write(B, 2, -1));
 		TestTrue(TEXT("close"), Sink.CloseFile());
 		TestTrue(TEXT("a file sink is a file sink"), Sink.IsFile() && Sink.Num() == 5);
+		TestFalse(TEXT("CloseFile seals it"), Sink.Write(A, 1, -1));
 	}
 	TArray<uint8> OnDisk;
 	TestTrue(TEXT("the directory is created and the bytes written"), FFileHelper::LoadFileToArray(OnDisk, *Path) && OnDisk == TArray<uint8>({ 1, 2, 3, 4, 5 }));
@@ -6157,6 +6548,55 @@ bool FVaRestHttpFileSinkTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("an unwritable path fails"), Blocked.Write(C, 1, -1));
 	TestTrue(TEXT("... and remembers it"), Blocked.HasError() && !Blocked.CloseFile());
 	IFileManager::Get().DeleteDirectory(*Dir, false, true);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpCountingUploadTest, "VaRest.Http.Transport.CountingUpload",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpCountingUploadTest::RunTest(const FString& Parameters)
+{
+	// Review I-2: the archive curl reads a progress-watched upload through
+	TSharedRef<FVaRestVirtualClock, ESPMode::ThreadSafe> Clock = MakeShared<FVaRestVirtualClock, ESPMode::ThreadSafe>();
+	Clock->Advance(2.0);
+	TSharedRef<FVaRestTransportProbe, ESPMode::ThreadSafe> Probe = MakeShared<FVaRestTransportProbe, ESPMode::ThreadSafe>();
+	VaRest::Http::FCountingUpload Upload(TArray<uint8>{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 }, Probe, Clock, /*bStamp*/ true);
+	TestEqual(TEXT("TotalSize is the Content-Length curl sends (CurlHttp.cpp:896-902)"), Upload.TotalSize(), static_cast<int64>(10));
+	uint8 Out[10] = {};
+	Upload.Serialize(Out, 4);
+	TestEqual(TEXT("counted as curl reads"), Probe->BytesSent.load(), static_cast<int64>(4));
+	TestTrue(TEXT("not done yet"), Probe->UploadDoneAt.load() < 0.0);
+	Upload.Seek(4);
+	Upload.Serialize(Out + 4, 6);
+	TestEqual(TEXT("all of it"), Probe->BytesSent.load(), static_cast<int64>(10));
+	TestEqual(TEXT("UploadDoneAt stamped at the last byte (IN-3)"), Probe->UploadDoneAt.load(), 2.0);
+	TestTrue(TEXT("the bytes are the body's"), Out[0] == 1 && Out[9] == 10);
+	Upload.Serialize(Out, 1);
+	TestTrue(TEXT("reading past the end is an error, not garbage"), Upload.IsError());
+
+	TArray<FVaRestBodySegment> Segments;
+	Segments.AddDefaulted_GetRef().Bytes = { 'a', 'b' };
+	Segments.AddDefaulted_GetRef().Bytes = { 'c' };
+	TSharedRef<FVaRestTransportProbe, ESPMode::ThreadSafe> SegmentProbe = MakeShared<FVaRestTransportProbe, ESPMode::ThreadSafe>();
+	VaRest::Http::FCountingUpload Parts(MakeShared<FVaRestSegmentStream, ESPMode::ThreadSafe>(MoveTemp(Segments)), 3, SegmentProbe, Clock, false);
+	uint8 Abc[3] = {};
+	Parts.Serialize(Abc, 3);
+	TestTrue(TEXT("an inner archive (multipart segments) is read through and counted"), Abc[0] == 'a' && Abc[2] == 'c' && SegmentProbe->BytesSent.load() == 3);
+	TestTrue(TEXT("... without stamping when not asked"), SegmentProbe->UploadDoneAt.load() < 0.0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpTransportTimeoutsTest, "VaRest.Http.Transport.ActivityFollowsTotal",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpTransportTimeoutsTest::RunTest(const FString& Parameters)
+{
+	using VaRest::Http::EffectiveActivityTimeout;
+	// Review I-5. IHttpRequest has GetTimeout (IHttpRequest.h:341-347) but no activity getter, so the applied value is
+	// the function the transport calls, tested here
+	TestEqual(TEXT("a total timeout alone also bounds silence, so the engine's 30 s default cannot fire first"), EffectiveActivityTimeout(60.f, 0.f), 60.f);
+	TestEqual(TEXT("an explicit activity timeout wins"), EffectiveActivityTimeout(60.f, 5.f), 5.f);
+	TestEqual(TEXT("neither: VaRest sets none (the engine's defaults apply)"), EffectiveActivityTimeout(0.f, 0.f), 0.f);
 	return true;
 }
 
@@ -6216,13 +6656,40 @@ bool FVaRestHttpTransportRefusedTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpTransportMockTest, "VaRest.Http.Transport.EngineMockResponse",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpTransportMockTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::TransportTestPrivate;
+	// Review M-15: an engine mock response (http.UrlPatternsToMockResponse, HttpManager.cpp:43-48, parsed at :773-839) is
+	// appended to the engine's payload, not to the body stream (HttpRequestCommon.cpp:124-160, triggered at :190)
+	TGuardConsoleVariable<FString> Mock(TEXT("http.UrlPatternsToMockResponse"), TEXT("mock.varest.test->200++{\"mocked\":true}++Content-Type:application/json"));
+	TSharedRef<FDone, ESPMode::ThreadSafe> Done = MakeShared<FDone, ESPMode::ThreadSafe>();
+	FVaRestTransportRequest Request;
+	Request.Verb = TEXT("GET");
+	Request.Url = TEXT("http://mock.varest.test/x");
+	VaRest::Http::GetDefaultTransport()->Start(MoveTemp(Request), [Done](FVaRestTransportResult&& Result)
+	{
+		Done->Result = MoveTemp(Result);
+		++Done->Calls;
+		Done->bDone = true;
+	});
+	TestTrue(TEXT("completes"), VaRest::Http::Testing::PumpUntil([Done] { return Done->bDone.load(); }, 5.0));
+	const FString Body = FString::ConstructFromPtrSize(reinterpret_cast<const UTF8CHAR*>(Done->Result.Body.GetData()), Done->Result.Body.Num());
+	TestTrue(TEXT("the mocked status"), Done->Result.Status == 200 && Done->Result.Failure == EVaRestTransportFailure::None);
+	TestEqualSensitive(TEXT("the engine's payload is taken when the stream got nothing"), Body, FString(TEXT("{\"mocked\":true}")));
+	TestTrue(TEXT("... with the slack ParseOwned needs"), Done->Result.Body.Max() > Done->Result.Body.Num());
+	return true;
+}
+
 #endif
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `Tools/run_tests.sh VaRest.Http`
-Expected: the build fails on `VaRestBodySink.h` (no such file) and `VaRest::Http::GetDefaultTransport` (undeclared).
+Expected: the build fails on `VaRestBodySink.h`, `VaRestHttpTransportInternal.h` (no such file) and `VaRest::Http::GetDefaultTransport` (undeclared).
 
 - [ ] **Step 3: The sink** — `Source/VaRestHttp/Private/VaRestBodySink.h`
 
@@ -6232,6 +6699,7 @@ Expected: the build fails on `VaRestBodySink.h` (no such file) and `VaRest::Http
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Async/Mutex.h"
 
 class IFileHandle;
 
@@ -6241,35 +6709,61 @@ namespace VaRest::Http
 	 * Receives a response body on the transport's thread (IHttpRequest::SetResponseBodyReceiveStreamDelegateV2,
 	 * IHttpRequest.h:273-284). In memory it reserves Content-Length + 1 on the first chunk, so FVaRestJson::ParseOwned
 	 * appends its terminator without reallocating (spec 2.1) -- the engine's own buffer is reserved at exactly
-	 * Content-Length (CurlHttp.cpp:631-633). For SaveTo it writes a file instead, created with its directory on the first
-	 * byte. One writing thread at a time; read after the request completed.
+	 * Content-Length (CurlHttp.cpp:631-633). The up-front reserve is capped at max(MaxBytes, ReserveCap) + 1 and the
+	 * buffer grows past it, always keeping Num + 1 <= Max (reviews M-6, M13). With MaxBytes (a JSON result's cap) the
+	 * write that passes it fails, which stops the transfer (IHttpRequest.cpp:36-44).
+	 *
+	 * For SaveTo it writes a file instead, created with its directory on the first byte. Those writes run on the HTTP
+	 * thread, as the engine's own SetResponseBodyReceiveStream to a file archive does (decision 31): a slow disk stalls
+	 * the shared HTTP thread. A bounded pipe could go behind this class later without an API change.
+	 *
+	 * Locked (review C-4): on Apple, Write runs on NSURLSession's delegate queue (AppleHttp.cpp:194-206, :884-888) while
+	 * the completion reads on the HTTP thread, and the engine orders the two only through a plain property
+	 * (AppleHttp.cpp:220-233, :948-952). Write runs inside the engine's stream lock (HttpRequestCommon.cpp:711-723), so the
+	 * lock order is engine stream lock -> Mutex, never the reverse. TakeBytes and CloseFile seal the sink: a later Write
+	 * fails. Uncontended, the lock costs about 20 ns per curl chunk of 16 KiB or more.
 	 */
 	class FBodySink
 	{
 	public:
+		/** The up-front reserve without a larger JSON cap: 8 MiB */
+		static constexpr int64 ReserveCap = 8 * 1024 * 1024;
+
 		FBodySink() = default;
-		explicit FBodySink(FString InFilePath);
+		/** MaxBytes: the result's JSON cap (0 = none) */
+		explicit FBodySink(int64 InMaxBytes);
+		explicit FBodySink(FString InFilePath, int64 InMaxBytes = 0);
 		~FBodySink();
 
-		/** Appends Length bytes. ContentLength: the response's, or 0 or less when unknown. False on failure (a file write, over 2 GiB in memory). */
+		/**
+		 * Appends Length bytes. ContentLength: the response's, or 0 or less when unknown. False on failure: a file write,
+		 * over 2 GiB in memory, past MaxBytes, or after the sink was sealed.
+		 */
 		bool Write(const void* Data, int64 Length, int64 ContentLength);
-		/** Memory: the bytes, with at least one byte of slack */
+		/** Memory: the bytes, with at least one byte of slack. Seals the sink. */
 		TArray<uint8> TakeBytes();
-		/** File: flushes and closes it; false when any write failed */
+		/** File: flushes and closes it; false when any write failed. Seals the sink. */
 		bool CloseFile();
 
-		int64 Num() const { return Written; }
+		int64 Num() const;
 		bool IsFile() const { return !FilePath.IsEmpty(); }
-		bool HasError() const { return bError; }
-		/** Tests: the memory buffer, to prove it is allocated once */
-		const uint8* GetDataInternal() const { return Bytes.GetData(); }
+		bool HasError() const;
+		/** The body passed MaxBytes */
+		bool IsTooLarge() const;
+		/** Tests: the memory buffer and its capacity, to prove what is reserved */
+		const uint8* GetDataInternal() const;
+		int32 GetCapacityInternal() const;
 
 	private:
+		mutable UE::FMutex Mutex;
 		FString FilePath;
+		int64 MaxBytes = 0;
 		TUniquePtr<IFileHandle> File;
 		TArray<uint8> Bytes;
 		int64 Written = 0;
 		bool bError = false;
+		bool bTooLarge = false;
+		bool bSealed = false;
 	};
 }
 ```
@@ -6281,12 +6775,19 @@ namespace VaRest::Http
 
 #include "VaRestBodySink.h"
 
+#include "Async/UniqueLock.h"
 #include "GenericPlatform/GenericPlatformFile.h"
 #include "HAL/PlatformFileManager.h"
 #include "Misc/Paths.h"
 
-VaRest::Http::FBodySink::FBodySink(FString InFilePath)
+VaRest::Http::FBodySink::FBodySink(int64 InMaxBytes)
+	: MaxBytes(FMath::Max<int64>(0, InMaxBytes))
+{
+}
+
+VaRest::Http::FBodySink::FBodySink(FString InFilePath, int64 InMaxBytes)
 	: FilePath(MoveTemp(InFilePath))
+	, MaxBytes(FMath::Max<int64>(0, InMaxBytes))
 {
 }
 
@@ -6294,13 +6795,22 @@ VaRest::Http::FBodySink::~FBodySink() = default;
 
 bool VaRest::Http::FBodySink::Write(const void* Data, int64 Length, int64 ContentLength)
 {
-	if (bError)
+	UE::TUniqueLock<UE::FMutex> Lock(Mutex);
+	if (bError || bSealed)
 	{
 		return false;
 	}
 	if (Length <= 0)
 	{
 		return true;
+	}
+	const int64 NewNum = Written + Length;
+	if (MaxBytes > 0 && NewNum > MaxBytes)
+	{
+		// Review M13: bounded memory on untrusted input -- the transfer stops here, the request ends ResponseTooLarge
+		bError = true;
+		bTooLarge = true;
+		return false;
 	}
 	if (IsFile())
 	{
@@ -6315,25 +6825,26 @@ bool VaRest::Http::FBodySink::Write(const void* Data, int64 Length, int64 Conten
 			bError = true;
 			return false;
 		}
-		Written += Length;
+		Written = NewNum;
 		return true;
 	}
 
-	const int64 NewNum = Written + Length;
 	if (NewNum + 1 > MAX_int32)
 	{
 		// TArray<uint8> holds int32 elements; SaveTo is the way for a larger body
 		bError = true;
 		return false;
 	}
-	if (Bytes.Max() == 0 && ContentLength > 0 && ContentLength < MAX_int32)
+	if (Bytes.Max() == 0 && ContentLength > 0)
 	{
-		// Content-Length + 1: the terminator ParseOwned appends fits without a reallocation (spec 2.1)
-		Bytes.Reserve(static_cast<int32>(FMath::Max(ContentLength, NewNum)) + 1);
+		// Content-Length + 1: the terminator ParseOwned appends fits without a reallocation (spec 2.1). Capped, because a
+		// Content-Length is a claim: 2000000000 would otherwise allocate 2 GB before a byte arrived (review M-6).
+		const int64 Claimed = FMath::Min(ContentLength, FMath::Max(MaxBytes, ReserveCap));
+		Bytes.Reserve(static_cast<int32>(FMath::Min<int64>(MAX_int32 - 1, FMath::Max(Claimed, NewNum)) + 1));
 	}
 	else if (NewNum + 1 > Bytes.Max())
 	{
-		// Unknown or wrong length (chunked, compressed): grow geometrically, always leaving a byte free
+		// Unknown, wrong or capped length (chunked, compressed): grow geometrically, always leaving a byte free
 		Bytes.Reserve(static_cast<int32>(FMath::Min<int64>(MAX_int32, FMath::Max<int64>(NewNum + 1, static_cast<int64>(Bytes.Max()) * 2))));
 	}
 	Bytes.Append(static_cast<const uint8*>(Data), static_cast<int32>(Length));
@@ -6343,6 +6854,8 @@ bool VaRest::Http::FBodySink::Write(const void* Data, int64 Length, int64 Conten
 
 TArray<uint8> VaRest::Http::FBodySink::TakeBytes()
 {
+	UE::TUniqueLock<UE::FMutex> Lock(Mutex);
+	bSealed = true;
 	if (Bytes.Max() == Bytes.Num())
 	{
 		Bytes.Reserve(Bytes.Num() + 1);
@@ -6352,6 +6865,8 @@ TArray<uint8> VaRest::Http::FBodySink::TakeBytes()
 
 bool VaRest::Http::FBodySink::CloseFile()
 {
+	UE::TUniqueLock<UE::FMutex> Lock(Mutex);
+	bSealed = true;
 	if (File.IsValid())
 	{
 		if (!File->Flush())
@@ -6361,6 +6876,36 @@ bool VaRest::Http::FBodySink::CloseFile()
 		File.Reset();
 	}
 	return !bError;
+}
+
+int64 VaRest::Http::FBodySink::Num() const
+{
+	UE::TUniqueLock<UE::FMutex> Lock(Mutex);
+	return Written;
+}
+
+bool VaRest::Http::FBodySink::HasError() const
+{
+	UE::TUniqueLock<UE::FMutex> Lock(Mutex);
+	return bError;
+}
+
+bool VaRest::Http::FBodySink::IsTooLarge() const
+{
+	UE::TUniqueLock<UE::FMutex> Lock(Mutex);
+	return bTooLarge;
+}
+
+const uint8* VaRest::Http::FBodySink::GetDataInternal() const
+{
+	UE::TUniqueLock<UE::FMutex> Lock(Mutex);
+	return Bytes.GetData();
+}
+
+int32 VaRest::Http::FBodySink::GetCapacityInternal() const
+{
+	UE::TUniqueLock<UE::FMutex> Lock(Mutex);
+	return Bytes.Max();
 }
 ```
 
@@ -6374,6 +6919,81 @@ namespace VaRest::Http
 }
 ```
 
+`Source/VaRestHttp/Private/VaRestHttpTransportInternal.h` (what the transport's unit tests reach):
+
+```cpp
+// Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
+
+#pragma once
+
+#include "CoreMinimal.h"
+#include "Serialization/Archive.h"
+#include "VaRestTransport.h"
+
+namespace VaRest::Http
+{
+	/**
+	 * Decision 30 (review I-5): the activity timeout the transport sets. With a total timeout and no activity timeout the
+	 * engine would still apply its own default (GetActivityTimeoutOrDefault -> [HTTP] HttpActivityTimeout = 30,
+	 * HttpRequestCommon.cpp:733-736, HttpModule.cpp:98), so .Timeout(60) against a server silent for 40 s would fail at 30 s
+	 * as a connection error. Spec 4.7: the request's total timeout governs. 0 = set none.
+	 */
+	float EffectiveActivityTimeout(float TotalSeconds, float ActivitySeconds);
+
+	/**
+	 * Decision 29 (review I-2): an upload that reports progress while it goes. Under CompleteOnHttpThread curl calls the
+	 * progress delegate only from the body receive callback and at the finish (CurlHttp.cpp:453-467, :1274), and its
+	 * upload callback reports nothing (CurlHttp.cpp:668-683): BytesSent stays 0 for a whole upload and UploadDoneAt would
+	 * be stamped at the first response byte. So when progress is asked for (OnProgress, or trace metadata, IN-11) the body
+	 * goes through this archive and IHttpRequest::SetContentFromStream.
+	 *
+	 * Engine facts (UE 5.8.1): curl reads a stream payload through CURLOPT_READFUNCTION -> UploadCallback ->
+	 * FRequestPayloadInFileStream::FillOutputBuffer (CurlHttp.cpp:421-429, :668-683, :996-1001; HttpRequestPayload.cpp:77-97),
+	 * which serializes straight into curl's buffer on the HTTP thread (IHttpRequest.h:250-257, the note at :252): the same one copy an
+	 * in-memory payload makes. Its length is TotalSize() (HttpRequestPayload.cpp:53-56), sent as Content-Length
+	 * (CurlHttp.cpp:896-902) and CURLOPT_POSTFIELDSIZE/INFILESIZE (:952, :962, :987): no chunked encoding. A stream is not
+	 * seekable (:390) where memory is (:348-349), but curl gets a seek callback only with [HTTP.Curl] bAllowSeekFunction,
+	 * false by default (:1051, BaseEngine.ini), so a rewind fails the same way either way. A streamed POST or DELETE needs a
+	 * Content-Type (:945, :983); Resolve always sets one for a body (Task 8) and the transport stage refuses an empty one
+	 * (Task 8, review I3). Apple sizes a stream from TotalSize() too (AppleHttp.cpp:633, :727) and copies an in-memory body
+	 * into NSData anyway (:536, :553).
+	 *
+	 * One reader at a time (curl's read callback, or NSURLSession's stream thread); the probe's atomics are read on the game
+	 * thread. A file is opened on the first read, on the reading thread, never on the game thread.
+	 */
+	class FCountingUpload final : public FArchive
+	{
+	public:
+		using FProbeRef = TSharedRef<FVaRestTransportProbe, ESPMode::ThreadSafe>;
+		using FClockPtr = TSharedPtr<IVaRestClock, ESPMode::ThreadSafe>;
+
+		FCountingUpload(TArray<uint8>&& InBytes, FProbeRef InProbe, FClockPtr InClock, bool bInStamp);
+		FCountingUpload(TSharedRef<FArchive, ESPMode::ThreadSafe> InInner, int64 InTotal, FProbeRef InProbe, FClockPtr InClock, bool bInStamp);
+		FCountingUpload(FString InFilePath, int64 InTotal, FProbeRef InProbe, FClockPtr InClock, bool bInStamp);
+		virtual ~FCountingUpload() override;
+
+		virtual void Serialize(void* Data, int64 Length) override;
+		virtual void Seek(int64 InPos) override;
+		virtual int64 Tell() override { return Position; }
+		virtual int64 TotalSize() override { return Total; }
+		virtual FString GetArchiveName() const override { return TEXT("VaRest upload"); }
+
+	private:
+		void Count(int64 Length);
+
+		TArray<uint8> Bytes;
+		TSharedPtr<FArchive, ESPMode::ThreadSafe> Inner;
+		FString FilePath;
+		TUniquePtr<FArchive> File;
+		int64 Total = 0;
+		int64 Position = 0;
+		FProbeRef Probe;
+		FClockPtr Clock;
+		bool bStamp = false;
+	};
+}
+```
+
 `Source/VaRestHttp/Private/VaRestHttpTransport.cpp`:
 
 ```cpp
@@ -6381,11 +7001,13 @@ namespace VaRest::Http
 
 #include "VaRestTransport.h"
 
+#include "HAL/FileManager.h"
 #include "HAL/PlatformTime.h"
 #include "HttpModule.h"
 #include "Interfaces/IHttpRequest.h"
 #include "Interfaces/IHttpResponse.h"
 #include "VaRestBodySink.h"
+#include "VaRestHttpTransportInternal.h"
 #include "VaRestTrace.h"
 
 namespace VaRest::Http::HttpTransportPrivate
@@ -6421,6 +7043,15 @@ namespace VaRest::Http::HttpTransportPrivate
 		}
 	}
 
+	/** Two writers can report BytesSent (the counting archive and the engine's progress delegate): keep the larger */
+	void AtomicMax(std::atomic<int64>& Target, int64 Value)
+	{
+		int64 Seen = Target.load();
+		while (Value > Seen && !Target.compare_exchange_weak(Seen, Value))
+		{
+		}
+	}
+
 	/** Shared by the engine delegates of one request; completes exactly once */
 	struct FCompletion
 	{
@@ -6431,6 +7062,24 @@ namespace VaRest::Http::HttpTransportPrivate
 			, Probe(MoveTemp(InProbe))
 			, Clock(MoveTemp(InClock))
 		{
+		}
+
+		/**
+		 * Review I-3: the engine does not always call back. FHttpManager::Shutdown calls Request->Shutdown() on every
+		 * outstanding request (HttpManager.cpp:164-169), which unbinds the delegates (HttpRequestImpl.cpp:32-38); with [HTTP]
+		 * bUseNullHttp, CreateRequest returns a request that never completes (HttpModule.cpp:377-380, NullHttp.cpp:142-149).
+		 * Either way this object dies with the request: finish it. At shutdown the posted game-thread task never runs, which
+		 * is harmless.
+		 */
+		~FCompletion()
+		{
+			if (!bDone.exchange(true) && OnComplete)
+			{
+				FVaRestTransportResult Dropped;
+				Dropped.Failure = EVaRestTransportFailure::Other;
+				Dropped.FailureDetail = TEXT("TransportDropped");
+				OnComplete(MoveTemp(Dropped)); // only posts a game-thread task
+			}
 		}
 
 		double Now() const
@@ -6445,20 +7094,31 @@ namespace VaRest::Http::HttpTransportPrivate
 		std::atomic<bool> bDone{ false };
 		/** Stamp transport times (trace metadata, IN-11) */
 		bool bStamp = false;
+		/** The body went through FCountingUpload: BytesUp is what was sent, not what was meant (review M-18) */
+		bool bCountedUpload = false;
 		int64 BytesUp = 0;
 	};
 
 	class FCall final : public IVaRestTransportCall
 	{
 	public:
-		explicit FCall(TWeakPtr<IHttpRequest, ESPMode::ThreadSafe> InRequest)
+		FCall(TWeakPtr<IHttpRequest, ESPMode::ThreadSafe> InRequest, TWeakPtr<FCompletion, ESPMode::ThreadSafe> InCompletion)
 			: Request(MoveTemp(InRequest))
+			, Completion(MoveTemp(InCompletion))
 		{
 		}
 
 		virtual void Cancel() override
 		{
 			check(IsInGameThread());
+			// Review M-5: a request already finished on the HTTP thread is left alone. For one that ended by an abort
+			// (a timeout), curl's AbortRequest would run FinishRequestNotInHttpManager a second time (CurlHttp.cpp:1194-1209,
+			// HttpRequestCommon.cpp:224-237): the engine's finish, stats and logs twice.
+			const TSharedPtr<FCompletion, ESPMode::ThreadSafe> Done = Completion.Pin();
+			if (!Done.IsValid() || Done->bDone.load())
+			{
+				return;
+			}
 			// The completion delegate then reports EHttpFailureReason::Cancelled (HttpRequestCommon.cpp:295-298)
 			if (TSharedPtr<IHttpRequest, ESPMode::ThreadSafe> Pinned = Request.Pin())
 			{
@@ -6468,6 +7128,7 @@ namespace VaRest::Http::HttpTransportPrivate
 
 	private:
 		TWeakPtr<IHttpRequest, ESPMode::ThreadSafe> Request;
+		TWeakPtr<FCompletion, ESPMode::ThreadSafe> Completion;
 	};
 
 	class FHttpModuleTransport final : public IVaRestTransport
@@ -6496,14 +7157,35 @@ namespace VaRest::Http::HttpTransportPrivate
 		}
 
 		const TSharedRef<FBodySink, ESPMode::ThreadSafe> Sink = Request.ResponseFile.IsEmpty()
-			? MakeShared<FBodySink, ESPMode::ThreadSafe>()
-			: MakeShared<FBodySink, ESPMode::ThreadSafe>(Request.ResponseFile);
+			? MakeShared<FBodySink, ESPMode::ThreadSafe>(Request.MaxBodyBytes)
+			: MakeShared<FBodySink, ESPMode::ThreadSafe>(Request.ResponseFile, Request.MaxBodyBytes);
 		const TSharedRef<FCompletion, ESPMode::ThreadSafe> Completion = MakeShared<FCompletion, ESPMode::ThreadSafe>(MoveTemp(OnComplete), Sink, Request.Probe, Request.Clock);
 		Completion->bStamp = Request.bReportStatusTime;
 		Completion->BytesUp = Request.Probe->UploadTotal.load();
 
 		bool bBodyAccepted = true;
-		if (!Request.BodyFile.IsEmpty())
+		const int64 UploadTotal = Request.Probe->UploadTotal.load();
+		if (Request.bReportProgress && UploadTotal > 0)
+		{
+			// Decision 29: counted as curl reads it (FCountingUpload). Only here: the default path stays SetContent(TArray&&).
+			TSharedPtr<FCountingUpload, ESPMode::ThreadSafe> Counted;
+			if (!Request.BodyFile.IsEmpty())
+			{
+				Counted = MakeShared<FCountingUpload, ESPMode::ThreadSafe>(MoveTemp(Request.BodyFile), UploadTotal, Request.Probe, Request.Clock, Request.bReportStatusTime);
+			}
+			else if (Request.BodySegments.Num() > 0)
+			{
+				Counted = MakeShared<FCountingUpload, ESPMode::ThreadSafe>(MakeShared<FVaRestSegmentStream, ESPMode::ThreadSafe>(MoveTemp(Request.BodySegments)),
+					UploadTotal, Request.Probe, Request.Clock, Request.bReportStatusTime);
+			}
+			else
+			{
+				Counted = MakeShared<FCountingUpload, ESPMode::ThreadSafe>(MoveTemp(Request.Body), Request.Probe, Request.Clock, Request.bReportStatusTime);
+			}
+			Completion->bCountedUpload = true;
+			bBodyAccepted = Http->SetContentFromStream(Counted.ToSharedRef());
+		}
+		else if (!Request.BodyFile.IsEmpty())
 		{
 			bBodyAccepted = Http->SetContentAsStreamedFile(Request.BodyFile);
 		}
@@ -6525,15 +7207,16 @@ namespace VaRest::Http::HttpTransportPrivate
 			Result.FailureDetail = TEXT("BodyRejected");
 			FVaRestTransportComplete Callback = MoveTemp(Completion->OnComplete);
 			Callback(MoveTemp(Result));
-			return MakeShared<FCall, ESPMode::ThreadSafe>(TWeakPtr<IHttpRequest, ESPMode::ThreadSafe>(Http));
+			return MakeShared<FCall, ESPMode::ThreadSafe>(TWeakPtr<IHttpRequest, ESPMode::ThreadSafe>(Http), Completion);
 		}
 		if (Request.Timeout > 0.f)
 		{
 			Http->SetTimeout(Request.Timeout);
 		}
-		if (Request.ActivityTimeout > 0.f)
+		const float Activity = EffectiveActivityTimeout(Request.Timeout, Request.ActivityTimeout);
+		if (Activity > 0.f)
 		{
-			Http->SetActivityTimeout(Request.ActivityTimeout);
+			Http->SetActivityTimeout(Activity);
 		}
 		Http->SetPriority(MapPriority(Request.Priority));
 		// Spec 1: complete on the HTTP thread; the completion below only moves bytes and dispatches
@@ -6550,7 +7233,10 @@ namespace VaRest::Http::HttpTransportPrivate
 				{
 					if (const FHttpResponsePtr Response = Pinned->GetResponse())
 					{
-						ContentLength = Response->GetContentLength() > 0 ? static_cast<int64>(Response->GetContentLength()) : -1;
+						// Review M-16: curl decompresses (CURLOPT_ACCEPT_ENCODING "", CurlHttp.cpp:1016-1021), so with a
+						// Content-Encoding the Content-Length counts the compressed bytes: the received total is unknown
+						const bool bEncoded = !Response->GetHeader(TEXT("Content-Encoding")).IsEmpty();
+						ContentLength = !bEncoded && Response->GetContentLength() > 0 ? static_cast<int64>(Response->GetContentLength()) : -1;
 					}
 				}
 				Completion->Probe->DownloadTotal = ContentLength;
@@ -6568,7 +7254,7 @@ namespace VaRest::Http::HttpTransportPrivate
 			Http->OnRequestProgress64().BindLambda([Completion](FHttpRequestPtr, uint64 Sent, uint64 Received)
 			{
 				FVaRestTransportProbe& Probe = *Completion->Probe;
-				Probe.BytesSent = static_cast<int64>(Sent);
+				AtomicMax(Probe.BytesSent, static_cast<int64>(Sent));
 				Probe.BytesReceived = static_cast<int64>(Received);
 				if (Completion->bStamp && Probe.UploadDoneAt.load() < 0.0 && static_cast<int64>(Sent) >= Probe.UploadTotal.load())
 				{
@@ -6603,6 +7289,15 @@ namespace VaRest::Http::HttpTransportPrivate
 				Result.EffectiveUrl = Resp->GetEffectiveURL();
 				Result.ContentType = Resp->GetContentType();
 			}
+			// "Received", not "Sink": a lambda local may not hide an enclosing local (MSVC C4456 is an error here, review I2)
+			FBodySink& Received = *Completion->Sink;
+			if (Resp.IsValid() && Received.Num() == 0 && Resp->GetContent().Num() > 0)
+			{
+				// Review M-15: engine mock responses append to the engine's payload, not to the stream
+				// (HttpRequestCommon.cpp:124-160); take it, through the sink, so the slack and the cap still hold
+				const TArray<uint8>& Engine = Resp->GetContent();
+				Received.Write(Engine.GetData(), Engine.Num(), Engine.Num());
+			}
 			if (!bSucceeded || !Resp.IsValid())
 			{
 				const EHttpFailureReason Reason = Req.IsValid() ? Req->GetFailureReason() : EHttpFailureReason::Other;
@@ -6613,11 +7308,10 @@ namespace VaRest::Http::HttpTransportPrivate
 				}
 				Result.FailureDetail = FName(LexToString(Reason));
 			}
-			FBodySink& Sink = *Completion->Sink;
-			if (Sink.IsFile())
+			if (Received.IsFile())
 			{
 				Result.bBodyInFile = true;
-				if (!Sink.CloseFile() && Result.Failure == EVaRestTransportFailure::None)
+				if (!Received.CloseFile() && Result.Failure == EVaRestTransportFailure::None)
 				{
 					Result.Failure = EVaRestTransportFailure::Other;
 					Result.FailureDetail = TEXT("ResponseFileWriteFailed");
@@ -6625,15 +7319,23 @@ namespace VaRest::Http::HttpTransportPrivate
 			}
 			else
 			{
-				Result.Body = Sink.TakeBytes();
+				Result.Body = Received.TakeBytes();
 			}
-			if (Sink.HasError() && Result.Failure == EVaRestTransportFailure::None)
+			if (Received.IsTooLarge())
+			{
+				// Review M13: the sink stopped the transfer at the result's JSON cap; whatever the engine then reported
+				Result.Failure = EVaRestTransportFailure::Other;
+				Result.FailureDetail = TEXT("ResponseTooLarge");
+				Result.Body.Empty();
+			}
+			else if (Received.HasError() && Result.Failure == EVaRestTransportFailure::None)
 			{
 				Result.Failure = EVaRestTransportFailure::Other;
 				Result.FailureDetail = TEXT("ResponseBodyRejected");
 			}
-			Result.BytesUp = Completion->BytesUp;
-			Result.BytesDown = Sink.Num();
+			// Review M-18: with a counted upload, what was sent; otherwise the body's size
+			Result.BytesUp = Completion->bCountedUpload ? Completion->Probe->BytesSent.load() : Completion->BytesUp;
+			Result.BytesDown = Received.Num();
 			if (Completion->bStamp)
 			{
 				Result.TransportDoneAt = Completion->Now();
@@ -6643,9 +7345,110 @@ namespace VaRest::Http::HttpTransportPrivate
 		});
 
 		// The completion delegate runs even when ProcessRequest refuses to start ("always called when the request completes
-		// or on error", IHttpRequest.h:351): the refusal arrives there as a failure, so the return value adds nothing
+		// or on error", IHttpRequest.h:351): the refusal arrives there as a failure, so the return value adds nothing.
+		// When the engine drops it instead, ~FCompletion finishes the request (review I-3).
 		Http->ProcessRequest();
-		return MakeShared<FCall, ESPMode::ThreadSafe>(WeakHttp);
+		return MakeShared<FCall, ESPMode::ThreadSafe>(WeakHttp, Completion);
+	}
+}
+
+float VaRest::Http::EffectiveActivityTimeout(float TotalSeconds, float ActivitySeconds)
+{
+	return ActivitySeconds > 0.f ? ActivitySeconds : FMath::Max(TotalSeconds, 0.f);
+}
+
+VaRest::Http::FCountingUpload::FCountingUpload(TArray<uint8>&& InBytes, FProbeRef InProbe, FClockPtr InClock, bool bInStamp)
+	: Bytes(MoveTemp(InBytes))
+	, Total(Bytes.Num())
+	, Probe(MoveTemp(InProbe))
+	, Clock(MoveTemp(InClock))
+	, bStamp(bInStamp)
+{
+	SetIsLoading(true);
+}
+
+VaRest::Http::FCountingUpload::FCountingUpload(TSharedRef<FArchive, ESPMode::ThreadSafe> InInner, int64 InTotal, FProbeRef InProbe, FClockPtr InClock, bool bInStamp)
+	: Inner(MoveTemp(InInner))
+	, Total(InTotal)
+	, Probe(MoveTemp(InProbe))
+	, Clock(MoveTemp(InClock))
+	, bStamp(bInStamp)
+{
+	SetIsLoading(true);
+}
+
+VaRest::Http::FCountingUpload::FCountingUpload(FString InFilePath, int64 InTotal, FProbeRef InProbe, FClockPtr InClock, bool bInStamp)
+	: FilePath(MoveTemp(InFilePath))
+	, Total(InTotal)
+	, Probe(MoveTemp(InProbe))
+	, Clock(MoveTemp(InClock))
+	, bStamp(bInStamp)
+{
+	SetIsLoading(true);
+}
+
+VaRest::Http::FCountingUpload::~FCountingUpload() = default;
+
+void VaRest::Http::FCountingUpload::Serialize(void* Data, int64 Length)
+{
+	if (Length <= 0)
+	{
+		return;
+	}
+	if (Position + Length > Total)
+	{
+		SetError();
+		return;
+	}
+	if (Inner.IsValid())
+	{
+		Inner->Seek(Position);
+		Inner->Serialize(Data, Length);
+		if (Inner->IsError())
+		{
+			SetError();
+			return;
+		}
+	}
+	else if (!FilePath.IsEmpty())
+	{
+		if (!File.IsValid())
+		{
+			// On the reading thread (the HTTP thread for curl): never disk IO on the game thread
+			File.Reset(IFileManager::Get().CreateFileReader(*FilePath));
+		}
+		if (!File.IsValid())
+		{
+			SetError();
+			return;
+		}
+		File->Seek(Position);
+		File->Serialize(Data, Length);
+		if (File->IsError())
+		{
+			SetError();
+			return;
+		}
+	}
+	else
+	{
+		FMemory::Memcpy(Data, Bytes.GetData() + Position, static_cast<SIZE_T>(Length));
+	}
+	Count(Length);
+}
+
+void VaRest::Http::FCountingUpload::Seek(int64 InPos)
+{
+	Position = FMath::Clamp<int64>(InPos, 0, Total);
+}
+
+void VaRest::Http::FCountingUpload::Count(int64 Length)
+{
+	Position += Length;
+	HttpTransportPrivate::AtomicMax(Probe->BytesSent, Position);
+	if (bStamp && Position == Total && Probe->UploadDoneAt.load() < 0.0)
+	{
+		Probe->UploadDoneAt = Clock.IsValid() ? Clock->Now() : FPlatformTime::Seconds();
 	}
 }
 
@@ -6659,22 +7462,27 @@ TSharedRef<IVaRestTransport, ESPMode::ThreadSafe> VaRest::Http::GetDefaultTransp
 - [ ] **Step 5: Run and pass**
 
 Run: `Tools/run_tests.sh VaRest.Http`
-Expected: `0 failed`, including `VaRest.Http.Transport.MemorySinkSlack`, `.FileSink`, `.CompletesOffGameThread`, `.RefusedRequestCompletesOnce`.
+Expected: `0 failed`, including `VaRest.Http.Transport.MemorySinkSlack`, `.FileSink`, `.CountingUpload`, `.ActivityFollowsTotal`, `.CompletesOffGameThread`, `.RefusedRequestCompletesOnce`, `.EngineMockResponse`.
 
 - [ ] **Step 6: Restore-the-bug (slack)**
 
-In `FBodySink::Write`, temporarily reserve `ContentLength` instead of `ContentLength + 1` and make `TakeBytes` return `MoveTemp(Bytes)` without its reserve. Run `Tools/run_tests.sh VaRest.Http.Transport`; expected FAIL in `VaRest.Http.Transport.MemorySinkSlack` ("one byte of slack"). Restore; PASS. Report both runs.
+In `FBodySink::Write`, temporarily reserve `Claimed` instead of `Claimed + 1` and make `TakeBytes` return `MoveTemp(Bytes)` without its reserve. Run `Tools/run_tests.sh VaRest.Http.Transport`; expected FAIL in `VaRest.Http.Transport.MemorySinkSlack` ("one byte of slack"). Restore; PASS. Report both runs.
 
 - [ ] **Step 7: Restore-the-bug (completion thread)**
 
 Temporarily change the policy to `EHttpRequestDelegateThreadPolicy::CompleteOnGameThread`. Run `Tools/run_tests.sh VaRest.Http.Transport`; expected FAIL in `VaRest.Http.Transport.CompletesOffGameThread`: a game-thread completion comes from the HTTP manager's tick (`HttpManager.cpp:537-544`), which this `PumpUntil` does not run, so "completes" times out. Restore; PASS. Report both runs.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 8: Restore-the-bug (the reserve cap and the JSON cap, reviews M-6, M13)**
+
+In `FBodySink::Write`, temporarily use `const int64 Claimed = ContentLength;` and delete the `MaxBytes > 0 && NewNum > MaxBytes` block. Run `Tools/run_tests.sh VaRest.Http.Transport`; expected FAIL in `VaRest.Http.Transport.MemorySinkSlack` ("a huge Content-Length reserves at most ReserveCap + 1", "past the cap the write fails"). Restore; PASS. Report both runs.
+
+- [ ] **Step 9: Commit**
 
 ```bash
 git add Source/VaRestHttp/Public/VaRestTransport.h Source/VaRestHttp/Private/VaRestBodySink.h Source/VaRestHttp/Private/VaRestBodySink.cpp \
-  Source/VaRestHttp/Private/VaRestHttpTransport.cpp Source/VaRestHttp/Private/Tests/VaRestHttpTransportTest.cpp
-git commit -m "http: FHttpModule transport -- HTTP-thread completion, body received into Content-Length + 1, file sink, streamed uploads
+  Source/VaRestHttp/Private/VaRestHttpTransportInternal.h Source/VaRestHttp/Private/VaRestHttpTransport.cpp \
+  Source/VaRestHttp/Private/Tests/VaRestHttpTransportTest.cpp
+git commit -m "http: FHttpModule transport -- HTTP-thread completion, a locked body sink with slack and caps, counted uploads, dropped completions finish
 
 Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 ```
@@ -6685,11 +7493,13 @@ Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 
 The heart of M3. Spec §4: "Each request is an `FVaRestExchange` that flows through a fixed chain. A stage is asynchronous middleware: it may pass the exchange on, observe or alter the outcome, short-circuit (cache hit, queued), or re-issue (retry, auth replay)." This task builds the mechanism with the stages M3 needs — custom `Outer` stages, the attempt boundary, custom `PerAttempt` stages, the transport (the limiter, Task 12, and the log stage, Task 14, slot in before it) — and the life of an exchange:
 
-1. `Send()` on any thread assigns the id (IN-10), moves the builder into the exchange, and enters on the game thread, directly or through a game-thread task (spec §1).
-2. `Enter` snapshots the configuration (spec §3.1: "A request snapshots the configuration at `Send()`"), resolves the URL and headers, and runs the chain.
+1. `Send()` on any thread assigns the id (IN-10), snapshots the configuration (spec §3.1: "A request snapshots the configuration at `Send()`"; decision 27), moves the builder into the exchange, and enters on the game thread, directly or through a game-thread task (spec §1).
+2. `Enter` resolves the URL and headers, and runs the chain.
 3. The transport completes on any thread; the completion only posts a game-thread task (spec §1).
 4. `OnChainDone` classifies the outcome. A body to decode goes to a `UE::Tasks` task, with the typed handler moved along, so no other thread touches it meanwhile.
-5. `Complete` runs on the game thread, exactly once, never inside `Send()` (decision 3), and delivers.
+5. `Complete` runs on the game thread, exactly once, never inside `Send()` (decision 3), and delivers. Deliveries are game-thread tasks, which the game thread also runs between tick groups, so a callback can run mid-frame, not only at a frame boundary (decision 32); every delivery goes through one helper, so M5 can change that in one place.
+
+Every `TSharedPtr` that crosses to another thread is moved into the game-thread continuation, never copied, so an exchange and its client state die on the game thread; out-of-line destructors send what is left there as a backstop (review I-1). A transport that destroys its completion uncalled still finishes the request (`TransportDropped`, review I-3).
 
 Configuration is an immutable `FClientConfig` swapped under a lock, so a builder made on a worker reads a consistent copy. In-flight exchanges are owned by the client state and keep it alive (spec §3.2: "in-flight exchanges are owned by the client state, and they keep the client state alive. No `AddToRoot` anywhere"). The typed half of a request is `TResultHandler<T>`; every result kind of spec §3.2 is here: `FVaRestJson` (default), `void`, `FString`, `TArray<uint8>`, `FVaRestResponse`, any `USTRUCT`. The struct path is tested in Task 10, where the test types module arrives.
 
@@ -6702,8 +7512,8 @@ Configuration is an immutable `FClientConfig` swapped under a lock, so a builder
 **Interfaces:**
 - Consumes: Tasks 2–7 (types, URL functions, bodies, trace ids, redactor, clock, transport, fake, `GetDefaultTransport`); `FVaRestJson::ParseOwned`, `FVaRestJson::Parse(TConstArrayView<uint8>, const FVaRestJsonParseOptions&)`, `FVaRestJson::TryToUtf8`, `FVaRestJsonParseOptions::MaxInputBytes`, `FVaRestJsonConvert::JsonToStruct`, `FVaRestJsonConvertOptions`, `FVaRestJsonDecodeReport`, `VaRest::Json::bHasScriptStruct<T>`, `VaRest::Json::GetScriptStruct<T>()`, `VaRest::Json::AppendRepairedUtf8` (VaRestJson).
 - Produces (public):
-  - `VaRestResultHandler.h`: `struct VaRest::Http::FFinish { Response, Error, Body, bBodyInFile, TempFile, SaveTo, bKeepBody, DecodeOptions, ParseOptions, bTimeDecode, DecodeStartAt, DecodeEndAt, Clock }`; `class IResultHandler { GetResultType, DecodesBody, Decode, Deliver, WantsProgress, Progress }`; `DecodeJson(FFinish&, FVaRestJson&)`, `DecodeStruct(FFinish&, const UScriptStruct*, void*)`, `DecodeText(FFinish&, FString&)`, `ReleaseBody(FFinish&)`; `TResultHandler<T>` (+ `<void>`) with `OnSuccess`, `OnError`, `OnComplete`, `OnProgress` (`TUniqueFunction`s).
-  - `VaRestStage.h`: `struct FVaRestAttemptOutcome { Status, Headers, EffectiveUrl, ContentType, Body, bBodyInFile, Failure, FailureDetail, BytesUp, BytesDown; static Canceled(); IsTransportFailure() }`; `using FVaRestOutcomeCallback = TUniqueFunction<void(FVaRestAttemptOutcome&&)>`; `using FVaRestStageRef = TSharedRef<IVaRestStage, ESPMode::ThreadSafe>`; `using FVaRestStageChain = TArray<FVaRestStageRef>`; `using FVaRestExchangeRef = TSharedRef<FVaRestExchange, ESPMode::ThreadSafe>`; `class FVaRestStageNext { Proceed(const FVaRestExchangeRef&, FVaRestOutcomeCallback&&) const }`; `class IVaRestStage { GetStageName() const; virtual bool MayReissue() const { return false; } Process(const FVaRestExchangeRef&, const FVaRestStageNext&, FVaRestOutcomeCallback&&) }`; `enum class EVaRestExchangePhase { Created, InChain, Decoding, Done }`; `class FVaRestExchange` (stage accessors `GetRequestId`, `GetClientId`, `GetVerb`, `GetUrl`, `GetPathTemplate`, `GetTag`, `GetPriority`, `IsIdempotent`, `GetRequestHeaders`, `GetAttemptHeaders`, `GetBody`, `GetAttempt`, `IsCancelRequested`, `IsDone`; internal fields listed in the header).
+  - `VaRestResultHandler.h`: `struct VaRest::Http::FFinish { Response, Error, Body, bBodyInFile, TempFile, SaveTo, bKeepBody, DecodeOptions, ParseOptions, bTimeDecode, DecodeStartAt, DecodeEndAt, Clock }`; `class IResultHandler { GetResultType, DecodesBody, DecodesJson, Decode, Deliver, WantsProgress, Progress }`; `DecodeJson(FFinish&, FVaRestJson&)`, `DecodeStruct(FFinish&, const UScriptStruct*, void*)`, `DecodeText(FFinish&, FString&)`, `ReleaseBody(FFinish&)`; `TResultHandler<T>` (+ `<void>`) with `OnSuccess`, `OnError`, `OnComplete`, `OnProgress` (`TUniqueFunction`s).
+  - `VaRestStage.h`: `struct FVaRestAttemptOutcome { Status, Headers, EffectiveUrl, ContentType, Body, bBodyInFile, Failure, FailureDetail, BytesUp, BytesDown; static Canceled(); IsTransportFailure() }`; `using FVaRestOutcomeCallback = TUniqueFunction<void(FVaRestAttemptOutcome&&)>`; `using FVaRestStageRef = TSharedRef<IVaRestStage, ESPMode::ThreadSafe>`; `using FVaRestStageChain = TArray<FVaRestStageRef>`; `using FVaRestExchangeRef = TSharedRef<FVaRestExchange, ESPMode::ThreadSafe>`; `class FVaRestStageNext { Proceed(const FVaRestExchangeRef&, FVaRestOutcomeCallback&&) const }`; `class IVaRestStage { GetStageName() const; virtual bool MayReissue() const { return false; } Process(const FVaRestExchangeRef&, const FVaRestStageNext&, FVaRestOutcomeCallback&&) }`; `enum class EVaRestExchangePhase { Created, InChain, Decoding, Done }`; `class FVaRestExchange` (out-of-line destructor; stage accessors `GetRequestId`, `GetClientId`, `GetVerb`, `GetUrl`, `GetPathTemplate`, `GetTag`, `GetPriority`, `IsIdempotent`, `GetRequestHeaders`, `GetAttemptHeaders`, `GetBody`, `GetAttempt`, `IsCancelRequested`, `IsDone`; internal fields listed in the header).
   - `VaRestClient.h`: `struct VaRest::Http::FRequestSpec`; `VaRest::Http::SendRequest(TUniquePtr<FRequestSpec>&&, const char* SourceFile, uint32 SourceLine)`; `FVaRestRequestHandle { GetId(), IsActive() }` (`Cancel()` arrives in Task 11); `template <typename T> class [[nodiscard]] TVaRestRequest` with `Path`, `Query` (string and integral overloads), `Header`, `Body(const FVaRestJson&)`, `Body(FStringView)`, `Body(TArray<uint8>&&)`, `Body(TConstArrayView<uint8>)`, `Tag`, `Priority`, `OnSuccess`, `OnError`, `OnComplete`, `Send(UE::FSourceLocation = Current())`; `FVaRestClient` (`static Make(FStringView BaseUrl)`, `IsValid`, `GetId`, `GetBaseUrl`, `GetInFlightCount`, `WithName`, `WithBaseUrl`, `WithHeader`, `WithoutHeader`, `WithNaming`, `WithTransport`, `WithClock`, `Use(FVaRestStageRef, EVaRestStageSlot)`, `Get/Post/Put/Patch/Delete/Head<T>(Path)`, `Request<T>(Verb, Path)`, `GetStateInternal()`).
   - `VaRestHttpTesting.h` additions: `template <typename T> struct TTestOutcome` (atomics `SuccessCalls`, `ErrorCalls`, `CompleteCalls`, `bAllOnGameThread`; `Value`, `Error`, `Response`; `IsDone()`), `MakeOutcome<T>()`, `Observe(TVaRestRequest<T>&&, const TSharedRef<TTestOutcome<T>, ESPMode::ThreadSafe>&)`, `struct FTestRig { Clock, Fake, Client; explicit FTestRig(FStringView BaseUrl = "https://api.test"); Wait(Outcome, Seconds) }`.
   - Private (`VaRestClientState.h`): `struct FClientConfig`, `class FClientState` (`Create`, `GetClientId`, `GetConfig`, `EditConfig`, `Enter`, `OnAttemptDone`, `NumInFlight`, `static ForEachLive`), `MakeAttemptBoundaryStage()`, `MakeTransportStage()`; (`VaRestDecode.h`) `ProcessErrorBody(FFinish&)`, `RawBodyText(TConstArrayView<uint8>)`, `RawBodyCap = 4096`.
@@ -6715,9 +7525,12 @@ Configuration is an immutable `FClientConfig` swapped under a lock, so a builder
 
 #if WITH_DEV_AUTOMATION_TESTS
 
+#include "HAL/PlatformProcess.h"
+#include "HAL/PlatformTime.h"
 #include "Misc/AutomationTest.h"
 #include "Tasks/Task.h"
 #include "VaRestClient.h"
+#include "VaRestClientState.h"
 #include "VaRestHttpTesting.h"
 
 namespace VaRest::Http::PipelineTestPrivate
@@ -6733,7 +7546,9 @@ namespace VaRest::Http::PipelineTestPrivate
 			Pass,
 			Sign,
 			Reissue,
-			Answer
+			Answer,
+			/** Reports the outcome twice (a buggy stage, review C-3) */
+			Twice
 		};
 
 		FRecordingStage(FString InLabel, FLog InLog, EMode InMode = EMode::Pass)
@@ -6765,6 +7580,16 @@ namespace VaRest::Http::PipelineTestPrivate
 			}
 			FLog Recorder = Log;
 			FString Name = Label;
+			if (Mode == EMode::Twice)
+			{
+				Next.Proceed(Exchange, [Done = MoveTemp(OnOutcome)](FVaRestAttemptOutcome&& Outcome) mutable
+				{
+					FVaRestAttemptOutcome Again = Outcome;
+					Done(MoveTemp(Outcome));
+					Done(MoveTemp(Again));
+				});
+				return;
+			}
 			if (Mode == EMode::Reissue)
 			{
 				// What M4's retry does: a second trip through the stages after this one, once the first outcome is back
@@ -6872,8 +7697,10 @@ bool FVaRestHttpPipelineErrorsTest::RunTest(const FString& Parameters)
 	Rig.Fake->Enqueue(FVaRestFakeResponse::Failed(EVaRestTransportFailure::Connection, TEXT("ConnectionError")));
 	Rig.Fake->Enqueue(FVaRestFakeResponse::Failed(EVaRestTransportFailure::Timeout, TEXT("TimedOut")));
 	Rig.Fake->Enqueue(FVaRestFakeResponse::Failed(EVaRestTransportFailure::Other, TEXT("BodyRejected")));
+	Rig.Fake->Enqueue(FVaRestFakeResponse::Failed(EVaRestTransportFailure::Other, TEXT("ResponseFileWriteFailed")));
+	Rig.Fake->Enqueue(FVaRestFakeResponse::Failed(EVaRestTransportFailure::Other, TEXT("TransportDropped")));
 	TArray<TSharedRef<TTestOutcome<FVaRestJson>, ESPMode::ThreadSafe>> Outcomes;
-	for (int32 i = 0; i < 6; ++i)
+	for (int32 i = 0; i < 8; ++i)
 	{
 		Outcomes.Add(MakeOutcome<FVaRestJson>());
 		Observe(Rig.Client.Get(FString::Printf(TEXT("/e%d?token=secret-%d"), i, i)).Tag(TEXT("errs")), Outcomes.Last()).Send();
@@ -6896,8 +7723,12 @@ bool FVaRestHttpPipelineErrorsTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("a non-JSON error body: no Body, RawBody holds the text"), !Html.Body.IsValid() && Html.RawBody.Contains(TEXT("oops")));
 	TestTrue(TEXT("no connection: Kind Connection, retryable"), Outcomes[3]->Error.Kind == EVaRestErrorKind::Connection && Outcomes[3]->Error.bRetryable && Outcomes[3]->Error.HttpStatus == 0);
 	TestTrue(TEXT("a total timeout: Kind Timeout"), Outcomes[4]->Error.Kind == EVaRestErrorKind::Timeout && Outcomes[4]->Error.bRetryable);
-	TestTrue(TEXT("another transport failure: Connection, with the transport's detail"), Outcomes[5]->Error.Kind == EVaRestErrorKind::Connection
-		&& Outcomes[5]->Error.Message.Contains(TEXT("BodyRejected")));
+	// Review M14: a local failure is not a network one -- M4's retry must not re-send onto a full disk
+	TestTrue(TEXT("a body the engine refused: Kind Config, not retryable, with the detail"), Outcomes[5]->Error.Kind == EVaRestErrorKind::Config
+		&& !Outcomes[5]->Error.bRetryable && Outcomes[5]->Error.Message.Contains(TEXT("BodyRejected")));
+	TestTrue(TEXT("a file that cannot be written: Kind Decode, not retryable"), Outcomes[6]->Error.Kind == EVaRestErrorKind::Decode && !Outcomes[6]->Error.bRetryable);
+	TestTrue(TEXT("a completion the transport dropped: Connection, not retryable (review I-3)"), Outcomes[7]->Error.Kind == EVaRestErrorKind::Connection
+		&& !Outcomes[7]->Error.bRetryable && Outcomes[7]->Error.Message.Contains(TEXT("TransportDropped")));
 	return true;
 }
 
@@ -6955,7 +7786,14 @@ bool FVaRestHttpPipelineFromWorkerTest::RunTest(const FString& Parameters)
 		*bActiveOnWorker = Handle.IsActive();
 		*SentFrom = IsInGameThread() ? 2 : 1;
 	});
-	TestTrue(TEXT("the worker sent"), PumpUntil([SentFrom] { return SentFrom->load() != 0; }));
+	// Review I-6: drain no game-thread task until the worker is done, or the game thread could finish the whole request
+	// between its Send() and IsActive(). The worker never needs the game thread, so this cannot deadlock.
+	const double SpinUntil = FPlatformTime::Seconds() + 10.0;
+	while (SentFrom->load() == 0 && FPlatformTime::Seconds() < SpinUntil)
+	{
+		FPlatformProcess::Yield();
+	}
+	TestTrue(TEXT("the worker sent"), SentFrom->load() != 0);
 	TestEqual(TEXT("... from a worker thread"), SentFrom->load(), 1);
 	TestTrue(TEXT("sent from a worker, the request is active before it reaches the game thread"), bActiveOnWorker->load());
 	TestTrue(TEXT("completes"), Rig.Wait(Outcome));
@@ -7028,11 +7866,15 @@ bool FVaRestHttpPipelineDroppedTest::RunTest(const FString& Parameters)
 	TWeakPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> WeakState = Rig.Client.GetStateInternal();
 	Rig.Client = FVaRestClient(); // the last handle
 	TestTrue(TEXT("spec 3.2: the in-flight exchange keeps the client state alive"), WeakState.IsValid());
+	const int32 OffBefore = Counters().ClientStatesDestroyedOffGameThread.load();
+	// The completion comes from a worker (bCompleteOnWorker) and the JSON is decoded on another: both hand their
+	// references over to the game thread instead of dropping the last one where they run (review I-1)
 	Rig.Fake->Complete(0, Json(200, R"({"late":true})"));
 	TestTrue(TEXT("the request still completes"), Rig.Wait(Outcome));
 	TestTrue(TEXT("... and calls back"), Outcome->SuccessCalls == 1);
 	PumpUntil([&WeakState] { return !WeakState.IsValid(); }, 1.0);
 	TestFalse(TEXT("then the state dies"), WeakState.IsValid());
+	TestEqual(TEXT("... on the game thread (spec 1; review I-1)"), Counters().ClientStatesDestroyedOffGameThread.load() - OffBefore, 0);
 	return true;
 }
 
@@ -7070,34 +7912,66 @@ bool FVaRestHttpPipelineConfigRaceTest::RunTest(const FString& Parameters)
 {
 	using namespace VaRest::Http::Testing;
 	FTestRig Rig;
-	Rig.Client.WithHeader(TEXT("X-Gen"), TEXT("0"));
+	// One edit changes two headers together: a request that ever sees X-A != X-B saw half an edit
+	auto EditBoth = [&Rig](int32 Gen)
+	{
+		Rig.Client.GetStateInternal()->EditConfig([Gen](VaRest::Http::FClientConfig& Edited)
+		{
+			Edited.DefaultHeaders.Set(TEXT("X-A"), LexToString(Gen));
+			Edited.DefaultHeaders.Set(TEXT("X-B"), LexToString(Gen));
+		});
+	};
+	EditBoth(0);
 	FVaRestClient Client = Rig.Client;
 	TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> Finished = MakeShared<std::atomic<int32>, ESPMode::ThreadSafe>(0);
-	for (int32 t = 0; t < 8; ++t)
+	for (int32 t = 0; t < 4; ++t)
 	{
 		UE::Tasks::Launch(TEXT("VaRest.Test.Sender"), [Client, Finished]
 		{
-			for (int32 i = 0; i < 25; ++i)
+			for (int32 i = 0; i < 50; ++i)
 			{
-				// Builders read the configuration from a worker while the game thread replaces it
-				Client.Get(TEXT("/race")).Send();
+				// Spec 3.1: the snapshot is taken here, at Send() on a worker, while the game thread replaces it
+				Client.Get(TEXT("/worker")).Send();
 			}
 			++*Finished;
 		});
 	}
 	for (int32 Gen = 1; Gen <= 200; ++Gen)
 	{
-		Rig.Client.WithHeader(TEXT("X-Gen"), LexToString(Gen));
+		EditBoth(Gen);
+		Rig.Client.Get(FString::Printf(TEXT("/gt/%d"), Gen)).Send(); // sent right after edit Gen, on the game thread
+		if (Gen % 10 == 0)
+		{
+			PumpUntil([] { return false; }, 0.001); // let the workers' requests enter between edits
+		}
 	}
-	TestTrue(TEXT("the senders finish"), PumpUntil([Finished] { return Finished->load() == 8; }, 10.0));
-	TestTrue(TEXT("all 200 reach the transport"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 200 && Rig.Client.GetInFlightCount() == 0; }, 10.0));
-	bool bConsistent = true;
+	TestTrue(TEXT("the senders finish"), PumpUntil([Finished] { return Finished->load() == 4; }, 10.0));
+	TestTrue(TEXT("all 400 reach the transport"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 400 && Rig.Client.GetInFlightCount() == 0; }, 10.0));
+	bool bWhole = true;
+	bool bOrdered = true;
+	bool bAtSend = true;
+	int32 LastGameThreadGen = -1;
+	TSet<int32> Seen;
 	for (int32 i = 0; i < Rig.Fake->NumCalls(); ++i)
 	{
-		int32 Gen = -1;
-		bConsistent &= LexTryParseString(Gen, *Rig.Fake->GetCall(i).Request.Headers.Get(TEXT("X-Gen"))) && Gen >= 0 && Gen <= 200;
+		const FVaRestTransportRequest& Sent = Rig.Fake->GetCall(i).Request;
+		int32 A = -1;
+		int32 B = -2;
+		bWhole &= LexTryParseString(A, *Sent.Headers.Get(TEXT("X-A"))) && LexTryParseString(B, *Sent.Headers.Get(TEXT("X-B"))) && A == B;
+		Seen.Add(A);
+		int32 SentAt = -1;
+		if (Sent.Url.Contains(TEXT("/gt/")) && LexTryParseString(SentAt, *Sent.Url.RightChop(Sent.Url.Find(TEXT("/gt/")) + 4)))
+		{
+			bOrdered &= A >= LastGameThreadGen;
+			bAtSend &= A == SentAt;
+			LastGameThreadGen = A;
+		}
 	}
-	TestTrue(TEXT("every request carries one whole configuration"), bConsistent);
+	TestTrue(TEXT("every request carries one whole configuration (X-A == X-B)"), bWhole);
+	TestTrue(TEXT("spec 3.1: a request carries the configuration of its Send(), not of its later Enter"), bAtSend);
+	TestTrue(TEXT("... so generations never go back in transport order"), bOrdered);
+	TestTrue(TEXT("snapshots were taken at different generations"), Seen.Num() > 1);
+	// The data-race half (a worker reading while the game thread swaps) is a crash/TSAN smoke test: it fails only by crashing
 	return true;
 }
 
@@ -7118,6 +7992,67 @@ bool FVaRestHttpPipelineConfigErrorTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("a missing path parameter is Kind Config, named"), Missing->Error.Kind == EVaRestErrorKind::Config && Missing->Error.Message.Contains(TEXT("{id}")));
 	TestEqual(TEXT("the transport never saw them"), NoBase.Fake->NumCalls() + Rig.Fake->NumCalls(), 0);
 	TestFalse(TEXT("Config errors are not retryable"), Missing->Error.bRetryable);
+
+	// Review M12: only the path is a template; a brace in the query is the caller's text
+	auto Search = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/items/{id}?fields={a,b}")).Path(TEXT("id"), 7), Search).Send();
+	TestTrue(TEXT("completes"), Rig.Wait(Search));
+	TestTrue(TEXT("a brace in the query is no path parameter"), Search->SuccessCalls == 1
+		&& Rig.Fake->GetCall(0).Request.Url.Equals(TEXT("https://api.test/items/7?fields={a,b}"), ESearchCase::CaseSensitive));
+
+	// Decision 33 (review M22): a base URL may carry a query, not a fragment
+	AddExpectedErrorPlain(TEXT("has a fragment"), EAutomationExpectedErrorFlags::Contains, 1);
+	FTestRig Fragment(TEXTVIEW("https://api.test/v1#x"));
+	auto Refused = MakeOutcome<FVaRestJson>();
+	Observe(Fragment.Client.Get(TEXT("/a")), Refused).Send();
+	TestTrue(TEXT("completes"), Fragment.Wait(Refused));
+	TestTrue(TEXT("a base URL with a fragment: Kind Config, never sent"), Refused->Error.Kind == EVaRestErrorKind::Config && Fragment.Fake->NumCalls() == 0);
+	FTestRig Keyed(TEXTVIEW("https://api.test/v1?key=k"));
+	auto WithKey = MakeOutcome<FVaRestJson>();
+	Observe(Keyed.Client.Get(TEXT("/pets?limit=2")).Query(TEXT("page"), 3), WithKey).Send();
+	TestTrue(TEXT("completes"), Keyed.Wait(WithKey));
+	TestEqualSensitive(TEXT("the base query first, then the request's own pairs"), Keyed.Fake->GetCall(0).Request.Url,
+		FString(TEXT("https://api.test/v1/pets?key=k&limit=2&page=3")));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpPipelineDroppedCompletionTest, "VaRest.Http.Pipeline.DroppedCompletion",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpPipelineDroppedCompletionTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	// Review I-3: the engine destroys completions uncalled at HTTP module shutdown and with NullHttp
+	FTestRig Rig;
+	Rig.Fake->Enqueue(FVaRestFakeResponse::Manual());
+	auto Outcome = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/lost")), Outcome).Send();
+	TestTrue(TEXT("dispatched"), PumpUntil([&Rig] { return Rig.Fake->NumInFlight() == 1; }));
+	Rig.Fake->Drop(0);
+	TestTrue(TEXT("the request still finishes"), Rig.Wait(Outcome));
+	TestTrue(TEXT("... with one OnError and one OnComplete"), Outcome->ErrorCalls == 1 && Outcome->CompleteCalls == 1 && Outcome->SuccessCalls == 0);
+	TestTrue(TEXT("... as a dropped transport call"), Outcome->Error.Kind == EVaRestErrorKind::Connection && Outcome->Error.Message.Contains(TEXT("TransportDropped")));
+	TestEqual(TEXT("nothing left in flight"), Rig.Client.GetInFlightCount(), 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpPipelineOutcomeTwiceTest, "VaRest.Http.Pipeline.OutcomeTwice",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpPipelineOutcomeTwiceTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::PipelineTestPrivate;
+	// Review C-3: a stage that reports its outcome twice -- the second report is ignored, nothing crashes
+	FTestRig Rig;
+	FLog Log = MakeShared<TArray<FString>, ESPMode::ThreadSafe>();
+	Rig.Client.Use(MakeShared<FRecordingStage, ESPMode::ThreadSafe>(TEXT("twice"), Log, FRecordingStage::EMode::Twice), EVaRestStageSlot::Outer);
+	Rig.Fake->Enqueue(Json(200, R"({"ok":true})"));
+	auto Outcome = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/twice")), Outcome).Send();
+	TestTrue(TEXT("completes"), Rig.Wait(Outcome));
+	PumpUntil([] { return false; }, 0.05);
+	TestTrue(TEXT("one OnSuccess, one OnComplete"), Outcome->SuccessCalls == 1 && Outcome->CompleteCalls == 1 && Outcome->ErrorCalls == 0);
 	return true;
 }
 
@@ -7179,6 +8114,8 @@ namespace VaRest::Http
 		virtual FName GetResultType() const = 0;
 		/** A 2xx body needs decoding off the game thread: JSON, a struct, text */
 		virtual bool DecodesBody() const = 0;
+		/** The body is parsed as JSON (FVaRestJson, a struct): the transport applies MaxJsonBytes to it (reviews M-6, M13) */
+		virtual bool DecodesJson() const = 0;
 		/** A 2xx response into the typed value; a failure sets Finish.Error (Kind Decode). A background task when DecodesBody(), else the game thread. */
 		virtual void Decode(FFinish& Finish) = 0;
 		/** OnSuccess or OnError, then OnComplete. The game thread, or a background task with OnHttpThread(). */
@@ -7261,6 +8198,11 @@ namespace VaRest::Http
 		virtual bool DecodesBody() const override
 		{
 			return !std::is_same_v<T, TArray<uint8>> && !std::is_same_v<T, FVaRestResponse>;
+		}
+
+		virtual bool DecodesJson() const override
+		{
+			return DecodesBody() && !std::is_same_v<T, FString>;
 		}
 
 		virtual void Decode(FFinish& Finish) override
@@ -7355,6 +8297,7 @@ namespace VaRest::Http
 
 		virtual FName GetResultType() const override { return NAME_None; }
 		virtual bool DecodesBody() const override { return false; }
+		virtual bool DecodesJson() const override { return false; }
 		virtual void Decode(FFinish& Finish) override { ReleaseBody(Finish); }
 
 		virtual void Deliver(FFinish& Finish) override
@@ -7503,6 +8446,12 @@ class VARESTHTTP_API FVaRestExchange : public TSharedFromThis<FVaRestExchange, E
 {
 public:
 	FVaRestExchange() = default;
+	/**
+	 * Out of line (VaRestPipeline.cpp). Off the game thread it sends its State and Config there to die (review I-1
+	 * backstop): with them go the client state, custom stages, the transport and the clock, whose destructors may clear
+	 * game-thread timers.
+	 */
+	~FVaRestExchange();
 	FVaRestExchange(const FVaRestExchange&) = delete;
 	FVaRestExchange& operator=(const FVaRestExchange&) = delete;
 
@@ -7610,6 +8559,7 @@ public:
 #include "VaRestHttpTypes.h"
 #include "VaRestJsonConvert.h"
 #include "VaRestResultHandler.h"
+#include "VaRestUrl.h"
 #include "VaRestStage.h"
 
 #include <type_traits>
@@ -7722,6 +8672,13 @@ public:
 	TVaRestRequest Query(FStringView Name, ValueType Value) &&
 	{
 		return MoveTemp(*this).Query(Name, FStringView(LexToString(Value)));
+	}
+
+	/** An array value, written as Style says (OpenAPI N9, decision 34): Repeat (default) tag=a&tag=b; Csv, Ssv, Pipes one joined pair */
+	TVaRestRequest Query(FStringView Name, TConstArrayView<FString> Values, EVaRestQueryStyle Style = EVaRestQueryStyle::Repeat) &&
+	{
+		VaRest::Http::AddQueryValues(Spec->Query, Name, Values, Style);
+		return MoveTemp(*this);
 	}
 
 	/** Sets a header (replacing one of that name, whatever its case); it wins over the client's and over a body's Content-Type */
@@ -8006,12 +8963,27 @@ namespace VaRest::Http
 #include "VaRestClientState.h"
 
 #include "Misc/ScopeLock.h"
+#include "Tasks/Task.h"
+#include "VaRestHttpTesting.h"
 
 namespace VaRest::Http::ClientStatePrivate
 {
-	FCriticalSection LiveLock;
-	/** A client state can die on any thread (the last exchange may be released by a task), so this is locked */
-	TArray<TWeakPtr<FClientState, ESPMode::ThreadSafe>> Live;
+	/** Locked: a client state can die on any thread (a game's own worker may drop the last FVaRestClient) */
+	struct FLiveRegistry
+	{
+		FCriticalSection Lock;
+		TArray<TWeakPtr<FClientState, ESPMode::ThreadSafe>> States;
+	};
+
+	/**
+	 * Leaked on purpose (review I-4): a global FVaRestClient in a game module is destroyed during static destruction,
+	 * possibly after this file's statics; its ~FClientState must not lock a destroyed mutex or edit a freed array.
+	 */
+	FLiveRegistry& Live()
+	{
+		static FLiveRegistry* Registry = new FLiveRegistry();
+		return *Registry;
+	}
 }
 
 VaRest::Http::FClientState::FClientState(uint64 InClientId, FClientConfig&& InConfig)
@@ -8022,8 +8994,17 @@ VaRest::Http::FClientState::FClientState(uint64 InClientId, FClientConfig&& InCo
 
 VaRest::Http::FClientState::~FClientState()
 {
-	FScopeLock Lock(&ClientStatePrivate::LiveLock);
-	ClientStatePrivate::Live.RemoveAll([this](const TWeakPtr<FClientState, ESPMode::ThreadSafe>& Weak) { return !Weak.IsValid() || Weak.HasSameObject(this); });
+	if (!IsInGameThread())
+	{
+#if !UE_BUILD_SHIPPING
+		++Testing::Counters().ClientStatesDestroyedOffGameThread;
+#endif
+		// Review I-1 backstop: the configuration (custom stages, transport, clock) dies on the game thread
+		UE::Tasks::Launch(TEXT("VaRest.ReleaseConfig"), [Doomed = Config] {}, UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
+	}
+	ClientStatePrivate::FLiveRegistry& Registry = ClientStatePrivate::Live();
+	FScopeLock Lock(&Registry.Lock);
+	Registry.States.RemoveAll([this](const TWeakPtr<FClientState, ESPMode::ThreadSafe>& Weak) { return !Weak.IsValid() || Weak.HasSameObject(this); });
 }
 
 TSharedRef<VaRest::Http::FClientState, ESPMode::ThreadSafe> VaRest::Http::FClientState::Create(FClientConfig&& InConfig)
@@ -8031,8 +9012,9 @@ TSharedRef<VaRest::Http::FClientState, ESPMode::ThreadSafe> VaRest::Http::FClien
 	check(IsInGameThread());
 	TSharedRef<FClientState, ESPMode::ThreadSafe> Created = MakeShared<FClientState, ESPMode::ThreadSafe>(FVaRestTrace::NewClientId(), MoveTemp(InConfig));
 	Created->EditConfig([](FClientConfig&) {});
-	FScopeLock Lock(&ClientStatePrivate::LiveLock);
-	ClientStatePrivate::Live.Add(Created);
+	ClientStatePrivate::FLiveRegistry& Registry = ClientStatePrivate::Live();
+	FScopeLock Lock(&Registry.Lock);
+	Registry.States.Add(Created);
 	return Created;
 }
 
@@ -8094,8 +9076,9 @@ void VaRest::Http::FClientState::ForEachLive(TFunctionRef<void(FClientState&)> V
 	check(IsInGameThread());
 	TArray<TSharedRef<FClientState, ESPMode::ThreadSafe>> Alive;
 	{
-		FScopeLock Lock(&ClientStatePrivate::LiveLock);
-		for (const TWeakPtr<FClientState, ESPMode::ThreadSafe>& Weak : ClientStatePrivate::Live)
+		ClientStatePrivate::FLiveRegistry& Registry = ClientStatePrivate::Live();
+		FScopeLock Lock(&Registry.Lock);
+		for (const TWeakPtr<FClientState, ESPMode::ThreadSafe>& Weak : Registry.States)
 		{
 			if (TSharedPtr<FClientState, ESPMode::ThreadSafe> Pinned = Weak.Pin())
 			{
@@ -8107,6 +9090,10 @@ void VaRest::Http::FClientState::ForEachLive(TFunctionRef<void(FClientState&)> V
 	{
 		Visit(*Client);
 	}
+	// Review M-9: a pin taken here can be a state's last reference. Released here, inside FVaRestTrace::AddSink's
+	// snapshot, the state's Client{Destroyed} would go out before the new sink is added, and the sink would keep a ghost
+	// client. Released from a later game-thread task, it reaches the sink after OnAttached.
+	UE::Tasks::Launch(TEXT("VaRest.ReleaseSnapshotPins"), [Kept = MoveTemp(Alive)] {}, UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
 }
 ```
 
@@ -8306,7 +9293,13 @@ void VaRest::Http::ProcessErrorBody(FFinish& Finish)
 
 namespace VaRest::Http::PipelinePrivate
 {
-	/** A game-thread task: UE::Tasks' GameThreadNormalPri is ENamedThreads::GameThread (TaskPrivate.cpp:614-615) */
+	/**
+	 * A game-thread task: UE::Tasks' GameThreadNormalPri is ENamedThreads::GameThread (TaskPrivate.cpp:614-615). Every
+	 * delivery goes through here. The game thread runs its named queue at frame boundaries and also inside tick-group and
+	 * task waits, so a callback can run between tick groups, mid-frame (decision 32; v1 delivered from the core ticker).
+	 * Spec 1 says "on the game thread", which this is; M5's Blueprint async actions decide whether to defer to a frame
+	 * boundary, and if so it is this one function that changes.
+	 */
 	template <typename FuncType>
 	void OnGameThread(const TCHAR* DebugName, FuncType&& Func)
 	{
@@ -8328,8 +9321,22 @@ namespace VaRest::Http::PipelinePrivate
 		FVaRestExchange& Exchange;
 	};
 
-	EVaRestErrorKind KindFor(EVaRestTransportFailure Failure)
+	EVaRestErrorKind KindFor(EVaRestTransportFailure Failure, FName Detail)
 	{
+		// Review M14: a local failure is not a network one, and M4's retry reads bRetryable from the kind
+		static const FName BodyRejected(TEXT("BodyRejected"));
+		static const FName InvalidHeader(TEXT("InvalidHeader"));
+		static const FName FileWriteFailed(TEXT("ResponseFileWriteFailed"));
+		static const FName BodyTooBig(TEXT("ResponseBodyRejected"));
+		static const FName TooLarge(TEXT("ResponseTooLarge"));
+		if (Detail == BodyRejected || Detail == InvalidHeader)
+		{
+			return EVaRestErrorKind::Config;
+		}
+		if (Detail == FileWriteFailed || Detail == BodyTooBig || Detail == TooLarge)
+		{
+			return EVaRestErrorKind::Decode;
+		}
 		switch (Failure)
 		{
 		case EVaRestTransportFailure::None: return EVaRestErrorKind::None;
@@ -8339,9 +9346,78 @@ namespace VaRest::Http::PipelinePrivate
 		}
 	}
 
+	/**
+	 * Review I3: decision 11 holds for the final headers too. The builder checks the request's headers, but a custom
+	 * PerAttempt stage edits AttemptHeaders after every builder check. A body also needs a Content-Type: curl checks one
+	 * for a streamed POST or DELETE (CurlHttp.cpp:945, :983). Returns the first bad name, or null.
+	 */
+	const FVaRestHeaders::FPair* FindBadHeader(const FVaRestExchange& Ex)
+	{
+		for (const FVaRestHeaders::FPair& Pair : Ex.AttemptHeaders)
+		{
+			if (!IsValidHeaderName(Pair.Key) || !IsValidHeaderValue(Pair.Value))
+			{
+				return &Pair;
+			}
+			if (!Ex.Body.IsEmpty() && Pair.Key.Equals(TEXT("Content-Type"), ESearchCase::IgnoreCase) && Pair.Value.TrimStartAndEnd().IsEmpty())
+			{
+				return &Pair;
+			}
+		}
+		return nullptr;
+	}
+
+	/**
+	 * Review I-3: the transport's completion, wrapped. It carries the exchange as a TSharedPtr that is moved, never
+	 * copied, into the game-thread continuation (review I-1: the last reference is dropped on the game thread). If the
+	 * transport destroys it uncalled -- the engine does at HTTP module shutdown and with NullHttp -- its destructor
+	 * reports TransportDropped through the same path, so the request still finishes once. A moved-from guard holds
+	 * nothing and reports nothing.
+	 */
+	class FCompletionGuard
+	{
+	public:
+		FCompletionGuard(const FVaRestExchangeRef& InExchange, FVaRestOutcomeCallback&& InOutcome)
+			: Held(InExchange)
+			, Outcome(MoveTemp(InOutcome))
+		{
+		}
+		FCompletionGuard(FCompletionGuard&&) = default;
+		FCompletionGuard& operator=(FCompletionGuard&&) = delete;
+
+		~FCompletionGuard()
+		{
+			if (Held.IsValid())
+			{
+				FVaRestTransportResult Dropped;
+				Dropped.Failure = EVaRestTransportFailure::Other;
+				Dropped.FailureDetail = TEXT("TransportDropped");
+				Deliver(MoveTemp(Dropped));
+			}
+		}
+
+		/** Any thread -- the HTTP thread for FHttpModule. It only moves the result to the game thread (spec 1). */
+		void Deliver(FVaRestTransportResult&& Result)
+		{
+			if (!Held.IsValid())
+			{
+				return;
+			}
+			OnGameThread(TEXT("VaRest.AttemptDone"), [Target = MoveTemp(Held), Callback = MoveTemp(Outcome), Moved = MoveTemp(Result)]() mutable
+			{
+				Target->State->OnAttemptDone(Target.ToSharedRef(), MoveTemp(Moved), MoveTemp(Callback));
+			});
+		}
+
+	private:
+		TSharedPtr<FVaRestExchange, ESPMode::ThreadSafe> Held;
+		FVaRestOutcomeCallback Outcome;
+	};
+
 	/** Background thread (or the game thread for nothing but the tests' restore-the-bug): spec 1's "parsing, decoding ... run on UE::Tasks" */
 	void RunDecode(IResultHandler& Handler, FFinish& Finish)
 	{
+#if !UE_BUILD_SHIPPING
 		if (IsInGameThread())
 		{
 			++Testing::Counters().DecodesOnGameThread;
@@ -8350,6 +9426,7 @@ namespace VaRest::Http::PipelinePrivate
 		{
 			++Testing::Counters().DecodesOffGameThread;
 		}
+#endif
 		if (Finish.bTimeDecode)
 		{
 			Finish.DecodeStartAt = Finish.Clock->Now();
@@ -8395,6 +9472,17 @@ namespace VaRest::Http::PipelinePrivate
 		{
 			FVaRestExchange& Ex = *Exchange;
 			const FClientConfig& Cfg = *Ex.Config;
+			if (const FVaRestHeaders::FPair* Bad = FindBadHeader(Ex))
+			{
+				// Review I3: a header a stage set (or an empty Content-Type with a body) never reaches the transport
+				UE_LOG(LogVaRestHttp, Error, TEXT("#%llu VaRest: header \"%s\" is not a token, holds CR, LF or NUL, or is an empty Content-Type with a body; the request fails with Kind=Config"),
+					Ex.RequestId, *Bad->Key);
+				FVaRestAttemptOutcome Refused;
+				Refused.Failure = EVaRestTransportFailure::Other;
+				Refused.FailureDetail = TEXT("InvalidHeader");
+				OnOutcome(MoveTemp(Refused));
+				return;
+			}
 			FVaRestTransportRequest Request;
 			Request.RequestId = Ex.RequestId;
 			Request.Attempt = Ex.Attempt;
@@ -8421,16 +9509,14 @@ namespace VaRest::Http::PipelinePrivate
 			Request.ActivityTimeout = Ex.ActivityTimeout;
 			Request.Priority = Ex.Priority;
 			Request.ResponseFile = Ex.TempFile;
+			// Reviews M-6, M13: the transport stops a JSON body past its cap instead of receiving all of it first
+			Request.MaxBodyBytes = Ex.Handler.IsValid() && Ex.Handler->DecodesJson() ? Ex.MaxJsonBytes : 0;
 			Request.Clock = Cfg.Clock;
 			Request.Probe->UploadTotal = Ex.Body.ContentLength;
 			Ex.Probe = Request.Probe;
-			Ex.TransportCall = Cfg.Transport->Start(MoveTemp(Request), [Exchange, Outcome = MoveTemp(OnOutcome)](FVaRestTransportResult&& Result) mutable
+			Ex.TransportCall = Cfg.Transport->Start(MoveTemp(Request), [Guard = FCompletionGuard(Exchange, MoveTemp(OnOutcome))](FVaRestTransportResult&& Result) mutable
 			{
-				// Any thread -- the HTTP thread for FHttpModule. It only moves the result to the game thread (spec 1).
-				OnGameThread(TEXT("VaRest.AttemptDone"), [Exchange, Callback = MoveTemp(Outcome), Moved = MoveTemp(Result)]() mutable
-				{
-					Exchange->State->OnAttemptDone(Exchange, MoveTemp(Moved), MoveTemp(Callback));
-				});
+				Guard.Deliver(MoveTemp(Result));
 			});
 		}
 	};
@@ -8442,6 +9528,15 @@ FVaRestAttemptOutcome FVaRestAttemptOutcome::Canceled()
 	Out.Failure = EVaRestTransportFailure::Canceled;
 	Out.FailureDetail = TEXT("Canceled");
 	return Out;
+}
+
+FVaRestExchange::~FVaRestExchange()
+{
+	if (!IsInGameThread() && (State.IsValid() || Config.IsValid()))
+	{
+		// Review I-1 backstop: a pin taken on another thread (IsActive, Cancel) can be the last reference
+		VaRest::Http::PipelinePrivate::OnGameThread(TEXT("VaRest.ReleaseExchange"), [DoomedState = MoveTemp(State), DoomedConfig = MoveTemp(Config)] {});
+	}
 }
 
 void FVaRestStageNext::Proceed(const FVaRestExchangeRef& Exchange, FVaRestOutcomeCallback&& OnOutcome) const
@@ -8483,17 +9578,25 @@ VaRest::Http::FFinish VaRest::Http::FClientState::MakeFinish(const FVaRestExchan
 bool VaRest::Http::FClientState::Resolve(FVaRestExchange& Exchange, FString& OutError) const
 {
 	const FClientConfig& Cfg = *Exchange.Config;
+	if (Cfg.BaseUrl.Contains(TEXT("#")))
+	{
+		// Decision 33 (review M22): a base URL may carry a query (kept, before the request's own pairs), not a fragment
+		OutError = FString::Printf(TEXT("the base URL \"%s\" has a fragment; a base URL may carry a query but not a fragment"), *Cfg.Redactor->RedactUrl(Cfg.BaseUrl));
+		return false;
+	}
 	int32 QueryAt = INDEX_NONE;
-	Exchange.PathTemplate = Exchange.RawPath.FindChar(TEXT('?'), QueryAt) ? Exchange.RawPath.Left(QueryAt) : Exchange.RawPath;
+	const bool bHasQuery = Exchange.RawPath.FindChar(TEXT('?'), QueryAt);
+	Exchange.PathTemplate = bHasQuery ? Exchange.RawPath.Left(QueryAt) : Exchange.RawPath;
 
-	// The template is expanded before the join, so a brace in the base URL is never touched
-	TValueOrError<FString, FString> Expanded = ExpandPathTemplate(Exchange.RawPath, Exchange.PathParams);
+	// The template is expanded before the join, so a brace in the base URL is never touched. Only the path is a template
+	// (review M12): a brace in the query is the caller's text and goes out as written.
+	TValueOrError<FString, FString> Expanded = ExpandPathTemplate(Exchange.PathTemplate, Exchange.PathParams);
 	if (Expanded.HasError())
 	{
 		OutError = Expanded.StealError();
 		return false;
 	}
-	FString Resolved = JoinUrl(Cfg.BaseUrl, Expanded.GetValue());
+	FString Resolved = JoinUrl(Cfg.BaseUrl, bHasQuery ? Expanded.GetValue() + Exchange.RawPath.Mid(QueryAt) : Expanded.GetValue());
 	if (!IsAbsoluteHttpUrl(Resolved))
 	{
 		OutError = FString::Printf(TEXT("\"%s\" is not an absolute http(s) URL (base URL \"%s\")"), *Cfg.Redactor->RedactUrl(Resolved), *Cfg.Redactor->RedactUrl(Cfg.BaseUrl));
@@ -8528,8 +9631,12 @@ void VaRest::Http::FClientState::Enter(const FVaRestExchangeRef& Exchange)
 	check(IsInGameThread());
 	FVaRestExchange& Ex = *Exchange;
 	FApiScope Scope(Ex);
-	// Spec 3.1: "A request snapshots the configuration at Send()" -- here, on the game thread, where configuration changes
-	Ex.Config = GetConfig();
+	// Spec 3.1: "A request snapshots the configuration at Send()" -- SendRequest took it (decision 27); an exchange made
+	// any other way gets one here
+	if (!Ex.Config.IsValid())
+	{
+		Ex.Config = GetConfig();
+	}
 	Ex.StartedAt = Ex.Config->Clock->Now();
 	Ex.Phase = EVaRestExchangePhase::InChain;
 	InFlight.Add(Ex.RequestId, Exchange);
@@ -8573,8 +9680,9 @@ void VaRest::Http::FClientState::OnChainDone(const FVaRestExchangeRef& Exchange,
 	using namespace PipelinePrivate;
 	check(IsInGameThread());
 	FVaRestExchange& Ex = *Exchange;
-	if (Ex.bFinished)
+	if (Ex.bFinished || Ex.Phase != EVaRestExchangePhase::InChain)
 	{
+		// Finished, or a second outcome while the first is being decoded (a stage that reported twice): ignored (review C-3)
 		return;
 	}
 	FFinish Finish = MakeFinish(Ex);
@@ -8587,15 +9695,34 @@ void VaRest::Http::FClientState::OnChainDone(const FVaRestExchangeRef& Exchange,
 	Finish.Body = MoveTemp(Outcome.Body);
 	Finish.bBodyInFile = Outcome.bBodyInFile;
 
-	if (Outcome.IsTransportFailure())
+	static const FName TooLarge(TEXT("ResponseTooLarge"));
+	static const FName Dropped(TEXT("TransportDropped"));
+	if (Outcome.IsTransportFailure() && Outcome.FailureDetail == TooLarge && Outcome.Status > 0 && !IsSuccessStatus(Outcome.Status))
 	{
-		Finish.Error.Kind = KindFor(Outcome.Failure);
+		// Reviews M-6, M13: an error response whose body passed the JSON cap is still the HTTP error it was; the body is gone
+		Finish.Error.Kind = EVaRestErrorKind::Http;
+		Finish.Error.HttpStatus = Outcome.Status;
+		Finish.Error.Message = FString::Printf(TEXT("%s (its body is over the MaxJsonBytes limit of %lld and was not kept)"),
+			*FVaRestError::DefaultMessage(EVaRestErrorKind::Http, Outcome.Status), Ex.MaxJsonBytes);
+		Finish.Error.bRetryable = FVaRestError::IsRetryableStatus(Outcome.Status);
+	}
+	else if (Outcome.IsTransportFailure() && Outcome.FailureDetail == TooLarge)
+	{
+		// Decision 20: the transport stopped the body at the cap -- bounded memory on untrusted input
+		Finish.Error.Kind = EVaRestErrorKind::Decode;
+		Finish.Error.Message = FString::Printf(TEXT("the JSON response is over the MaxJsonBytes limit of %lld; the transfer stopped there"), Ex.MaxJsonBytes);
+	}
+	else if (Outcome.IsTransportFailure())
+	{
+		Finish.Error.Kind = KindFor(Outcome.Failure, Outcome.FailureDetail);
 		Finish.Error.Message = FVaRestError::DefaultMessage(Finish.Error.Kind, 0);
 		if (!Outcome.FailureDetail.IsNone())
 		{
 			Finish.Error.Message += FString::Printf(TEXT(" (%s)"), *Outcome.FailureDetail.ToString());
 		}
-		Finish.Error.bRetryable = Finish.Error.Kind == EVaRestErrorKind::Connection || Finish.Error.Kind == EVaRestErrorKind::Timeout;
+		// A dropped completion (engine shutdown, NullHttp) would only be dropped again
+		Finish.Error.bRetryable = (Finish.Error.Kind == EVaRestErrorKind::Connection || Finish.Error.Kind == EVaRestErrorKind::Timeout)
+			&& Outcome.FailureDetail != Dropped;
 	}
 	else if (!IsSuccessStatus(Outcome.Status))
 	{
@@ -8624,14 +9751,16 @@ void VaRest::Http::FClientState::OnChainDone(const FVaRestExchangeRef& Exchange,
 	Ex.Phase = EVaRestExchangePhase::Decoding;
 	// The handler goes with the task and comes back with the result: nothing else touches it meanwhile
 	TUniquePtr<IResultHandler> Handler = MoveTemp(Ex.Handler);
-	UE::Tasks::Launch(TEXT("VaRest.Decode"), [Exchange, Decoder = MoveTemp(Handler), Pending = MoveTemp(Finish)]() mutable
+	// The exchange travels as a TSharedPtr moved into the continuation, so the worker never drops the last reference
+	// (review I-1; TSharedRef's move constructor copies, SharedPointer.h:354-361)
+	UE::Tasks::Launch(TEXT("VaRest.Decode"), [Held = TSharedPtr<FVaRestExchange, ESPMode::ThreadSafe>(Exchange), Decoder = MoveTemp(Handler), Pending = MoveTemp(Finish)]() mutable
 	{
 		// Spec 1: "Parsing, decoding, cache disk IO ... run on UE::Tasks background tasks"
 		RunDecode(*Decoder, Pending);
-		OnGameThread(TEXT("VaRest.Deliver"), [Exchange, Delivered = MoveTemp(Decoder), Done = MoveTemp(Pending)]() mutable
+		OnGameThread(TEXT("VaRest.Deliver"), [Target = MoveTemp(Held), Delivered = MoveTemp(Decoder), Done = MoveTemp(Pending)]() mutable
 		{
-			Exchange->Handler = MoveTemp(Delivered);
-			Exchange->State->Complete(Exchange, MoveTemp(Done));
+			Target->Handler = MoveTemp(Delivered);
+			Target->State->Complete(Target.ToSharedRef(), MoveTemp(Done));
 		});
 	});
 }
@@ -8643,6 +9772,12 @@ void VaRest::Http::FClientState::Complete(const FVaRestExchangeRef& Exchange, FF
 	FVaRestExchange& Ex = *Exchange;
 	if (Ex.bFinished)
 	{
+		return;
+	}
+	if (Ex.Phase == EVaRestExchangePhase::Decoding && !Ex.Handler.IsValid())
+	{
+		// Review C-3: a decode task holds the handler. It completes the exchange when it returns -- as Canceled when the
+		// flag is set -- so finishing here would leave nothing to deliver to and lose every callback.
 		return;
 	}
 	if (Ex.ApiDepth > 0)
@@ -8693,7 +9828,21 @@ void VaRest::Http::FClientState::Complete(const FVaRestExchangeRef& Exchange, FF
 #include "VaRestClientState.h"
 #include "VaRestHttpLog.h"
 #include "VaRestHttpSettings.h"
+#include "VaRestRedactor.h"
 #include "VaRestTrace.h"
+
+namespace VaRest::Http::ClientPrivate
+{
+	/** Decision 33 (review M22): said once, where the base URL is set; each request then fails with Kind=Config */
+	void WarnIfFragment(const FString& BaseUrl)
+	{
+		if (BaseUrl.Contains(TEXT("#")))
+		{
+			UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: the base URL \"%s\" has a fragment; a base URL may carry a query but not a fragment, so this client's requests fail with Kind=Config"),
+				*FVaRestRedactor().RedactUrl(BaseUrl));
+		}
+	}
+}
 
 VaRest::Http::FRequestSpec::FRequestSpec(TSharedPtr<FClientState, ESPMode::ThreadSafe> InState, FStringView InVerb, FStringView InPath)
 	: State(MoveTemp(InState))
@@ -8732,6 +9881,9 @@ FVaRestRequestHandle VaRest::Http::SendRequest(TUniquePtr<FRequestSpec>&& Spec, 
 	Ex.RequestId = FVaRestTrace::NewRequestId(); // IN-10: assigned at creation, whatever the trace mask
 	Ex.ClientId = Spec->State->GetClientId();
 	Ex.State = Spec->State;
+	// Spec 3.1, verbatim: "A request snapshots the configuration at Send()" -- here, on the sending thread, under the
+	// state's read lock (decision 27). A struct body was encoded in Body() with the naming of that moment.
+	Ex.Config = Spec->State->GetConfig();
 	Ex.Verb = MoveTemp(Spec->Verb);
 	Ex.RawPath = MoveTemp(Spec->Path);
 	Ex.PathParams = MoveTemp(Spec->PathParams);
@@ -8797,6 +9949,7 @@ FVaRestClient FVaRestClient::Make(FStringView BaseUrl)
 	Initial.RedactKeys = Settings->RedactKeys;
 	Initial.Transport = VaRest::Http::GetDefaultTransport();
 	Initial.Clock = FVaRestRealClock::Get();
+	VaRest::Http::ClientPrivate::WarnIfFragment(Initial.BaseUrl);
 	return FVaRestClient(VaRest::Http::FClientState::Create(MoveTemp(Initial)));
 }
 
@@ -8829,6 +9982,7 @@ FVaRestClient& FVaRestClient::WithBaseUrl(FStringView BaseUrl)
 {
 	if (State.IsValid())
 	{
+		VaRest::Http::ClientPrivate::WarnIfFragment(FString(BaseUrl.TrimStartAndEnd()));
 		State->EditConfig([BaseUrl](VaRest::Http::FClientConfig& Edited) { Edited.BaseUrl = FString(BaseUrl.TrimStartAndEnd()); });
 	}
 	return *this;
@@ -8889,7 +10043,7 @@ FVaRestClient& FVaRestClient::Use(FVaRestStageRef Stage, EVaRestStageSlot Slot)
 }
 ```
 
-- [ ] **Step 10: The outcome recorder and the test rig** — append to `Source/VaRestHttp/Public/VaRestHttpTesting.h` (add `#include "VaRestClient.h"` and `#include "VaRestFakeTransport.h"` to its includes):
+- [ ] **Step 10: The outcome recorder and the test rig** — in `Source/VaRestHttp/Public/VaRestHttpTesting.h`, insert at Task 6's marker comment, inside the `#if WITH_DEV_AUTOMATION_TESTS` block (add `#include "VaRestClient.h"` and `#include "VaRestFakeTransport.h"` to its includes):
 
 ```cpp
 namespace VaRest::Http::Testing
@@ -8987,7 +10141,7 @@ namespace VaRest::Http::Testing
 }
 ```
 
-Append to `Source/VaRestHttp/Private/VaRestHttpTesting.cpp`:
+In `Source/VaRestHttp/Private/VaRestHttpTesting.cpp`, before its closing `#endif // WITH_DEV_AUTOMATION_TESTS`:
 
 ```cpp
 VaRest::Http::Testing::FTestRig::FTestRig(FStringView BaseUrl)
@@ -9002,15 +10156,19 @@ VaRest::Http::Testing::FTestRig::FTestRig(FStringView BaseUrl)
 - [ ] **Step 11: Run and pass**
 
 Run: `Tools/run_tests.sh VaRest.Http`
-Expected: `0 failed`, including the eleven `VaRest.Http.Pipeline.*` tests. Then `Tools/run_tests.sh --no-build VaRest` (everything stays green).
+Expected: `0 failed`, including the thirteen `VaRest.Http.Pipeline.*` tests. Then `Tools/run_tests.sh --no-build VaRest` (everything stays green).
 
 - [ ] **Step 12: Restore-the-bug (the game-thread hop)**
 
-In `FTransportStage::Process`, temporarily call `Exchange->State->OnAttemptDone(Exchange, MoveTemp(Result), MoveTemp(Outcome));` directly in the transport callback instead of posting the game-thread task. Run `Tools/run_tests.sh VaRest.Http.Pipeline`; expected FAIL: `VaRest.Http.Pipeline.ManyConcurrent` and `.GetJson` (callbacks off the game thread, or a `check(IsInGameThread())` assertion in `OnAttemptDone` stops the run — either is the failure). Restore; PASS. Report both runs.
+In `FCompletionGuard::Deliver`, temporarily call `Held->State->OnAttemptDone(Held.ToSharedRef(), MoveTemp(Result), MoveTemp(Outcome));` directly instead of posting the game-thread task. Run `Tools/run_tests.sh VaRest.Http.Pipeline`; expected FAIL: `VaRest.Http.Pipeline.ManyConcurrent` and `.GetJson` (callbacks off the game thread, or a `check(IsInGameThread())` assertion in `OnAttemptDone` stops the run — either is the failure). Restore; PASS. Report both runs.
 
 - [ ] **Step 13: Restore-the-bug (callbacks never inside Send)**
 
 In `FClientState::Complete`, temporarily delete the `if (Ex.ApiDepth > 0) { ... }` block. Run `Tools/run_tests.sh VaRest.Http.Pipeline`; expected FAIL in `VaRest.Http.Pipeline.NeverInsideSend` ("decision 3: no callback runs inside Send()"). Restore; PASS.
+
+- [ ] **Step 13b: Restore-the-bug (one whole configuration per request, reviews I-7, I6)**
+
+In the test `VaRest.Http.Pipeline.ConfigEditedWhileSending`, temporarily split `EditBoth` into two edits (`Rig.Client.WithHeader(TEXT("X-A"), LexToString(Gen)); Rig.Client.WithHeader(TEXT("X-B"), LexToString(Gen));`). Run `Tools/run_tests.sh VaRest.Http.Pipeline.ConfigEditedWhileSending`; expected FAIL ("every request carries one whole configuration (X-A == X-B)"): with four workers sending 200 requests against 200 edit pairs, a worker's snapshot lands between the two edits. Restore; PASS. Report both runs (if the broken run passes, run it again and report that too: the window is a few microseconds per edit).
 
 - [ ] **Step 14: Commit**
 
@@ -9069,6 +10227,18 @@ namespace VaRest::Http::BuilderTestPrivate
 		VaRest::Http::Testing::Observe(MoveTemp(Request), Outcome).Send();
 		return Rig.Wait(Outcome);
 	}
+
+	/** A PerAttempt stage that signs with a value holding CRLF (review I3) */
+	class FBadSigner final : public IVaRestStage
+	{
+	public:
+		virtual FName GetStageName() const override { return TEXT("BadSigner"); }
+		virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) override
+		{
+			Exchange->GetAttemptHeaders().Set(TEXT("X-Signed"), TEXT("a\r\nX-Evil: 1"));
+			Next.Proceed(Exchange, MoveTemp(OnOutcome));
+		}
+	};
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpBuilderBodiesTest, "VaRest.Http.Builder.Bodies",
@@ -9118,6 +10288,11 @@ bool FVaRestHttpBuilderBodiesTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("multipart with a file streams segments"), Call(9).BodySegments.Num() == 3 && Call(9).Body.Num() == 0);
 	TestEqual(TEXT("upload sizes reach the probe"), Call(8).Probe->UploadTotal.load(), static_cast<int64>(5000));
 	IFileManager::Get().Delete(*File);
+
+	// OpenAPI N9 array styles through the builder (review I7)
+	const TArray<FString> Tags = { TEXT("a"), TEXT("b") };
+	TestTrue(TEXT("array query"), Run(Rig, Rig.Client.Get(TEXT("/q")).Query(TEXT("tag"), Tags).Query(TEXT("csv"), Tags, EVaRestQueryStyle::Csv)));
+	TestEqualSensitive(TEXT("Repeat by default, then Csv"), Call(10).Url, FString(TEXT("https://api.test/q?tag=a&tag=b&csv=a%2Cb")));
 	return true;
 }
 
@@ -9142,6 +10317,23 @@ bool FVaRestHttpBuilderMisuseTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("a missing upload file is Kind Config"), MissingFile->Error.Kind == EVaRestErrorKind::Config && MissingFile->Error.Message.Contains(TEXT("missing.bin")));
 	TestTrue(TEXT("Naming() after a struct body is Kind Config"), LateNaming->Error.Kind == EVaRestErrorKind::Config && LateNaming->Error.Message.Contains(TEXT("Naming")));
 	TestEqual(TEXT("none reached the transport"), Rig.Fake->NumCalls(), 0);
+
+	// Review I3: the multipart boundary goes into Content-Type
+	auto BadBoundary = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Post(TEXT("/h")).Body(FVaRestMultipart(TEXT("b\r\nX-Evil: 1")).AddField(TEXT("a"), TEXT("1"))), BadBoundary).Send();
+	TestTrue(TEXT("completes"), Rig.Wait(BadBoundary));
+	TestTrue(TEXT("a boundary with CRLF is Kind Config"), BadBoundary->Error.Kind == EVaRestErrorKind::Config && BadBoundary->Error.Message.Contains(TEXT("boundary")));
+	TestEqual(TEXT("... and never reached the transport"), Rig.Fake->NumCalls(), 0);
+
+	// Review I3: a PerAttempt stage edits the headers after every builder check; the transport stage checks them again
+	AddExpectedErrorPlain(TEXT("holds CR, LF or NUL"), EAutomationExpectedErrorFlags::Contains, 1);
+	FTestRig Signed;
+	Signed.Client.Use(MakeShared<VaRest::Http::BuilderTestPrivate::FBadSigner, ESPMode::ThreadSafe>(), EVaRestStageSlot::PerAttempt);
+	auto Stage = MakeOutcome<FVaRestJson>();
+	Observe(Signed.Client.Get(TEXT("/signed")), Stage).Send();
+	TestTrue(TEXT("completes"), Signed.Wait(Stage));
+	TestTrue(TEXT("a stage's CRLF header value is Kind Config, not retryable"), Stage->Error.Kind == EVaRestErrorKind::Config && !Stage->Error.bRetryable);
+	TestEqual(TEXT("... and the transport never saw it"), Signed.Fake->NumCalls(), 0);
 
 	AddExpectedErrorPlain(TEXT("invalid default header"), EAutomationExpectedErrorFlags::Contains, 1);
 	Rig.Client.WithHeader(TEXT("X-Bad"), TEXT("a\nb"));
@@ -9217,7 +10409,7 @@ bool FVaRestHttpBuilderUnsentTest::RunTest(const FString& Parameters)
 Run: `Tools/run_tests.sh VaRest.Http.Builder`
 Expected: the build fails: no `TVaRestRequest::Body(const FIntPoint&)`, `BodyFile`, `Idempotent`, `Naming`.
 
-- [ ] **Step 3: The builder** — in `Source/VaRestHttp/Public/VaRestClient.h`, add `#include "VaRestUrl.h"` to the includes, replace `TVaRestRequest::Header` with:
+- [ ] **Step 3: The builder** — in `Source/VaRestHttp/Public/VaRestClient.h` (it includes `VaRestUrl.h` since Task 8), replace `TVaRestRequest::Header` with:
 
 ```cpp
 	/**
@@ -9434,7 +10626,7 @@ The rename is atomic where the platform's is: `FUnixPlatformFile::MoveFile` is `
 
 **Interfaces:**
 - Consumes: Task 8's pipeline, `FFinish`, `DecodeJson`, `DecodeStruct`, `ProcessErrorBody`, `RawBodyCap`; `FVaRestFakeTransport::FCall::BodyData/BodyNum`, `Testing::Counters()` (Task 6).
-- Produces: `TVaRestRequest<T>::KeepBody() &&`, `SaveTo(FStringView FilePath) && requires (std::is_void_v<T> || std::is_same_v<T, FVaRestResponse>)`, `OnHttpThread() &&`, `MaxJsonBytes(int64) &&`; `FVaRestClient& FVaRestClient::WithMaxJsonBytes(int64)`; private `bool VaRest::Http::FinalizeSaveTo(FFinish&)`, `void VaRest::Http::LoadFilePrefix(const FString& Path, TArray<uint8>& Out)`; module `VaRestTests` with `FVaRestHttpTestItem { FString Name; int32 Level; }` and `FVaRestHttpTestProfile { int64 Id; FString Name; TArray<FVaRestHttpTestItem> Items; int32 Score = 7; }`.
+- Produces: `TVaRestRequest<T>::KeepBody() &&`, `SaveTo(FStringView FilePath) && requires (std::is_void_v<T> || std::is_same_v<T, FVaRestResponse>)`, `OnHttpThread() &&`, `MaxJsonBytes(int64) &&`; `FVaRestClient& FVaRestClient::WithMaxJsonBytes(int64)`; private `bool VaRest::Http::FinalizeSaveTo(FFinish&, TFunctionRef<bool()> IsCanceled)`, `void VaRest::Http::LoadFilePrefix(const FString& Path, TArray<uint8>& Out)`; module `VaRestTests` with `FVaRestHttpTestItem { FString Name; int32 Level; }` and `FVaRestHttpTestProfile { int64 Id; FString Name; TArray<FVaRestHttpTestItem> Items; int32 Score = 7; }`.
 
 - [ ] **Step 1: The test module** — `Source/VaRestTests/VaRestTests.Build.cs`
 
@@ -9560,6 +10752,9 @@ bool FVaRestHttpStructDecodeTest::RunTest(const FString& Parameters)
 	FTestRig Rig;
 	Rig.Fake->Enqueue(Json(200, Profile));
 	auto Outcome = MakeOutcome<FVaRestHttpTestProfile>();
+	// Review M9: process-wide counters -- let an earlier test's late tasks land before the baseline
+	FlushRedactionPipe();
+	PumpUntil([] { return false; }, 0.05);
 	const int32 OffBefore = Counters().DecodesOffGameThread;
 	const int32 OnBefore = Counters().DecodesOnGameThread;
 	Observe(Rig.Client.Get<FVaRestHttpTestProfile>(TEXT("/me")), Outcome).Send();
@@ -9640,8 +10835,13 @@ bool FVaRestHttpEmptyBodiesTest::RunTest(const FString& Parameters)
 #include "Misc/AutomationTest.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "UObject/Package.h"
+#include "UObject/UObjectGlobals.h"
 #include "VaRestClient.h"
+#include "VaRestHttpSettings.h"
 #include "VaRestHttpTesting.h"
+
+#include <atomic>
 
 namespace VaRest::Http::DecodeTestPrivate
 {
@@ -9715,6 +10915,7 @@ bool FVaRestHttpContentTypesTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("... the raw body kept and quoted"), O[2]->Response.Body.Num() > 0 && O[2]->Error.RawBody.Contains(TEXT("login")));
 	TestTrue(TEXT("invalid JSON is a Decode error with the parser's message"), O[3]->Error.Kind == EVaRestErrorKind::Decode && O[3]->Error.Message.Contains(TEXT("not valid JSON")));
 	TestTrue(TEXT("... and the first bytes as RawBody, from before the in-situ parse"), O[3]->Error.RawBody.Contains(TEXT("{\"a\":")));
+	TestEqual(TEXT("decision 26: an in-situ parse error keeps no raw body, only the 4 KiB prefix"), O[3]->Response.Body.Num(), 0);
 	return true;
 }
 
@@ -9747,10 +10948,12 @@ bool FVaRestHttpKeepBodyTest::RunTest(const FString& Parameters)
 	Observe(Rig.Client.Get(TEXT("/error")), CappedError).Send();
 	TestTrue(TEXT("complete"), PumpUntil([&] { return Capped->IsDone() && Uncapped->IsDone() && CappedError->IsDone(); }));
 	TestTrue(TEXT("over the client's cap: a Decode error naming the limit"), Capped->Error.Kind == EVaRestErrorKind::Decode && Capped->Error.Message.Contains(TEXT("MaxJsonBytes")));
-	TestEqual(TEXT("... the bytes kept (nothing was parsed)"), Capped->Response.Body.Num(), FCStringAnsi::Strlen(Body));
+	// Reviews M-6, M13: the transport stops the body at the cap (the fake mirrors the HTTP transport's sink)
+	TestTrue(TEXT("... the transfer stopped there: nothing kept, not retryable"), Capped->Response.Body.Num() == 0 && !Capped->Error.bRetryable);
+	TestEqual(TEXT("... the cap reached the transport"), Rig.Fake->GetCall(1).Request.MaxBodyBytes, static_cast<int64>(16));
 	TestTrue(TEXT("a request's MaxJsonBytes(0) lifts it"), Uncapped->Value.IsSet() && Uncapped->Value->IsObject());
-	TestTrue(TEXT("an error body over the cap is not parsed: RawBody instead"), CappedError->Error.Kind == EVaRestErrorKind::Http
-		&& !CappedError->Error.Body.IsValid() && CappedError->Error.RawBody.Contains(TEXT("padding")));
+	TestTrue(TEXT("an error body over the cap: still the HTTP error, its body not kept"), CappedError->Error.Kind == EVaRestErrorKind::Http
+		&& CappedError->Error.HttpStatus == 500 && !CappedError->Error.Body.IsValid() && CappedError->Error.Message.Contains(TEXT("MaxJsonBytes")));
 	return true;
 }
 
@@ -9766,6 +10969,55 @@ bool FVaRestHttpOnHttpThreadTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("completes"), Rig.Wait(Outcome));
 	TestFalse(TEXT("OnHttpThread: callbacks off the game thread (decision 4)"), Outcome->bAllOnGameThread.load());
 	TestEqual(TEXT("... still exactly once"), Outcome->CompleteCalls.load(), 1);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpOnHttpThreadPinTest, "VaRest.Http.Decode.OnHttpThreadPinsOwner",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpOnHttpThreadPinTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	FTestRig Rig;
+	// Owner() holds its owner weakly; once the local is cleared, nothing else refers to it, so a GC frees it unless the
+	// delivery pins it (decision 28, review C-5)
+	UObject* Owner = NewObject<UVaRestHttpSettings>(GetTransientPackage(), NAME_None, RF_Transient);
+	const TWeakObjectPtr<UObject> Weak(Owner);
+	struct FState
+	{
+		std::atomic<bool> bInside{false};
+		std::atomic<bool> bRelease{false};
+		std::atomic<int32> CompleteCalls{0};
+	};
+	const TSharedRef<FState, ESPMode::ThreadSafe> State = MakeShared<FState, ESPMode::ThreadSafe>();
+	Rig.Client.Get(TEXT("/pinned")).Owner(Owner).OnHttpThread()
+		.OnSuccess([State](const FVaRestJson&, const FVaRestResponse&)
+		{
+			// Where a [this] callback would touch the owner, on a worker: hold here until the game thread has collected
+			State->bInside = true;
+			const double Until = FPlatformTime::Seconds() + 5.0;
+			while (!State->bRelease.load() && FPlatformTime::Seconds() < Until)
+			{
+				FPlatformProcess::Yield();
+			}
+		})
+		.OnComplete([State](const TVaRestResult<FVaRestJson>&)
+		{
+			++State->CompleteCalls;
+		})
+		.Send();
+	Owner = nullptr;
+	TestTrue(TEXT("the callback runs on a worker"), PumpUntil([State] { return State->bInside.load(); }));
+	CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS, true);
+	TestTrue(TEXT("decision 28: a GC while an OnHttpThread callback runs does not free its owner"), Weak.IsValid());
+	State->bRelease = true;
+	TestTrue(TEXT("completes"), PumpUntil([State] { return State->CompleteCalls.load() == 1; }));
+	// The pin drops on the worker right after the callbacks return (Task 10 Step 6), so poll with a GC each time
+	TestTrue(TEXT("... and the pin is dropped after the callbacks (no leak)"), PumpUntil([&Weak]
+	{
+		CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS, true);
+		return !Weak.IsValid();
+	}, 2.0));
 	return true;
 }
 
@@ -9845,7 +11097,10 @@ Expected: the build fails: no `KeepBody`, `SaveTo`, `OnHttpThread`, `MaxJsonByte
 	/**
 	 * Spec 3.2: streams the body into a temp file next to FilePath and renames it onto FilePath on success; a failed or
 	 * canceled download leaves FilePath untouched and deletes the temp file. Only for void and FVaRestResponse results
-	 * (decision 9): a body on disk has nothing to decode.
+	 * (decision 9): a body on disk has nothing to decode. The file is written on the HTTP thread, as the engine's own
+	 * SetResponseBodyReceiveStream to a file archive does (decision 31); the rename runs on a UE::Tasks worker. A Cancel()
+	 * that lands after the rename delivers the success with the saved file: the destination was already replaced, and
+	 * success is the truthful outcome (review M-4).
 	 */
 	TVaRestRequest SaveTo(FStringView FilePath) && requires (std::is_void_v<T> || std::is_same_v<T, FVaRestResponse>)
 	{
@@ -9857,7 +11112,11 @@ Expected: the build fails: no `KeepBody`, `SaveTo`, `OnHttpThread`, `MaxJsonByte
 		return MoveTemp(*this);
 	}
 
-	/** Spec 3.2: callbacks on a worker thread instead of the game thread, after the game thread has seen the result (decision 4) */
+	/**
+	 * Spec 3.2: callbacks on a worker thread instead of the game thread, after the game thread has seen the result
+	 * (decision 4). With Owner(), the owner is checked on the game thread and then pinned (TStrongObjectPtr) until the
+	 * callbacks return, so GC cannot free it under them (decision 28): it may outlive its own destruction by one callback.
+	 */
 	TVaRestRequest OnHttpThread() &&
 	{
 		Spec->bOnHttpThread = true;
@@ -9900,9 +11159,11 @@ FVaRestClient& FVaRestClient::WithMaxJsonBytes(int64 Bytes)
 	 * atomically (UnixPlatformFile.cpp:1092); Windows' MoveFileW refuses an existing target (WindowsPlatformFile.cpp:1218),
 	 * so there the old file is deleted first, as FFileManagerGeneric::Move does (FileManagerGeneric.cpp:303-323). An empty
 	 * body never opened the sink, so it becomes an empty file. False, with a Decode error and the temp file deleted, when
-	 * the move fails. Background thread.
+	 * the move fails. IsCanceled is read right before the rename (review M-4): when it is true the temp file is deleted,
+	 * the destination stays untouched, and false comes back with no error (Complete then delivers Canceled). A cancel
+	 * after the rename is too late: the request delivers its success. Background thread.
 	 */
-	bool FinalizeSaveTo(FFinish& Finish);
+	bool FinalizeSaveTo(FFinish& Finish, TFunctionRef<bool()> IsCanceled);
 
 	/** The first RawBodyCap bytes of a file (an error body that went to SaveTo's temp file) */
 	void LoadFilePrefix(const FString& Path, TArray<uint8>& Out);
@@ -9911,7 +11172,7 @@ FVaRestClient& FVaRestClient::WithMaxJsonBytes(int64 Bytes)
 In `Source/VaRestHttp/Private/VaRestDecode.cpp`, add the includes `GenericPlatform/GenericPlatformFile.h`, `HAL/PlatformFileManager.h`, `Misc/Paths.h`, and:
 
 ```cpp
-bool VaRest::Http::FinalizeSaveTo(FFinish& Finish)
+bool VaRest::Http::FinalizeSaveTo(FFinish& Finish, TFunctionRef<bool()> IsCanceled)
 {
 	IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
 	auto Fail = [&Finish, &PlatformFile](const TCHAR* What)
@@ -9929,6 +11190,12 @@ bool VaRest::Http::FinalizeSaveTo(FFinish& Finish)
 		{
 			return Fail(TEXT("create"));
 		}
+	}
+	if (IsCanceled())
+	{
+		// Review M-4: "a canceled download never touches the destination" -- read as late as it can be
+		PlatformFile.DeleteFile(*Finish.TempFile);
+		return false;
 	}
 	if (!PlatformFile.MoveFile(*Finish.SaveTo, *Finish.TempFile))
 	{
@@ -9963,9 +11230,13 @@ void VaRest::Http::LoadFilePrefix(const FString& Path, TArray<uint8>& Out)
 1. Replace `RunDecode` with:
 
 ```cpp
-	/** Background thread (the restore-the-bug runs put it on the game thread): spec 1's "parsing, decoding ... run on UE::Tasks" */
-	void RunDecode(IResultHandler& Handler, FFinish& Finish, bool bCanceled)
+	/**
+	 * Background thread (the restore-the-bug runs put it on the game thread): spec 1's "parsing, decoding ... run on
+	 * UE::Tasks". Ex is read only through its atomic cancel flag, which any thread may read.
+	 */
+	void RunDecode(IResultHandler& Handler, FFinish& Finish, const FVaRestExchange& Ex)
 	{
+#if !UE_BUILD_SHIPPING
 		if (IsInGameThread())
 		{
 			++Testing::Counters().DecodesOnGameThread;
@@ -9974,6 +11245,8 @@ void VaRest::Http::LoadFilePrefix(const FString& Path, TArray<uint8>& Out)
 		{
 			++Testing::Counters().DecodesOffGameThread;
 		}
+#endif
+		const bool bCanceled = Ex.IsCancelRequested();
 		if (Finish.bTimeDecode)
 		{
 			Finish.DecodeStartAt = Finish.Clock->Now();
@@ -9989,7 +11262,8 @@ void VaRest::Http::LoadFilePrefix(const FString& Path, TArray<uint8>& Out)
 		}
 		if (!Finish.Error.IsError() && !bCanceled)
 		{
-			if (Finish.SaveTo.IsEmpty() || FinalizeSaveTo(Finish))
+			// Review M-4: the cancel flag is read again right before the rename
+			if (Finish.SaveTo.IsEmpty() || FinalizeSaveTo(Finish, [&Ex] { return Ex.IsCancelRequested(); }))
 			{
 				Handler.Decode(Finish);
 			}
@@ -10023,8 +11297,9 @@ void VaRest::Http::LoadFilePrefix(const FString& Path, TArray<uint8>& Out)
 3. In `FClientState::OnChainDone`, replace
 
 ```cpp
-	if (Ex.bFinished)
+	if (Ex.bFinished || Ex.Phase != EVaRestExchangePhase::InChain)
 	{
+		// Finished, or a second outcome while the first is being decoded (a stage that reported twice): ignored (review C-3)
 		return;
 	}
 ```
@@ -10032,9 +11307,11 @@ void VaRest::Http::LoadFilePrefix(const FString& Path, TArray<uint8>& Out)
 with
 
 ```cpp
-	if (Ex.bFinished)
+	if (Ex.bFinished || Ex.Phase != EVaRestExchangePhase::InChain)
 	{
-		if (!Ex.TempFile.IsEmpty())
+		// Finished, or a second outcome while the first is being decoded (a stage that reported twice): ignored (review C-3).
+		// A finished one's attempt file is removed (a second outcome's file is its decode task's to finish).
+		if (Ex.bFinished && !Ex.TempFile.IsEmpty())
 		{
 			UE::Tasks::Launch(TEXT("VaRest.DeleteTemp"), [Stale = Ex.TempFile] { IFileManager::Get().Delete(*Stale, false, false, true); });
 		}
@@ -10050,7 +11327,7 @@ and replace the `bTask` computation with:
 		|| (Finish.Error.IsError() ? Finish.Error.Kind == EVaRestErrorKind::Http && bHasBody : Ex.Handler->DecodesBody() && bHasBody);
 ```
 
-and in the decode task, call `RunDecode(*Decoder, Pending, Exchange->IsCancelRequested());`.
+and in the decode task, call `RunDecode(*Decoder, Pending, *Held);` (Task 8's decode task holds the exchange as `Held`).
 
 4. In `FClientState::Complete`, replace the delivery at its end:
 
@@ -10072,20 +11349,35 @@ with
 	}
 	if (Ex.bOnHttpThread)
 	{
-		// Decision 4: the game thread has seen the result (Completed, Task 15); the callbacks run on a worker
-		UE::Tasks::Launch(TEXT("VaRest.DeliverOffGameThread"), [Delivered = MoveTemp(Handler), Done = MoveTemp(Finish)]() mutable
+		// Decision 4: the game thread has seen the result (Completed, Task 15); the callbacks run on a worker.
+		// Decision 28 (review C-5): the owner, live here on the game thread, is pinned until the callbacks return -- a
+		// worker may not ask a TWeakObjectPtr (WeakObjectPtr.h:290-300), and GC could free the owner under a [this]
+		// callback. TStrongObjectPtr takes its reference here (StrongObjectPtrTemplates.h:57-61 -> Reset, :167 AddRef, with
+		// the incremental-GC barrier of FUObjectItem::AddRef, UObjectArray.h:347-366) and drops it on the worker, which
+		// 5.8.1 allows: ~TStrongObjectPtr -> Reset -> ReleaseUObject (StrongObjectPtrTemplates.h:47-50, :122-131;
+		// StrongObjectPtr.cpp:10-16) is an atomic decrement (UObjectArray.h:375-386) whose root-dirtying takes a try-lock
+		// or queues lock-free, from any thread (GarbageCollection.cpp:701-719).
+		TStrongObjectPtr<const UObject> Pin;
+		if (Ex.bHasOwner)
+		{
+			Pin.Reset(Ex.Owner.Get());
+		}
+		UE::Tasks::Launch(TEXT("VaRest.DeliverOffGameThread"), [Delivered = MoveTemp(Handler), Done = MoveTemp(Finish), Kept = MoveTemp(Pin)]() mutable
 		{
 			Delivered->Deliver(Done);
+			Kept.Reset(); // after the callbacks, on this worker: legal, see above
 		});
 		return;
 	}
 	Handler->Deliver(Finish);
 ```
 
+and add `#include "UObject/StrongObjectPtr.h"` to `VaRestPipeline.cpp`.
+
 - [ ] **Step 7: Run and pass**
 
 Run: `Tools/run_tests.sh VaRest.Http`
-Expected: `0 failed`: the six `VaRest.Http.Decode.*` tests in `VaRestHttp` and the three in `VaRestTests` (`Struct`, `StructErrors`, `EmptyBodies`).
+Expected: `0 failed`: the seven `VaRest.Http.Decode.*` tests in `VaRestHttp` and the three in `VaRestTests` (`Struct`, `StructErrors`, `EmptyBodies`).
 
 - [ ] **Step 8: Restore-the-bug (zero-copy slack, spec 2.1)**
 
@@ -10093,7 +11385,11 @@ In `FClientState::OnChainDone`, temporarily replace `Finish.Body = MoveTemp(Outc
 
 - [ ] **Step 9: Restore-the-bug (decode off the game thread, spec 1)**
 
-In `OnChainDone`, temporarily make the decode run inline: replace the `UE::Tasks::Launch(TEXT("VaRest.Decode"), ...)` block with `RunDecode(*Handler, Finish, Ex.IsCancelRequested()); Ex.Handler = MoveTemp(Handler); Complete(Exchange, MoveTemp(Finish));`. Run `Tools/run_tests.sh VaRest.Http.Decode`; expected FAIL in `VaRest.Http.Decode.Struct` ("the decode ran off the game thread"). Restore; PASS. Report both runs.
+In `OnChainDone`, temporarily make the decode run inline: replace the `UE::Tasks::Launch(TEXT("VaRest.Decode"), ...)` block with `RunDecode(*Handler, Finish, Ex); Ex.Handler = MoveTemp(Handler); Complete(Exchange, MoveTemp(Finish));`. Run `Tools/run_tests.sh VaRest.Http.Decode`; expected FAIL in `VaRest.Http.Decode.Struct` ("the decode ran off the game thread"). Restore; PASS. Report both runs.
+
+- [ ] **Step 9b: Restore-the-bug (the owner pin, decision 28, review C-5)**
+
+In `Complete`'s `bOnHttpThread` branch, temporarily delete `Pin.Reset(Ex.Owner.Get());`. Run `Tools/run_tests.sh VaRest.Http.Decode.OnHttpThreadPinsOwner`; expected FAIL ("decision 28: a GC while an OnHttpThread callback runs does not free its owner"): nothing holds the owner while the worker is inside its callback, so the game thread's GC frees it. Restore; PASS. Report both runs.
 
 - [ ] **Step 10: Commit**
 
@@ -10114,8 +11410,8 @@ Spec §3.2: "`.Owner(this)` // weak: owner gone -> no callbacks, no further retr
 
 - an explicit `Cancel()` delivers `Kind=Canceled` to `OnError`/`OnComplete`, never inside `Cancel()`;
 - after `Cancel()` returns on the game thread no `OnSuccess` runs, even when the answer was already on its way;
-- an owner that is gone delivers nothing, and no attempt starts for it. It is checked on entry, before each dispatch, when an attempt ends, and at completion;
-- engine shutdown (`FCoreDelegates::OnEnginePreExit`, `CoreDelegates.h:261-262`, which fires before core modules shut down) cancels every in-flight request and delivers nothing. `ShutdownModule` is not used for this: it does not run in an automation session (CLAUDE.md).
+- an owner that is gone delivers nothing, and no attempt starts for it. It is checked on entry, before each dispatch, when an attempt ends, and at completion, and it wins over an earlier `Cancel()` (a cancel in the owner's `EndPlay` followed by its destruction delivers nothing either, review C-2); a cancel that lands after `SaveTo`'s rename delivers the success (review M-4);
+- engine shutdown (`FCoreDelegates::OnEnginePreExit`, `CoreDelegates.h:261-262`, which fires before core modules shut down) cancels every in-flight request and delivers nothing, and a request sent after it completes silently without reaching the HTTP module, which is about to unload (`LaunchEngineLoop.cpp:5182`; review M-14). `ShutdownModule` is not used for this: it does not run in an automation session (CLAUDE.md).
 
 `Cancel()` from any thread sets the flag at once (a decode in flight sees it) and does the rest on the game thread.
 
@@ -10129,7 +11425,7 @@ Spec §3.2: "`.Owner(this)` // weak: owner gone -> no callbacks, no further retr
 
 **Interfaces:**
 - Consumes: Task 8's exchange phases, `bFinished`, `ApiDepth`, `bCancelRequested`, `CancelReason`, `TransportCall`, `FApiScope`.
-- Produces: `void FVaRestRequestHandle::Cancel() const` (any thread); `TVaRestRequest<T>::Owner(const UObject* InOwner) &&`; `void FVaRestClient::CancelAll(FName Tag = NAME_None)` (game thread); private `FClientState::Cancel(const FVaRestExchangeRef&, EVaRestCancelReason)`, `FClientState::CancelAll(FName Tag, EVaRestCancelReason)`, `static FClientState::CancelForShutdown()`; `PipelinePrivate::IsOwnerGone(const FVaRestExchange&)`, `PipelinePrivate::MarkOwnerGone(FVaRestExchange&)`.
+- Produces: `void FVaRestRequestHandle::Cancel() const` (any thread); `TVaRestRequest<T>::Owner(const UObject* InOwner) &&`; `void FVaRestClient::CancelAll(FName Tag = NAME_None)` (game thread); private `FClientState::Cancel(const FVaRestExchangeRef&, EVaRestCancelReason)`, `FClientState::CancelAll(FName Tag, EVaRestCancelReason)`, `static FClientState::CancelForShutdown()`, `static FClientState::IsShuttingDown()`, `static FClientState::ResetShutdownInternal()` (tests); `PipelinePrivate::IsOwnerGone(const FVaRestExchange&)`, `PipelinePrivate::MarkOwnerGone(FVaRestExchange&)`.
 
 - [ ] **Step 1: Write the failing tests** — `Source/VaRestHttp/Private/Tests/VaRestHttpCancelTest.cpp`
 
@@ -10138,6 +11434,8 @@ Spec §3.2: "`.Owner(this)` // weak: owner gone -> no callbacks, no further retr
 
 #if WITH_DEV_AUTOMATION_TESTS
 
+#include "HAL/PlatformProcess.h"
+#include "HAL/PlatformTime.h"
 #include "Misc/AutomationTest.h"
 #include "Tasks/Task.h"
 #include "UObject/Package.h"
@@ -10165,10 +11463,39 @@ namespace VaRest::Http::CancelTestPrivate
 		TUniqueFunction<void()> Resume;
 	};
 
+	/** An Outer stage that holds the outcome on its way up until the test forwards it (review C-3) */
+	class FOutcomeHoldingStage final : public IVaRestStage
+	{
+	public:
+		virtual FName GetStageName() const override { return TEXT("HoldOutcome"); }
+		virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) override
+		{
+			Next.Proceed(Exchange, [this, Done = MoveTemp(OnOutcome)](FVaRestAttemptOutcome&& Outcome) mutable
+			{
+				Kept = MoveTemp(Outcome);
+				Forward = [this, Callback = MoveTemp(Done)]() mutable { Callback(MoveTemp(Kept)); };
+				bHolding = true;
+			});
+		}
+		FVaRestAttemptOutcome Kept;
+		TUniqueFunction<void()> Forward;
+		bool bHolding = false;
+	};
+
 	UObject* NewOwner()
 	{
 		// Any UObject will do; a transient settings instance needs no extra class
 		return NewObject<UVaRestHttpSettings>(GetTransientPackage(), NAME_None, RF_Transient);
+	}
+
+	/** Review I-6: run nothing on the game thread until the worker is done; the worker never needs the game thread */
+	void SpinUntil(const TSharedRef<std::atomic<bool>, ESPMode::ThreadSafe>& Flag)
+	{
+		const double Until = FPlatformTime::Seconds() + 10.0;
+		while (!Flag->load() && FPlatformTime::Seconds() < Until)
+		{
+			FPlatformProcess::Yield();
+		}
 	}
 }
 
@@ -10227,7 +11554,8 @@ bool FVaRestHttpCancelRacesTest::RunTest(const FString& Parameters)
 		Observe(Client.Get(TEXT("/never")), Before).Send().Cancel();
 		*bCanceled = true;
 	});
-	TestTrue(TEXT("the worker ran"), PumpUntil([bCanceled] { return bCanceled->load(); }));
+	SpinUntil(bCanceled); // review I-6: a pump here could run Enter between Send() and Cancel() on the worker
+	TestTrue(TEXT("the worker ran"), bCanceled->load());
 	TestTrue(TEXT("completes"), Early.Wait(Before));
 	TestTrue(TEXT("canceled before entry: Kind Canceled"), Before->Error.Kind == EVaRestErrorKind::Canceled);
 	TestEqual(TEXT("... and never sent"), Early.Fake->NumCalls(), 0);
@@ -10241,10 +11569,65 @@ bool FVaRestHttpCancelRacesTest::RunTest(const FString& Parameters)
 	ParkedHandle.Cancel();
 	TestTrue(TEXT("completes while the stage holds it"), Held.Wait(Parked));
 	TestTrue(TEXT("Canceled"), Parked->Error.Kind == EVaRestErrorKind::Canceled);
-	Stage->Resume();
+	{
+		// Review M8: moved out first, so the stage keeps no exchange (and no client state) after it ran
+		TUniqueFunction<void()> Run = MoveTemp(Stage->Resume);
+		Run();
+	}
 	PumpUntil([] { return false; }, 0.05);
 	TestEqual(TEXT("a stage that resumes later reaches no transport (Proceed reports Canceled)"), Held.Fake->NumCalls(), 0);
 	TestEqual(TEXT("... and nothing is delivered twice"), Parked->CompleteCalls.load(), 1);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpCancelHeldOutcomeTest, "VaRest.Http.Cancel.WhileOutcomeHeld",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpCancelHeldOutcomeTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::CancelTestPrivate;
+	// Review C-3: Cancel() defers its Complete (decision 3); before that task runs, a stage forwards the 200 it held, and
+	// the decode task takes the handler. The deferred Complete must leave the exchange to the decode task.
+	FTestRig Rig;
+	TSharedRef<FOutcomeHoldingStage, ESPMode::ThreadSafe> Stage = MakeShared<FOutcomeHoldingStage, ESPMode::ThreadSafe>();
+	Rig.Client.Use(Stage, EVaRestStageSlot::Outer);
+	Rig.Fake->Enqueue(Json(200, R"({"ok":true})"));
+	auto Outcome = MakeOutcome<FVaRestJson>();
+	const FVaRestRequestHandle Handle = Observe(Rig.Client.Get(TEXT("/held")), Outcome).Send();
+	TestTrue(TEXT("the stage holds the outcome"), PumpUntil([&Stage] { return Stage->bHolding; }));
+	Handle.Cancel();
+	{
+		TUniqueFunction<void()> Run = MoveTemp(Stage->Forward); // synchronously, before any pump
+		Run();
+	}
+	TestTrue(TEXT("completes"), Rig.Wait(Outcome));
+	PumpUntil([] { return false; }, 0.05);
+	TestTrue(TEXT("exactly one OnError(Canceled) and one OnComplete"), Outcome->ErrorCalls == 1 && Outcome->CompleteCalls == 1
+		&& Outcome->SuccessCalls == 0 && Outcome->Error.Kind == EVaRestErrorKind::Canceled);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpCancelThenOwnerGoneTest, "VaRest.Http.Cancel.CancelThenOwnerGone",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpCancelThenOwnerGoneTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::CancelTestPrivate;
+	// Review C-2: the usual "cancel my requests in EndPlay", then the owner is destroyed before the Canceled is delivered
+	FTestRig Rig;
+	Rig.Fake->Enqueue(FVaRestFakeResponse::Manual());
+	UObject* Owner = NewOwner();
+	auto Outcome = MakeOutcome<FVaRestJson>();
+	const FVaRestRequestHandle Handle = Observe(Rig.Client.Get(TEXT("/owned")).Owner(Owner), Outcome).Send();
+	TestTrue(TEXT("dispatched"), PumpUntil([&Rig] { return Rig.Fake->NumInFlight() == 1; }));
+	Handle.Cancel();
+	Owner->MarkAsGarbage(); // before any pump
+	PumpUntil([&Handle] { return !Handle.IsActive(); });
+	PumpUntil([] { return false; }, 0.1);
+	TestEqual(TEXT("owner gone wins over the earlier Cancel(): no callbacks"), Outcome->SuccessCalls + Outcome->ErrorCalls + Outcome->CompleteCalls, 0);
+	TestEqual(TEXT("... and the request is over"), Rig.Client.GetInFlightCount(), 0);
 	return true;
 }
 
@@ -10307,6 +11690,15 @@ bool FVaRestHttpCancelAllTest::RunTest(const FString& Parameters)
 	PumpUntil([] { return false; }, 0.05);
 	TestEqual(TEXT("shutdown cancels the transport call"), Rig.Fake->NumCanceled(), 3);
 	TestEqual(TEXT("... and delivers nothing"), B->CompleteCalls.load(), 0);
+
+	// Review M-14: after OnEnginePreExit the HTTP module is about to unload; a late Send() never reaches it
+	auto Late = MakeOutcome<FVaRestJson>();
+	const FVaRestRequestHandle LateHandle = Observe(Rig.Client.Get(TEXT("/late")), Late).Send();
+	PumpUntil([&LateHandle] { return !LateHandle.IsActive(); });
+	PumpUntil([] { return false; }, 0.05);
+	TestEqual(TEXT("a request sent during shutdown is not sent"), Rig.Fake->NumCalls(), 3);
+	TestEqual(TEXT("... and delivers nothing"), Late->CompleteCalls.load(), 0);
+	VaRest::Http::FClientState::ResetShutdownInternal(); // the editor goes on: later tests send again
 	return true;
 }
 
@@ -10382,12 +11774,21 @@ In `FVaRestClient`, after `GetInFlightCount`:
 - [ ] **Step 4: The state's half** — in `Source/VaRestHttp/Private/VaRestClientState.h`, add to `FClientState`'s public section:
 
 ```cpp
-		/** Game thread. Reason is kept if one is already set (the first reason wins). */
+		/**
+		 * Game thread. The first reason wins, except that a silent one (OwnerGone, Shutdown) overrides User: callbacks
+		 * must not run into an owner that is gone or at engine exit, whatever canceled first (review C-2).
+		 */
 		void Cancel(const FVaRestExchangeRef& Exchange, EVaRestCancelReason Reason);
 		/** Game thread: every in-flight exchange with Tag (all for NAME_None) */
 		void CancelAll(FName Tag, EVaRestCancelReason Reason);
-		/** FCoreDelegates::OnEnginePreExit: every live client's requests, without callbacks */
+		/** FCoreDelegates::OnEnginePreExit: every live client's requests, without callbacks; later sends complete silently (review M-14) */
 		static void CancelForShutdown();
+		/** Any thread */
+		static bool IsShuttingDown();
+#if WITH_DEV_AUTOMATION_TESTS
+		/** Tests: the editor goes on after a simulated shutdown */
+		static void ResetShutdownInternal();
+#endif
 ```
 
 In `Source/VaRestHttp/Private/VaRestPipeline.cpp`:
@@ -10403,7 +11804,8 @@ In `Source/VaRestHttp/Private/VaRestPipeline.cpp`:
 
 	void MarkOwnerGone(FVaRestExchange& Ex)
 	{
-		if (Ex.CancelReason == EVaRestCancelReason::None)
+		// Silence wins over an earlier User cancel (review C-2); Shutdown is silent too, and stays
+		if (Ex.CancelReason != EVaRestCancelReason::Shutdown)
 		{
 			Ex.CancelReason = EVaRestCancelReason::OwnerGone;
 		}
@@ -10426,9 +11828,15 @@ In `Source/VaRestHttp/Private/VaRestPipeline.cpp`:
 3. In `FClientState::Enter`, after `InFlight.Add(Ex.RequestId, Exchange);`:
 
 ```cpp
+	if (IsShuttingDown())
+	{
+		// Review M-14: after OnEnginePreExit; the HTTP module unloads next (LaunchEngineLoop.cpp:5182)
+		Ex.CancelReason = EVaRestCancelReason::Shutdown;
+		Ex.bCancelRequested = true;
+	}
 	if (Ex.IsCancelRequested() || IsOwnerGone(Ex))
 	{
-		// Canceled before it reached the game thread, or its owner is already gone: no transport call
+		// Canceled before it reached the game thread, its owner is already gone, or the engine is exiting: no transport call
 		Complete(Exchange, MakeFinish(Ex));
 		return;
 	}
@@ -10447,17 +11855,19 @@ In `Source/VaRestHttp/Private/VaRestPipeline.cpp`:
 5. In `FClientState::Complete`, after the `if (Ex.ApiDepth > 0) { ... }` block and before `Ex.bFinished = true;`:
 
 ```cpp
-	if (!Ex.IsCancelRequested() && IsOwnerGone(Ex))
+	if (IsOwnerGone(Ex))
 	{
+		// Spec 3.2: owner gone -> no callbacks, whatever canceled it first (a Cancel() in the owner's EndPlay, review C-2)
 		MarkOwnerGone(Ex);
 	}
-	if (Ex.IsCancelRequested())
+	if (Ex.IsCancelRequested() && Ex.CancelReason == EVaRestCancelReason::None)
 	{
-		// After Cancel() nothing but Canceled is delivered, even an answer that raced it (decision 2)
-		if (Ex.CancelReason == EVaRestCancelReason::None)
-		{
-			Ex.CancelReason = EVaRestCancelReason::User; // the flag set off the game thread before the reason
-		}
+		Ex.CancelReason = EVaRestCancelReason::User; // the flag set off the game thread before the reason
+	}
+	if (Ex.IsCancelRequested() && Finish.Response.SavedFile.IsEmpty())
+	{
+		// After Cancel() nothing but Canceled is delivered, even an answer that raced it (decision 2). A SaveTo whose
+		// rename already replaced the destination delivers its success: the truthful outcome (review M-4).
 		FFinish Canceled = MakeFinish(Ex);
 		Canceled.Error.Kind = EVaRestErrorKind::Canceled;
 		Canceled.Error.Message = FVaRestError::DefaultMessage(EVaRestErrorKind::Canceled, 0);
@@ -10499,7 +11909,8 @@ void VaRest::Http::FClientState::Cancel(const FVaRestExchangeRef& Exchange, EVaR
 	{
 		return;
 	}
-	if (Ex.CancelReason == EVaRestCancelReason::None)
+	// Review C-2: the first reason wins, but silence (OwnerGone, Shutdown) overrides User
+	if (Ex.CancelReason == EVaRestCancelReason::None || Reason == EVaRestCancelReason::Shutdown || Reason == EVaRestCancelReason::OwnerGone)
 	{
 		Ex.CancelReason = Reason;
 	}
@@ -10537,10 +11948,29 @@ void VaRest::Http::FClientState::CancelAll(FName Tag, EVaRestCancelReason Reason
 	}
 }
 
+namespace VaRest::Http::PipelinePrivate
+{
+	/** Trivially destructible: safe as a static (review I-4) */
+	std::atomic<bool> bShuttingDown{ false };
+}
+
 void VaRest::Http::FClientState::CancelForShutdown()
 {
+	PipelinePrivate::bShuttingDown = true;
 	ForEachLive([](FClientState& Client) { Client.CancelAll(NAME_None, EVaRestCancelReason::Shutdown); });
 }
+
+bool VaRest::Http::FClientState::IsShuttingDown()
+{
+	return PipelinePrivate::bShuttingDown.load();
+}
+
+#if WITH_DEV_AUTOMATION_TESTS
+void VaRest::Http::FClientState::ResetShutdownInternal()
+{
+	PipelinePrivate::bShuttingDown = false;
+}
+#endif
 ```
 
 - [ ] **Step 5: The handle, the client, the hook** — in `Source/VaRestHttp/Private/VaRestClient.cpp`:
@@ -10548,7 +11978,7 @@ void VaRest::Http::FClientState::CancelForShutdown()
 ```cpp
 void FVaRestRequestHandle::Cancel() const
 {
-	const TSharedPtr<FVaRestExchange, ESPMode::ThreadSafe> Pinned = Exchange.Pin();
+	TSharedPtr<FVaRestExchange, ESPMode::ThreadSafe> Pinned = Exchange.Pin();
 	if (!Pinned.IsValid() || Pinned->IsDone())
 	{
 		return;
@@ -10558,9 +11988,10 @@ void FVaRestRequestHandle::Cancel() const
 		Pinned->State->Cancel(Pinned.ToSharedRef(), EVaRestCancelReason::User);
 		return;
 	}
-	// Any thread: the flag now (a decode in flight sees it), the rest where the control plane lives (spec 1)
+	// Any thread: the flag now (a decode in flight sees it), the rest where the control plane lives (spec 1). The pin is
+	// moved into the task, so this thread never drops the last reference (review I-1).
 	Pinned->bCancelRequested = true;
-	UE::Tasks::Launch(TEXT("VaRest.Cancel"), [Target = Pinned.ToSharedRef()] { Target->State->Cancel(Target, EVaRestCancelReason::User); },
+	UE::Tasks::Launch(TEXT("VaRest.Cancel"), [Target = MoveTemp(Pinned)] { Target->State->Cancel(Target.ToSharedRef(), EVaRestCancelReason::User); },
 		UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
 }
 
@@ -10594,7 +12025,7 @@ In `Source/VaRestHttp/Private/VaRestHttpModule.cpp`, add `#include "Misc/CoreDel
 - [ ] **Step 6: Run and pass**
 
 Run: `Tools/run_tests.sh VaRest.Http`
-Expected: `0 failed`, including `VaRest.Http.Cancel.InTransport`, `.Races`, `.OwnerGone`, `.AllAndShutdown`, `.FromCallback`.
+Expected: `0 failed`, including `VaRest.Http.Cancel.InTransport`, `.Races`, `.WhileOutcomeHeld`, `.CancelThenOwnerGone`, `.OwnerGone`, `.AllAndShutdown`, `.FromCallback`.
 
 - [ ] **Step 7: Restore-the-bug (owner gone)**
 
@@ -10629,7 +12060,7 @@ Spec §4.6: "Per-client `MaxConcurrent` (default 16) with a priority queue (High
 
 **Interfaces:**
 - Consumes: Task 8's chain, `FVaRestStageNext`, `FVaRestExchange::bInLimiterQueue/LimiterWait/Priority`; Task 11's `FClientState::Cancel`.
-- Produces: private `VaRest::Http::FLimiter` (`SetCapacity(int32, double Now)`, `Acquire(uint64 RequestId, EVaRestPriority, double Now, FGrant&&, FAbort&&)`, `Release(double Now)`, `bool Abort(uint64 RequestId)`, `NumActive()`, `NumQueued()`, `GetCapacity()`; `FGrant = TUniqueFunction<void(double WaitedSeconds)>`, `FAbort = TUniqueFunction<void()>`); `FClientState::GetLimiter()`; `MakeLimiterStage()`; public `FVaRestClient& FVaRestClient::WithMaxConcurrent(int32)`.
+- Produces: private `VaRest::Http::FLimiter` (`SetCapacity(int32)` (no grants), `Pump(double Now)`, `Acquire(uint64 RequestId, EVaRestPriority, double Now, FGrant&&, FAbort&&)`, `Release(double Now)`, `bool Abort(uint64 RequestId)`, `NumActive()`, `NumQueued()`, `GetCapacity()`; `FGrant = TUniqueFunction<void(double WaitedSeconds)>`, `FAbort = TUniqueFunction<void()>`); `FClientState::GetLimiter()`; `MakeLimiterStage()`; public `FVaRestClient& FVaRestClient::WithMaxConcurrent(int32)`.
 
 - [ ] **Step 1: Write the failing tests** — `Source/VaRestHttp/Private/Tests/VaRestHttpLimiterTest.cpp`
 
@@ -10813,7 +12244,33 @@ bool FVaRestHttpLimiterCapacityTest::RunTest(const FString& Parameters)
 	PumpUntil([] { return false; }, 0.02);
 	TestEqual(TEXT("one at a time"), Rig.Fake->NumCalls(), 1);
 	Rig.Client.WithMaxConcurrent(3);
-	TestTrue(TEXT("raising MaxConcurrent dispatches the queue at once"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 3; }));
+	TestEqual(TEXT("review M-2: nothing is granted inside WithMaxConcurrent()"), Rig.Fake->NumCalls(), 1);
+	TestTrue(TEXT("raising MaxConcurrent dispatches the queue on the next game-thread task"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 3; }));
+	Rig.Client.CancelAll();
+	PumpUntil([&Rig] { return Rig.Client.GetInFlightCount() == 0; });
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpLimiterDroppedTest, "VaRest.Http.Limiter.DroppedCompletionFreesSlot",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpLimiterDroppedTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	// Review I-3: a completion the transport drops still finishes the request, and its slot comes back
+	FTestRig Rig;
+	Rig.Client.WithMaxConcurrent(1);
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest&) { return FVaRestFakeResponse::Manual(); });
+	auto First = MakeOutcome<FVaRestJson>();
+	auto Second = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/first")), First).Send();
+	Observe(Rig.Client.Get(TEXT("/second")), Second).Send();
+	PumpUntil([] { return false; }, 0.02);
+	TestEqual(TEXT("one slot"), Rig.Fake->NumCalls(), 1);
+	Rig.Fake->Drop(0);
+	TestTrue(TEXT("the dropped one finishes"), Rig.Wait(First));
+	TestTrue(TEXT("... once, with OnError and OnComplete"), First->ErrorCalls == 1 && First->CompleteCalls == 1 && First->Error.Message.Contains(TEXT("TransportDropped")));
+	TestTrue(TEXT("the slot is released: the queued one is dispatched"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 2; }));
 	Rig.Client.CancelAll();
 	PumpUntil([&Rig] { return Rig.Client.GetInFlightCount() == 0; });
 	return true;
@@ -10839,15 +12296,20 @@ Expected: the build fails: no `FVaRestClient::WithMaxConcurrent`.
 
 namespace VaRest::Http
 {
-	/** Spec 4.6: MaxConcurrent slots and a priority queue, Highest first, FIFO within a priority. Game thread. */
+	/**
+	 * Spec 4.6: MaxConcurrent slots and a priority queue, Highest first, FIFO within a priority. Strict priority, as the
+	 * spec says: under sustained higher-priority load a Low request can wait indefinitely (review M-19). Game thread.
+	 */
 	class FLimiter
 	{
 	public:
 		using FGrant = TUniqueFunction<void(double /*WaitedSeconds*/)>;
 		using FAbort = TUniqueFunction<void()>;
 
-		/** At least 1; a larger capacity dispatches queued attempts at once */
-		void SetCapacity(int32 InCapacity, double Now);
+		/** At least 1. Grants nothing by itself: the caller pumps, from a game-thread task (review M-2) */
+		void SetCapacity(int32 InCapacity);
+		/** Grants queued attempts while slots are free. Not re-entrant: a Release inside a grant only frees its slot (review M-1). */
+		void Pump(double Now);
 		/** OnGrant now when a slot is free, else when one is; OnAbort instead if Abort() takes it out of the queue */
 		void Acquire(uint64 RequestId, EVaRestPriority Priority, double Now, FGrant&& OnGrant, FAbort&& OnAbort);
 		/** A granted attempt ended */
@@ -10868,12 +12330,11 @@ namespace VaRest::Http
 			FAbort OnAbort;
 		};
 
-		void Pump(double Now);
-
 		/** Indexed by EVaRestPriority: Highest = 0 ... Low = 3 */
 		TArray<FEntry> Queues[4];
 		int32 Active = 0;
 		int32 Capacity = 16;
+		bool bPumping = false;
 	};
 }
 ```
@@ -10887,11 +12348,10 @@ namespace VaRest::Http
 
 static_assert(static_cast<int32>(EVaRestPriority::Highest) == 0 && static_cast<int32>(EVaRestPriority::Low) == 3, "FLimiter indexes its queues by priority");
 
-void VaRest::Http::FLimiter::SetCapacity(int32 InCapacity, double Now)
+void VaRest::Http::FLimiter::SetCapacity(int32 InCapacity)
 {
 	check(IsInGameThread());
 	Capacity = FMath::Max(1, InCapacity);
-	Pump(Now);
 }
 
 void VaRest::Http::FLimiter::Acquire(uint64 RequestId, EVaRestPriority Priority, double Now, FGrant&& OnGrant, FAbort&& OnAbort)
@@ -10914,7 +12374,12 @@ void VaRest::Http::FLimiter::Release(double Now)
 {
 	check(IsInGameThread());
 	Active = FMath::Max(0, Active - 1);
-	Pump(Now);
+	// Review M-1: inside a grant (an exchange canceled at dispatch answers at once) only the slot is freed; the pump
+	// already running takes the next entry. Recursing instead grows the stack with every dead entry in the queue.
+	if (!bPumping)
+	{
+		Pump(Now);
+	}
 }
 
 bool VaRest::Http::FLimiter::Abort(uint64 RequestId)
@@ -10946,8 +12411,14 @@ int32 VaRest::Http::FLimiter::NumQueued() const
 
 void VaRest::Http::FLimiter::Pump(double Now)
 {
-	// Re-entrant: a grant may finish at once (a canceled exchange) and Release, which pumps again; every pass re-reads
-	// the queues and holds nothing in them across the call
+	check(IsInGameThread());
+	if (bPumping)
+	{
+		return;
+	}
+	// A grant may finish at once (a canceled exchange) and Release; that Release only frees the slot (review M-1). Every
+	// pass re-reads the queues and holds nothing in them across the call.
+	TGuardValue<bool> Pumping(bPumping, true);
 	while (Active < Capacity)
 	{
 		int32 Level = 0;
@@ -10995,7 +12466,20 @@ and at the end of `Publish`, after the write lock's scope (wrap the assignment i
 		FWriteScopeLock WriteLock(ConfigLock);
 		Config = Next;
 	}
-	Limiter.SetCapacity(Next->MaxConcurrent, Next->Clock->Now());
+	const int32 Wanted = FMath::Max(1, Next->MaxConcurrent);
+	if (Limiter.GetCapacity() != Wanted)
+	{
+		// Review M-2: only on a change, and the grants from a later game-thread task -- a grant can run a request to its
+		// end at once, and Publish runs inside WithHeader(), SetSecretValue() and the like (decision 3)
+		Limiter.SetCapacity(Wanted);
+		UE::Tasks::Launch(TEXT("VaRest.LimiterPump"), [Weak = TWeakPtr<FClientState, ESPMode::ThreadSafe>(AsShared())]
+		{
+			if (const TSharedPtr<FClientState, ESPMode::ThreadSafe> Pinned = Weak.Pin())
+			{
+				Pinned->Limiter.Pump(Pinned->GetConfig()->Clock->Now());
+			}
+		}, UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
+	}
 ```
 
 In `Source/VaRestHttp/Private/VaRestPipeline.cpp`, add to `PipelinePrivate`:
@@ -11076,7 +12560,7 @@ FVaRestClient& FVaRestClient::WithMaxConcurrent(int32 MaxConcurrent)
 - [ ] **Step 6: Run and pass**
 
 Run: `Tools/run_tests.sh VaRest.Http`
-Expected: `0 failed`, including the five `VaRest.Http.Limiter.*` tests; the earlier suites stay green.
+Expected: `0 failed`, including the six `VaRest.Http.Limiter.*` tests; the earlier suites stay green.
 
 - [ ] **Step 7: Restore-the-bug (priority order)**
 
@@ -11121,7 +12605,9 @@ Spec §4.7: "Per attempt: `SetTimeout` (total) and `SetActivityTimeout`; plus th
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "Misc/AutomationTest.h"
+#include "UObject/Package.h"
 #include "VaRestClient.h"
+#include "VaRestHttpSettings.h"
 #include "VaRestHttpTesting.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpTimeoutAppliedTest, "VaRest.Http.Timeout.Applied",
@@ -11219,6 +12705,56 @@ bool FVaRestHttpProgressTest::RunTest(const FString& Parameters)
 	PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 2; });
 	TestFalse(TEXT("no OnProgress, no progress binding (IN-11)"), Rig.Fake->GetCall(1).Request.bReportProgress);
 	PumpUntil([&Rig] { return Rig.Client.GetInFlightCount() == 0; });
+
+	// Review M-16: a compressed body's Content-Length counts compressed bytes; past it the total is unknown, never > 100%
+	Rig.Fake->Enqueue(FVaRestFakeResponse::Manual());
+	TSharedRef<FSeen, ESPMode::ThreadSafe> Encoded = MakeShared<FSeen, ESPMode::ThreadSafe>();
+	auto Gzip = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/gz")).OnProgress([Encoded](const FVaRestProgress& Progress) { Encoded->Calls.Add(Progress); }), Gzip).Send();
+	PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 3; });
+	Rig.Fake->ReportProgress(2, 0, 300, 100);
+	Rig.Clock->Advance(0.1);
+	TestTrue(TEXT("received past the reported total: the total is unknown (-1)"), Encoded->Calls.Num() == 1 && Encoded->Calls[0].DownloadTotal == -1);
+	Rig.Client.CancelAll();
+	PumpUntil([&Rig] { return Rig.Client.GetInFlightCount() == 0; });
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpProgressOwnerGoneTest, "VaRest.Http.Progress.NotAfterOwnerGone",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpProgressOwnerGoneTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	// Review C-1: the usual .Owner(this).OnProgress([this]...) -- the last progress call must not run into a dead owner
+	FTestRig Rig;
+	Rig.Fake->Enqueue(FVaRestFakeResponse::Manual());
+	UObject* Owner = NewObject<UVaRestHttpSettings>(GetTransientPackage(), NAME_None, RF_Transient);
+	TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> Calls = MakeShared<std::atomic<int32>, ESPMode::ThreadSafe>(0);
+	auto Outcome = MakeOutcome<FVaRestJson>();
+	const FVaRestRequestHandle Handle = Observe(Rig.Client.Get(TEXT("/owned")).Owner(Owner).OnProgress([Calls](const FVaRestProgress&) { ++*Calls; }), Outcome).Send();
+	PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 1; });
+	Rig.Fake->ReportProgress(0, 0, 10, 100);
+	Owner->MarkAsGarbage();
+	const int32 AtMark = Calls->load();
+	Rig.Fake->Complete(0, FVaRestFakeResponse::Json(200, FUtf8StringView(UTF8TEXT(R"({"k":1})"))));
+	PumpUntil([&Handle] { return !Handle.IsActive(); });
+	PumpUntil([] { return false; }, 0.05);
+	TestEqual(TEXT("spec 3.2: owner gone -> no callbacks, progress included"), Calls->load() - AtMark, 0);
+	TestEqual(TEXT("... and no result callbacks"), Outcome->CompleteCalls.load(), 0);
+
+	// After an explicit Cancel() too (review M-3)
+	Rig.Fake->Enqueue(FVaRestFakeResponse::Manual());
+	TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> AfterCancel = MakeShared<std::atomic<int32>, ESPMode::ThreadSafe>(0);
+	auto Canceled = MakeOutcome<FVaRestJson>();
+	const FVaRestRequestHandle CancelHandle = Observe(Rig.Client.Get(TEXT("/canceled")).OnProgress([AfterCancel](const FVaRestProgress&) { ++*AfterCancel; }), Canceled).Send();
+	PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 2; });
+	CancelHandle.Cancel();
+	const int32 AtCancel = AfterCancel->load();
+	Rig.Fake->ReportProgress(1, 0, 10, 100);
+	Rig.Clock->Advance(0.1);
+	TestTrue(TEXT("completes"), Rig.Wait(Canceled));
+	TestEqual(TEXT("no progress after Cancel() returned"), AfterCancel->load() - AtCancel, 0);
 	return true;
 }
 
@@ -11233,7 +12769,11 @@ Expected: the build fails: no `FVaRestClient::WithTimeout`, `TVaRestRequest::Tim
 - [ ] **Step 3: The options** — in `Source/VaRestHttp/Public/VaRestClient.h`, add to `TVaRestRequest` after `MaxJsonBytes`:
 
 ```cpp
-	/** Spec 4.7, per attempt: a value above 0 replaces the client's (0 keeps it) */
+	/**
+	 * Spec 4.7, per attempt: a value above 0 replaces the client's (0 keeps it). With a total and no activity timeout the
+	 * transport bounds silence by the total too, so the engine's 30 s idle default never fires first (decision 30); on Mac
+	 * and iOS the engine's connection timeout still caps silence (docs/dev/http-thread-completion.md).
+	 */
 	TVaRestRequest Timeout(float TotalSeconds, float ActivitySeconds = 0.f) &&
 	{
 		if (TotalSeconds > 0.f)
@@ -11259,7 +12799,10 @@ Expected: the build fails: no `FVaRestClient::WithTimeout`, `TVaRestRequest::Tim
 and to `FVaRestClient` after `WithMaxConcurrent`:
 
 ```cpp
-	/** Spec 3.1 / 4.7: seconds per attempt; 0 = the engine's default ([HTTP] HttpTotalTimeout, HttpActivityTimeout) */
+	/**
+	 * Spec 3.1 / 4.7: seconds per attempt; 0 = the engine's default ([HTTP] HttpTotalTimeout, HttpActivityTimeout). An
+	 * activity of 0 with a total above 0 bounds silence by the total (decision 30).
+	 */
 	FVaRestClient& WithTimeout(float Total, float Activity = 0.f);
 ```
 
@@ -11289,7 +12832,10 @@ FVaRestClient& FVaRestClient::WithTimeout(float Total, float Activity)
 	/** Game thread: calls OnProgress when the probe changed since the last call */
 	void DeliverProgress(FVaRestExchange& Ex)
 	{
-		if (!Ex.Probe.IsValid() || !Ex.Handler.IsValid() || !Ex.Handler->WantsProgress())
+		// No progress for a request being canceled, whose owner is gone, or at shutdown (spec 3.2: no callbacks; review C-1).
+		// The last call comes from OnAttemptDone after Task 11's owner check only marks it: without this, OnProgress
+		// would run into a destroyed owner.
+		if (!Ex.Probe.IsValid() || !Ex.Handler.IsValid() || !Ex.Handler->WantsProgress() || Ex.IsCancelRequested() || IsOwnerGone(Ex))
 		{
 			return;
 		}
@@ -11298,6 +12844,11 @@ FVaRestClient& FVaRestClient::WithTimeout(float Total, float Activity)
 		Current.BytesReceived = Ex.Probe->BytesReceived.load();
 		Current.UploadTotal = Ex.Probe->UploadTotal.load();
 		Current.DownloadTotal = Ex.Probe->DownloadTotal.load();
+		if (Current.DownloadTotal >= 0 && Current.BytesReceived > Current.DownloadTotal)
+		{
+			// Review M-16: a compressed body's Content-Length counts compressed bytes; a percentage must never pass 100%
+			Current.DownloadTotal = -1;
+		}
 		if (Current == Ex.LastProgress)
 		{
 			return;
@@ -11357,7 +12908,7 @@ In `FClientState::OnAttemptDone`, after `Ex.TransportCall.Reset();` (and the own
 - [ ] **Step 5: Run and pass**
 
 Run: `Tools/run_tests.sh VaRest.Http`
-Expected: `0 failed`, including `VaRest.Http.Timeout.Applied`, `VaRest.Http.Timeout.Fires`, `VaRest.Http.Progress.Throttled`.
+Expected: `0 failed`, including `VaRest.Http.Timeout.Applied`, `VaRest.Http.Timeout.Fires`, `VaRest.Http.Progress.Throttled`, `VaRest.Http.Progress.NotAfterOwnerGone`. (`Throttled` needs the virtual clock's integer nanoseconds, Task 6: in doubles its third tick falls due at 0.30000000000000004 while the test reaches 0.3, review I1.)
 
 - [ ] **Step 6: Restore-the-bug (the request's timeout)**
 
@@ -11366,6 +12917,10 @@ In `FTransportStage::Process`, temporarily set `Request.Timeout = Cfg.Timeout;` 
 - [ ] **Step 7: Restore-the-bug (throttle)**
 
 In `DeliverProgress`, temporarily delete the `if (Current == Ex.LastProgress) { return; }` check. Run `Tools/run_tests.sh VaRest.Http.Progress`; expected FAIL in `VaRest.Http.Progress.Throttled` ("no change, no call"). Restore; PASS.
+
+- [ ] **Step 7b: Restore-the-bug (no progress into a gone owner, review C-1)**
+
+In `DeliverProgress`, temporarily remove `|| Ex.IsCancelRequested() || IsOwnerGone(Ex)` from the guard. Run `Tools/run_tests.sh VaRest.Http.Progress`; expected FAIL in `VaRest.Http.Progress.NotAfterOwnerGone` ("owner gone -> no callbacks, progress included"). Restore; PASS. Report both runs.
 
 - [ ] **Step 8: Commit**
 
@@ -11611,6 +13166,7 @@ bool FVaRestHttpLogRotationTest::RunTest(const FString& Parameters)
 	const FVaRestRequestHandle Rotated = Run(Rig, Rig.Client.Get(TEXT("/p/token-one-abcdefgh")));
 	TestTrue(TEXT("a rotated-out value is still scrubbed (Inspector D21)"), Capture.Contains(Id(Rotated) + TEXT("GET https://api.test/p/*** ")));
 	Rig.Clock->Advance(FVaRestSecretSet::PreviousLifetime);
+	TestEqual(TEXT("the expiry timer fired once and left nothing armed (review C1)"), Rig.Clock->NumPendingTimers(), 0);
 	const FVaRestRequestHandle Expired = Run(Rig, Rig.Client.Get(TEXT("/p/token-one-abcdefgh")));
 	TestTrue(TEXT("... until its 10 minutes are up"), Capture.Contains(Id(Expired) + TEXT("GET https://api.test/p/token-one-abcdefgh ")));
 	Rig.Client.ClearSecretValues();
@@ -11729,7 +13285,9 @@ and append:
 void VaRest::Http::FClientState::SetSecret(FName Slot, const FString& Value)
 {
 	check(IsInGameThread());
-	Secrets.Set(Slot, Value, GetConfig()->Clock->Now());
+	const double Now = GetConfig()->Clock->Now();
+	Secrets.Prune(Now); // review C1: expired values never count toward the next expiry
+	Secrets.Set(Slot, Value, Now);
 	EditConfig([](FClientConfig&) {});
 	ScheduleSecretExpiry();
 }
@@ -11746,13 +13304,17 @@ void VaRest::Http::FClientState::ScheduleSecretExpiry()
 {
 	const TSharedRef<const FClientConfig, ESPMode::ThreadSafe> Current = GetConfig();
 	Current->Clock->ClearTimer(SecretExpiryTimer);
-	const double ExpiresAt = Secrets.NextExpiry();
+	// Review C1: prune first, and only a value still pending counts -- an expired one would re-arm a timer due at once,
+	// forever (a hang under the virtual clock, a republished configuration every frame under the real one)
+	const double Now = Current->Clock->Now();
+	Secrets.Prune(Now);
+	const double ExpiresAt = Secrets.NextExpiry(Now);
 	if (ExpiresAt < 0.0)
 	{
 		return;
 	}
 	const TWeakPtr<FClientState, ESPMode::ThreadSafe> Weak = AsShared();
-	SecretExpiryTimer = Current->Clock->SetTimer(ExpiresAt - Current->Clock->Now(), [Weak]
+	SecretExpiryTimer = Current->Clock->SetTimer(ExpiresAt - Now, [Weak]
 	{
 		if (const TSharedPtr<FClientState, ESPMode::ThreadSafe> Pinned = Weak.Pin())
 		{
@@ -12014,6 +13576,7 @@ Inspector §9.1 is the contract; Task 4 built the types and the registry, this t
 #include "Misc/ScopeLock.h"
 #include "UObject/Package.h"
 #include "VaRestClient.h"
+#include "VaRestClientState.h"
 #include "VaRestHttpSettings.h"
 #include "VaRestHttpTesting.h"
 #include "VaRestTrace.h"
@@ -12256,21 +13819,27 @@ bool FVaRestHttpTraceZeroCostTest::RunTest(const FString& Parameters)
 	using namespace VaRest::Http::TraceTestPrivate;
 	FVaRestTrace::FScopedSinkIsolation Isolation; // no sink: the mask is 0
 	FTestRig Rig;
-	const FVaRestTraceCounters& Counters = FVaRestTrace::Counters();
+	// "TraceCounters", not "Counters": Testing::Counters() is in scope (review M18)
+	const FVaRestTraceCounters& TraceCounters = FVaRestTrace::Counters();
+	// Review M9: the counters are process-wide -- let an earlier test's late tasks (body log lines on the redaction pipe,
+	// decode tasks) land before the baseline
+	FlushRedactionPipe();
+	PumpUntil([] { return false; }, 0.05);
 	FVaRestTrace::Counters().Reset();
 	TArray<TSharedRef<TTestOutcome<FVaRestJson>, ESPMode::ThreadSafe>> Outcomes;
 	TArray<FVaRestRequestHandle> Handles;
-	for (int32 i = 0; i < 20; ++i)
+	// Inspector 3.1 item 6 / R3: "over 1000 requests" (review M10); cheap on the fake
+	for (int32 i = 0; i < 1000; ++i)
 	{
 		Outcomes.Add(MakeOutcome<FVaRestJson>());
 		Handles.Add(Observe(Rig.Client.Get(TEXT("/n?token=x")).Header(TEXT("Authorization"), TEXT("Bearer x")), Outcomes.Last()).Send());
 	}
-	PumpUntil([&Outcomes] { return !Outcomes.ContainsByPredicate([](const TSharedRef<TTestOutcome<FVaRestJson>, ESPMode::ThreadSafe>& Each) { return !Each->IsDone(); }); });
+	TestTrue(TEXT("all complete"), PumpUntil([&Outcomes] { return !Outcomes.ContainsByPredicate([](const TSharedRef<TTestOutcome<FVaRestJson>, ESPMode::ThreadSafe>& Each) { return !Each->IsDone(); }); }, 30.0));
 	// Inspector 3.1 item 6: counted, not timed
-	TestEqual(TEXT("IN-11: no event is built without a sink"), Counters.EventsBuilt.load(), static_cast<uint64>(0));
-	TestEqual(TEXT("... no redactor call"), Counters.RedactorCalls.load(), static_cast<uint64>(0));
-	TestEqual(TEXT("... no transport delegate bound"), Counters.DelegateBinds.load(), static_cast<uint64>(0));
-	TestEqual(TEXT("... no trace-point cycles"), Counters.TraceCycles.load(), static_cast<uint64>(0));
+	TestEqual(TEXT("IN-11: no event is built without a sink"), TraceCounters.EventsBuilt.load(), static_cast<uint64>(0));
+	TestEqual(TEXT("... no redactor call"), TraceCounters.RedactorCalls.load(), static_cast<uint64>(0));
+	TestEqual(TEXT("... no transport delegate bound"), TraceCounters.DelegateBinds.load(), static_cast<uint64>(0));
+	TestEqual(TEXT("... no trace-point cycles"), TraceCounters.TraceCycles.load(), static_cast<uint64>(0));
 
 	const FSinkRef Sink = MakeSink(EVaRestTraceDetail::Metadata);
 	FVaRestTrace::AddSink(Sink);
@@ -12279,9 +13848,10 @@ bool FVaRestHttpTraceZeroCostTest::RunTest(const FString& Parameters)
 	const FVaRestRequestHandle Traced = Observe(Rig.Client.Get(TEXT("/n")).Header(TEXT("Authorization"), TEXT("Bearer x")), One).Send();
 	Rig.Wait(One);
 	FVaRestTrace::RemoveSink(Sink);
-	TestEqual(TEXT("with a sink: four events"), Counters.EventsBuilt.load(), static_cast<uint64>(4));
-	TestEqual(TEXT("... the two timing delegates bound for the one attempt (IN-11)"), Counters.DelegateBinds.load(), static_cast<uint64>(2));
+	// Review M9: only this request's events -- a late Client{Destroyed} from an earlier rig may count in EventsBuilt
 	const TArray<FVaRestTraceEvent> Events = Sink->For(Traced.GetId());
+	TestEqual(TEXT("with a sink: four events for the request"), Events.Num(), 4);
+	TestEqual(TEXT("... the two timing delegates bound for the one attempt (IN-11)"), TraceCounters.DelegateBinds.load(), static_cast<uint64>(2));
 	TestTrue(TEXT("Metadata alone builds no headers"), Events.Num() == 4 && Events[0].Payload.Get<FVaRestTraceStarted>().Headers.IsEmpty()
 		&& Events[1].Payload.Get<FVaRestTraceAttemptDispatched>().Headers.IsEmpty() && Events[2].Payload.Get<FVaRestTraceAttemptEnded>().Headers.IsEmpty());
 	return true;
@@ -12390,13 +13960,57 @@ bool FVaRestHttpTraceClientsTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpTraceGhostTest, "VaRest.Http.Trace.SnapshotNoGhost",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpTraceGhostTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::TraceTestPrivate;
+	// Review M-9: the snapshot's walk pins every live state. When a pin is a state's last reference, the state must die
+	// after AddSink added the sink, so its Client{Destroyed} reaches it (else the sink keeps a ghost client)
+	FVaRestTrace::FScopedSinkIsolation Isolation;
+	FVaRestClient Doomed = FVaRestClient::Make(TEXT("https://ghost.test"));
+	const uint64 Id = Doomed.GetId();
+	TSharedPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> Held = Doomed.GetStateInternal();
+	const TWeakPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> Weak = Held;
+	Doomed = FVaRestClient();
+	VaRest::Http::FClientState::ForEachLive([&Held, Id](VaRest::Http::FClientState& State)
+	{
+		if (State.GetClientId() == Id)
+		{
+			Held.Reset(); // the walk's pin is now the last reference
+		}
+	});
+	TestTrue(TEXT("the walk's pin outlives the walk"), Weak.IsValid());
+	PumpUntil([&Weak] { return !Weak.IsValid(); }, 1.0);
+	TestFalse(TEXT("... and is dropped from a later game-thread task"), Weak.IsValid());
+
+	FVaRestClient Second = FVaRestClient::Make(TEXT("https://ghost2.test"));
+	const uint64 SecondId = Second.GetId();
+	TSharedPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> SecondHeld = Second.GetStateInternal();
+	Second = FVaRestClient();
+	const FSinkRef Sink = MakeSink(EVaRestTraceDetail::Metadata);
+	// Runs inside the snapshot (contributors are called in reverse order, MulticastDelegateBase.h:299-300, so after the
+	// core's walk took its pin only if registered first -- either way the state must not be a ghost)
+	const FDelegateHandle Dropper = FVaRestTrace::OnBuildSnapshot().AddLambda([&SecondHeld](FVaRestTraceSnapshot&) { SecondHeld.Reset(); });
+	FVaRestTrace::AddSink(Sink);
+	FVaRestTrace::OnBuildSnapshot().Remove(Dropper);
+	PumpUntil([] { return false; }, 0.05);
+	FVaRestTrace::RemoveSink(Sink);
+	const bool bInSnapshot = Sink->Snapshots.Num() == 1 && Sink->Snapshots[0].Clients.ContainsByPredicate([SecondId](const FVaRestTraceClient& Each) { return Each.ClientId == SecondId; });
+	const bool bDestroyedSeen = Sink->ClientEvents(SecondId).ContainsByPredicate([](const FVaRestTraceClient& Each) { return !Each.bCreated; });
+	TestTrue(TEXT("a client the snapshot listed is destroyed for the sink too: no ghost"), !bInSnapshot || bDestroyedSeen);
+	return true;
+}
+
 #endif
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `Tools/run_tests.sh VaRest.Http.Trace.`
-Expected: it builds (the tests use Task 4's surface only) and the six `VaRest.Http.Trace.*` tests FAIL: the sink receives no request or client events ("a typical request is four events": `""`), and the snapshot has no client.
+Expected: it builds (the tests use Task 4's surface and Task 8's state only) and the seven `VaRest.Http.Trace.*` tests FAIL (`SnapshotNoGhost`'s first half passes already: Task 8 defers the pins): the sink receives no request or client events ("a typical request is four events": `""`), and the snapshot has no client.
 
 - [ ] **Step 3: The trace points** — `Source/VaRestHttp/Private/VaRestTracePoints.h`
 
@@ -12731,7 +14345,7 @@ In `Source/VaRestHttp/Private/VaRestClient.cpp`, in `SendRequest`, make the game
 
 - [ ] **Step 5: Wire the request events** — in `Source/VaRestHttp/Private/VaRestPipeline.cpp`, add `#include "VaRestTracePoints.h"`, then:
 
-1. Replace the whole `FClientState::Enter` (its Task 8 body plus Task 11's owner check) with:
+1. Replace the whole `FClientState::Enter` (its Task 8 body plus Task 11's shutdown and owner checks) with:
 
 ```cpp
 void VaRest::Http::FClientState::Enter(const FVaRestExchangeRef& Exchange)
@@ -12740,14 +14354,24 @@ void VaRest::Http::FClientState::Enter(const FVaRestExchangeRef& Exchange)
 	check(IsInGameThread());
 	FVaRestExchange& Ex = *Exchange;
 	FApiScope Scope(Ex);
-	// Spec 3.1: "A request snapshots the configuration at Send()" -- here, on the game thread, where configuration changes
-	Ex.Config = GetConfig();
+	// Spec 3.1: "A request snapshots the configuration at Send()" -- SendRequest took it (decision 27); an exchange made
+	// any other way gets one here
+	if (!Ex.Config.IsValid())
+	{
+		Ex.Config = GetConfig();
+	}
 	Ex.StartedAt = Ex.Config->Clock->Now();
 	Ex.Phase = EVaRestExchangePhase::InChain;
 	InFlight.Add(Ex.RequestId, Exchange);
+	if (IsShuttingDown())
+	{
+		// Review M-14: after OnEnginePreExit; the HTTP module unloads next (LaunchEngineLoop.cpp:5182)
+		Ex.CancelReason = EVaRestCancelReason::Shutdown;
+		Ex.bCancelRequested = true;
+	}
 	if (Ex.IsCancelRequested() || IsOwnerGone(Ex))
 	{
-		// Canceled before it reached the game thread, or its owner is already gone: no transport call
+		// Canceled before it reached the game thread, its owner is already gone, or the engine is exiting: no transport call
 		TracePoints::Started(Ex);
 		Complete(Exchange, MakeFinish(Ex));
 		return;
@@ -12822,10 +14446,20 @@ In `Source/VaRestHttp/Private/VaRestClientState.cpp`, add `#include "VaRestTrace
 ```cpp
 VaRest::Http::FClientState::~FClientState()
 {
-	// IN-8. This can run on a worker (the last exchange released by a task); the event still goes out on the game thread.
+	// IN-8. Off the game thread only when a game's own thread dropped the last FVaRestClient (the core hands its
+	// references to the game thread, review I-1); the event still goes out on the game thread.
 	TracePoints::Client(ClientId, *Config, false);
-	FScopeLock Lock(&ClientStatePrivate::LiveLock);
-	ClientStatePrivate::Live.RemoveAll([this](const TWeakPtr<FClientState, ESPMode::ThreadSafe>& Weak) { return !Weak.IsValid() || Weak.HasSameObject(this); });
+	if (!IsInGameThread())
+	{
+#if !UE_BUILD_SHIPPING
+		++Testing::Counters().ClientStatesDestroyedOffGameThread;
+#endif
+		// Review I-1 backstop: the configuration (custom stages, transport, clock) dies on the game thread
+		UE::Tasks::Launch(TEXT("VaRest.ReleaseConfig"), [Doomed = Config] {}, UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
+	}
+	ClientStatePrivate::FLiveRegistry& Registry = ClientStatePrivate::Live();
+	FScopeLock Lock(&Registry.Lock);
+	Registry.States.RemoveAll([this](const TWeakPtr<FClientState, ESPMode::ThreadSafe>& Weak) { return !Weak.IsValid() || Weak.HasSameObject(this); });
 }
 
 void VaRest::Http::FClientState::EditConfig(TFunctionRef<void(FClientConfig&)> Edit)
@@ -12865,7 +14499,7 @@ and first in `ShutdownModule`:
 - [ ] **Step 8: Run and pass**
 
 Run: `Tools/run_tests.sh VaRest.Http`
-Expected: `0 failed`, including `VaRest.Http.Trace.Success`, `.Failures`, `.ZeroCostWhenOff`, `.LateAttach`, `.GameThreadOnly`, `.Clients`; the earlier suites stay green (`VaRest.Http.TraceSurface.*` included).
+Expected: `0 failed`, including `VaRest.Http.Trace.Success`, `.Failures`, `.ZeroCostWhenOff`, `.LateAttach`, `.GameThreadOnly`, `.Clients`, `.SnapshotNoGhost`; the earlier suites stay green (`VaRest.Http.TraceSurface.*` included).
 
 - [ ] **Step 9: Restore-the-bug (redaction at capture, Inspector R1)**
 
@@ -12905,7 +14539,7 @@ Decision 14 is the lifecycle: `Tools/run_tests.sh` starts the server on a port t
 
 **Interfaces:**
 - Consumes: the whole client surface (Tasks 8–15); `VaRest::Http::Testing::{GetTestServerUrl, PumpUntil, MakeOutcome, Observe, Counters, FLogCapture, FlushRedactionPipe}`; `FVaRestHttpTestProfile` (Task 10); `VaRest::Http::FSha256` (Task 2).
-- Produces: `Tools/testserver/server.py` (`register_upgrade(token, handler)`, `STATE`, `LOCK`, `PLUGINS`, `FIXTURES_DIR`, `make_server(host, port)`, `main`; CLI `--host --port --ready-file --parent-pid --fixtures-dir`; the routes in its docstring, `/fixture/<name>` for Task 17's benchmark), `Tools/testserver/selftest.py`; runner variables `VAREST_NO_TESTSERVER=1` (no server) and the server log `<Host>/Saved/Logs/VaRestTestServer.log`. W0 adds `ws.py` and the TLS listener (WebSocket §17).
+- Produces: `Tools/testserver/server.py` (`register_upgrade(token, handler)`, `STATE`, `LOCK`, `PLUGINS`, `FIXTURES_DIR`, `make_server(host, port)`, `main`; CLI `--host --port --ready-file --parent-pid --fixtures-dir`; the routes in its docstring, `/fixture/<name>` for Task 17's benchmark, `/slowread` for upload progress), `Tools/testserver/selftest.py`; runner variables `VAREST_NO_TESTSERVER=1` (no server) and the server log `<Host>/Saved/Logs/VaRestTestServer.<runner pid>.log`. W0 adds `ws.py` and the TLS listener (WebSocket §17).
 
 - [ ] **Step 1: Write the failing tests** — `Source/VaRestTests/Private/VaRestIntegrationTest.cpp`
 
@@ -13237,6 +14871,34 @@ bool FVaRestIntegrationDownloadTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestIntegrationUploadProgressTest, "VaRest.Integration.Http.UploadProgress",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestIntegrationUploadProgressTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRestTestsIntegrationPrivate;
+	FString BaseUrl;
+	if (!ServerUrl(*this, BaseUrl))
+	{
+		return false;
+	}
+	// Decision 29 (review I-2): under CompleteOnHttpThread curl reports no progress while it uploads; the counting
+	// archive does. The server reads 1 MiB per 100 ms, so TCP backpressure keeps the 16 MiB upload going for about 1.5 s.
+	constexpr int32 Size = 16 * 1024 * 1024;
+	FVaRestClient Client = MakeClient(BaseUrl);
+	TSharedRef<FProgressLog, ESPMode::ThreadSafe> Progress = MakeShared<FProgressLog, ESPMode::ThreadSafe>();
+	auto Outcome = MakeOutcome<FVaRestJson>();
+	Observe(Client.Post(TEXT("/slowread?chunk=1048576&interval_ms=100")).Body(Pattern(Size))
+		.OnProgress([Progress](const FVaRestProgress& Seen) { Progress->Seen.Add(Seen); }), Outcome).Send();
+	TestTrue(TEXT("completes"), Wait(Outcome, 60.0));
+	TestTrue(TEXT("the server got every byte"), Outcome->Value.IsSet() && Outcome->Value.GetValue()[TEXT("received")].AsInt64() == Size);
+	TestTrue(TEXT("upload progress arrives while the body goes up, not only at the end"),
+		Progress->Seen.ContainsByPredicate([](const FVaRestProgress& Seen) { return Seen.BytesSent > 0 && Seen.BytesSent < Size; }));
+	TestTrue(TEXT("... ending at the whole body"), Progress->Seen.Num() > 0 && Progress->Seen.Last().BytesSent == Size && Progress->Seen.Last().UploadTotal == Size);
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestIntegrationSaveToTest, "VaRest.Integration.Http.SaveTo",
 	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
 
@@ -13295,6 +14957,7 @@ bool FVaRestIntegrationShapesTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("a redirect is followed (CurlHttp.cpp:183)"), Redirected->Value.IsSet() && Redirected->Value.GetValue()[TEXT("path")].AsString() == TEXT("/echo/after"));
 	TestTrue(TEXT("... and the effective URL says where it ended"), Redirected->Response.EffectiveUrl.EndsWith(TEXT("/echo/after")));
 	TestTrue(TEXT("a JSON body over MaxJsonBytes is a Decode error (decision 20)"), Capped->Error.Kind == EVaRestErrorKind::Decode && Capped->Error.Message.Contains(TEXT("MaxJsonBytes")));
+	TestTrue(TEXT("... stopped by the transport, not retryable, nothing kept (reviews M-6, M13)"), !Capped->Error.bRetryable && Capped->Response.Body.Num() == 0);
 	TestTrue(TEXT("... and the same body under the default cap decodes whole"), Uncapped->Value.IsSet()
 		&& Uncapped->Value.GetValue().Num() == FCString::Atoi(*Uncapped->Response.Headers.Get(TEXT("X-Item-Count"))));
 	return true;
@@ -13497,7 +15160,7 @@ bool FVaRestIntegrationStructTest::RunTest(const FString& Parameters)
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `Tools/run_tests.sh VaRest.Integration`
-Expected: it builds, and all twelve `VaRest.Integration.Http.*` tests FAIL with "no test server: run Tools/run_tests.sh, which starts Tools/testserver/server.py …" (the runner does not start one yet). This is decision 14's loud failure, seen once on purpose.
+Expected: it builds, and all thirteen `VaRest.Integration.Http.*` tests FAIL with "no test server: run Tools/run_tests.sh, which starts Tools/testserver/server.py …" (the runner does not start one yet). This is decision 14's loud failure, seen once on purpose.
 
 - [ ] **Step 3: The server** — `Tools/testserver/server.py`
 
@@ -13511,7 +15174,8 @@ Expected: it builds, and all twelve `VaRest.Integration.Http.*` tests FAIL with 
 
 --port 0 lets the OS choose. Once the server accepts connections it prints "VaRestTestServer <base url>" and,
 with --ready-file, writes the base URL to that file (atomically, so a reader never sees half of it). With
---parent-pid it exits when that process is gone, so a runner killed with SIGKILL leaves no server behind.
+--parent-pid it exits when that process is gone or is no longer its parent (a reused PID), so a runner killed
+with SIGKILL leaves no server behind. The parent must be the process that started the server.
 
 Routes. Every response with a body has a Content-Length unless the route says chunked.
 
@@ -13530,6 +15194,8 @@ Routes. Every response with a body has a Content-Length unless the route says ch
   ANY  /redirect?to=<path>  302 to that path
   ANY  /headers/set?<Name>=<Value>&...        200 {} with each pair as a response header
   GET  /json/profile        the FVaRestHttpTestProfile fixture (camelCase keys; an id above 2^53; no "score")
+  ANY  /slowread?chunk=N&interval_ms=M        reads the request body N bytes at a time, M ms apart (TCP backpressure
+                            slows the client's upload, so upload progress can be watched), then {"received": bytes}
   GET  /fixture/<name>      a file of --fixtures-dir (the benchmark's bench_*.json from Tools/gen_bench_json.py), kept
                             in memory after the first read; 404 without the option or the file
   For M4's stage tests (core spec 7.1):
@@ -13787,6 +15453,23 @@ def route_fixture(h, match):
     h.send_bytes(200, body, "application/json" if name.endswith(".json") else "application/octet-stream")
 
 
+def route_slowread(h):
+    """Called before the body is read: it reads the body itself, slowly"""
+    chunk = max(1, query_int(h, "chunk", 65536))
+    interval = query_int(h, "interval_ms", 100) / 1000.0
+    remaining = int(h.headers.get("Content-Length") or 0)
+    received = 0
+    while remaining > 0:
+        data = h.rfile.read(min(chunk, remaining))
+        if not data:
+            break
+        received += len(data)
+        remaining -= len(data)
+        if remaining > 0:
+            time.sleep(interval)
+    h.send_json(200, {"received": received})
+
+
 def route_retry_after(h, match):
     failures = int(match.group(1))
     seen = count_call("retry", h.query.get("key", ["default"])[0])
@@ -13913,6 +15596,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
             url = urllib.parse.urlsplit(self.path)
             self.query = urllib.parse.parse_qs(url.query, keep_blank_values=True)
+            if url.path == "/slowread":
+                route_slowread(self)
+                return
             self.body = self.read_body()
             for methods, pattern, route in ROUTES:
                 match = pattern.fullmatch(url.path)
@@ -13988,11 +15674,15 @@ def write_ready(path, url):
 
 
 def watch_parent(pid, server):
-    # os.kill(pid, 0) only probes on POSIX; on Windows it would terminate the process
+    # POSIX only: there os.kill(pid, 0) probes, on Windows it would terminate the process. A PID can be reused, so the
+    # server also checks that it is still that process's child: when the parent dies, the server is re-parented.
     if os.name != "posix":
         return
     while True:
         time.sleep(0.5)
+        if os.getppid() != pid:
+            server.shutdown()
+            return
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
@@ -14166,6 +15856,12 @@ class ServerTest(unittest.TestCase):
         self.assertEqual((status, data, headers["Content-Length"]), (200, b"x" * 10, "10"))
         self.assertGreaterEqual(time.monotonic() - started, 0.4)
 
+    def test_slowread(self):
+        started = time.monotonic()
+        status, _, value = self.call_json("POST", "/slowread?chunk=100&interval_ms=50", b"x" * 300, {"Content-Type": "application/octet-stream"})
+        self.assertEqual((status, value), (200, {"received": 300}))
+        self.assertGreaterEqual(time.monotonic() - started, 0.1)
+
     def test_large_is_deterministic(self):
         _, headers, first = self.call("GET", "/large?bytes=100000&seed=5")
         _, _, second = self.call("GET", "/large?bytes=100000&seed=5")
@@ -14264,12 +15960,17 @@ class ServerTest(unittest.TestCase):
 
 class LifecycleTest(unittest.TestCase):
     def test_ready_file_and_parent_watch(self):
-        # The runner's contract (M3 plan decision 14): a ready file with the URL; exit when the parent goes
+        # The runner's contract (M3 plan decision 14): a ready file with the URL; exit when the parent -- the process
+        # that started the server -- goes. A stand-in parent starts the server and sleeps; the test kills it.
         with tempfile.TemporaryDirectory() as directory:
             ready = os.path.join(directory, "url")
-            parent = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
-            child = subprocess.Popen([sys.executable, "-I", os.path.join(HERE, "server.py"), "--port", "0",
-                                      "--ready-file", ready, "--parent-pid", str(parent.pid)], stdout=subprocess.PIPE)
+            child_pid_file = os.path.join(directory, "pid")
+            starter = ("import os, subprocess, sys, time\n"
+                       "child = subprocess.Popen([sys.executable, '-I', sys.argv[1], '--port', '0', '--ready-file', sys.argv[2],"
+                       " '--parent-pid', str(os.getpid())], stdout=subprocess.DEVNULL)\n"
+                       "open(sys.argv[3], 'w').write(str(child.pid))\n"
+                       "time.sleep(60)\n")
+            parent = subprocess.Popen([sys.executable, "-c", starter, os.path.join(HERE, "server.py"), ready, child_pid_file])
             try:
                 deadline = time.monotonic() + 10
                 while not os.path.exists(ready) and time.monotonic() < deadline:
@@ -14280,16 +15981,23 @@ class LifecycleTest(unittest.TestCase):
                 connection.request("GET", "/echo")
                 self.assertEqual(connection.getresponse().status, 200)
                 connection.close()
+                with open(child_pid_file, encoding="utf-8") as stream:
+                    child_pid = int(stream.read())
                 parent.kill()
                 parent.wait()
-                self.assertEqual(child.wait(timeout=5), 0)
-                self.assertTrue(child.stdout.readline().startswith(b"VaRestTestServer http://127.0.0.1:"))
+                deadline = time.monotonic() + 5
+                gone = False
+                while time.monotonic() < deadline and not gone:
+                    try:
+                        os.kill(child_pid, 0)
+                        time.sleep(0.1)
+                    except ProcessLookupError:
+                        gone = True
+                self.assertTrue(gone, "the server outlived its parent")
             finally:
-                for process in (parent, child):
-                    if process.poll() is None:
-                        process.kill()
-                        process.wait()
-                child.stdout.close()
+                if parent.poll() is None:
+                    parent.kill()
+                    parent.wait()
 
 
 if __name__ == "__main__":
@@ -14299,7 +16007,7 @@ if __name__ == "__main__":
 - [ ] **Step 5: Run the self-test**
 
 Run: `python3 -I Tools/testserver/selftest.py -v`
-Expected: `Ran 22 tests` … `OK` (about 2 s; Python 3.9 or later for `random.randbytes`).
+Expected: `Ran 23 tests` … `OK` (about 2 s; Python 3.9 or later for `random.randbytes`).
 
 - [ ] **Step 6: The runner owns the server** — in `Tools/run_tests.sh`:
 
@@ -14309,15 +16017,16 @@ Expected: `Ran 22 tests` … `OK` (about 2 s; Python 3.9 or later for `random.ra
 # The runner starts Tools/testserver/server.py on a port the OS picks and passes its URL to the editor as
 # -VaRestTestServer=<url> for the VaRest.Integration.* tests (M3 plan decision 14); it stops the server on exit, and the
 # server also exits by itself when this script dies (--parent-pid). VAREST_NO_TESTSERVER=1 skips it: integration tests
-# then fail, by design. The server's output goes to <Host>/Saved/Logs/VaRestTestServer.log.
+# then fail, by design. The server's output goes to <Host>/Saved/Logs/VaRestTestServer.<runner pid>.log.
 ```
 
 2. After the `if [[ $BUILD -eq 1 ]]; then ... fi` block, insert:
 
 ```bash
 SERVER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/testserver"
-SERVER_URL_FILE="$HOST/Saved/Logs/VaRestTestServer.url"
-SERVER_LOG="$HOST/Saved/Logs/VaRestTestServer.log"
+# $$ in the names: two runners at once each get their own (review M-13)
+SERVER_URL_FILE="$HOST/Saved/Logs/VaRestTestServer.$$.url"
+SERVER_LOG="$HOST/Saved/Logs/VaRestTestServer.$$.log"
 SERVER_PID=""
 stop_server() {
 	# Our own child, by PID (never by name or pattern)
@@ -14325,6 +16034,7 @@ stop_server() {
 		kill "$SERVER_PID" 2>/dev/null || true
 		wait "$SERVER_PID" 2>/dev/null || true
 	fi
+	rm -f "$SERVER_URL_FILE"
 }
 trap stop_server EXIT
 SERVER_ARGS=()
@@ -14361,7 +16071,7 @@ fi
 - [ ] **Step 7: Run and pass**
 
 Run: `Tools/run_tests.sh VaRest.Integration`
-Expected: `12 passed, 0 failed` (about 15 s: the timeouts, the limiter and the 8 MiB download dominate). Then `Tools/run_tests.sh --no-build VaRest` — everything green, unit and integration. Check that no `server.py` is left running afterwards: `pgrep -x python3` lists none started by the run (look at its arguments with `ps -o args= -p <pid>`; never kill by pattern).
+Expected: `13 passed, 0 failed` (about 17 s: the timeouts, the limiter, the slow upload and the 8 MiB download dominate). Then `Tools/run_tests.sh --no-build VaRest` — everything green, unit and integration. Check that no `server.py` is left running afterwards: `pgrep -x python3` lists none started by the run (look at its arguments with `ps -o args= -p <pid>`; never kill by pattern).
 
 - [ ] **Step 8: Restore-the-bug (the runner's lifecycle, decision 14)**
 
@@ -14689,11 +16399,16 @@ the fallback; this page is the checklist for the other platforms at the release 
 1. `OnProcessRequestComplete` runs off the game thread when the policy is `CompleteOnHttpThread`, exactly once,
    also for a request the engine refuses to start.
 2. The response body arrives through `SetResponseBodyReceiveStreamDelegateV2` into VaRest's own sink (reserved at
-   `Content-Length + 1`, the byte of slack `ParseOwned` needs), every chunk before the completion, from one thread
-   at a time.
-3. When a trace sink wants metadata (Inspector IN-11), `OnStatusCodeReceived` and `OnRequestProgress64` run off the
-   game thread and only write atomics.
-4. Nothing of VaRest runs on the HTTP thread beyond that: the completion launches a game-thread task (Task 8).
+   `Content-Length + 1`, the byte of slack `ParseOwned` needs, capped at `max(MaxJsonBytes, 8 MiB) + 1`), every chunk
+   before the completion. The sink has its own lock and is sealed by the completion, so the thread that writes it and
+   the thread that takes it need no ordering from the engine.
+3. When a trace sink wants metadata (Inspector IN-11) or a caller wants progress, `OnStatusCodeReceived` and
+   `OnRequestProgress64` run off the game thread and only write atomics, and the upload goes through VaRest's counting
+   archive (`SetContentFromStream`), whose `Serialize` runs on the thread that reads the body (curl's read callback
+   on the HTTP thread, NSURLSession's stream thread on Apple) and also only writes atomics.
+4. Nothing of VaRest runs on the HTTP thread beyond that: the completion launches a game-thread task (Task 8). A
+   `SaveTo` download is written to its temp file on the thread that receives it, as the engine's own file streaming
+   does.
 
 ## Backends in UE 5.8.1
 
@@ -14709,9 +16424,18 @@ as one too (`AppleHttp.cpp:689`). The HTTP thread finishes a `CompleteOnHttpThre
 (`HttpThread.cpp:452-461`); a request refused before it starts is finished on the HTTP thread as well
 (`FinishRequestNotInHttpManager`, `HttpRequestCommon.cpp:224-237`), and the status-code delegate follows the same policy (`HttpRequestCommon.cpp:629-640`).
 On Apple the body bytes come from NSURLSession's delegate (`URLSession:dataTask:didReceiveData:`,
-`AppleHttp.cpp:194-206`) into `PassReceivedDataToStream` (`AppleHttp.cpp:884-888`), so the sink is written on that
-queue and read at completion on the HTTP thread: item 2 depends on the engine's own ordering there, which is what
-the byte-exact tests below check.
+`AppleHttp.cpp:194-206`, on the session's serial delegate queue, `ApplePlatformHttp.cpp:265`) into
+`PassReceivedDataToStream` (`AppleHttp.cpp:884-888`), so the sink is written on that queue and read at completion on
+the HTTP thread, which learns of the completion through a plain property (`AppleHttp.cpp:220-233`, `:948-952`). The
+sink synchronizes the delegate queue and the HTTP thread itself (its lock; review C-4), so item 2 holds by
+construction; the byte-exact tests below still check it.
+
+Timeouts on Apple: NSURLSession's `timeoutInterval` is the engine's connection timeout (`AppleHttp.cpp:738`, `[HTTP]
+HttpConnectionTimeout`, 30 s by default), and it bounds silence whatever activity timeout a request sets. A
+`.Timeout(60)` against a server silent for 40 s therefore fails at about 30 s on Mac and iOS, as a connection error.
+On curl VaRest sets the engine's activity timeout to the total timeout when no activity timeout is given (decision
+30), so there the total governs. A game that needs long silences on Apple raises `HttpConnectionTimeout` in its
+`[HTTP]` section.
 
 ## Verified
 
@@ -14771,6 +16495,15 @@ In the module table, replace the `VaRestHttp` row and add one after `VaRestEdito
 | `VaRestTests` | UncookedOnly | test-only USTRUCTs, the `VaRest.Integration.*` suite against `Tools/testserver/`, `Bench.VaRest.Http.*`; never in a game target |
 ```
 
+In `Conventions & Patterns`, after the line that freezes the v2 Blueprint-visible surface, add (review M16):
+
+```markdown
+- **`UVaRestHttpSettings` property names are frozen from M3**: they are persisted config keys
+  (`[/Script/VaRestHttp.VaRestHttpSettings]` in a project's ini). `FVaRestError`'s fields, `EVaRestErrorKind`,
+  `EVaRestPriority`, `EVaRestLogLevel` and `EVaRestQueryStyle` freeze with M5, when they become pin names. A rename
+  needs a CoreRedirect (or a config redirect) in the same commit.
+```
+
 (`AGENTS.md` has neither section, so nothing is mirrored there.)
 
 - [ ] **Step 10: The milestone builds** (CLAUDE.md: "Monolithic game target -- a different code path; check it before a milestone lands"; spec §7.2: "monolithic Development and Shipping game targets")
@@ -14793,19 +16526,36 @@ python3 - Source/VaRestHttp Source/VaRestTests Source/VaRestJson/Private/VaRestJ
 import pathlib, re, sys
 capture = re.compile(r'\[(?:[^\]]*[ ,])?([A-Za-z_]\w*) = (?:MoveTemp\()?\1\)?[\],]')
 member = re.compile(r'^\s+(?:const )?[\w:<>, ]+[ &*](Config|State|Url|Verb|Body|Tag|Priority|Owner|Attempt|InFlight|Limiter) = ')
+declared = re.compile(r'^\s+(?:const )?(?:auto|[A-Z][\w:]*(?:<[^;=()]*>)?)[ &*]+([A-Za-z_]\w*)(?: = |\(|\{| : )')
 owners = {"VaRestClient.cpp", "VaRestClientState.cpp", "VaRestPipeline.cpp", "VaRestLogStage.cpp", "VaRestTracePoints.cpp"}
 for root in sys.argv[1:]:
     paths = [pathlib.Path(root)] if root.endswith(".cpp") else sorted(pathlib.Path(root).rglob("*.[ch]*"))
     for path in paths:
-        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        lines = path.read_text(encoding="utf-8").splitlines()
+        # Review I2 (MSVC C4456): a local declared inside a lambda body with the name of a local of the function around
+        # it. Approximation: in each function (a line starting at column 0 that ends a signature, up to the next "}" at
+        # column 0), a name declared twice where the second declaration is deeper inside a "[...](...) ... {" block.
+        scope_names = {}
+        lambda_depth = 0
+        for number, line in enumerate(lines, 1):
+            if line.startswith("}"):
+                scope_names, lambda_depth = {}, 0
             if capture.search(line):
                 print("%s:%d: init-capture reuses a name: %s" % (path, number, line.strip()))
             if path.name in owners and member.search(line):
                 print("%s:%d: check: a local named like a member? %s" % (path, number, line.strip()))
+            match = declared.match(line)
+            if match:
+                name, indent = match.group(1), len(line) - len(line.lstrip("\t"))
+                if lambda_depth > 0 and name in scope_names and scope_names[name] < indent:
+                    print("%s:%d: check: a lambda local hides an enclosing local (C4456)? %s" % (path, number, line.strip()))
+                scope_names.setdefault(name, indent)
+            if re.search(r'\]\s*\([^)]*\)\s*(?:mutable\s*)?(?:->\s*[\w:<>]+\s*)?$|\]\s*(?:mutable\s*)?$', line.rstrip()) or re.search(r'\]\([^)]*\)\s*(?:mutable\s*)?\{\s*$', line):
+                lambda_depth += 1
 PY
 ```
 
-Expected: no `init-capture reuses a name` line (`[Result = MoveTemp(Result)]`: C4456/C4458 are errors in this build, `CppCompileWarnings.cs:88-90`). Each `check:` line matters only inside a member function of `FVaRestExchange`, `FClientState` or `FVaRestClient` (C4458); a free function or another class may use the name. Rename what is real (`Moved`, `Pending`, `Resolved`) and rebuild.
+Expected: no `init-capture reuses a name` line (`[Result = MoveTemp(Result)]`: C4456/C4458 are errors in this build, `CppCompileWarnings.cs:88-90`). A `check: a local named like a member` line matters only inside a member function of `FVaRestExchange`, `FClientState` or `FVaRestClient` (C4458); a free function or another class may use the name. A `check: a lambda local hides an enclosing local` line is the class of review I2 (`FBodySink& Sink` inside a lambda of a function with a `Sink`; clang flags it only with `-Wshadow-uncaptured-local`): read each one. Rename what is real (`Moved`, `Pending`, `Received`) and rebuild.
 
 - [ ] **Step 12: The whole suite**
 
@@ -14842,10 +16592,10 @@ Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 
 What later milestones take from here, so their plans start from code that exists:
 
-- **M4 stages** go in `FClientState::Publish` between the custom `Outer` stages and `MakeAttemptBoundaryStage()` (offline queue, cache, retry; decision 13), and auth before the custom `PerAttempt` stages. Retry declares `MayReissue()` (decision 12) and reads `FVaRestError::bRetryable`, `FVaRestExchange::IsIdempotent()` and the stable `Idempotency-Key` (Task 9). Backoff uses `IVaRestClock::SetTimer` (Task 6) with the injectable `FRandomStream` M4 adds (WebSocket §19 item 1). Auth calls `FVaRestClient::SetSecretValue` for each token (Task 14) and adds its token paths and header/query names to the redactor's keys (IN-13 layer 2).
-- **M4 trace**: `Note`, `Excerpt` (IN-14: the request prefix copied at `Send`, the response redacted on the decode task before `ParseOwned`, an undecoded one on the redaction pipe, the admission counter), `Marker`, `GapBefore`/`AuthWait`/`AuthRefreshId` in `AttemptDispatched`, the cache fields of `Started`, `Envelope` in `Completed`, and the IN-17 goldens `VaRest.Http.Trace.*` beside Task 15's. `bExcerptPending` stays false until then. `FVaRestTraceEvent::Source` is already there (WebSocket §19 item 4).
+- **M4 stages** go in `FClientState::Publish` between the custom `Outer` stages and `MakeAttemptBoundaryStage()` (offline queue, cache, retry; decision 13), and auth before the custom `PerAttempt` stages. Retry declares `MayReissue()` (decision 12) and reads `FVaRestError::bRetryable`, `FVaRestExchange::IsIdempotent()` and the stable `Idempotency-Key` (Task 9). Backoff uses `IVaRestClock::SetTimer` (Task 6) with the injectable `FRandomStream` M4 adds (WebSocket §19 item 1). Auth calls `FVaRestClient::SetSecretValue` for each token (Task 14) and adds its token paths and header/query names to the redactor's keys (IN-13 layer 2). Added keys match whole normalised keys (decision 18), so for a `BearerRefresh` token path such as `data.auth.refresh_token` auth adds the last segment, `refresh_token`, not the path (review M19).
+- **M4 trace**: `Note`, `Excerpt` (IN-14: the request prefix copied at `Send`, the response redacted on the decode task before `ParseOwned`, an undecoded one on the redaction pipe, the admission counter), `Marker`, `GapBefore`/`AuthWait`/`AuthRefreshId` in `AttemptDispatched`, the cache fields of `Started`, `Envelope` in `Completed`, and the IN-17 goldens `VaRest.Http.Trace.*` beside Task 15's. `bExcerptPending` stays false until then. `FVaRestTraceEvent::Source` is already there (WebSocket §19 item 4). Decode-task excerpts launch on the redaction pipe off the game thread, so M4 first turns `GetRedactionPipe()` into an atomic pointer with a shutdown flag the launchers check (review M-10; Task 5 checks the game thread until then).
 - **M4 envelope**: decode errors already carry `Path`; the envelope's evaluator runs in `RunDecode` (Task 10) before the handler's `Decode`.
-- **M5 Blueprint decode** (decision 22): decoding into a `UUserDefinedStruct` off the game thread keeps the struct alive for the whole task (`TStrongObjectPtr<const UScriptStruct>` or an `FGCObject`), decodes into memory the task owns (the `FInstancedStruct`), and fetches converted-field lists per use, never cached across a recompile (`UserDefinedStructureCompilerUtils.cpp:225`). Blueprint nodes then pass their initiator through IN-15 (Task 15 reads the frame when `Send` runs on the game thread; its test lands with the nodes). `FVaRestError`'s fields and `EVaRestErrorKind`'s values become pin names then: freeze them with M5's surface.
+- **M5 Blueprint decode** (decision 22): decoding into a `UUserDefinedStruct` off the game thread keeps the struct alive for the whole task (`TStrongObjectPtr<const UScriptStruct>` or an `FGCObject`), decodes into memory the task owns (the `FInstancedStruct`), and fetches converted-field lists per use, never cached across a recompile (`UserDefinedStructureCompilerUtils.cpp:225`). Blueprint nodes then pass their initiator through IN-15 (Task 15 reads the frame when `Send` runs on the game thread; its test lands with the nodes). `FVaRestError`'s fields and `EVaRestErrorKind`'s values become pin names then: freeze them with M5's surface (the CLAUDE.md line Task 17 adds). Blueprint async actions decide whether their delegates fire at a frame boundary or, like the C++ callbacks, from game-thread tasks that can run between tick groups (decision 32, review M-12); all deliveries go through `PipelinePrivate::OnGameThread`, so the change is local.
 - **M5 settings**: the rest of spec §5.5 joins `UVaRestHttpSettings` (Task 2); hubs open scopes beyond scope 0 (IN-7) through `FVaRestTrace::OnBuildSnapshot`.
 - **W0/W1** (WebSocket §16.3, §17): `ws.py` registers with `server.register_upgrade("websocket", handler)` and shares `STATE`/`LOCK` (Task 16); the TLS listener and `certs/` are W0's. W1 reuses `PumpUntil`, `FLogCapture`, the runner's server lifecycle and the redactor (WebSocket §19 item 3).
-- **Known limits carried**: a request canceled while still in phase `Created` (sent from a worker, not yet on the game thread) is not reached by `CancelAll` (it is not in flight yet) and completes canceled only if its own handle was canceled; the body of a non-JSON error response is kept to 4 KiB of text (`RawBodyCap`, Task 8); progress is throttled to 10 Hz on the game thread (Task 13).
+- **Known limits carried**: a request canceled while still in phase `Created` (sent from a worker, not yet on the game thread) is not reached by `CancelAll` (it is not in flight yet) and completes canceled only if its own handle was canceled; the body of a non-JSON error response is kept to 4 KiB of text (`RawBodyCap`, Task 8), and a JSON body that failed to parse to its first 4 KiB (decision 26); progress is throttled to 10 Hz on the game thread (Task 13); `SaveTo` writes on the HTTP thread (decision 31: a slow disk stalls it; a bounded pipe can go behind `FBodySink` without an API change); on Mac and iOS a silence longer than `[HTTP] HttpConnectionTimeout` fails the request whatever its timeouts (`docs/dev/http-thread-completion.md`); the limiter's strict priority can starve `Low` under sustained load (spec §4.6, review M-19).
