@@ -466,7 +466,12 @@ void VaRest::Http::FClientState::Enter(const FVaRestExchangeRef& Exchange)
 		Ex.CancelReason = EVaRestCancelReason::Shutdown;
 		Ex.bCancelRequested = true;
 	}
-	if (Ex.IsCancelRequested() || IsOwnerGone(Ex))
+	if (IsOwnerGone(Ex))
+	{
+		// Silent by shape: marked here, so the entry path does not rest on Complete's own re-check (task 11 review, minor 1)
+		MarkOwnerGone(Ex);
+	}
+	if (Ex.IsCancelRequested())
 	{
 		// Canceled before it reached the game thread, its owner is already gone, or the engine is exiting: no transport call
 		Complete(Exchange, MakeFinish(Ex));
@@ -639,11 +644,13 @@ void VaRest::Http::FClientState::Complete(const FVaRestExchangeRef& Exchange, FF
 		// Spec 3.2: owner gone -> no callbacks, whatever canceled it first (a Cancel() in the owner's EndPlay, review C-2)
 		MarkOwnerGone(Ex);
 	}
-	if (Ex.IsCancelRequested() && Ex.CancelReason == EVaRestCancelReason::None)
+	// Read once: a worker's Cancel() landing between two reads would deliver Kind=Canceled with no reason (task 11 review, minor 4)
+	const bool bCanceled = Ex.IsCancelRequested();
+	if (bCanceled && Ex.CancelReason == EVaRestCancelReason::None)
 	{
 		Ex.CancelReason = EVaRestCancelReason::User; // the flag set off the game thread before the reason
 	}
-	if (Ex.IsCancelRequested() && Finish.Response.SavedFile.IsEmpty())
+	if (bCanceled && Finish.Response.SavedFile.IsEmpty())
 	{
 		// After Cancel() nothing but Canceled is delivered, even an answer that raced it (decision 2). A SaveTo whose
 		// rename already replaced the destination delivers its success: the truthful outcome (review M-4).

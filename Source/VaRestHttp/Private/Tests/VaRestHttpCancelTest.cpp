@@ -289,7 +289,8 @@ bool FVaRestHttpOwnerGoneTest::RunTest(const FString& Parameters)
 	Gone->MarkAsGarbage();
 	auto Never = MakeOutcome<FVaRestJson>();
 	const FVaRestRequestHandle NeverHandle = Observe(Rig.Client.Get(TEXT("/gone")).Owner(Gone), Never).Send();
-	PumpUntil([&NeverHandle] { return !NeverHandle.IsActive(); });
+	TestTrue(TEXT("the request whose owner was gone before entry finishes"), PumpUntil([&NeverHandle] { return !NeverHandle.IsActive(); }));
+	TestEqual(TEXT("... and leaves nothing in flight"), Rig.Client.GetInFlightCount(), 0);
 	TestEqual(TEXT("an owner gone before entry: nothing sent"), Rig.Fake->NumCalls(), 1);
 	TestEqual(TEXT("... and nothing delivered"), Never->CompleteCalls.load(), 0);
 	return true;
@@ -313,7 +314,8 @@ bool FVaRestHttpOwnerCheckpointsTest::RunTest(const FString& Parameters)
 	GoneAtEntry->MarkAsGarbage();
 	auto Entered = MakeOutcome<FVaRestJson>();
 	const FVaRestRequestHandle EnteredHandle = Observe(Entry.Client.Get(TEXT("/entry")).Owner(GoneAtEntry), Entered).Send();
-	PumpUntil([&EnteredHandle] { return !EnteredHandle.IsActive(); });
+	TestTrue(TEXT("finishes (entry)"), PumpUntil([&EnteredHandle] { return !EnteredHandle.IsActive(); }));
+	TestEqual(TEXT("... nothing left in flight (entry)"), Entry.Client.GetInFlightCount(), 0);
 	TestEqual(TEXT("an owner gone on entry: no stage runs"), Watcher->Entered, 0);
 	TestEqual(TEXT("... and nothing is delivered (entry)"), Entered->CompleteCalls.load(), 0);
 
@@ -329,7 +331,8 @@ bool FVaRestHttpOwnerCheckpointsTest::RunTest(const FString& Parameters)
 		TUniqueFunction<void()> Resume = MoveTemp(Holder->Resume);
 		Resume();
 	}
-	PumpUntil([&DispatchedHandle] { return !DispatchedHandle.IsActive(); });
+	TestTrue(TEXT("finishes (dispatch)"), PumpUntil([&DispatchedHandle] { return !DispatchedHandle.IsActive(); }));
+	TestEqual(TEXT("... nothing left in flight (dispatch)"), Dispatch.Client.GetInFlightCount(), 0);
 	TestEqual(TEXT("an owner gone before the dispatch: no transport call"), Dispatch.Fake->NumCalls(), 0);
 	TestEqual(TEXT("... and nothing is delivered (dispatch)"), Dispatched->CompleteCalls.load(), 0);
 
@@ -343,7 +346,8 @@ bool FVaRestHttpOwnerCheckpointsTest::RunTest(const FString& Parameters)
 	const FVaRestRequestHandle AttemptedHandle = Observe(Ending.Client.Get(TEXT("/attempt")).Owner(GoneInFlight), Attempted).Send();
 	GoneInFlight->MarkAsGarbage();
 	Ending.Fake->Complete(0, Json(200, R"({"late":1})"));
-	PumpUntil([&AttemptedHandle] { return !AttemptedHandle.IsActive(); });
+	TestTrue(TEXT("finishes (attempt)"), PumpUntil([&AttemptedHandle] { return !AttemptedHandle.IsActive(); }));
+	TestEqual(TEXT("... nothing left in flight (attempt)"), Ending.Client.GetInFlightCount(), 0);
 	TestTrue(TEXT("an owner gone in flight: the outcome comes back up as canceled"), Retrier->bSawCancel);
 	TestEqual(TEXT("... and nothing is delivered (attempt)"), Attempted->CompleteCalls.load(), 0);
 
@@ -356,7 +360,8 @@ bool FVaRestHttpOwnerCheckpointsTest::RunTest(const FString& Parameters)
 	const FVaRestRequestHandle CompletedHandle = Observe(Completion.Client.Get(TEXT("/complete")).Owner(GoneBeforeDelivery), Completed).Send();
 	CompletedHandle.Cancel();
 	GoneBeforeDelivery->MarkAsGarbage(); // before any pump
-	PumpUntil([&CompletedHandle] { return !CompletedHandle.IsActive(); });
+	TestTrue(TEXT("finishes (completion)"), PumpUntil([&CompletedHandle] { return !CompletedHandle.IsActive(); }));
+	TestEqual(TEXT("... nothing left in flight (completion)"), Completion.Client.GetInFlightCount(), 0);
 	PumpUntil([] { return false; }, 0.05);
 	TestEqual(TEXT("an owner gone before its Canceled is delivered: nothing is delivered"), Completed->CompleteCalls.load(), 0);
 	{
@@ -389,11 +394,15 @@ bool FVaRestHttpCancelAllTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("the other tag is untouched"), B->IsDone());
 	TestEqual(TEXT("... still in flight"), Rig.Client.GetInFlightCount(), 1);
 
-	// Engine exit: every live client's requests stop, and no callback runs into a world that is going away
+	// Engine exit: every live client's requests stop, and no callback runs into a world that is going away.
+	// CancelForShutdown() is the process-wide one the OnEnginePreExit hook calls: run inside a working editor, it cancels
+	// every live VaRest client's in-flight requests, not only this rig's, and none of them ever gets a callback; until the
+	// reset below, every Send() anywhere completes silently without being sent. Run this test where no other VaRest
+	// traffic matters (a headless test run), never with a live session using VaRest (task 11 review, minor 6).
 	VaRest::Http::FClientState::CancelForShutdown();
 	// Review N-6: the editor goes on, so every later test must send again -- also when this test returns early
 	ON_SCOPE_EXIT { VaRest::Http::FClientState::ResetShutdownInternal(); };
-	PumpUntil([&Rig] { return Rig.Client.GetInFlightCount() == 0; });
+	TestTrue(TEXT("shutdown finishes every request"), PumpUntil([&Rig] { return Rig.Client.GetInFlightCount() == 0; }));
 	PumpUntil([] { return false; }, 0.05);
 	TestEqual(TEXT("shutdown cancels the transport call"), Rig.Fake->NumCanceled(), 3);
 	TestEqual(TEXT("... and delivers nothing"), B->CompleteCalls.load(), 0);
@@ -401,7 +410,8 @@ bool FVaRestHttpCancelAllTest::RunTest(const FString& Parameters)
 	// Review M-14: after OnEnginePreExit the HTTP module is about to unload; a late Send() never reaches it
 	auto Late = MakeOutcome<FVaRestJson>();
 	const FVaRestRequestHandle LateHandle = Observe(Rig.Client.Get(TEXT("/late")), Late).Send();
-	PumpUntil([&LateHandle] { return !LateHandle.IsActive(); });
+	TestTrue(TEXT("a request sent during shutdown finishes"), PumpUntil([&LateHandle] { return !LateHandle.IsActive(); }));
+	TestEqual(TEXT("... and leaves nothing in flight"), Rig.Client.GetInFlightCount(), 0);
 	PumpUntil([] { return false; }, 0.05);
 	TestEqual(TEXT("a request sent during shutdown is not sent"), Rig.Fake->NumCalls(), 3);
 	TestEqual(TEXT("... and delivers nothing"), Late->CompleteCalls.load(), 0);

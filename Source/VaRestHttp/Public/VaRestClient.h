@@ -77,7 +77,10 @@ public:
 	bool IsActive() const;
 	/**
 	 * Any thread. The callbacks then get Kind=Canceled (decision 2), never inside Cancel() (decision 3); after it returns
-	 * on the game thread no OnSuccess runs. No-op on a finished request.
+	 * on the game thread no OnSuccess runs, with two exceptions. A SaveTo() whose rename already replaced the destination
+	 * delivers its success with the saved file, the truthful outcome (review M-4). With OnHttpThread(), a result already
+	 * handed to the worker is past canceling (IsActive() is false): Cancel() is then a no-op while its callbacks are queued
+	 * or running there. No-op on a finished request.
 	 */
 	void Cancel() const;
 
@@ -436,7 +439,11 @@ public:
 	FString GetBaseUrl() const;
 	/** Game thread */
 	int32 GetInFlightCount() const;
-	/** Game thread: cancels every in-flight request with this tag (all of them for NAME_None), like Cancel() on each */
+	/**
+	 * Game thread: cancels every in-flight request with this tag (all of them for NAME_None), like Cancel() on each. It sees
+	 * the requests that have reached the game thread: one sent from another thread an instant earlier, whose hop here has
+	 * not run yet, is not among them (IsActive() is already true for it); cancel that one by its handle.
+	 */
 	void CancelAll(FName InTag = NAME_None);
 
 	// ---- configuration (game thread)

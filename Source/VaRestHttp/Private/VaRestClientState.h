@@ -65,7 +65,10 @@ namespace VaRest::Http
 		 * must not run into an owner that is gone or at engine exit, whatever canceled first (review C-2).
 		 */
 		void Cancel(const FVaRestExchangeRef& Exchange, EVaRestCancelReason Reason);
-		/** Game thread: every in-flight exchange with InTag (all for NAME_None) */
+		/**
+		 * Game thread: every in-flight exchange with InTag (all for NAME_None) -- those Enter has seen. One sent from another
+		 * thread whose Enter task has not run is not in InFlight yet; its handle cancels it (task 11 review, minor 3).
+		 */
 		void CancelAll(FName InTag, EVaRestCancelReason Reason);
 		/** FCoreDelegates::OnEnginePreExit: every live client's requests, without callbacks; later sends complete silently (review M-14) */
 		static void CancelForShutdown();
