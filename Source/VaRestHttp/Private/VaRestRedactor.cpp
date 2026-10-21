@@ -351,22 +351,47 @@ FString FVaRestRedactor::ScrubText(FStringView Text) const
 
 int32 FVaRestRedactor::SecretValueStart(FStringView Piece, EVaRestRedactKeyKind Kind) const
 {
-	// One rule for query, fragment, form bodies and path parameters (review round 2): a key can start at the front of the
-	// piece or after any '?' (a query inside a query value or a hash-router fragment) or ';' (a pair separator for some
-	// servers, a path parameter's start). The first candidate that is a secret key wins, and its value runs to the end
-	// of the piece: ';' and '?' only ever START a key, they never end a value, so "password=ab;cd" cannot leak "cd".
-	// Over-redaction is accepted; leaking a tail is not.
-	for (int32 Start = 0; Start < Piece.Len(); ++Start)
+	// One rule for query, fragment, form bodies and path parameters: a key can start at the front of the piece or after any
+	// '?' (a query inside a query value or a hash-router fragment), ';' (a pair separator for some servers, a path
+	// parameter's start) or '#' (a second fragment). The first candidate that is a secret key wins, and its value runs to
+	// the end of the piece: these characters only ever START a key, they never end a value, so "password=ab;cd" cannot
+	// leak "cd". Over-redaction is accepted; leaking a tail is not.
+	//
+	// Linear (review round 3): every candidate whose key reaches the same '=' is one group, and each '=' is found once.
+	// A group is judged by its longest candidate and its shortest. Every candidate between them holds a separator, so no
+	// exact key matches it (FVaRestRedactRules::AddKey refuses separators) and the idempotencykey/tokentype allowance does
+	// not apply; the substring rules that could match it match the longest, which holds the same text. A candidate after the
+	// front is a query key whatever the piece is (a "?code=" inside a form value is an OAuth code).
+	auto Judge = [this, &Piece](int32 KeyStart, int32 KeyEnd, EVaRestRedactKeyKind KeyKind)
 	{
-		if (Start > 0 && Piece[Start - 1] != TEXT('?') && Piece[Start - 1] != TEXT(';'))
-		{
-			continue;
-		}
+		return Rules.ShouldRedact(FStringView(VaRest::Http::PercentDecode(Piece.Mid(KeyStart, KeyEnd - KeyStart), true)), KeyKind);
+	};
+	int32 Cursor = 0;
+	while (Cursor <= Piece.Len())
+	{
 		int32 Equals = INDEX_NONE;
-		if (Piece.RightChop(Start).FindChar(TEXT('='), Equals) && Rules.ShouldRedact(FStringView(VaRest::Http::PercentDecode(Piece.Mid(Start, Equals), true)), Kind))
+		if (!Piece.RightChop(Cursor).FindChar(TEXT('='), Equals))
 		{
-			return Start + Equals;
+			return INDEX_NONE;
 		}
+		Equals += Cursor;
+		int32 Longest = INDEX_NONE;
+		int32 Shortest = INDEX_NONE;
+		for (int32 At = FMath::Max(Cursor, 1); At < Equals; ++At)
+		{
+			const TCHAR Before = Piece[At - 1];
+			if (Before == TEXT('?') || Before == TEXT(';') || Before == TEXT('#'))
+			{
+				Longest = Longest == INDEX_NONE ? At : Longest;
+				Shortest = At;
+			}
+		}
+		if ((Cursor == 0 && Equals > 0 && Judge(0, Equals, Kind))
+			|| (Longest != INDEX_NONE && (Judge(Longest, Equals, EVaRestRedactKeyKind::Query) || (Shortest != Longest && Judge(Shortest, Equals, EVaRestRedactKeyKind::Query)))))
+		{
+			return Equals;
+		}
+		Cursor = Equals + 1;
 	}
 	return INDEX_NONE;
 }
@@ -383,7 +408,21 @@ void FVaRestRedactor::AppendRedactedPairs(FStringView Pairs, EVaRestRedactKeyKin
 			++End;
 		}
 		const FStringView Piece = Pairs.Mid(Start, End - Start);
-		const int32 Equals = SecretValueStart(Piece, Kind);
+		int32 Equals = SecretValueStart(Piece, Kind);
+		int32 FirstEquals = INDEX_NONE;
+		int32 Percent = INDEX_NONE;
+		if (Equals == INDEX_NONE && Piece.FindChar(TEXT('='), FirstEquals) && Piece.RightChop(FirstEquals + 1).FindChar(TEXT('%'), Percent))
+		{
+			// An encoded nested query ("next=%2Fx%3Fcode%3DX"): to the server it is the value "/x?code=X". VaRest's own
+			// Query() encodes everything but the unreserved set, so a URL built through it always looks like this. The value
+			// is decoded once; a '?' in it starts the candidates of the tail, judged as query keys, and a hit hides the value.
+			const FString Decoded = VaRest::Http::PercentDecode(Piece.RightChop(FirstEquals + 1), true);
+			int32 Question = INDEX_NONE;
+			if (Decoded.FindChar(TEXT('?'), Question) && SecretValueStart(FStringView(Decoded).RightChop(Question + 1), EVaRestRedactKeyKind::Query) != INDEX_NONE)
+			{
+				Equals = FirstEquals;
+			}
+		}
 		if (Equals != INDEX_NONE)
 		{
 			Out += Piece.Left(Equals);

@@ -3,7 +3,9 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "Misc/AutomationTest.h"
+#include "HAL/PlatformTime.h"
 #include "Misc/Paths.h"
+#include "VaRestUrl.h"
 #include "VaRestRedactionPipe.h"
 #include "VaRestRedactor.h"
 #include "VaRestSha256.h"
@@ -16,6 +18,68 @@ namespace VaRest::Http::RedactorTestPrivate
 	}
 
 	const TCHAR* const Bearer = TEXT("canary-bearer-0123456789");
+
+	/** The straightforward per-candidate logic the linear scan replaced: quadratic, and the ground truth for it */
+	int32 ReferenceScan(const FVaRestRedactRules& Rules, FStringView Piece, EVaRestRedactKeyKind FirstKind)
+	{
+		for (int32 Start = 0; Start < Piece.Len(); ++Start)
+		{
+			if (Start > 0 && Piece[Start - 1] != TEXT('?') && Piece[Start - 1] != TEXT(';') && Piece[Start - 1] != TEXT('#'))
+			{
+				continue;
+			}
+			int32 Equals = INDEX_NONE;
+			if (Piece.RightChop(Start).FindChar(TEXT('='), Equals)
+				&& Rules.ShouldRedact(FStringView(VaRest::Http::PercentDecode(Piece.Mid(Start, Equals), true)), Start == 0 ? FirstKind : EVaRestRedactKeyKind::Query))
+			{
+				return Start + Equals;
+			}
+		}
+		return INDEX_NONE;
+	}
+
+	/** The form excerpt the reference scan gives: the pairs of AppendRedactedPairs, written with ReferenceScan */
+	FString ReferenceForm(const FVaRestRedactRules& Rules, FStringView Body)
+	{
+		FString Out;
+		int32 Start = 0;
+		while (Start <= Body.Len())
+		{
+			int32 End = Start;
+			while (End < Body.Len() && Body[End] != TEXT('&'))
+			{
+				++End;
+			}
+			const FStringView Piece = Body.Mid(Start, End - Start);
+			int32 Equals = ReferenceScan(Rules, Piece, EVaRestRedactKeyKind::Form);
+			int32 FirstEquals = INDEX_NONE;
+			int32 Percent = INDEX_NONE;
+			if (Equals == INDEX_NONE && Piece.FindChar(TEXT('='), FirstEquals) && Piece.RightChop(FirstEquals + 1).FindChar(TEXT('%'), Percent))
+			{
+				const FString Decoded = VaRest::Http::PercentDecode(Piece.RightChop(FirstEquals + 1), true);
+				int32 Question = INDEX_NONE;
+				if (Decoded.FindChar(TEXT('?'), Question) && ReferenceScan(Rules, FStringView(Decoded).RightChop(Question + 1), EVaRestRedactKeyKind::Query) != INDEX_NONE)
+				{
+					Equals = FirstEquals;
+				}
+			}
+			if (Equals != INDEX_NONE)
+			{
+				Out += Piece.Left(Equals);
+				Out += TEXT("=***");
+			}
+			else
+			{
+				Out += Piece;
+			}
+			if (End < Body.Len())
+			{
+				Out.AppendChar(TEXT('&'));
+			}
+			Start = End + 1;
+		}
+		return Out;
+	}
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpRedactUrlTest, "VaRest.Http.Redactor.Url",
@@ -287,6 +351,106 @@ bool FVaRestHttpSecretSetTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("each redactor call is counted (IN-11)"), FVaRestTrace::Counters().RedactorCalls.load(), Before + 2);
 	const FVaRestRedactor WithSecret(FVaRestRedactRules(), { VaRest::Http::RedactorTestPrivate::Bearer });
 	TestEqualSensitive(TEXT("ScrubText replaces a known secret (an error message)"), WithSecret.ScrubText(FString::Printf(TEXT("failed for %s: 401"), VaRest::Http::RedactorTestPrivate::Bearer)), FString(TEXT("failed for ***: 401")));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpRedactScanTest, "VaRest.Http.Redactor.CandidateScan",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpRedactScanTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::RedactorTestPrivate;
+	FVaRestRedactRules Rules;
+	Rules.AddKey(TEXT("playerpin"));
+	const FVaRestRedactor Redactor(Rules, {});
+
+	// Review round 3 rulings: encoded nested queries, a query inside a form value, a second fragment
+	TestEqualSensitive(TEXT("an encoded nested code"), Redactor.RedactUrl(TEXT("https://h/x?next=%2Fx%3Fcode%3DX")), FString(TEXT("https://h/x?next=***")));
+	TestEqualSensitive(TEXT("an encoded nested access_token"), Redactor.RedactUrl(TEXT("https://h/x?next=%2Fx%3Faccess_token%3DX")), FString(TEXT("https://h/x?next=***")));
+	TestEqualSensitive(TEXT("an encoded value without a secret is kept"), Redactor.RedactUrl(TEXT("https://h/x?next=%2Fhome")), FString(TEXT("https://h/x?next=%2Fhome")));
+	TestEqualSensitive(TEXT("an encoded nested query without a secret is kept"), Redactor.RedactUrl(TEXT("https://h/x?next=%2Fx%3Fpage%3D2")), FString(TEXT("https://h/x?next=%2Fx%3Fpage%3D2")));
+	const FVaRestTraceExcerpt Nested = Redactor.RedactBody(TEXT("application/x-www-form-urlencoded"), Bytes("next=/x?code=X"), 14, 4096);
+	TestEqualSensitive(TEXT("a '?code=' in a form value is a query key"), Nested.ToText(), FString(TEXT("next=/x?code=***")));
+	TestEqualSensitive(TEXT("a second '#' in a fragment starts a key"), Redactor.RedactUrl(TEXT("https://h/x#/cb#code=X")), FString(TEXT("https://h/x#/cb#code=***")));
+
+	// The linear scan gives what the per-candidate reference gave, on seeded pseudo-random pieces over the separators, the
+	// encodings and the letters of the rules' keys
+	const TCHAR Alphabet[] = { 'a', 'b', 'c', '?', ';', '=', '&', '%', '2', 'F', '3', 'D', 't', 'o', 'k', 'e', 'n', 'p', 'w', 'd', 's', 'i', 'g', '#' };
+	FRandomStream Random(20261021);
+	int32 Mismatches = 0;
+	int32 Redacting = 0;
+	for (int32 Case = 0; Case < 3000; ++Case)
+	{
+		FString Text;
+		const int32 Length = Random.RandRange(1, 24);
+		for (int32 i = 0; i < Length; ++i)
+		{
+			Text.AppendChar(Alphabet[Random.RandRange(0, UE_ARRAY_COUNT(Alphabet) - 1)]);
+		}
+		// Splice whole keys in too, so the interesting candidates are common
+		if (Random.RandRange(0, 2) == 0)
+		{
+			const TCHAR* const Keys[] = { TEXT("token="), TEXT("code="), TEXT("password="), TEXT("sig="), TEXT("key="), TEXT("tokentype="), TEXT("playerPin="), TEXT("a?code="), TEXT(";token=") };
+			Text.InsertAt(Random.RandRange(0, Text.Len()), Keys[Random.RandRange(0, UE_ARRAY_COUNT(Keys) - 1)]);
+		}
+		const FTCHARToUTF8 Utf8(*Text);
+		const TConstArrayView<uint8> Body(reinterpret_cast<const uint8*>(Utf8.Get()), Utf8.Length());
+		const FString Expected = ReferenceForm(Rules, Text);
+		const FString Actual = Redactor.RedactBody(TEXT("application/x-www-form-urlencoded"), Body, Body.Num(), 4096).ToText();
+		Redacting += Expected != Text ? 1 : 0;
+		if (!Expected.Equals(Actual, ESearchCase::CaseSensitive))
+		{
+			if (++Mismatches <= 5)
+			{
+				AddError(FString::Printf(TEXT("'%s': reference '%s', linear '%s'"), *Text, *Expected, *Actual));
+			}
+		}
+	}
+	TestEqual(TEXT("the linear scan equals the reference on every string"), Mismatches, 0);
+	TestTrue(TEXT("... and the strings redact often enough to mean something"), Redacting > 300);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpRedactBoundTest, "VaRest.Http.Redactor.LinearBound",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpRedactBoundTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::RedactorTestPrivate;
+	// A smoke check against quadratic blowup (a server can send 100 KiB of ';' in a Location), not a benchmark: the bound is generous
+	const FVaRestRedactor Redactor;
+	const int32 Size = 64 * 1024;
+	auto Repeat = [Size](const TCHAR* Unit, int32 UnitLength)
+	{
+		FString Text;
+		Text.Reserve(Size);
+		while (Text.Len() < Size)
+		{
+			Text.Append(Unit, UnitLength);
+		}
+		return Text;
+	};
+	auto Seconds = [](TFunctionRef<void()> Work)
+	{
+		const double Begin = FPlatformTime::Seconds();
+		Work();
+		return FPlatformTime::Seconds() - Begin;
+	};
+	const FString Semicolons = Repeat(TEXT(";"), 1);
+	const FString Questions = Repeat(TEXT("?"), 1);
+	const FString Encoded = Repeat(TEXT("%3F"), 3);
+	const FString Hashes = Repeat(TEXT("#"), 1);
+	const double Bound = 0.05;
+
+	TestTrue(TEXT("64 KiB of ';' then '=' in a URL query"), Seconds([&] { (void)Redactor.RedactUrl(FString(TEXT("https://h/x?")) + Semicolons + TEXT("=")); }) < Bound);
+	TestTrue(TEXT("... in a path run"), Seconds([&] { (void)Redactor.RedactUrl(FString(TEXT("https://h/x")) + Semicolons + TEXT("=")); }) < Bound);
+	TestTrue(TEXT("... of '?'"), Seconds([&] { (void)Redactor.RedactUrl(FString(TEXT("https://h/x?")) + Questions + TEXT("=")); }) < Bound);
+	TestTrue(TEXT("... of '#' in a fragment"), Seconds([&] { (void)Redactor.RedactUrl(FString(TEXT("https://h/x#")) + Hashes + TEXT("=")); }) < Bound);
+	TestTrue(TEXT("... of '%3F' in an encoded value"), Seconds([&] { (void)Redactor.RedactUrl(FString(TEXT("https://h/x?next=")) + Encoded); }) < Bound);
+	TestTrue(TEXT("... of '%3F' then '=' in an encoded value"), Seconds([&] { (void)Redactor.RedactUrl(FString(TEXT("https://h/x?next=")) + Encoded + TEXT("%3D")); }) < Bound);
+	const FTCHARToUTF8 FormUtf8(*(Semicolons + TEXT("=")));
+	const TConstArrayView<uint8> FormBody(reinterpret_cast<const uint8*>(FormUtf8.Get()), FormUtf8.Length());
+	TestTrue(TEXT("... in a form body"), Seconds([&] { (void)Redactor.RedactBody(TEXT("application/x-www-form-urlencoded"), FormBody, FormBody.Num(), 1 << 20); }) < Bound);
 	return true;
 }
 

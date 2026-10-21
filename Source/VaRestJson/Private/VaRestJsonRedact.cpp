@@ -5,6 +5,7 @@
 #include "RapidJsonIncludes.h"
 #include "JsonUtils/RapidJsonUtils.h"
 #include "String/Find.h"
+#include "VaRestJsonLog.h"
 #include "VaRestJsonUtf8.h"
 #include "VaRestJsonWriterInternal.h"
 
@@ -196,6 +197,17 @@ void FVaRestRedactRules::Normalize(FUtf8StringView Key, TArray<UTF8CHAR, TInline
 
 void FVaRestRedactRules::AddKey(FStringView Key)
 {
+	// URL and form redaction start a candidate key after '?', ';' and '#' and end it at '=' or '&'; a key holding one of these
+	// could never be matched there, and the linear candidate scan (VaRestRedactor.cpp) relies on exact keys being free of them
+	for (const TCHAR Separator : { TEXT('?'), TEXT(';'), TEXT('#'), TEXT('='), TEXT('&') })
+	{
+		int32 Found = INDEX_NONE;
+		if (Key.FindChar(Separator, Found))
+		{
+			UE_LOG(LogVaRestJson, Warning, TEXT("FVaRestRedactRules::AddKey: ignored the key '%s', which contains '%c' (a key cannot hold a URL or form separator)"), *FString(Key), Separator);
+			return;
+		}
+	}
 	VaRest::Json::FUtf8Scratch Scratch;
 	VaRest::Json::RedactPrivate::FKeyBuffer Normalized;
 	Normalize(VaRest::Json::ConvertForDocument(Key, Scratch, /*bWarn*/ false), Normalized);

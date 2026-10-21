@@ -67,6 +67,19 @@ bool FVaRestJsonRedactKeysTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("an added key matches exactly, not as a substring"), Added.ShouldRedact(FStringView(TEXT("pin")), K::Form));
 	TestFalse(TEXT("... nor inside a longer key"), Added.ShouldRedact(FStringView(TEXT("playerPinHint")), K::Form));
 	TestTrue(TEXT("the built-in rules still apply"), Added.ShouldRedact(FStringView(TEXT("password")), K::Form));
+
+	// A key holding a URL or form separator is ignored with a warning (the linear candidate scan of the HTTP redactor needs it)
+	AddExpectedMessagePlain(TEXT("contains"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 5);
+	FVaRestRedactRules Separators;
+	for (const TCHAR* Bad : { TEXT("a?b"), TEXT("a;b"), TEXT("a#b"), TEXT("a=b"), TEXT("a&b") })
+	{
+		Separators.AddKey(Bad);
+	}
+	TestFalse(TEXT("a key with '?' was ignored"), Separators.ShouldRedact(FStringView(TEXT("a?b")), K::Form));
+	TestFalse(TEXT("a key with ';' was ignored"), Separators.ShouldRedact(FStringView(TEXT("a;b")), K::Form));
+	TestFalse(TEXT("a key with '#' was ignored"), Separators.ShouldRedact(FStringView(TEXT("a#b")), K::Form));
+	TestFalse(TEXT("a key with '=' was ignored"), Separators.ShouldRedact(FStringView(TEXT("a=b")), K::Form));
+	TestFalse(TEXT("a key with '&' was ignored"), Separators.ShouldRedact(FStringView(TEXT("a&b")), K::Form));
 	return true;
 }
 
