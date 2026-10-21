@@ -12,6 +12,7 @@
 #include "Misc/DateTime.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "UObject/UObjectGlobals.h"
 #include "VaRestClient.h"
 #include "VaRestHttpTesting.h"
 #include "VaRestJsonObject.h"
@@ -99,6 +100,14 @@ namespace VaRestTestsRequestPathBenchPrivate
 		// Checked after the clock stops: GetObjectField makes UObjects
 		UVaRestJsonObject* Data = Finished->load() == 1 && Request->GetResponseObject() ? Request->GetResponseObject()->GetObjectField(TEXT("data")) : nullptr;
 		Run.bOk = Data && Data->GetIntegerField(TEXT("count")) == ExpectedCount;
+		// Task 17 review M2 (P17.3), outside the clock: the request (un-rooted at completion, VaRestRequestJSON.cpp:487), its
+		// FJsonObject tree and the response bytes stay until a GC -- about 1 GiB over the test -- while each v2 run frees its
+		// own when it returns, so without this later v1 runs would allocate on a heap that only grows
+		CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
+		// Then one untimed pump step: the collection leaves work for the next tick, which without this lands in the next
+		// run's clock (measured: v2's longest step 0.23-0.26 ms right after a GC, 0.05 ms with this step or without the GC)
+		FTSTicker::GetCoreTicker().Tick(0.f);
+		FTaskGraphInterface::Get().ProcessThreadUntilIdle(ENamedThreads::GameThread);
 		return Run;
 	}
 

@@ -269,3 +269,42 @@ exactly. (When these numbers were taken the test checked one item's id only; sin
 against the generator's `9007199254740993 + i`, and a re-run on the M2 final-fix code counted 0 inexact ids of 3527 and of
 35074.) This VaRest decode row is the DOM + walk baseline that M7's SAX -> struct decoder must beat by 1.5x to become
 the default for typed responses (spec §2.4).
+
+## Correction (2026-10-21): timings without LLM
+
+The parse and write timings above ran with `-llm`, which slows every allocation, and the engine's DOM allocates per value
+while VaRest's arena allocates per chunk: the engine rows carry most of that overhead (task 17 review, P17.1). Re-run
+without it: `Tools/run_tests.sh Bench.VaRest.Json` three times (the first built the code, the other two `--no-build`),
+same machine, fixtures and Development editor as above, on the M3 final fix wave B code, with the machine shared (load
+average 9.5-13.2 of 32 hardware threads in `uptime` samples around the invocations). Without LLM the test reports memory
+as -1 ("n/a"); to run at all it needed one fix: `RetainedBytes` now runs its body with LLM off too, which the parse and
+write rows read (it used to skip it, and the bench dereferenced an empty document). Median of three invocations, raw
+values in brackets, ms:
+
+| fixture | path | parse ms | write ms |
+|---|---|---|---|
+| bench_64kb.json | engine (FString, v1 path) | 1.46 [1.46, 1.62, 1.40] | 0.96 [0.96, 1.03, 0.93] |
+| bench_64kb.json | engine (UTF-8 reader) | 1.40 [1.40, 1.63, 1.38] | |
+| bench_64kb.json | VaRest Parse (copy + in situ) | 0.23 [0.23, 0.25, 0.22] | 0.13 [0.13, 0.14, 0.12] |
+| bench_64kb.json | VaRest ParseOwned (minus the test's copy) | 0.23 [0.23, 0.25, 0.22] | |
+| bench_256kb.json | engine (FString, v1 path) | 5.83 [5.83, 6.86, 5.77] | 3.80 [3.72, 4.53, 3.80] |
+| bench_256kb.json | engine (UTF-8 reader) | 5.70 [5.61, 6.26, 5.70] | |
+| bench_256kb.json | VaRest Parse (copy + in situ) | 0.94 [0.94, 1.05, 0.94] | 0.53 [0.53, 0.75, 0.52] |
+| bench_256kb.json | VaRest ParseOwned (minus the test's copy) | 0.93 [0.93, 1.05, 0.93] | |
+| bench_1mb.json | engine (FString, v1 path) | 23.54 [22.79, 28.47, 23.54] | 17.08 [17.08, 19.03, 14.96] |
+| bench_1mb.json | engine (UTF-8 reader) | 22.95 [21.87, 24.90, 22.95] | |
+| bench_1mb.json | VaRest Parse (copy + in situ) | 3.76 [3.68, 4.15, 3.76] | 2.17 [2.17, 2.40, 2.12] |
+| bench_1mb.json | VaRest ParseOwned (minus the test's copy) | 3.84 [3.84, 4.12, 3.72] | |
+| bench_10mb.json | engine (FString, v1 path) | 239.72 [239.72, 286.07, 236.05] | 164.20 [164.20, 192.51, 164.02] |
+| bench_10mb.json | engine (UTF-8 reader) | 233.75 [228.71, 273.94, 233.75] | |
+| bench_10mb.json | VaRest Parse (copy + in situ) | 38.38 [37.87, 42.50, 38.38] | 24.05 [22.90, 26.49, 24.05] |
+| bench_10mb.json | VaRest ParseOwned (minus the test's copy) | 37.54 [36.64, 42.23, 37.54] | |
+
+Small documents, 1000 parses of `{"id":1,"name":"x"}` (median of 15 per invocation): engine 0.857 ms [0.855, 0.857,
+0.950], VaRest 0.236 ms [0.236, 0.221, 0.261].
+
+The ratio on bench_10mb.json is **6.2x** (239.72 vs 38.38 ms; ParseOwned 6.4x; 6.1x against the engine's UTF-8 reader),
+not the 24-26x of the `-llm` tables: LLM cost the engine path about 4.4x (1049.57 vs 239.72 ms) and VaRest about 1.06x
+(40.50 vs 38.38 ms). Write is 6.8x (164.20 vs 24.05 ms). The 1 MiB, 256 KiB and 64 KiB ratios are 6.2-6.3x. The memory
+columns above stay as measured in the `-llm` runs, which they need, and the spec 7.3 gate (2x faster or 2x less memory,
+not worse on the other) still holds on speed: **PASS**.

@@ -35,7 +35,9 @@ namespace VaRestJsonBench
 	/**
 	 * Bytes still allocated under Tag after Body returns, while Keep (filled by Body) is alive.
 	 * -1 when LLM is off: run with VAREST_EXTRA_ARGS=-llm. LLM aggregates per frame, so stats are
-	 * flushed by hand around the measurement (LowLevelMemTracker.h:611).
+	 * flushed by hand around the measurement (LowLevelMemTracker.h:611). Body runs either way: the
+	 * caller writes and walks what it fills (M3 final wave B, P17.1: without -llm the bench dereferenced
+	 * an empty document).
 	 */
 	template <typename BodyType>
 	int64 RetainedBytes(const TCHAR* Tag, BodyType&& Body)
@@ -43,6 +45,7 @@ namespace VaRestJsonBench
 #if ENABLE_LOW_LEVEL_MEM_TRACKER
 		if (!FLowLevelMemTracker::IsEnabled())
 		{
+			Body();
 			return -1;
 		}
 		const FName TagName(Tag);
@@ -56,6 +59,7 @@ namespace VaRestJsonBench
 		Llm.UpdateStatsPerFrame();
 		return Llm.GetTagAmountForTracker(ELLMTracker::Default, TagName, ELLMTagSet::None) - Before;
 #else
+		Body();
 		return -1;
 #endif
 	}
