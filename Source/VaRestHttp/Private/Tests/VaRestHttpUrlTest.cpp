@@ -284,7 +284,10 @@ bool FVaRestHttpMultipartTest::RunTest(const FString& Parameters)
 	Expected.Append(Utf8(TEXT("\r\n--XyZ\r\nContent-Disposition: form-data; name=\"we%22ird%0D%0A\"\r\n\r\nv\r\n--XyZ--\r\n")));
 	TestTrue(TEXT("in-memory multipart body, byte for byte"), Body.GetValue().Bytes == Expected);
 	TestTrue(TEXT("kind"), Body.GetValue().Kind == EVaRestBodyKind::Multipart && !Body.GetValue().IsStreamed());
-	TestEqual(TEXT("three part descriptors"), Body.GetValue().PartDescriptors.Num(), 3);
+	if (!TestEqual(TEXT("three part descriptors"), Body.GetValue().PartDescriptors.Num(), 3))
+	{
+		return false;
+	}
 	TestEqual(TEXT("binary descriptors drop their bytes"), Body.GetValue().PartDescriptors[1].Bytes.Num(), 0);
 	TestEqual(TEXT("... but keep their size"), Body.GetValue().PartDescriptors[1].Size, static_cast<int64>(3));
 

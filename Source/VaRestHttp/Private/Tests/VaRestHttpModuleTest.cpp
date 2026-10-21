@@ -15,6 +15,10 @@ bool FVaRestHttpModuleLoadsTest::RunTest(const FString& Parameters)
 {
 	TestTrue(TEXT("VaRestHttp is loaded"), FModuleManager::Get().IsModuleLoaded(TEXT("VaRestHttp")));
 	const UVaRestHttpSettings* Settings = GetDefault<UVaRestHttpSettings>();
+	if (!TestNotNull(TEXT("the settings default object exists"), Settings))
+	{
+		return false;
+	}
 	TestTrue(TEXT("default log level is Basic (spec 4.5)"), Settings->LogLevel == EVaRestLogLevel::Basic);
 	TestEqual(TEXT("default max concurrent is 16 (spec 4.6)"), Settings->MaxConcurrent, 16);
 	TestEqual(TEXT("total timeout 0: the engine default"), Settings->Timeout, 0.f);
@@ -36,10 +40,18 @@ bool FVaRestHttpHeadersTest::RunTest(const FString& Parameters)
 	H.Set(TEXT("X-Trace"), TEXT("1"));
 	TestEqual(TEXT("repeated names are kept"), H.Num(), 4);
 	TestEqualSensitive(TEXT("lookup ignores case"), H.Get(TEXT("CONTENT-TYPE")), FString(TEXT("text/plain")));
-	TestEqualSensitive(TEXT("Find returns the first of a repeated name"), *H.Find(TEXT("Set-Cookie")), FString(TEXT("a=1")));
+	const FString* FirstCookie = H.Find(TEXT("Set-Cookie"));
+	if (!TestNotNull(TEXT("Find finds a repeated name"), FirstCookie))
+	{
+		return false;
+	}
+	TestEqualSensitive(TEXT("Find returns the first of a repeated name"), *FirstCookie, FString(TEXT("a=1")));
 
 	H.Set(TEXT("SET-COOKIE"), TEXT("c=3"));
-	TestEqual(TEXT("Set replaces every header of that name"), H.Num(), 3);
+	if (!TestEqual(TEXT("Set replaces every header of that name"), H.Num(), 3))
+	{
+		return false;
+	}
 	TestEqualSensitive(TEXT("... at the first one's position"), H.GetPairs()[1].Value, FString(TEXT("c=3")));
 	TestEqualSensitive(TEXT("... with the name as given"), H.GetPairs()[1].Key, FString(TEXT("SET-COOKIE")));
 
