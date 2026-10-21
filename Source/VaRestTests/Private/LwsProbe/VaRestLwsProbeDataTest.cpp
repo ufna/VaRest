@@ -9,7 +9,6 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "HAL/PlatformProcess.h"
-#include "HAL/PlatformTime.h"
 #include "Misc/AutomationTest.h"
 #include "VaRestSha256.h"
 
@@ -120,6 +119,9 @@ namespace VaRest::LwsProbe::VaRestLwsProbeDataTestPrivate
 
 	/** The flood's size: more than loopback socket buffers hold even with raised tcp_wmem/tcp_rmem (review M-6) */
 	constexpr int64 FloodBytes = 32 * 1024 * 1024;
+
+	/** The most that may arrive in the 2 s after the pause for it to count as held */
+	constexpr int64 PauseHeldBytes = 256 * 1024;
 
 	struct FFlood
 	{
@@ -370,7 +372,7 @@ bool FVaRestLwsProbeFlowControlTest::RunTest(const FString& Parameters)
 	{
 		return false;
 	}
-	Fact(*this, TEXT("rx.flow_pause_stops_callbacks"), AgreesIf(BoolRound.AfterPause <= 256 * 1024),
+	Fact(*this, TEXT("rx.flow_pause_stops_callbacks"), AgreesIf(BoolRound.AfterPause <= PauseHeldBytes),
 		FString::Printf(TEXT("%lld bytes in %d CLIENT_RECEIVE calls in the 2 s after lws_rx_flow_control(wsi, 0) (returned %lld); round 2: %lld bytes"),
 			BoolRound.AfterPause, BoolRound.AfterPauseCalls, BoolRound.PauseReturned, NowRound.AfterPause),
 		TEXT("T11 and WebSocket spec 2.3: lws_rx_flow_control(wsi, 0) stops reading, so TCP pushes back"),
@@ -383,10 +385,13 @@ bool FVaRestLwsProbeFlowControlTest::RunTest(const FString& Parameters)
 			BoolRound.bResumed ? TEXT("resumed reading") : TEXT("did not resume within 20 s"), BoolRound.ResumeReturned,
 			NowRound.bResumed ? TEXT("resumed reading") : TEXT("did not resume within 20 s"), NowRound.ResumeReturned),
 		TEXT("none"), TEXT("two rounds, each its own rig and flood; the return values are lws_rx_flow_control's"));
-	// Only a flood that ran to its end timed every write: one that broke off, or never ended, is recorded, never "differs"
-	Fact(*this, TEXT("rx.flow_backpressure_reached_server"), BoolRound.bFloodLogged ? AgreesIf(BoolRound.Longest >= 1.0) : EVerdict::Recorded,
-		BoolRound.bFloodLogged ? FString::Printf(TEXT("the server's longest write blocked %.2f s; %d writes blocked over 100 ms"), BoolRound.Longest, BoolRound.SlowWrites)
-			: (!BoolRound.BrokeOff.IsEmpty() ? BoolRound.BrokeOff : FString(TEXT("no flood or flood_error event in the journal"))),
+	// The situation is reached only when the pause held and the flood ran to its end (every write timed): a stall with
+	// no held pause, a flood that broke off or one that never ended is recorded, never "agrees" or "differs" (review minor 1)
+	const bool bPauseHeld = BoolRound.AfterPause <= PauseHeldBytes;
+	const FString PauseNote = FString::Printf(TEXT("%lld bytes arrived in the 2 s pause (held: %s)"), BoolRound.AfterPause, YesNo(bPauseHeld));
+	Fact(*this, TEXT("rx.flow_backpressure_reached_server"), BoolRound.bFloodLogged && bPauseHeld ? AgreesIf(BoolRound.Longest >= 1.0) : EVerdict::Recorded,
+		BoolRound.bFloodLogged ? FString::Printf(TEXT("the server's longest write blocked %.2f s; %d writes blocked over 100 ms; %s"), BoolRound.Longest, BoolRound.SlowWrites, *PauseNote)
+			: FString::Printf(TEXT("%s; %s"), BoolRound.BrokeOff.IsEmpty() ? TEXT("no flood or flood_error event in the journal") : *BoolRound.BrokeOff, *PauseNote),
 		TEXT("WebSocket spec 2.3: with reading paused, TCP pushes back on the server"),
 		FString::Printf(TEXT("the server's flood event, round 1 (%lld bytes: more than loopback socket buffers hold, review M-6)"), FloodBytes));
 	return true;
@@ -698,12 +703,17 @@ bool FVaRestLwsProbeSoSndbufTest::RunTest(const FString& Parameters)
 		if (Reason == LWS_CALLBACK_CLIENT_ESTABLISHED)
 		{
 			const lws_sockfd_type Fd = lws_get_socket_fd(Wsi);
+			// The value before the set too (review minor 7): what getsockopt reports after it reads against both
+			int Before = 0;
+			socklen_t BeforeLen = sizeof(Before);
+			const int GotBefore = getsockopt(Fd, SOL_SOCKET, SO_SNDBUF, &Before, &BeforeLen);
 			int Asked = 256 * 1024;
 			const int Set = setsockopt(Fd, SOL_SOCKET, SO_SNDBUF, &Asked, sizeof(Asked));
-			int Got = 0;
-			socklen_t GotLen = sizeof(Got);
-			getsockopt(Fd, SOL_SOCKET, SO_SNDBUF, &Got, &GotLen);
-			C.Rig->Record(C.Id, Marker, Got, FString::Printf(TEXT("setsockopt(SO_SNDBUF, 262144) returned %d on fd %d; getsockopt reports %d"), Set, static_cast<int32>(Fd), Got));
+			int After = 0;
+			socklen_t AfterLen = sizeof(After);
+			const int GotAfter = getsockopt(Fd, SOL_SOCKET, SO_SNDBUF, &After, &AfterLen);
+			C.Rig->Record(C.Id, Marker, After, FString::Printf(TEXT("on fd %d: getsockopt before reports %d (returned %d); setsockopt(SO_SNDBUF, 262144) returned %d; getsockopt after reports %d (returned %d)"),
+				static_cast<int32>(Fd), Before, GotBefore, Set, After, GotAfter));
 		}
 		return KeepDefault;
 	};
@@ -720,11 +730,11 @@ bool FVaRestLwsProbeSoSndbufTest::RunTest(const FString& Parameters)
 	const FEvent* PlainMark = PlainSeen.FindByPredicate([](const FEvent& Each) { return Each.Reason == Marker; });
 	const FEvent* TlsMark = TlsSeen.FindByPredicate([](const FEvent& Each) { return Each.Reason == Marker; });
 	Fact(*this, TEXT("tx.so_sndbuf_ws"), EVerdict::Recorded, PlainMark ? PlainMark->Note : FString::Printf(TEXT("never opened: %s"), *ErrorOf(PlainSeen)), SndbufSpec, TEXT("ws://, in CLIENT_ESTABLISHED"));
-	Fact(*this, TEXT("tx.so_sndbuf_wss"), EVerdict::Recorded, TlsMark ? TlsMark->Note : FString::Printf(TEXT("never opened: %s"), *ErrorOf(TlsSeen)), SndbufSpec, TEXT("wss:// (the TCP socket under TLS), in CLIENT_ESTABLISHED"));
+	Fact(*this, TEXT("tx.so_sndbuf_wss"), EVerdict::Recorded, TlsMark ? TlsMark->Note : FString::Printf(TEXT("never opened: %s"), *ErrorOf(TlsSeen)), SndbufSpec, TEXT("wss:// (the TCP socket under TLS), in CLIENT_ESTABLISHED; it opens after the ws:// connection ended, so the fd number can repeat"));
 	return true;
-#else
-	Fact(*this, TEXT("tx.so_sndbuf_ws"), EVerdict::Unverified, TEXT("unverified here; release-pass item (Win64): setsockopt takes a SOCKET and a char* there"), SndbufSpec, TEXT("this platform"));
-	Fact(*this, TEXT("tx.so_sndbuf_wss"), EVerdict::Unverified, TEXT("unverified here; release-pass item (Win64)"), SndbufSpec, TEXT("this platform"));
+#else // other platforms
+	Fact(*this, TEXT("tx.so_sndbuf_ws"), EVerdict::Unverified, TEXT("unverified here; release-pass item (other platforms): on Win64 setsockopt takes a SOCKET and a char*"), SndbufSpec, TEXT("this platform"));
+	Fact(*this, TEXT("tx.so_sndbuf_wss"), EVerdict::Unverified, TEXT("unverified here; release-pass item (other platforms)"), SndbufSpec, TEXT("this platform"));
 	return true;
 #endif
 }
