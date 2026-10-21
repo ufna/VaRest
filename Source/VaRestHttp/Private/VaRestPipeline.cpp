@@ -1,5 +1,6 @@
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 
+#include "Misc/Guid.h"
 #include "VaRestClientState.h"
 
 #include "Tasks/Task.h"
@@ -364,9 +365,21 @@ bool VaRest::Http::FClientState::Resolve(FVaRestExchange& Exchange, FString& Out
 	{
 		Exchange.RequestHeaders.Set(Pair.Key, Pair.Value);
 	}
+	if (!Exchange.Body.IsEmpty() && Exchange.Verb.Equals(TEXT("GET"), ESearchCase::IgnoreCase))
+	{
+		// Spec 3.2: "A body on GET is dropped with a warning (v1 rule)"; the engine would refuse the request
+		// (HttpRequestCommon.cpp:764-768: "An HTTP Get request cannot contain a payload")
+		UE_LOG(LogVaRestHttp, Warning, TEXT("#%llu VaRest: GET %s has a body; it is dropped (spec 3.2)"), Exchange.RequestId, *Cfg.Redactor->RedactUrl(Exchange.Url));
+		Exchange.Body = FVaRestRequestBody();
+	}
 	if (!Exchange.Body.IsEmpty() && !Exchange.RequestHeaders.Contains(TEXT("Content-Type")))
 	{
 		Exchange.RequestHeaders.Set(TEXT("Content-Type"), Exchange.Body.ContentType);
+	}
+	if (Exchange.bIdempotent && !Exchange.RequestHeaders.Contains(TEXT("Idempotency-Key")))
+	{
+		// Generated once per logical request, into the request headers every attempt copies: stable across attempts (spec 3.2)
+		Exchange.RequestHeaders.Set(TEXT("Idempotency-Key"), FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower));
 	}
 
 	Exchange.Timeout = Exchange.TimeoutOverride.Get(Cfg.Timeout);

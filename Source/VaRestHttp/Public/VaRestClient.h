@@ -131,10 +131,25 @@ public:
 		return MoveTemp(*this);
 	}
 
-	/** Sets a header (replacing one of that name, whatever its case); it wins over the client's and over a body's Content-Type */
+	/**
+	 * Sets a header (replacing one of that name, whatever its case); it wins over the client's and over a body's
+	 * Content-Type. A name that is not an RFC 9110 token, or a value holding a control character other than HTAB
+	 * (CR, LF, NUL among them), fails the request with Kind=Config and nothing is sent (decision 11: header injection).
+	 */
 	TVaRestRequest Header(FStringView Name, FStringView Value) &&
 	{
-		Spec->Headers.Set(Name, Value);
+		if (!VaRest::Http::IsValidHeaderName(Name))
+		{
+			Spec->Fail(FString::Printf(TEXT("invalid header name \"%s\""), *FString(Name).ReplaceCharWithEscapedChar()));
+		}
+		else if (!VaRest::Http::IsValidHeaderValue(Value))
+		{
+			Spec->Fail(FString::Printf(TEXT("the value of header \"%s\" holds CR, LF, NUL or another control character"), *FString(Name)));
+		}
+		else
+		{
+			Spec->Headers.Set(Name, Value);
+		}
 		return MoveTemp(*this);
 	}
 
@@ -173,6 +188,89 @@ public:
 	TVaRestRequest Body(TConstArrayView<uint8> Bytes) &&
 	{
 		return MoveTemp(*this).Body(TArray<uint8>(Bytes.GetData(), Bytes.Num()));
+	}
+
+	/**
+	 * A USTRUCT, encoded straight to UTF-8 bytes (spec 2.4) with the naming policy known now: the request's Naming(),
+	 * else the client's. Call Naming() first; after a struct body it fails the request.
+	 */
+	template <typename StructType>
+		requires (VaRest::Json::bHasScriptStruct<StructType> && !std::is_same_v<StructType, FVaRestJson>)
+	TVaRestRequest Body(const StructType& Value) &&
+	{
+		FVaRestJsonConvertOptions Options;
+		Options.Naming = Spec->Naming;
+		TArray<uint8> Bytes;
+		FVaRestJsonError EncodeError;
+		if (!FVaRestJsonConvert::StructToUtf8(VaRest::Json::GetScriptStruct<StructType>(), &Value, Bytes, Options, EVaRestJsonFormat::Condensed, &EncodeError))
+		{
+			Spec->Fail(FString::Printf(TEXT("the struct body cannot be written: %s"), *EncodeError.Message));
+		}
+		Spec->Body = FVaRestRequestBody::FromBytes(MoveTemp(Bytes), EVaRestBodyKind::Json, TEXT("application/json"));
+		Spec->bStructBodySet = true;
+		return MoveTemp(*this);
+	}
+
+	/** application/x-www-form-urlencoded */
+	TVaRestRequest Body(const FVaRestForm& Form) &&
+	{
+		Spec->Body = FVaRestRequestBody::FromForm(Form);
+		return MoveTemp(*this);
+	}
+
+	/** multipart/form-data; file parts stream from disk while uploading */
+	TVaRestRequest Body(const FVaRestMultipart& Multipart) &&
+	{
+		TValueOrError<FVaRestRequestBody, FString> Built = FVaRestRequestBody::FromMultipart(Multipart);
+		if (Built.HasError())
+		{
+			Spec->Fail(Built.StealError());
+		}
+		else
+		{
+			Spec->Body = Built.StealValue();
+		}
+		return MoveTemp(*this);
+	}
+
+	/** A file streamed while uploading (IHttpRequest::SetContentAsStreamedFile). Its size is read now; a missing file fails the request. */
+	TVaRestRequest BodyFile(FStringView FilePath, FStringView ContentType = TEXTVIEW("application/octet-stream")) &&
+	{
+		TValueOrError<FVaRestRequestBody, FString> Built = FVaRestRequestBody::FromFile(FilePath, ContentType);
+		if (Built.HasError())
+		{
+			Spec->Fail(Built.StealError());
+		}
+		else
+		{
+			Spec->Body = Built.StealValue();
+		}
+		return MoveTemp(*this);
+	}
+
+	/** Spec 3.2: "adds a stable Idempotency-Key: <uuid> across attempts" (M4's retry reads the flag too). A key set with Header is kept. */
+	TVaRestRequest Idempotent() &&
+	{
+		Spec->bIdempotent = true;
+		return MoveTemp(*this);
+	}
+
+	/** The naming policy of a struct body set after this (spec 2.4: per client, API or request) */
+	TVaRestRequest Naming(EVaRestJsonNaming InNaming) &&
+	{
+		if (Spec->bStructBodySet)
+		{
+			Spec->Fail(TEXT("Naming() after a struct Body() has no effect: call Naming() first"));
+		}
+		Spec->Naming = InNaming;
+		return MoveTemp(*this);
+	}
+
+	/** Spec 2.4: every mismatch while decoding a struct response is an error, not a warning */
+	TVaRestRequest StrictDecode(bool bStrict = true) &&
+	{
+		Spec->bStrictDecode = bStrict;
+		return MoveTemp(*this);
 	}
 
 	TVaRestRequest Tag(FName InTag) &&

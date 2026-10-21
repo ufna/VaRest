@@ -35,7 +35,17 @@ VaRest::Http::FRequestSpec::FRequestSpec(TSharedPtr<FClientState, ESPMode::Threa
 	}
 }
 
-VaRest::Http::FRequestSpec::~FRequestSpec() = default;
+VaRest::Http::FRequestSpec::~FRequestSpec()
+{
+#if !UE_BUILD_SHIPPING
+	if (!bSent && ConfigAtBuild.IsValid())
+	{
+		// Spec 3.2: "In non-Shipping builds a builder destroyed unsent also logs an error naming the URL" -- redacted like every log line
+		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: a %s request to %s was built but never sent (Send() is missing)"),
+			*Verb, *ConfigAtBuild->Redactor->RedactUrl(JoinUrl(ConfigAtBuild->BaseUrl, Path)));
+	}
+#endif
+}
 
 void VaRest::Http::FRequestSpec::Fail(FString Problem)
 {
@@ -179,6 +189,13 @@ FVaRestClient& FVaRestClient::WithBaseUrl(FStringView BaseUrl)
 
 FVaRestClient& FVaRestClient::WithHeader(FStringView Name, FStringView Value)
 {
+	if (!VaRest::Http::IsValidHeaderName(Name) || !VaRest::Http::IsValidHeaderValue(Value))
+	{
+		// Decision 11; no request to fail here, so the header is refused and the error logged
+		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: invalid default header \"%s\" (not a token, or the value holds a control character); not set"),
+			*FString(Name).ReplaceCharWithEscapedChar());
+		return *this;
+	}
 	if (State.IsValid())
 	{
 		State->EditConfig([Name, Value](VaRest::Http::FClientConfig& Edited) { Edited.DefaultHeaders.Set(Name, Value); });
