@@ -15,7 +15,7 @@ namespace VaRest::Json
 	{
 		const UTF8CHAR* Data;
 		uint32 Len;
-		/** CityHash32 of the bytes; set for object keys, 0 otherwise */
+		/** HashKey of the bytes; set for object keys, 0 otherwise */
 		uint32 Hash;
 
 		FUtf8StringView View() const { return FUtf8StringView(Data, Len); }
@@ -85,9 +85,16 @@ namespace VaRest::Json
 	/** Objects with more members than this carry an FIndex, built at parse time or on mutation -- never on read */
 	inline constexpr uint32 IndexThreshold = 8;
 
+	/** This process's hash seed (VaRestJsonDocument.cpp) */
+	uint64 GetHashSeed();
+
+	/**
+	 * Seeded per process (VaRest-sj2): with a fixed hash and linear probing, keys crafted to collide make every index build
+	 * O(n^2), and a dedicated server parses client JSON. The hash is never persisted, so the seed costs nothing.
+	 */
 	inline uint32 HashKey(FUtf8StringView Key)
 	{
-		return CityHash32(reinterpret_cast<const char*>(Key.GetData()), static_cast<uint32>(Key.Len()));
+		return static_cast<uint32>(CityHash64WithSeed(reinterpret_cast<const char*>(Key.GetData()), static_cast<uint32>(Key.Len()), GetHashSeed()));
 	}
 
 	/** Byte-exact comparison. TStringView::operator== is case-insensitive in UE, so it must not be used for keys. */

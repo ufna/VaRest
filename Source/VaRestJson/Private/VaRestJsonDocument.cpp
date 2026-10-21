@@ -2,6 +2,21 @@
 
 #include "VaRestJsonDocument.h"
 
+#include "HAL/PlatformTime.h"
+#include "Misc/Guid.h"
+
+uint64 VaRest::Json::GetHashSeed()
+{
+	// FGuid::NewGuid takes the platform's random source; a function-local static is initialised once, thread-safely,
+	// on first use -- no static-initialisation order with the engine's own startup
+	static const uint64 Seed = []
+	{
+		const FGuid Guid = FGuid::NewGuid();
+		return ((static_cast<uint64>(Guid.A) << 32) | Guid.B) ^ ((static_cast<uint64>(Guid.C) << 32) | Guid.D) ^ FPlatformTime::Cycles64();
+	}();
+	return Seed;
+}
+
 namespace VaRest::Json
 {
 	namespace DocumentPrivate

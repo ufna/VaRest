@@ -75,6 +75,7 @@ namespace VaRest::Json
 	{
 		using namespace ReaderPrivate;
 		check(Doc.Input.Num() > 0 && Doc.Input.Last() == 0);
+		check(StartOffset >= 0 && StartOffset < Doc.Input.Num());
 		const int32 DepthLimit = FMath::Clamp(Options.MaxDepth, 1, MaxDepth); // spec 2.2: one limit, so anything that parses also writes
 		FDomBuilder Handler(Doc, DepthLimit);
 		char* Text = reinterpret_cast<char*>(Doc.Input.GetData() + StartOffset);

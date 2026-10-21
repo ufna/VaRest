@@ -11,7 +11,9 @@ namespace VaRest::Json
 	/**
 	 * Chunked bump allocator. Memory is released only when the arena dies, and nothing it hands
 	 * out ever moves -- that is what lets a FVaRestJson handle hold a raw node pointer while the
-	 * node's parent keeps growing.
+	 * node's parent keeps growing. Single writer: allocating is not thread-safe. Only a thread that
+	 * mutates the document allocates, and mutation needs exclusive access (spec 2.2 thread contract);
+	 * reads never allocate, so concurrent readers are safe.
 	 */
 	class FArena
 	{

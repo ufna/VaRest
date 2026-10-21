@@ -306,4 +306,34 @@ bool FVaRestJsonDocLastWinsAfterRemoveTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonDocHashSeededTest, "VaRest.Json.Document.HashSeeded",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestJsonDocHashSeededTest::RunTest(const FString& Parameters)
+{
+	// VaRest-sj2: with the unseeded CityHash32 and linear probing, keys crafted to collide make every index build O(n^2)
+	// (a dedicated server parsing client JSON). The hash is never persisted, so a per-process seed costs nothing.
+	const FUtf8StringView Key(UTF8TEXT("player_id"));
+	const uint32 Seeded = VaRest::Json::HashKey(Key);
+	TestEqual(TEXT("stable within the process"), VaRest::Json::HashKey(Key), Seeded);
+	TestNotEqual(TEXT("not the unseeded CityHash32"), Seeded, CityHash32(reinterpret_cast<const char*>(Key.GetData()), static_cast<uint32>(Key.Len())));
+
+	// Indexed objects (more than IndexThreshold members) still find every key
+	FString Text = TEXT("{");
+	for (int32 i = 0; i < 40; ++i)
+	{
+		Text += FString::Printf(TEXT("%s\"k%d\":%d"), i ? TEXT(",") : TEXT(""), i, i);
+	}
+	Text += TEXT("}");
+	FVaRestJson J = FVaRestJson::Parse(FStringView(Text)).StealValue();
+	TestTrue(TEXT("indexed"), J.GetNodeInternal()->Obj.Index != nullptr);
+	bool bAllFound = true;
+	for (int32 i = 0; i < 40; ++i)
+	{
+		bAllFound &= J[*FString::Printf(TEXT("k%d"), i)].AsInt(-1) == i;
+	}
+	TestTrue(TEXT("every key is found through the seeded index"), bAllFound);
+	return true;
+}
+
 #endif
