@@ -87,6 +87,7 @@ namespace VaRest::LwsProbe::VaRestLwsProbeServiceTestPrivate
 		double Seconds = -1.0;
 		FString Error;
 		FString Sequence;
+		TArray<FEvent> Seen;
 	};
 
 	/**
@@ -110,7 +111,7 @@ namespace VaRest::LwsProbe::VaRestLwsProbeServiceTestPrivate
 		Spec.Port = Port;
 		const int32 Conn = Rig.Connect(MoveTemp(Spec));
 		Out.bEnded = Rig.WaitEnded(Conn, WaitSeconds);
-		const TArray<FEvent> Seen = Rig.Events(Conn);
+		Out.Seen = Rig.Events(Conn);
 		FEvent Start;
 		FEvent End;
 		const bool bStarted = Rig.Find(Conn, ConnectCalling, Start);
@@ -118,8 +119,8 @@ namespace VaRest::LwsProbe::VaRestLwsProbeServiceTestPrivate
 		{
 			Out.Seconds = End.Time - Start.Time;
 		}
-		Out.Error = ErrorOf(Seen);
-		Out.Sequence = CallSequence(Seen);
+		Out.Error = ErrorOf(Out.Seen);
+		Out.Sequence = CallSequence(Out.Seen);
 		return Out;
 	}
 
@@ -129,12 +130,39 @@ namespace VaRest::LwsProbe::VaRestLwsProbeServiceTestPrivate
 			: FString::Printf(TEXT("still pending after %.0f s (%s)"), WaitSeconds, *Run.Sequence);
 	}
 
-	/** A blackhole result, saying so when the host has no blackhole (the connect failed at once) */
-	FString DescribeBlackhole(const FHang& Run, double WaitSeconds)
+	/** TEST-NET-1 (RFC 5737): never assigned, so a SYN to it usually goes unanswered */
+	constexpr const TCHAR* BlackholeAddress = TEXT("192.0.2.1");
+	/** An end this soon after the connect call is a failure of the connect, not one of LWS's timeouts (whole seconds) */
+	constexpr double AtOnceSeconds = 0.5;
+
+	/**
+	 * A blackhole fact. Recorded with the measured time only when the connect really hung; unverified when it did not
+	 * black-hole here, so Task 11 never applies a value that measured something else (controller ruling, Task 5). Read
+	 * from the rig's events: APPEND_HANDSHAKE_HEADER means the TCP connect completed, because LWS compiles the handshake
+	 * only to write it to the socket (client.c.o lws_client_socket_service: lws_generate_client_handshake at 0x3d2, its
+	 * one call, then lws_ssl_capable_write at 0x40e). A transparent proxy accepts every connect that way
+	 */
+	void BlackholeFact(FAutomationTestBase& Test, const TCHAR* Id, const FHang& Run, double WaitSeconds, const FString& Spec, const FString& Evidence)
 	{
-		return Run.bEnded && Run.Seconds >= 0.0 && Run.Seconds < 0.5
-			? FString::Printf(TEXT("no blackhole on this host (failed at once): %s"), *Describe(Run, WaitSeconds))
-			: Describe(Run, WaitSeconds);
+		const bool bNullConnect = ConnectResult(Run.Seen).Equals(TEXT("null"), ESearchCase::CaseSensitive);
+		const bool bConnected = Run.Seen.ContainsByPredicate([](const FEvent& Each)
+		{
+			return Each.Reason == LWS_CALLBACK_CLIENT_APPEND_HANDSHAKE_HEADER || Each.Reason == LWS_CALLBACK_CLIENT_FILTER_PRE_ESTABLISH
+				|| Each.Reason == LWS_CALLBACK_CLIENT_ESTABLISHED || Each.Reason == LWS_CALLBACK_CLIENT_RECEIVE;
+		});
+		// Seconds stays negative when an end was seen but not timed: that measured nothing either
+		const bool bAtOnce = Run.bEnded && Run.Seconds < AtOnceSeconds;
+		if (!bNullConnect && !bConnected && !bAtOnce)
+		{
+			Fact(Test, Id, EVerdict::Recorded, Describe(Run, WaitSeconds), Spec, Evidence);
+			return;
+		}
+		const FString Happened = bNullConnect ? FString::Printf(TEXT("lws_client_connect_via_info returned null: %s"), *Run.Sequence)
+			: bConnected ? FString::Printf(TEXT("the TCP connect completed and the upgrade went out: %s"), *Describe(Run, WaitSeconds))
+			: FString::Printf(TEXT("the connect failed at once: %s"), *Describe(Run, WaitSeconds));
+		Fact(Test, Id, EVerdict::Unverified,
+			FString::Printf(TEXT("unverified here: the connect to %s did not black-hole (%s); release-pass item (a host without a transparent proxy)"), BlackholeAddress, *Happened),
+			Spec, Evidence);
 	}
 
 	struct FKill
@@ -425,17 +453,17 @@ bool FVaRestLwsProbeBlackholeTest::RunTest(const FString& Parameters)
 	{
 		return false;
 	}
-	// 192.0.2.1 is TEST-NET-1 (RFC 5737): never assigned, so a SYN to it usually goes unanswered. A host without a route
-	// fails at once instead, and the facts say so.
-	const FHang Configured = Hang(Site, 5, TEXT("192.0.2.1"), 80, 40.0);
+	// A SYN to BlackholeAddress usually goes unanswered. A host without a route fails at once instead, and one behind a
+	// transparent proxy completes the connect: both facts then read unverified (BlackholeFact)
+	const FHang Configured = Hang(Site, 5, BlackholeAddress, 80, 40.0);
 	NoteOutcome(*this, TEXT("the connect to TEST-NET-1 with timeout_secs 5 ended within 40 s"), Configured.bEnded);
-	Fact(*this, TEXT("timeout.tcp_connect_blackhole"), EVerdict::Recorded, DescribeBlackhole(Configured, 40.0),
+	BlackholeFact(*this, TEXT("timeout.tcp_connect_blackhole"), Configured, 40.0,
 		TEXT("WebSocket spec 2.2: whether a set timeout_secs bounds a TCP connect that is never answered"),
 		TEXT("timeout_secs = 5; TCP to 192.0.2.1:80; lws_service waiting up to 100 ms"));
 	// WebSocket spec 16.4: "default timeout_secs (blackhole address)" -- LWS's default against the kernel's SYN retries
-	const FHang Default = Hang(Site, 0, TEXT("192.0.2.1"), 80, 60.0);
+	const FHang Default = Hang(Site, 0, BlackholeAddress, 80, 60.0);
 	NoteOutcome(*this, TEXT("the connect to TEST-NET-1 with LWS's default timeout ended within 60 s"), Default.bEnded);
-	Fact(*this, TEXT("timeout.default_secs_blackhole"), EVerdict::Recorded, DescribeBlackhole(Default, 60.0),
+	BlackholeFact(*this, TEXT("timeout.default_secs_blackhole"), Default, 60.0,
 		TEXT("WebSocket spec 0.3 (inferred from 4.3) and 16.4: LWS's default timeout_secs, on a blackhole address"),
 		TEXT("timeout_secs = 0; TCP to 192.0.2.1:80; lws_service waiting up to 100 ms"));
 	return true;
