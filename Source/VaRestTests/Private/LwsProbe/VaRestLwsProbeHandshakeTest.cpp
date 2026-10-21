@@ -51,37 +51,75 @@ namespace VaRest::LwsProbe::VaRestLwsProbeHandshakeTestPrivate
 		return Out;
 	}
 
+	/** A redirect fact: recorded, or unverified when the redirect itself was not reached (Task 6 review M-4) */
+	struct FRedirect
+	{
+		EVerdict Verdict = EVerdict::Recorded;
+		FString Observed;
+	};
+
+	/**
+	 * Whether the redirect happened at all: the first request reached the server and the server sent its 3xx (ws.py's
+	 * ws_status journals "response" with the status before it answers). Empty when it did; else what was missing
+	 */
+	FString RedirectMissing(const FVaRestJson& Journal)
+	{
+		if (JournalEvents(Journal, TEXT("request"), 1).Num() == 0)
+		{
+			return TEXT("the first request never reached the server");
+		}
+		const TArray<FVaRestJson> Responses = JournalEvents(Journal, TEXT("response"), 1);
+		const int32 Status = Responses.Num() > 0 ? Responses[0][TEXT("status")].AsInt() : 0;
+		return Status >= 300 && Status <= 399 ? FString() : FString::Printf(TEXT("the server sent no 3xx (first response status %d, 0: none)"), Status);
+	}
+
 	/**
 	 * Whether the redirect was followed (review M-1): a second request at the server, or at the client a second
 	 * APPEND_HANDSHAKE_HEADER, or -- when the original connection was plain -- a certificate check or a TLS error. A
 	 * followed wss redirect can fail its TLS before any request reaches the server: the review (M-1) reads
 	 * lws_client_reset as keeping only the scheme's SSL bit, so SslFlags (ALLOW_SELFSIGNED, the host-name skip) do not
-	 * carry over, and the name checked becomes the bare address
+	 * carry over, and the name checked becomes the bare address. "Not followed" only for a redirect the server sent
+	 * (review M-4); one that never happened reads unverified
 	 */
-	FString Redirected(const TArray<FEvent>& Seen, const FVaRestJson& Journal, bool bOriginalTls)
+	FRedirect Redirected(const TArray<FEvent>& Seen, const FVaRestJson& Journal, bool bOriginalTls)
 	{
 		const TArray<FVaRestJson> Second = JournalEvents(Journal, TEXT("request"), 2);
 		const int32 Appends = OfReason(Seen, LWS_CALLBACK_CLIENT_APPEND_HANDSHAKE_HEADER).Num();
 		const TArray<FEvent> Checks = bOriginalTls ? TArray<FEvent>() : OfReason(Seen, LWS_CALLBACK_OPENSSL_PERFORM_SERVER_CERT_VERIFICATION);
 		const int32 Verifies = Checks.Num();
 		const FString Error = ErrorOf(Seen);
-		// FString::Contains ignores case by default
-		const bool bTlsError = !bOriginalTls && (Error.Contains(TEXT("ssl")) || Error.Contains(TEXT("tls")) || Error.Contains(TEXT("cert")));
+		// A heuristic on LWS's error string, after a plain start only (review M-6). This copy's TLS client fails a handshake
+		// with "client connect failed", a string only tls-client.c.o holds, so it is matched exactly; the substrings
+		// (FString::Contains ignores case) are for other builds: here they match only client.c.o's "HS: Redirect attempted
+		// SSL downgrade", which a plain start cannot give, and not client-handshake.c.o's TCP "connect failed"
+		const bool bTlsError = !bOriginalTls && (Error.Equals(TEXT("client connect failed"), ESearchCase::CaseSensitive)
+			|| Error.Contains(TEXT("ssl")) || Error.Contains(TEXT("tls")) || Error.Contains(TEXT("cert")));
 		// The last check's verdict says why a followed wss attempt failed. Error 62 is X509_V_ERR_HOSTNAME_MISMATCH (OpenSSL
 		// 1.1.1t x509_vfy.h:166); a direct wss connection to 127.0.0.1 got it too in a Task 6 diagnostic run, although the
 		// test leaf lists IP:127.0.0.1 (Tools/testserver/certs/test-server.pem), and LWS 3.0's client sets the name only with
 		// X509_VERIFY_PARAM_set1_host (openssl-client.c.o imports no X509_VERIFY_PARAM_set1_ip*)
 		const FString LastCheck = Verifies > 0 ? FString::Printf(TEXT(" (the last: %s)"), *Checks.Last().Note) : FString();
 		const FString Client = FString::Printf(TEXT("APPEND_HANDSHAKE_HEADER %d times, %d certificate checks after a plain start%s; the client %s"), Appends, Verifies, *LastCheck, *Outcome(Seen));
+		FRedirect Out;
 		if (Second.Num() > 0)
 		{
-			return FString::Printf(TEXT("followed: second request %s; %s"), *Second[0][TEXT("target")].AsString(), *Client);
+			Out.Observed = FString::Printf(TEXT("followed: second request %s; %s"), *Second[0][TEXT("target")].AsString(), *Client);
+			return Out;
 		}
 		if (Appends > 1 || Verifies > 0 || bTlsError)
 		{
-			return FString::Printf(TEXT("followed, and failed before a second request reached the server; %s"), *Client);
+			Out.Observed = FString::Printf(TEXT("followed, and failed before a second request reached the server; %s"), *Client);
+			return Out;
 		}
-		return FString::Printf(TEXT("not followed (no second request, no second attempt at the client); %s"), *Client);
+		const FString Missing = RedirectMissing(Journal);
+		if (!Missing.IsEmpty())
+		{
+			Out.Verdict = EVerdict::Unverified;
+			Out.Observed = FString::Printf(TEXT("the redirect was not reached: %s; %s"), *Missing, *Client);
+			return Out;
+		}
+		Out.Observed = FString::Printf(TEXT("not followed (no second request, no second attempt at the client); %s"), *Client);
+		return Out;
 	}
 
 	FString RedirectPath(const FString& Location, const FString& Key)
@@ -411,6 +449,12 @@ bool FVaRestLwsProbeOriginAndHeadersTest::RunTest(const FString& Parameters)
 
 	// The space APPEND_HANDSHAKE_HEADER reports with the context's 32 KiB header buffer, then a header that fills it but 512 bytes
 	const TArray<FEvent> Appends = OfReason(RawSeen, LWS_CALLBACK_CLIENT_APPEND_HANDSHAKE_HEADER);
+	// Review I-2, the precondition hs.append_header_space and hs.append_header_user read: without it they would be written
+	// from zeroed state ("len = -1", "is not"), a harness failure dressed as a library outcome
+	if (!TestTrue(TEXT("the raw-origin connection reached APPEND_HANDSHAKE_HEADER"), Appends.Num() > 0))
+	{
+		return false;
+	}
 	const int64 Space = Appends.Num() > 0 ? Appends[0].Len : -1;
 	const uint32 AppendFlags = Appends.Num() > 0 ? Appends[0].Flags : 0u;
 	const int32 FillBytes = Space > 1024 ? static_cast<int32>(Space - 512) : 0;
@@ -667,18 +711,25 @@ bool FVaRestLwsProbeRedirectsTest::RunTest(const FString& Parameters)
 		return false;
 	}
 	const FString RedirectSpec = TEXT("WebSocket spec 3.4 row \"upgrade 3xx (redirect not followed or failed)\" and ruling Q2 (2026-10-21: VaRest never follows an upgrade redirect); libwebsockets.a holds \"HS: Redirect failed\" and lws_client_reset");
-	Fact(*this, TEXT("hs.redirect_relative"), EVerdict::Recorded, Redirected(RelativeSeen, RelativeJournal, false), RedirectSpec,
+	const FRedirect RelativeResult = Redirected(RelativeSeen, RelativeJournal, false);
+	Fact(*this, TEXT("hs.redirect_relative"), RelativeResult.Verdict, RelativeResult.Observed, RedirectSpec,
 		TEXT("302 with Location: /ws/echo?key=<k>"));
-	Fact(*this, TEXT("hs.redirect_absolute"), EVerdict::Recorded, Redirected(AbsoluteSeen, AbsoluteJournal, false), RedirectSpec,
+	const FRedirect AbsoluteResult = Redirected(AbsoluteSeen, AbsoluteJournal, false);
+	Fact(*this, TEXT("hs.redirect_absolute"), AbsoluteResult.Verdict, AbsoluteResult.Observed, RedirectSpec,
 		TEXT("302 with Location: ws://<host>:<port>/ws/echo?key=<k>"));
+	// Review M-5: the header of a second request only when there was one
+	const FString SecondAuthorization = JournalEvents(RelativeJournal, TEXT("request"), 2).Num() > 0
+		? FString::Printf(TEXT("Authorization on the second request: %s"), *JournalHeader(RelativeJournal, TEXT("Authorization"), 2))
+		: FString(TEXT("no second request"));
 	Fact(*this, TEXT("hs.redirect_reappends_headers"), EVerdict::Recorded,
-		FString::Printf(TEXT("APPEND_HANDSHAKE_HEADER ran %d times; Authorization on the second request: %s"),
-			OfReason(RelativeSeen, LWS_CALLBACK_CLIENT_APPEND_HANDSHAKE_HEADER).Num(), *JournalHeader(RelativeJournal, TEXT("Authorization"), 2)),
+		FString::Printf(TEXT("APPEND_HANDSHAKE_HEADER ran %d times; %s"), OfReason(RelativeSeen, LWS_CALLBACK_CLIENT_APPEND_HANDSHAKE_HEADER).Num(), *SecondAuthorization),
 		TEXT("WebSocket spec 3.3: auth headers go on every attempt; ruling Q2: they must never reach another host"),
 		TEXT("the relative redirect, with Authorization appended"));
-	Fact(*this, TEXT("hs.redirect_to_tls"), EVerdict::Recorded, Redirected(ToTlsSeen, ToTlsJournal, false), RedirectSpec,
+	const FRedirect ToTlsResult = Redirected(ToTlsSeen, ToTlsJournal, false);
+	Fact(*this, TEXT("hs.redirect_to_tls"), ToTlsResult.Verdict, ToTlsResult.Observed, RedirectSpec,
 		TEXT("ws:// answered 302 with Location: wss://<host>:<tls port>/ws/echo, the test CA trusted; followed is decided from the client's events too (review M-1)"));
-	Fact(*this, TEXT("hs.redirect_downgrade"), EVerdict::Recorded, Redirected(DownSeen, DownJournal, true),
+	const FRedirect DownResult = Redirected(DownSeen, DownJournal, true);
+	Fact(*this, TEXT("hs.redirect_downgrade"), DownResult.Verdict, DownResult.Observed,
 		TEXT("none: libwebsockets.a holds \"HS: Redirect attempted SSL downgrade\""), TEXT("wss:// answered 302 with Location: ws://<host>:<port>/ws/echo"));
 
 	// Review I-5: what W1 needs to write ruling Q2's rule from evidence
@@ -895,15 +946,19 @@ bool FVaRestLwsProbeStatusInErrorTlsVerifyFailureTest::RunTest(const FString& Pa
 	Spec.Hook = StatusHook();
 	TArray<FEvent> Seen;
 	Visit(*this, Rig, MoveTemp(Spec), Seen);
-	const TCHAR* const Evidence = TEXT("wss to the TLS listener with its CA untrusted: the certificate check fails, no response");
+	// Review M-3: the last check's verdict (preverify, error, depth) in the evidence, so an untrusted CA and a host-name
+	// mismatch (error 62, which LWS 3.0 gives any IP-literal host: see Redirected) read apart
+	const TArray<FEvent> Checks = OfReason(Seen, LWS_CALLBACK_OPENSSL_PERFORM_SERVER_CERT_VERIFICATION);
+	const FString Evidence = FString::Printf(TEXT("wss to the TLS listener with its CA untrusted: the certificate check fails, no response; the last certificate check: %s"),
+		Checks.Num() > 0 ? *Checks.Last().Note : TEXT("none"));
 	// The case is a failed certificate check: PERFORM_SERVER_CERT_VERIFICATION with preverify_ok 0, its len (libwebsockets.h:1015-1044)
-	const bool bCheckFailed = Seen.ContainsByPredicate([](const FEvent& Each) { return Each.Reason == LWS_CALLBACK_OPENSSL_PERFORM_SERVER_CERT_VERIFICATION && Each.Len == 0; });
+	const bool bCheckFailed = Checks.ContainsByPredicate([](const FEvent& Each) { return Each.Len == 0; });
 	if (!bCheckFailed)
 	{
-		NotReachedFact(*this, TEXT("hs.status_in_connection_error.tls_verify_failure"), TEXT("no certificate check failed"), Seen, Evidence);
+		NotReachedFact(*this, TEXT("hs.status_in_connection_error.tls_verify_failure"), TEXT("no certificate check failed"), Seen, *Evidence);
 		return true;
 	}
-	StatusFact(*this, TEXT("hs.status_in_connection_error.tls_verify_failure"), Seen, 0, Evidence);
+	StatusFact(*this, TEXT("hs.status_in_connection_error.tls_verify_failure"), Seen, 0, *Evidence);
 	return true;
 }
 
@@ -944,11 +999,19 @@ bool FVaRestLwsProbeStatusInErrorKilledPendingTest::RunTest(const FString& Param
 	const TCHAR* const Evidence = TEXT("an attempt to /ws/hang killed with lws_set_timeout(LWS_TO_KILL_ASYNC) 1 s after the upgrade went out: no response");
 	// Task 5's rule (review minor 5): the fact speaks only for a kill that ran. "kill: no wsi" never reached LWS, and
 	// without a kill LWS's own handshake timeout ends the attempt, a CONNECTION_ERROR of another case
-	FEvent Killed;
-	if (!Rig.Find(Conn, CommandRan, Killed, TEXT("kill")) || !Killed.Note.Equals(TEXT("kill"), ESearchCase::CaseSensitive))
+	const int32 KillAt = Seen.IndexOfByPredicate([](const FEvent& Each) { return Each.Reason == CommandRan && Each.Note.StartsWith(TEXT("kill"), ESearchCase::CaseSensitive); });
+	const FString KillNote = KillAt == INDEX_NONE ? FString(TEXT("never queued")) : Seen[KillAt].Note;
+	if (!KillNote.Equals(TEXT("kill"), ESearchCase::CaseSensitive))
 	{
-		NotReachedFact(*this, TEXT("hs.status_in_connection_error.killed_pending"),
-			FString::Printf(TEXT("the kill did not run (%s)"), Killed.Note.IsEmpty() ? TEXT("never queued") : *Killed.Note), Seen, Evidence);
+		NotReachedFact(*this, TEXT("hs.status_in_connection_error.killed_pending"), FString::Printf(TEXT("the kill did not run (%s)"), *KillNote), Seen, Evidence);
+		return true;
+	}
+	// Review I-1: and only for a kill that landed on a pending upgrade. ConnectReturned and the sleep do not show the
+	// upgrade went out; APPEND_HANDSHAKE_HEADER before the kill command does (TcpCompleted), in the rig's service-thread order
+	const int32 UpgradeAt = Seen.IndexOfByPredicate([](const FEvent& Each) { return Each.Reason == LWS_CALLBACK_CLIENT_APPEND_HANDSHAKE_HEADER; });
+	if (UpgradeAt == INDEX_NONE || UpgradeAt > KillAt)
+	{
+		NotReachedFact(*this, TEXT("hs.status_in_connection_error.killed_pending"), TEXT("the upgrade had not gone out before the kill"), Seen, Evidence);
 		return true;
 	}
 	StatusFact(*this, TEXT("hs.status_in_connection_error.killed_pending"), Seen, 0, Evidence);
