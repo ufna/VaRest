@@ -276,6 +276,15 @@ FVaRestClient& FVaRestClient::WithMaxJsonBytes(int64 Bytes)
 	return *this;
 }
 
+FVaRestClient& FVaRestClient::WithMaxConcurrent(int32 MaxConcurrent)
+{
+	if (State.IsValid())
+	{
+		State->EditConfig([MaxConcurrent](VaRest::Http::FClientConfig& Edited) { Edited.MaxConcurrent = FMath::Max(1, MaxConcurrent); });
+	}
+	return *this;
+}
+
 FVaRestClient& FVaRestClient::Use(FVaRestStageRef Stage, EVaRestStageSlot Slot)
 {
 	if (State.IsValid())

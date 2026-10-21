@@ -98,6 +98,7 @@ void VaRest::Http::FClientState::Publish(const TSharedRef<FClientConfig, ESPMode
 			bReissue |= Entry.Key->MayReissue();
 		}
 	}
+	NewChain->Add(MakeLimiterStage()); // spec 4.6: "next to the transport, so queued retries wait their turn too"
 	NewChain->Add(MakeTransportStage());
 	Next->Chain = NewChain;
 	Next->bMayReissue = bReissue;
@@ -116,6 +117,20 @@ void VaRest::Http::FClientState::Publish(const TSharedRef<FClientConfig, ESPMode
 		FWriteScopeLock WriteLock(ConfigLock);
 		Replaced = MoveTemp(Config);
 		Config = Next;
+	}
+	const int32 Wanted = FMath::Max(1, Next->MaxConcurrent);
+	if (Limiter.GetCapacity() != Wanted)
+	{
+		// Review M-2: only on a change, and the grants from a later game-thread task -- a grant can run a request to its
+		// end at once, and Publish runs inside WithHeader(), SetSecretValue() and the like (decision 3)
+		Limiter.SetCapacity(Wanted);
+		UE::Tasks::Launch(TEXT("VaRest.LimiterPump"), [Weak = TWeakPtr<FClientState, ESPMode::ThreadSafe>(AsShared())]
+		{
+			if (const TSharedPtr<FClientState, ESPMode::ThreadSafe> Pinned = Weak.Pin())
+			{
+				Pinned->Limiter.Pump(Pinned->GetConfig()->Clock->Now());
+			}
+		}, UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
 	}
 }
 

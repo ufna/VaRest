@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "Misc/ScopeRWLock.h"
 #include "VaRestClient.h"
+#include "VaRestLimiter.h"
 #include "VaRestRedactor.h"
 #include "VaRestStage.h"
 
@@ -56,6 +57,8 @@ namespace VaRest::Http
 		void OnAttemptDone(const FVaRestExchangeRef& Exchange, FVaRestTransportResult&& Result, FVaRestOutcomeCallback&& OnOutcome);
 		/** Game thread */
 		int32 NumInFlight() const { return InFlight.Num(); }
+		/** Game thread */
+		FLimiter& GetLimiter() { return Limiter; }
 
 		/** Every live client (game thread): the trace snapshot, engine shutdown */
 		static void ForEachLive(TFunctionRef<void(FClientState&)> Visit);
@@ -96,9 +99,12 @@ namespace VaRest::Http
 		TSharedPtr<const FClientConfig, ESPMode::ThreadSafe> Config;
 		/** Spec 3.2: in-flight exchanges are owned here and keep this state alive (each holds its State) */
 		TMap<uint64, FVaRestExchangeRef> InFlight;
+		/** Spec 4.6 */
+		FLimiter Limiter;
 	};
 
 	/** The chain's built-in stages (VaRestPipeline.cpp) */
 	FVaRestStageRef MakeAttemptBoundaryStage();
+	FVaRestStageRef MakeLimiterStage();
 	FVaRestStageRef MakeTransportStage();
 }

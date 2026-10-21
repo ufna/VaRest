@@ -230,6 +230,38 @@ namespace VaRest::Http::PipelinePrivate
 		}
 	};
 
+	/** Spec 4.6: per attempt, right before the transport */
+	class FLimiterStage final : public IVaRestStage
+	{
+	public:
+		virtual FName GetStageName() const override { return TEXT("Limiter"); }
+
+		virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) override
+		{
+			FVaRestExchange& Ex = *Exchange;
+			// One of the two closures below runs, exactly once: the grant or the abort
+			TSharedRef<FVaRestOutcomeCallback, ESPMode::ThreadSafe> Outcome = MakeShared<FVaRestOutcomeCallback, ESPMode::ThreadSafe>(MoveTemp(OnOutcome));
+			Ex.bInLimiterQueue = true;
+			Ex.State->GetLimiter().Acquire(Ex.RequestId, Ex.Priority, Ex.Config->Clock->Now(),
+				[Exchange, Next, Outcome](double Waited)
+				{
+					Exchange->bInLimiterQueue = false;
+					Exchange->LimiterWait = Waited; // Inspector IN-2
+					Next.Proceed(Exchange, [Exchange, Outcome](FVaRestAttemptOutcome&& Result)
+					{
+						// The slot is freed before the outcome goes further up: a stage that re-issues queues again
+						Exchange->State->GetLimiter().Release(Exchange->Config->Clock->Now());
+						(*Outcome)(MoveTemp(Result));
+					});
+				},
+				[Exchange, Outcome]()
+				{
+					Exchange->bInLimiterQueue = false;
+					(*Outcome)(FVaRestAttemptOutcome::Canceled());
+				});
+		}
+	};
+
 	/** The chain's last stage: hands the attempt to IVaRestTransport */
 	class FTransportStage final : public IVaRestStage
 	{
@@ -354,6 +386,11 @@ void FVaRestStageNext::Proceed(const FVaRestExchangeRef& Exchange, FVaRestOutcom
 FVaRestStageRef VaRest::Http::MakeAttemptBoundaryStage()
 {
 	return MakeShared<PipelinePrivate::FAttemptBoundaryStage, ESPMode::ThreadSafe>();
+}
+
+FVaRestStageRef VaRest::Http::MakeLimiterStage()
+{
+	return MakeShared<PipelinePrivate::FLimiterStage, ESPMode::ThreadSafe>();
 }
 
 FVaRestStageRef VaRest::Http::MakeTransportStage()
@@ -735,6 +772,11 @@ void VaRest::Http::FClientState::Cancel(const FVaRestExchangeRef& Exchange, EVaR
 		return;
 	}
 	FApiScope Scope(Ex);
+	if (Ex.bInLimiterQueue && Limiter.Abort(Ex.RequestId))
+	{
+		// Out of the queue: its abort answers Canceled up the chain, and no slot was held
+		return;
+	}
 	if (Ex.TransportCall.IsValid())
 	{
 		// The transport answers Canceled through the normal path, which releases what the attempt holds

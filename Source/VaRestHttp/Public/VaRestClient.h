@@ -457,6 +457,8 @@ public:
 	FVaRestClient& WithClock(TSharedRef<IVaRestClock, ESPMode::ThreadSafe> Clock);
 	/** The largest response body parsed as JSON (decision 20); 0 = none. Default: UVaRestHttpSettings::MaxJsonResponseBytes (32 MiB). */
 	FVaRestClient& WithMaxJsonBytes(int64 Bytes);
+	/** Spec 4.6: requests at once (at least 1); the rest queue by priority. Default: UVaRestHttpSettings::MaxConcurrent (16). */
+	FVaRestClient& WithMaxConcurrent(int32 MaxConcurrent);
 	/** A custom stage (spec 4): Outer sees each logical request once, PerAttempt every attempt with its final headers */
 	FVaRestClient& Use(FVaRestStageRef Stage, EVaRestStageSlot Slot);
 
