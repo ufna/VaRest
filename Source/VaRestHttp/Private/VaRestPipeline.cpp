@@ -165,6 +165,64 @@ namespace VaRest::Http::PipelinePrivate
 		Ex.bCancelRequested = true;
 	}
 
+	/** Decision 8's throttle: the game thread reads the probe this often while an attempt runs */
+	constexpr double ProgressInterval = 0.1;
+
+	/** Game thread: calls OnProgress when the probe changed since the last call */
+	void DeliverProgress(FVaRestExchange& Ex)
+	{
+		// No progress for a request being canceled, whose owner is gone, or at shutdown (spec 3.2: no callbacks; review C-1).
+		// The last call comes from OnAttemptDone after Task 11's owner check only marks it: without this, OnProgress
+		// would run into a destroyed owner.
+		if (!Ex.Probe.IsValid() || !Ex.Handler.IsValid() || !Ex.Handler->WantsProgress() || Ex.IsCancelRequested() || IsOwnerGone(Ex))
+		{
+			return;
+		}
+		FVaRestProgress Current;
+		Current.BytesSent = Ex.Probe->BytesSent.load();
+		Current.BytesReceived = Ex.Probe->BytesReceived.load();
+		Current.UploadTotal = Ex.Probe->UploadTotal.load();
+		Current.DownloadTotal = Ex.Probe->DownloadTotal.load();
+		if (Current.DownloadTotal >= 0 && Current.BytesReceived > Current.DownloadTotal)
+		{
+			// Review M-16: a compressed body's Content-Length counts compressed bytes; a percentage must never pass 100%
+			Current.DownloadTotal = -1;
+		}
+		if (Current == Ex.LastProgress)
+		{
+			return;
+		}
+		Ex.LastProgress = Current;
+		Ex.Handler->Progress(Current);
+	}
+
+	void ScheduleProgress(const FVaRestExchangeRef& Exchange)
+	{
+		if (!Exchange->TransportCall.IsValid() || Exchange->IsCancelRequested())
+		{
+			// Review M-3: the timer stops once the attempt is canceled -- an OnProgress that called Cancel() included; the
+			// transport's Canceled answer is on its way, and OnAttemptDone delivers nothing for it
+			return;
+		}
+		const TWeakPtr<FVaRestExchange, ESPMode::ThreadSafe> Weak = Exchange;
+		Exchange->ProgressTimer = Exchange->Config->Clock->SetTimer(ProgressInterval, [Weak]
+		{
+			const TSharedPtr<FVaRestExchange, ESPMode::ThreadSafe> Pinned = Weak.Pin();
+			if (!Pinned.IsValid() || !Pinned->TransportCall.IsValid())
+			{
+				return;
+			}
+			if (IsOwnerGone(*Pinned))
+			{
+				// Spec 3.2: an owner gone mid-download stops it now rather than at the end
+				Pinned->State->Cancel(Pinned.ToSharedRef(), EVaRestCancelReason::OwnerGone);
+				return;
+			}
+			DeliverProgress(*Pinned);
+			ScheduleProgress(Pinned.ToSharedRef());
+		});
+	}
+
 	/**
 	 * Background thread (the restore-the-bug runs put it on the game thread): spec 1's "parsing, decoding ... run on
 	 * UE::Tasks". Ex is read only through its atomic cancel flag, which any thread may read.
@@ -338,10 +396,20 @@ namespace VaRest::Http::PipelinePrivate
 			Request.Clock = Cfg.Clock;
 			Request.Probe->UploadTotal = Ex.Body.ContentLength;
 			Ex.Probe = Request.Probe;
+			// IN-11: the progress delegate is bound only when someone reads it
+			Request.bReportProgress = Ex.Handler.IsValid() && Ex.Handler->WantsProgress();
+			// Decision 29 (review N-9): a callback, not only the trace, asked -- on curl the upload is then counted
+			Request.bProgressCallback = Request.bReportProgress;
+			Ex.LastProgress = FVaRestProgress();
+			const bool bWantsProgress = Request.bReportProgress;
 			Ex.TransportCall = Cfg.Transport->Start(MoveTemp(Request), [Guard = FCompletionGuard(Exchange, MoveTemp(OnOutcome))](FVaRestTransportResult&& Result) mutable
 			{
 				Guard.Deliver(MoveTemp(Result));
 			});
+			if (bWantsProgress)
+			{
+				ScheduleProgress(Exchange);
+			}
 		}
 	};
 }
@@ -544,6 +612,9 @@ void VaRest::Http::FClientState::OnAttemptDone(const FVaRestExchangeRef& Exchang
 		// Seen as canceled by every stage the outcome passes on its way up (M4's retry stops here)
 		MarkOwnerGone(Ex);
 	}
+	Ex.Config->Clock->ClearTimer(Ex.ProgressTimer);
+	// The final counts, so a caller sees 100% even when the transfer was quicker than one tick (decision 8)
+	DeliverProgress(Ex);
 	FVaRestAttemptOutcome Outcome;
 	Outcome.Status = Result.Status;
 	Outcome.Headers = MoveTemp(Result.Headers);
@@ -782,6 +853,8 @@ void VaRest::Http::FClientState::Cancel(const FVaRestExchangeRef& Exchange, EVaR
 	}
 	if (Ex.TransportCall.IsValid())
 	{
+		// Review M-3: no progress tick after Cancel() returns (ScheduleProgress re-arms nothing once the flag is set)
+		Ex.Config->Clock->ClearTimer(Ex.ProgressTimer);
 		// The transport answers Canceled through the normal path, which releases what the attempt holds
 		Ex.TransportCall->Cancel();
 		return;

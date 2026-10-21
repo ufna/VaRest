@@ -330,10 +330,19 @@ void FVaRestFakeTransport::Finish(int32 Index, FVaRestFakeResponse&& Response)
 			Req.Probe->StatusAt = Clock->Now();
 		}
 	}
-	// Never lower what ReportProgress already reported: a timeout or cancel after partial progress keeps it (review M-7)
-	int64 Reported = Req.Probe->BytesReceived.load();
-	while (Reported < Result.BytesDown && !Req.Probe->BytesReceived.compare_exchange_weak(Reported, Result.BytesDown))
+	if (Result.Failure == EVaRestTransportFailure::None)
 	{
+		// A completed body is every byte that arrived: the engine's count only grows (CurlHttp.cpp:663), and its finish
+		// reports it once more (CurlHttp.cpp:1274, :1221-1237), so a script that reported more than the body ends at the body
+		Req.Probe->BytesReceived = Result.BytesDown;
+	}
+	else
+	{
+		// Never lower what ReportProgress already reported: a timeout or cancel after partial progress keeps it (review M-7)
+		int64 Reported = Req.Probe->BytesReceived.load();
+		while (Reported < Result.BytesDown && !Req.Probe->BytesReceived.compare_exchange_weak(Reported, Result.BytesDown))
+		{
+		}
 	}
 	if (Req.bReportStatusTime)
 	{

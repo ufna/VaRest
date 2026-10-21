@@ -285,6 +285,19 @@ FVaRestClient& FVaRestClient::WithMaxConcurrent(int32 MaxConcurrent)
 	return *this;
 }
 
+FVaRestClient& FVaRestClient::WithTimeout(float Total, float Activity)
+{
+	if (State.IsValid())
+	{
+		State->EditConfig([Total, Activity](VaRest::Http::FClientConfig& Edited)
+		{
+			Edited.Timeout = FMath::Max(0.f, Total);
+			Edited.ActivityTimeout = FMath::Max(0.f, Activity);
+		});
+	}
+	return *this;
+}
+
 FVaRestClient& FVaRestClient::Use(FVaRestStageRef Stage, EVaRestStageSlot Slot)
 {
 	if (State.IsValid())

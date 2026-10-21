@@ -335,6 +335,37 @@ public:
 		return MoveTemp(*this);
 	}
 
+	/**
+	 * Spec 4.7, per attempt: a value above 0 replaces the client's (0 keeps it). With a total and no activity timeout the
+	 * transport bounds silence by the total too, so the engine's 30 s idle default never fires first (decision 30); on Mac
+	 * and iOS the engine's connection timeout still caps silence (docs/dev/http-thread-completion.md).
+	 */
+	TVaRestRequest Timeout(float TotalSeconds, float ActivitySeconds = 0.f) &&
+	{
+		if (TotalSeconds > 0.f)
+		{
+			Spec->Timeout = TotalSeconds;
+		}
+		if (ActivitySeconds > 0.f)
+		{
+			Spec->ActivityTimeout = ActivitySeconds;
+		}
+		return MoveTemp(*this);
+	}
+
+	/**
+	 * (const FVaRestProgress&): on the game thread, at most every 100 ms while bytes move, and once when the attempt ends
+	 * (decision 8). On curl backends an upload with OnProgress is read through a counting archive (decision 29), which curl
+	 * cannot rewind: with [HTTP.Curl] bAllowSeekFunction on, a 307/308 redirect or an auth replay that must resend the body
+	 * fails (with the engine default, off, curl rewinds no body at all, so nothing changes). Mac and iOS are not affected.
+	 */
+	template <typename FuncType>
+	TVaRestRequest OnProgress(FuncType&& Func) &&
+	{
+		Handler().OnProgress = Forward<FuncType>(Func);
+		return MoveTemp(*this);
+	}
+
 	TVaRestRequest Tag(FName InTag) &&
 	{
 		Spec->Tag = InTag;
@@ -473,6 +504,11 @@ public:
 	 *   queue at once.
 	 */
 	FVaRestClient& WithMaxConcurrent(int32 MaxConcurrent);
+	/**
+	 * Spec 3.1 / 4.7: seconds per attempt; 0 = the engine's default ([HTTP] HttpTotalTimeout, HttpActivityTimeout). An
+	 * activity of 0 with a total above 0 bounds silence by the total (decision 30).
+	 */
+	FVaRestClient& WithTimeout(float Total, float Activity = 0.f);
 	/** A custom stage (spec 4): Outer sees each logical request once, PerAttempt every attempt with its final headers */
 	FVaRestClient& Use(FVaRestStageRef Stage, EVaRestStageSlot Slot);
 
