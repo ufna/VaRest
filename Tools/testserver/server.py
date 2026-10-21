@@ -2,14 +2,17 @@
 # Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 """VaRest HTTP test server (core spec 7.1). Python 3.9+ standard library only.
 
-    python3 -I Tools/testserver/server.py [--host 127.0.0.1] [--port 0] [--ready-file PATH] [--parent-pid PID]
-                                          [--fixtures-dir DIR]
+    python3 -I Tools/testserver/server.py [--host 127.0.0.1] [--port 0] [--tls-port P] [--ready-file PATH]
+                                          [--parent-pid PID] [--fixtures-dir DIR]
 
 --port 0 lets the OS choose. Once the server accepts connections it prints "VaRestTestServer <base url>" and,
-with --ready-file, writes the base URL to that file (atomically, so a reader never sees half of it). With
---parent-pid it exits when that process is gone or is no longer its parent (a reused PID), so a runner killed
-with SIGKILL leaves no server behind. The parent must be the process that started the server: any other PID is
-refused at start (exit 2). A server that stops by itself (the parent watch, Ctrl-C) removes its ready file.
+with --ready-file, writes the base URL to that file (atomically, so a reader never sees half of it). --tls-port also
+serves every route and plug-in over TLS (stdlib ssl, the test certificate in certs/: localhost, 127.0.0.1 and ::1,
+signed by the throwaway test CA certs/test-ca.pem; WebSocket spec 16.3): it prints "VaRestTestServerTls <https url>" and
+the ready file holds that URL on a second line. With --parent-pid it exits when that process is gone or is no longer
+its parent (a reused PID), so a runner killed with SIGKILL leaves no server behind. The parent must be the process
+that started the server: any other PID is refused at start (exit 2). A server that stops by itself (the parent
+watch, Ctrl-C) removes its ready file.
 
 Routes. Every response with a body has a Content-Length unless the route says chunked. Bounds (review M1): a request
 body over MAX_BODY (64 MiB) gets 413, a request-target over MAX_TARGET (16 KiB) 414, and a numeric parameter that is
@@ -46,6 +49,7 @@ not an integer or is out of its range 400 ({"error", "name", ...}); each closes 
   ANY  /protected           "Authorization: Bearer <current access token>" -> 200, else 401
   ANY  /flaky?n=<k>&key=<k> the first k calls per key close the connection without a response; then 200
   GET  /envelope/ok, /envelope/err            {"ok": true, "data": {...}} / {"ok": false, "code", "message"}
+  GET  /tls/ca.pem          the test CA, for a client that verifies the TLS listener instead of allowing self-signed
 
 Plug-ins (WebSocket spec 16.3): each module named in PLUGINS that sits next to this file is imported at start
 and may call register_upgrade(token, handler) and register_route(methods, pattern, route). A request whose Upgrade
@@ -64,12 +68,20 @@ import os
 import random
 import re
 import socket
+try:
+    import ssl
+except ImportError:
+    ssl = None
 import sys
 import threading
 import time
 import urllib.parse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# WebSocket spec 16.3: the TLS listener's test certificate (certs/make_certs.sh; test-only, its CA's key is gone)
+CERTS_DIR = os.path.join(HERE, "certs")
+# A TLS client that never finishes its handshake is dropped after this, on its own thread (Handler.setup)
+TLS_HANDSHAKE_TIMEOUT = 10.0
 PLUGINS = ("ws",)
 
 LOCK = threading.Lock()
@@ -452,6 +464,12 @@ def route_envelope_err(h, match):
     h.send_json(200, {"ok": False, "code": "E42", "message": "the envelope says no"})
 
 
+def route_tls_ca(h, match):
+    """The test CA (certs/test-ca.pem): a client that wants the TLS listener verified, not only allowed, trusts this one"""
+    with open(os.path.join(CERTS_DIR, "test-ca.pem"), "rb") as stream:
+        h.send_bytes(200, stream.read(), "application/x-pem-file")
+
+
 ANY = None
 ROUTES = [
     (ANY, r"/echo(?:/.*)?", route_echo),
@@ -475,6 +493,7 @@ ROUTES = [
     (ANY, r"/flaky", route_flaky),
     (("GET",), r"/envelope/ok", route_envelope_ok),
     (("GET",), r"/envelope/err", route_envelope_err),
+    (("GET",), r"/tls/ca.pem", route_tls_ca),
 ]
 ROUTES = [(methods, re.compile(pattern), route) for methods, pattern, route in ROUTES]
 
@@ -483,6 +502,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
     # Keep-alive like a real API server: every response has a Content-Length or is chunked
     protocol_version = "HTTP/1.1"
     server_version = "VaRestTestServer/1"
+
+    def setup(self):
+        # The TLS handshake runs here, on this connection's thread, not in the accept loop: a client that never finishes
+        # it must not stall the others (TlsServer.get_request wraps without shaking hands)
+        if ssl is not None and isinstance(self.request, ssl.SSLSocket):
+            self.request.settimeout(TLS_HANDSHAKE_TIMEOUT)
+            self.request.do_handshake()
+            self.request.settimeout(None)
+        super().setup()
 
     def log_message(self, format, *args):
         # The UE log is the record; set VAREST_TESTSERVER_VERBOSE=1 to see requests
@@ -582,14 +610,45 @@ class Server(http.server.ThreadingHTTPServer):
     request_queue_size = 64
 
     def handle_error(self, request, client_address):
-        # A client that cancels, times out or drops a keep-alive connection resets it: a test scenario, not an error
-        if isinstance(sys.exc_info()[1], (ConnectionResetError, BrokenPipeError, TimeoutError)):
+        # A client that cancels, times out or drops a keep-alive connection resets it, and a TLS client may refuse our
+        # test certificate or speak plain HTTP to the TLS port: test scenarios, not errors
+        quiet = (ConnectionResetError, BrokenPipeError, TimeoutError, socket.timeout) + ((ssl.SSLError,) if ssl is not None else ())
+        if isinstance(sys.exc_info()[1], quiet):
             return
         super().handle_error(request, client_address)
 
 
 def make_server(host="127.0.0.1", port=0):
     return Server((host, port), Handler)
+
+
+class TlsServer(Server):
+    """The TLS listener (WebSocket spec 16.3): the same routes and plug-ins, over stdlib ssl"""
+
+    def __init__(self, address, handler, context):
+        self.tls_context = context
+        super().__init__(address, handler)
+
+    def get_request(self):
+        connection, address = self.socket.accept()
+        return self.tls_context.wrap_socket(connection, server_side=True, do_handshake_on_connect=False), address
+
+
+def make_tls_context():
+    if ssl is None:
+        raise OSError("this Python has no ssl module")
+    chain, key = os.path.join(CERTS_DIR, "test-server.pem"), os.path.join(CERTS_DIR, "test-server.key")
+    # load_cert_chain's FileNotFoundError carries no file name: check first, so the message names the missing file
+    for path in (chain, key):
+        if not os.path.isfile(path):
+            raise FileNotFoundError(2, "no such file", path)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(chain, key)
+    return context
+
+
+def make_tls_server(host="127.0.0.1", port=0):
+    return TlsServer((host, port), Handler, make_tls_context())
 
 
 def load_plugins():
@@ -639,6 +698,7 @@ def main(argv=None):
     parser.add_argument("--ready-file")
     parser.add_argument("--parent-pid", type=int)
     parser.add_argument("--fixtures-dir")
+    parser.add_argument("--tls-port", type=int, help="also serve every route with TLS on this port (0: the OS picks)")
     args = parser.parse_args(argv)
     # Review M-13: the watch compares getppid() with this PID, so it must be the parent now; any other PID would stop the
     # server half a second after it started, with nothing said
@@ -650,17 +710,36 @@ def main(argv=None):
 
     load_plugins()
     server = make_server(args.host, args.port)
-    url = "http://%s:%d" % (args.host, server.server_address[1])
+    urls = ["http://%s:%d" % (args.host, server.server_address[1])]
+    extras = []
+    if args.tls_port is not None:
+        try:
+            extras.append(make_tls_server(args.host, args.tls_port))
+        except OSError as error:
+            # Review M-11: the runner only says "did not start -- see <log>"; this line names the file that failed
+            # (ssl.SSLError is an OSError: a certificate that does not load lands here too)
+            print("VaRestTestServer: cannot start the TLS listener: %s: %s" % (getattr(error, "filename", None) or CERTS_DIR, error), file=sys.stderr, flush=True)
+            server.server_close()
+            return 2
+        urls.append("https://%s:%d" % (args.host, extras[0].server_address[1]))
     if args.parent_pid:
         threading.Thread(target=watch_parent, args=(args.parent_pid, server), daemon=True).start()
-    print("VaRestTestServer " + url, flush=True)
+    print("VaRestTestServer " + urls[0], flush=True)
+    if extras:
+        print("VaRestTestServerTls " + urls[1], flush=True)
+    for extra in extras:
+        threading.Thread(target=extra.serve_forever, kwargs={"poll_interval": 0.2}, daemon=True).start()
     if args.ready_file:
-        write_ready(args.ready_file, url)
+        write_ready(args.ready_file, "\n".join(urls))
     try:
         server.serve_forever(poll_interval=0.2)
     except KeyboardInterrupt:
         pass
     finally:
+        # The parent watch stops the plain listener; the TLS one goes with it
+        for extra in extras:
+            extra.shutdown()
+            extra.server_close()
         server.server_close()
         # The parent watch ends here when the runner was killed and its own cleanup never ran: a ready file must not
         # name a server that is gone

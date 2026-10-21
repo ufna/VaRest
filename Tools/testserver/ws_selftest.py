@@ -12,6 +12,7 @@ import json
 import os
 import random
 import socket
+import ssl
 import struct
 import subprocess
 import sys
@@ -590,6 +591,30 @@ class ScenarioTest(WsTestBase):
         client.close()
         self.assertEqual(client.message()[0], "close")
         self.assertEqual(self.of(self.ended(key), "flood")[0]["bytes"], 262144)
+
+
+class WssTest(unittest.TestCase):
+    """ws.py over the TLS listener, verified against the test CA"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.httpd = start(server.make_tls_server)
+        cls.port = cls.httpd.server_address[1]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+
+    def test_wss_echo_verified(self):
+        context = ssl.create_default_context(cafile=os.path.join(server.CERTS_DIR, "test-ca.pem"))
+        client = Client(self.port, "/ws/echo", tls=context)
+        self.addCleanup(client.shutdown)
+        self.assertTrue(client.accepted, client.headers)
+        client.send(ws.OP_TEXT, b"over tls")
+        self.assertEqual(client.message(), ("text", b"over tls"))
+        client.close()
+        self.assertEqual(client.message()[0], "close")
 
 
 class ScriptModeTest(unittest.TestCase):

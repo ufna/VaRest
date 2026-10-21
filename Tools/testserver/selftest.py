@@ -13,6 +13,7 @@ import os
 import shutil
 import signal
 import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -324,6 +325,79 @@ class ServerTest(unittest.TestCase):
         self.assertEqual((status, value), (200, {"hello": "ws"}))
         self.assertEqual(self.call("POST", "/plugin/hello")[0], 404)
 
+    def test_tls_ca_route(self):
+        status, headers, data = self.call("GET", "/tls/ca.pem")
+        with open(os.path.join(server.CERTS_DIR, "test-ca.pem"), "rb") as stream:
+            self.assertEqual((status, headers["Content-Type"], data), (200, "application/x-pem-file", stream.read()))
+
+
+class TlsTest(unittest.TestCase):
+    """The TLS listener (WebSocket spec 16.3): every route over stdlib ssl with the committed test certificate"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.httpd = server.make_tls_server("127.0.0.1", 0)
+        cls.port = cls.httpd.server_address[1]
+        cls.thread = threading.Thread(target=cls.httpd.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+
+    @staticmethod
+    def trusted():
+        return ssl.create_default_context(cafile=os.path.join(server.CERTS_DIR, "test-ca.pem"))
+
+    def get(self, context, server_hostname, path="/echo"):
+        """One HTTPS GET over a socket to 127.0.0.1 whose certificate is checked for server_hostname"""
+        with socket.create_connection(("127.0.0.1", self.port), timeout=10) as plain:
+            with context.wrap_socket(plain, server_hostname=server_hostname) as tls:
+                certificate = tls.getpeercert()
+                tls.sendall(("GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n" % (path, server_hostname)).encode("ascii"))
+                received = b""
+                while True:
+                    chunk = tls.recv(65536)
+                    if not chunk:
+                        return received, certificate
+                    received += chunk
+
+    def test_verified_by_name_and_by_ip(self):
+        for name in ("localhost", "127.0.0.1"):
+            received, _ = self.get(self.trusted(), name)
+            self.assertTrue(received.startswith(b"HTTP/1.1 200 "), (name, received[:80]))
+
+    def test_untrusted_is_refused(self):
+        with self.assertRaises(ssl.SSLCertVerificationError):
+            self.get(ssl.create_default_context(), "localhost")
+
+    def test_certificate_files(self):
+        with open(os.path.join(server.CERTS_DIR, "test-server.pem"), encoding="ascii") as stream:
+            chain = stream.read()
+        # The leaf and then the CA: a client that allows self-signed chains sees SELF_SIGNED_CERT_IN_CHAIN
+        self.assertEqual(chain.count("-----BEGIN CERTIFICATE-----"), 2)
+        with open(os.path.join(server.CERTS_DIR, "test-ca.pem"), encoding="ascii") as stream:
+            self.assertTrue(chain.rstrip().endswith(stream.read().strip()))
+        with open(os.path.join(server.CERTS_DIR, "test-server.key"), encoding="ascii") as stream:
+            self.assertNotIn("ENCRYPTED", stream.read())
+        _, certificate = self.get(self.trusted(), "localhost")
+        self.assertGreater(ssl.cert_time_to_seconds(certificate["notAfter"]) - time.time(), 10 * 365 * 86400)
+        self.assertIn(("DNS", "localhost"), certificate["subjectAltName"])
+        self.assertIn(("IP Address", "127.0.0.1"), certificate["subjectAltName"])
+
+    def test_a_stalled_or_plain_client_does_not_block_others(self):
+        # Review focus: the handshake runs on the connection's own thread, bounded by TLS_HANDSHAKE_TIMEOUT
+        stalled = socket.create_connection(("127.0.0.1", self.port), timeout=10)
+        try:
+            self.assertTrue(self.get(self.trusted(), "localhost")[0].startswith(b"HTTP/1.1 200 "))
+            with socket.create_connection(("127.0.0.1", self.port), timeout=10) as plain:
+                plain.sendall(b"GET /echo HTTP/1.1\r\nHost: x\r\n\r\n")
+                plain.recv(65536)
+            self.assertTrue(self.get(self.trusted(), "localhost")[0].startswith(b"HTTP/1.1 200 "))
+        finally:
+            stalled.close()
+
 
 class LifecycleTest(unittest.TestCase):
     def test_ready_file_and_parent_watch(self):
@@ -387,6 +461,70 @@ class LifecycleTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn(b"--parent-pid 1 is not the process that started this one", result.stderr)
         self.assertLess(time.monotonic() - started, 5)
+
+
+    def test_tls_listener_in_the_ready_file_and_gone_with_the_parent(self):
+        # Review focus: the runner killed with both listeners up -- both go, and the ready file with them
+        with tempfile.TemporaryDirectory() as directory:
+            ready = os.path.join(directory, "url")
+            child_pid_file = os.path.join(directory, "pid")
+            starter = ("import os, subprocess, sys, time\n"
+                       "child = subprocess.Popen([sys.executable, '-I', sys.argv[1], '--port', '0', '--tls-port', '0',"
+                       " '--ready-file', sys.argv[2], '--parent-pid', str(os.getpid())], stdout=subprocess.DEVNULL)\n"
+                       "open(sys.argv[3], 'w').write(str(child.pid))\n"
+                       "time.sleep(60)\n")
+            parent = subprocess.Popen([sys.executable, "-I", "-c", starter, os.path.join(HERE, "server.py"), ready, child_pid_file])
+            child_pid = None
+            gone = False
+            try:
+                deadline = time.monotonic() + 10
+                while not os.path.exists(ready) and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                with open(ready, encoding="utf-8") as stream:
+                    plain_url, tls_url = [urllib.parse.urlsplit(line) for line in stream.read().split()]
+                self.assertEqual((plain_url.scheme, tls_url.scheme), ("http", "https"))
+                context = ssl.create_default_context(cafile=os.path.join(server.CERTS_DIR, "test-ca.pem"))
+                connection = http.client.HTTPSConnection("127.0.0.1", tls_url.port, timeout=10, context=context)
+                connection.request("GET", "/echo")
+                self.assertEqual(connection.getresponse().status, 200)
+                connection.close()
+                with open(child_pid_file, encoding="utf-8") as stream:
+                    child_pid = int(stream.read())
+                parent.kill()
+                parent.wait()
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline and not gone:
+                    try:
+                        os.kill(child_pid, 0)
+                        time.sleep(0.1)
+                    except ProcessLookupError:
+                        gone = True
+                self.assertTrue(gone, "the server outlived its parent")
+                self.assertFalse(os.path.exists(ready), "the ready file outlived the server")
+                with self.assertRaises(ConnectionRefusedError):
+                    socket.create_connection(("127.0.0.1", tls_url.port), timeout=5).close()
+            finally:
+                if parent.poll() is None:
+                    parent.kill()
+                    parent.wait()
+                if child_pid is None and os.path.exists(child_pid_file):
+                    with open(child_pid_file, encoding="utf-8") as stream:
+                        child_pid = int(stream.read() or 0) or None
+                if child_pid is not None and not gone:
+                    try:
+                        os.kill(child_pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+                    except OSError:
+                        pass
+
+    def test_missing_certificate_names_the_file(self):
+        # Review M-11: the runner always passes --tls-port, so a missing certificate must say which file, not just fail
+        with tempfile.TemporaryDirectory() as directory:
+            shutil.copy(os.path.join(HERE, "server.py"), directory)
+            result = subprocess.run([sys.executable, "-I", os.path.join(directory, "server.py"), "--port", "0", "--tls-port", "0"],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=20)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(b"cannot start the TLS listener", result.stderr)
+        self.assertIn(b"test-server", result.stderr)
 
 
 class PluginTest(unittest.TestCase):
