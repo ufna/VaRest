@@ -19,6 +19,12 @@
 			"PlatformAllowList" : [ "Win64", "Mac", "Linux", "Android", "IOS" ]
 		},
 		{
+			"Name" : "VaRestHttp",
+			"Type" : "Runtime",
+			"LoadingPhase" : "PreDefault",
+			"PlatformAllowList" : [ "Win64", "Mac", "Linux", "Android", "IOS" ]
+		},
+		{
 			"Name" : "VaRest",
 			"Type" : "Runtime",
 			"LoadingPhase": "PreDefault"
