@@ -549,7 +549,7 @@ bool VaRest::Http::FClientState::Resolve(FVaRestExchange& Exchange, FString& Out
 	Exchange.MaxJsonBytes = Exchange.MaxJsonBytesOverride.Get(Cfg.MaxJsonBytes);
 	Exchange.DecodeOptions.Naming = Exchange.Naming;
 	Exchange.DecodeOptions.bStrict = Exchange.bStrictDecode;
-	Exchange.LogLevel = Cfg.LogLevel;
+	Exchange.LogLevel = EffectiveLogLevel(Cfg.LogLevel);
 	return true;
 }
 

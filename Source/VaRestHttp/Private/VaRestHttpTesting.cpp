@@ -114,6 +114,7 @@ VaRest::Http::Testing::FTestRig::FTestRig(FStringView BaseUrl)
 	, Fake(MakeShared<FVaRestFakeTransport, ESPMode::ThreadSafe>(Clock))
 	, Client(FVaRestClient::Make(BaseUrl))
 {
-	Client.WithTransport(Fake).WithClock(Clock);
+	// Logging is a test subject of its own (VaRest.Http.Log.*); elsewhere it would only add noise and warnings
+	Client.WithTransport(Fake).WithClock(Clock).WithLogLevel(EVaRestLogLevel::None);
 }
 #endif // WITH_DEV_AUTOMATION_TESTS

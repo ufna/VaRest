@@ -28,7 +28,12 @@ enum class EVaRestRedactKeyKind : uint8
 class VARESTJSON_API FVaRestRedactRules
 {
 public:
-	/** An exact key, normalised like every key: a key name (for a token path, its last segment: normalisation removes '.', so a whole path never matches), a header name, a project addition */
+	/**
+	 * An exact key, normalised like every key: a key name (for a token path, its last segment: normalisation removes '.', so a
+	 * whole path never matches), a header name, a project addition. A key holding '?', ';', '#', '=' or '&' is refused with a
+	 * Warning and not added: URL and form redaction start a key after '?', ';' or '#' and end it at '=' or '&', so it could
+	 * never match there. That holds for a JSON key too, which may legally contain them: only the built-in rules cover it.
+	 */
 	void AddKey(FStringView Key);
 
 	bool ShouldRedact(FUtf8StringView Key, EVaRestRedactKeyKind Kind) const;

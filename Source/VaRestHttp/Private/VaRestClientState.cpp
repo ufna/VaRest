@@ -98,6 +98,7 @@ void VaRest::Http::FClientState::Publish(const TSharedRef<FClientConfig, ESPMode
 			bReissue |= Entry.Key->MayReissue();
 		}
 	}
+	NewChain->Add(MakeLogStage()); // after custom PerAttempt stages: it logs the final headers
 	NewChain->Add(MakeLimiterStage()); // spec 4.6: "next to the transport, so queued retries wait their turn too"
 	NewChain->Add(MakeTransportStage());
 	Next->Chain = NewChain;
@@ -108,7 +109,7 @@ void VaRest::Http::FClientState::Publish(const TSharedRef<FClientConfig, ESPMode
 	{
 		Rules.AddKey(Key);
 	}
-	Next->Redactor = MakeShared<FVaRestRedactor, ESPMode::ThreadSafe>(MoveTemp(Rules), TArray<FString>());
+	Next->Redactor = MakeShared<FVaRestRedactor, ESPMode::ThreadSafe>(MoveTemp(Rules), Secrets.GetActive(Next->Clock->Now()));
 
 	// The replaced snapshot is released after the lock is dropped: with it can go the last reference to a transport, a
 	// clock or a stage, whose destructor may read a configuration, and FRWLock is not recursive
@@ -157,4 +158,50 @@ void VaRest::Http::FClientState::ForEachLive(TFunctionRef<void(FClientState&)> V
 	// snapshot, the state's Client{Destroyed} would go out before the new sink is added, and the sink would keep a ghost
 	// client. Released from a later game-thread task, it reaches the sink after OnAttached.
 	UE::Tasks::Launch(TEXT("VaRest.ReleaseSnapshotPins"), [Kept = MoveTemp(Alive)] {}, UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
+}
+
+void VaRest::Http::FClientState::SetSecret(FName Slot, const FString& Value)
+{
+	check(IsInGameThread());
+	const double Now = GetConfig()->Clock->Now();
+	Secrets.Prune(Now); // review C1: expired values never count toward the next expiry
+	Secrets.Set(Slot, Value, Now);
+	EditConfig([](FClientConfig&) {});
+	ScheduleSecretExpiry();
+}
+
+void VaRest::Http::FClientState::ClearSecrets()
+{
+	check(IsInGameThread());
+	Secrets.ClearAll();
+	GetConfig()->Clock->ClearTimer(SecretExpiryTimer);
+	EditConfig([](FClientConfig&) {});
+}
+
+void VaRest::Http::FClientState::ScheduleSecretExpiry()
+{
+	const TSharedRef<const FClientConfig, ESPMode::ThreadSafe> Current = GetConfig();
+	Current->Clock->ClearTimer(SecretExpiryTimer);
+	// Review C1: prune first, and only a value still pending counts -- an expired one would re-arm a timer due at once,
+	// forever (a hang under the virtual clock, a republished configuration every frame under the real one)
+	const double Now = Current->Clock->Now();
+	Secrets.Prune(Now);
+	const double ExpiresAt = Secrets.NextExpiry(Now);
+	if (ExpiresAt < 0.0)
+	{
+		return;
+	}
+	const TWeakPtr<FClientState, ESPMode::ThreadSafe> Weak = AsShared();
+	SecretExpiryTimer = Current->Clock->SetTimer(ExpiresAt - Now, [Weak, ExpiresAt]
+	{
+		if (const TSharedPtr<FClientState, ESPMode::ThreadSafe> Pinned = Weak.Pin())
+		{
+			// Reviews N-2, N-I3: the clock can fire a hair before ExpiresAt (the virtual clock rounds the delay to whole
+			// nanoseconds, so Now() may be one ulp below a double sum). Prune at the deadline this timer was armed for, or the
+			// value survives, NextExpiry returns it again and a timer due at once re-arms forever.
+			Pinned->Secrets.Prune(FMath::Max(Pinned->GetConfig()->Clock->Now(), ExpiresAt));
+			Pinned->EditConfig([](FClientConfig&) {}); // a redactor without the expired value
+			Pinned->ScheduleSecretExpiry();
+		}
+	});
 }

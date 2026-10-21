@@ -60,6 +60,10 @@ namespace VaRest::Http
 		/** Game thread */
 		FLimiter& GetLimiter() { return Limiter; }
 
+		/** Game thread: layer 3's known values (Inspector 2.2); publishes a new redactor */
+		void SetSecret(FName Slot, const FString& Value);
+		void ClearSecrets();
+
 		/** Every live client (game thread): the trace snapshot, engine shutdown */
 		static void ForEachLive(TFunctionRef<void(FClientState&)> Visit);
 
@@ -88,6 +92,8 @@ namespace VaRest::Http
 		void Complete(const FVaRestExchangeRef& Exchange, FFinish&& Finish);
 		FFinish MakeFinish(const FVaRestExchange& Exchange) const;
 		void Publish(const TSharedRef<FClientConfig, ESPMode::ThreadSafe>& Next);
+		/** Publishes again when the next rotated-out value expires */
+		void ScheduleSecretExpiry();
 
 		const uint64 ClientId;
 		mutable FRWLock ConfigLock;
@@ -101,10 +107,19 @@ namespace VaRest::Http
 		TMap<uint64, FVaRestExchangeRef> InFlight;
 		/** Spec 4.6 */
 		FLimiter Limiter;
+		/** Game thread; Publish copies its active values into each redactor */
+		FVaRestSecretSet Secrets;
+		FVaRestTimerHandle SecretExpiryTimer;
 	};
 
 	/** The chain's built-in stages (VaRestPipeline.cpp) */
 	FVaRestStageRef MakeAttemptBoundaryStage();
 	FVaRestStageRef MakeLimiterStage();
 	FVaRestStageRef MakeTransportStage();
+	/** Spec 4.5, per attempt (VaRestLogStage.cpp) */
+	FVaRestStageRef MakeLogStage();
+	/** The cvar VaRest.LogLevel when it is 0..3, else the client's level */
+	EVaRestLogLevel EffectiveLogLevel(EVaRestLogLevel ClientLevel);
+	/** Spec 4.5: "Logged bodies are truncated to 4 KiB" */
+	inline constexpr int32 LogBodyCap = 4096;
 }

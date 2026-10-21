@@ -385,6 +385,11 @@ bool FVaRestHttpRedactScanTest::RunTest(const FString& Parameters)
 	const FVaRestTraceExcerpt Nested = Redactor.RedactBody(TEXT("application/x-www-form-urlencoded"), Bytes("next=/x?code=X"), 14, 4096);
 	TestEqualSensitive(TEXT("a '?code=' in a form value is a query key"), Nested.ToText(), FString(TEXT("next=/x?code=***")));
 	TestEqualSensitive(TEXT("a second '#' in a fragment starts a key"), Redactor.RedactUrl(TEXT("https://h/x#/cb#code=X")), FString(TEXT("https://h/x#/cb#code=***")));
+	// Task 5 re-review 3, minor 1: two candidates reach one '=' ("token;c" and "c"); only the longest names a secret, so a
+	// scan that judged the shortest alone would leak X. The seeded strings below never produced this shape.
+	const FVaRestTraceExcerpt Longest = Redactor.RedactBody(TEXT("application/x-www-form-urlencoded"), Bytes("a=b;token;c=X"), 13, 4096);
+	TestEqualSensitive(TEXT("the longest candidate of a group is judged (form)"), Longest.ToText(), FString(TEXT("a=b;token;c=***")));
+	TestEqualSensitive(TEXT("the longest candidate of a group is judged (query)"), Redactor.RedactUrl(TEXT("https://h/x?a=b;token;c=X")), FString(TEXT("https://h/x?a=b;token;c=***")));
 
 	// The linear scan gives what the per-candidate reference gave, on seeded pseudo-random pieces over the separators, the
 	// encodings and the letters of the rules' keys

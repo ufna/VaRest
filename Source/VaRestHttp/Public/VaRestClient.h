@@ -509,6 +509,21 @@ public:
 	 * activity of 0 with a total above 0 bounds silence by the total (decision 30).
 	 */
 	FVaRestClient& WithTimeout(float Total, float Activity = 0.f);
+	/** Spec 4.5; the cvar VaRest.LogLevel (>= 0) overrides every client's */
+	FVaRestClient& WithLogLevel(EVaRestLogLevel Level);
+	/**
+	 * Inspector IN-13 layer 2: more keys whose values are redacted in logs and traces, matched exactly after normalisation.
+	 * A key holding '?', ';', '#', '=' or '&' is refused with a Warning (FVaRestRedactRules::AddKey).
+	 */
+	FVaRestClient& WithRedactedKeys(TConstArrayView<FString> Keys);
+	/**
+	 * Inspector IN-13 layer 3: a secret value (token, API key, session id) replaced by *** wherever it appears in a log
+	 * line or a trace. Setting a slot again keeps the old value known for 10 minutes (Inspector D21). Values under 8 bytes
+	 * are ignored. M4's auth calls this; a game may too. Game thread.
+	 */
+	void SetSecretValue(FName Slot, const FString& Value);
+	/** Logout: forgets every secret value, the rotated ones too. Game thread. */
+	void ClearSecretValues();
 	/** A custom stage (spec 4): Outer sees each logical request once, PerAttempt every attempt with its final headers */
 	FVaRestClient& Use(FVaRestStageRef Stage, EVaRestStageSlot Slot);
 

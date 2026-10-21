@@ -298,6 +298,40 @@ FVaRestClient& FVaRestClient::WithTimeout(float Total, float Activity)
 	return *this;
 }
 
+FVaRestClient& FVaRestClient::WithLogLevel(EVaRestLogLevel Level)
+{
+	if (State.IsValid())
+	{
+		State->EditConfig([Level](VaRest::Http::FClientConfig& Edited) { Edited.LogLevel = Level; });
+	}
+	return *this;
+}
+
+FVaRestClient& FVaRestClient::WithRedactedKeys(TConstArrayView<FString> Keys)
+{
+	if (State.IsValid())
+	{
+		State->EditConfig([Keys](VaRest::Http::FClientConfig& Edited) { Edited.RedactKeys.Append(Keys.GetData(), Keys.Num()); });
+	}
+	return *this;
+}
+
+void FVaRestClient::SetSecretValue(FName Slot, const FString& Value)
+{
+	if (State.IsValid())
+	{
+		State->SetSecret(Slot, Value);
+	}
+}
+
+void FVaRestClient::ClearSecretValues()
+{
+	if (State.IsValid())
+	{
+		State->ClearSecrets();
+	}
+}
+
 FVaRestClient& FVaRestClient::Use(FVaRestStageRef Stage, EVaRestStageSlot Slot)
 {
 	if (State.IsValid())
