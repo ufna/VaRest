@@ -5,6 +5,8 @@
 #include "Misc/AutomationTest.h"
 #include "HAL/PlatformTime.h"
 #include "Misc/Paths.h"
+#include "Tasks/Task.h"
+#include "VaRestHttpTesting.h"
 #include "VaRestUrl.h"
 #include "VaRestRedactionPipe.h"
 #include "VaRestRedactor.h"
@@ -393,10 +395,7 @@ bool FVaRestHttpSecretSetTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("... and nothing expires"), Set.NextExpiry(206.0) < 0.0);
 
 	// Review M9: a process-wide counter -- let an earlier test's body log lines (the redaction pipe) land first
-	if (UE::Tasks::FPipe* Pipe = VaRest::Http::GetRedactionPipe())
-	{
-		Pipe->WaitUntilEmpty();
-	}
+	VaRest::Http::WaitForRedactionPipe();
 	const uint64 Before = FVaRestTrace::Counters().RedactorCalls;
 	const FVaRestRedactor Redactor;
 	(void)Redactor.RedactUrl(TEXT("https://h/x"));
@@ -521,6 +520,58 @@ bool FVaRestHttpRedactBoundTest::RunTest(const FString& Parameters)
 	const FTCHARToUTF8 FormUtf8(*(Semicolons + TEXT("=")));
 	const TConstArrayView<uint8> FormBody(reinterpret_cast<const uint8*>(FormUtf8.Get()), FormUtf8.Length());
 	TestTrue(TEXT("... in a form body"), Seconds([&] { (void)Redactor.RedactBody(TEXT("application/x-www-form-urlencoded"), FormBody, FormBody.Num(), 1 << 20); }) < Bound);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpRedactorLaunchTest, "VaRest.Http.Redactor.LaunchFromAnyThread",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpRedactorLaunchTest::RunTest(const FString& Parameters)
+{
+	// Plan decision 16 (carry (a), review M-10): workers launch while the game thread stops and restarts the pipe. A
+	// launch either runs its body or reports false; none is lost and none runs into a deleted pipe.
+	struct FCounts
+	{
+		std::atomic<int32> Ran{ 0 };
+		std::atomic<int32> Accepted{ 0 };
+		std::atomic<int32> Refused{ 0 };
+		std::atomic<int32> WorkersDone{ 0 };
+	};
+	TSharedRef<FCounts, ESPMode::ThreadSafe> Counts = MakeShared<FCounts, ESPMode::ThreadSafe>();
+	constexpr int32 Workers = 8;
+	constexpr int32 PerWorker = 2000;
+	for (int32 Worker = 0; Worker < Workers; ++Worker)
+	{
+		UE::Tasks::Launch(TEXT("VaRest.Test.LaunchRedaction"), [Counts]
+		{
+			for (int32 Index = 0; Index < PerWorker; ++Index)
+			{
+				if (VaRest::Http::LaunchRedaction(TEXT("VaRest.Test.Body"), [Counts] { ++Counts->Ran; }))
+				{
+					++Counts->Accepted;
+				}
+				else
+				{
+					++Counts->Refused;
+				}
+			}
+			++Counts->WorkersDone;
+		});
+	}
+	VaRest::Http::Testing::PumpUntil([Counts] { return Counts->Accepted.load() + Counts->Refused.load() > Workers * PerWorker / 4; });
+	VaRest::Http::StopRedactionPipe();
+	VaRest::Http::StartRedactionPipe();
+	if (!TestTrue(TEXT("the workers finish"), VaRest::Http::Testing::PumpUntil([Counts] { return Counts->WorkersDone.load() == Workers; }, 30.0)))
+	{
+		return false;
+	}
+	VaRest::Http::WaitForRedactionPipe();
+	TestEqual(TEXT("every launch reported"), Counts->Accepted.load() + Counts->Refused.load(), Workers * PerWorker);
+	TestEqual(TEXT("every accepted body ran, no refused one did"), Counts->Ran.load(), Counts->Accepted.load());
+	TSharedRef<std::atomic<bool>, ESPMode::ThreadSafe> bAfter = MakeShared<std::atomic<bool>, ESPMode::ThreadSafe>(false);
+	TestTrue(TEXT("the restarted pipe takes work"), VaRest::Http::LaunchRedaction(TEXT("VaRest.Test.After"), [bAfter] { *bAfter = true; }));
+	VaRest::Http::WaitForRedactionPipe();
+	TestTrue(TEXT("... and runs it"), bAfter->load());
 	return true;
 }
 

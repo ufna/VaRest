@@ -611,4 +611,54 @@ bool FVaRestHttpLogConfigEscapedOnceTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpLogCurrentRedactorTest, "VaRest.Http.Log.CurrentRedactor",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpLogCurrentRedactorTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::LogTestPrivate;
+	// Plan decision 17 (carry (b), task 14 review M10): a secret the client learns while a request is out -- what an auth
+	// refresh does -- is scrubbed from that request's later lines and from its error's URL
+	FLevelIsolation Isolation;
+	FTestRig Rig;
+	Rig.Client.WithLogLevel(EVaRestLogLevel::Headers);
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest&) { return FVaRestFakeResponse::Manual(); });
+	FLogCapture Capture;
+	AddExpectedMessagePlain(TEXT("-> 404"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
+	const FString Late = TEXT("zz-late-secret-123456");
+	auto Echoed = MakeOutcome<FVaRestJson>();
+	auto Failed = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/late")), Echoed).Send();
+	Observe(Rig.Client.Get(TEXT("/err")).Query(TEXT("q"), Late), Failed).Send();
+	if (!TestTrue(TEXT("both dispatched"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 2; })))
+	{
+		Rig.Client.CancelAll();
+		PumpUntil([Echoed, Failed] { return Echoed->IsDone() && Failed->IsDone(); });
+		return false;
+	}
+	const int32 Mark = Capture.GetLines().Num();
+	Rig.Client.SetSecretValue(TEXT("Late"), Late);
+	FVaRestFakeResponse Echo = FVaRestFakeResponse::Json(200, FUtf8StringView(UTF8TEXT("{}")));
+	Echo.Headers.Set(TEXT("X-Echo"), Late);
+	Rig.Fake->Complete(0, MoveTemp(Echo));
+	Rig.Fake->Complete(1, FVaRestFakeResponse::Json(404, FUtf8StringView(UTF8TEXT("{}"))));
+	if (!TestTrue(TEXT("both complete"), PumpUntil([Echoed, Failed] { return Echoed->IsDone() && Failed->IsDone(); })))
+	{
+		return false;
+	}
+	const TArray<FString> Lines = Capture.GetLines();
+	bool bLeaked = false;
+	bool bScrubbedHeader = false;
+	for (int32 Index = Mark; Index < Lines.Num(); ++Index)
+	{
+		bLeaked |= Lines[Index].Contains(Late);
+		bScrubbedHeader |= Lines[Index].Contains(TEXT("<   X-Echo: ***"));
+	}
+	TestFalse(TEXT("no line written after the secret was set holds it"), bLeaked);
+	TestTrue(TEXT("... the echoed header shows ***"), bScrubbedHeader);
+	TestFalse(TEXT("the error's URL is redacted with the current secrets"), Failed->Error.Url.Contains(Late));
+	return true;
+}
+
 #endif

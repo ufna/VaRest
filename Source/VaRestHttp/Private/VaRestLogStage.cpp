@@ -1,7 +1,6 @@
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 
 #include "HAL/IConsoleManager.h"
-#include "Tasks/Pipe.h"
 #include "VaRestClientState.h"
 #include "VaRestHttpLog.h"
 #include "VaRestHttpTesting.h"
@@ -69,14 +68,9 @@ namespace VaRest::Http::LogStagePrivate
 	/** Copies at most LogBodyCap bytes here (game thread, one memcpy); redacts and writes on the redaction pipe (Inspector 7) */
 	void LogBodyLater(uint64 RequestId, const TCHAR* Direction, const FRedactorRef& Redactor, FString ContentType, TConstArrayView<uint8> Bytes, int64 TotalBytes)
 	{
-		UE::Tasks::FPipe* Pipe = GetRedactionPipe();
-		if (!Pipe)
-		{
-			return;
-		}
 		TArray<uint8> Head(Bytes.GetData(), FMath::Min(Bytes.Num(), LogBodyCap));
 		CountCopied(Head.Num());
-		Pipe->Launch(TEXT("VaRest.LogBody"), [RequestId, Direction, Redactor, Type = MoveTemp(ContentType), Prefix = MoveTemp(Head), TotalBytes]
+		LaunchRedaction(TEXT("VaRest.LogBody"), [RequestId, Direction, Redactor, Type = MoveTemp(ContentType), Prefix = MoveTemp(Head), TotalBytes]
 		{
 			WriteExcerpt(RequestId, Direction, Redactor->RedactBody(Type, Prefix, TotalBytes, LogBodyCap));
 		});
@@ -116,22 +110,17 @@ namespace VaRest::Http::LogStagePrivate
 		{
 			return;
 		}
-		UE::Tasks::FPipe* Pipe = GetRedactionPipe();
-		if (!Pipe)
-		{
-			return;
-		}
 		const uint64 RequestId = Ex.RequestId;
 		if (!Upload.FilePath.IsEmpty())
 		{
-			Pipe->Launch(TEXT("VaRest.LogBody"), [RequestId, Redactor, Path = Upload.FilePath, Type = Upload.ContentType, Total = Upload.ContentLength]
+			LaunchRedaction(TEXT("VaRest.LogBody"), [RequestId, Redactor, Path = Upload.FilePath, Type = Upload.ContentType, Total = Upload.ContentLength]
 			{
 				WriteExcerpt(RequestId, TEXT(">"), Redactor->DescribeStream(Path, Type, Total));
 			});
 		}
 		else if (Upload.Kind == EVaRestBodyKind::Multipart)
 		{
-			Pipe->Launch(TEXT("VaRest.LogBody"), [RequestId, Redactor, Capped = CopyPartsForLog(Upload.PartDescriptors, *Redactor), Total = Upload.ContentLength]
+			LaunchRedaction(TEXT("VaRest.LogBody"), [RequestId, Redactor, Capped = CopyPartsForLog(Upload.PartDescriptors, *Redactor), Total = Upload.ContentLength]
 			{
 				WriteExcerpt(RequestId, TEXT(">"), Redactor->DescribeMultipart(Capped, Total, LogBodyCap));
 			});
@@ -145,9 +134,10 @@ namespace VaRest::Http::LogStagePrivate
 	}
 #endif
 
-	/** Url: the shown URL when the request line built it, else empty and built here, only for a line that is written */
-	void LogOutcome(const FExchangeState& Ex, const FRedactorRef& Redactor, FString& Url, EVaRestLogLevel Level, double StartedAt, const FVaRestAttemptOutcome& Outcome)
+	void LogOutcome(const FExchangeState& Ex, EVaRestLogLevel Level, double StartedAt, const FVaRestAttemptOutcome& Outcome)
 	{
+		// Plan decision 17: the redactor of now -- a secret set while the attempt ran (an auth refresh) is known
+		const FRedactorRef Redactor = Ex.State->GetRedactor();
 		// Review M5: the attempt's own time, from the limiter's grant; a wait in the queue (IN-2's LimiterWait, measured on
 		// this exchange's clock) is shown apart, and only when it rounds to a millisecond or more
 		const double QueuedMs = Ex.LimiterWait * 1000.0;
@@ -158,10 +148,8 @@ namespace VaRest::Http::LogStagePrivate
 		// Review M2: a line the category drops is not built; a Warning line can be active when Log is not
 		if (bWarning ? UE_LOG_ACTIVE(LogVaRestHttp, Warning) : UE_LOG_ACTIVE(LogVaRestHttp, Log))
 		{
-			if (Url.IsEmpty())
-			{
-				Url = ShownUrl(Redactor, Ex.Url);
-			}
+			// Built here, only for a line that is written, and with the redactor of now: not the request line's
+			const FString Url = ShownUrl(Redactor, Ex.Url);
 			const FString ShownVerb = EscapeForLog(Ex.Verb);
 			if (bCanceled)
 			{
@@ -231,11 +219,10 @@ namespace VaRest::Http::LogStagePrivate
 			}
 			// URLs and headers are redacted here, on the game thread; bodies only on the redaction pipe (Inspector 7). Every
 			// value is escaped after it is redacted (review C1).
-			const FRedactorRef Redactor = Ex.Config->Redactor.ToSharedRef();
-			FString Shown;
+			const FRedactorRef Redactor = Ex.State->GetRedactor();
 			if (bLogActive && Level >= EVaRestLogLevel::Headers)
 			{
-				Shown = ShownUrl(Redactor, Ex.Url);
+				const FString Shown = ShownUrl(Redactor, Ex.Url);
 				UE_LOG(LogVaRestHttp, Log, TEXT("#%llu > %s %s (attempt %d)"), Ex.RequestId, *EscapeForLog(Ex.Verb), *Shown, Ex.Attempt);
 				LogHeaders(Ex.RequestId, TEXT(">"), Redactor->RedactHeaders(Ex.AttemptHeaders));
 			}
@@ -247,9 +234,9 @@ namespace VaRest::Http::LogStagePrivate
 			}
 #endif
 			const double StartedAt = Ex.Config->Clock->Now();
-			Next.Proceed(Exchange, [Exchange, Redactor, Line = MoveTemp(Shown), Level, StartedAt, Done = MoveTemp(OnOutcome)](FVaRestAttemptOutcome&& Outcome) mutable
+			Next.Proceed(Exchange, [Exchange, Level, StartedAt, Done = MoveTemp(OnOutcome)](FVaRestAttemptOutcome&& Outcome) mutable
 			{
-				LogOutcome(Internals(*Exchange), Redactor, Line, Level, StartedAt, Outcome);
+				LogOutcome(Internals(*Exchange), Level, StartedAt, Outcome);
 				Done(MoveTemp(Outcome));
 			});
 #endif
@@ -325,7 +312,7 @@ void VaRest::Http::LogConfigError(const FExchangeState& Ex, FStringView Message)
 	{
 		return;
 	}
-	const FString Url = LogStagePrivate::ShownUrl(Cfg.Redactor.ToSharedRef(), Ex.Url.IsEmpty() ? JoinUrl(Cfg.BaseUrl, Ex.RawPath) : Ex.Url);
+	const FString Url = LogStagePrivate::ShownUrl(Ex.State->GetRedactor(), Ex.Url.IsEmpty() ? JoinUrl(Cfg.BaseUrl, Ex.RawPath) : Ex.Url);
 	UE_LOG(LogVaRestHttp, Warning, TEXT("#%llu %s %s -> Config error: %s"), Ex.RequestId, *EscapeForLog(Ex.Verb), *Url, *EscapeControlsForLog(Message));
 }
 

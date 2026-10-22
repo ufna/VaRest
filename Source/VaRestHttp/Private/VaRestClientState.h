@@ -50,6 +50,12 @@ namespace VaRest::Http
 		uint64 GetClientId() const { return ClientId; }
 		/** Any thread */
 		TSharedRef<const FClientConfig, ESPMode::ThreadSafe> GetConfig() const;
+		/**
+		 * Any thread: the redactor of the configuration published now, with every secret set so far and the rotated ones
+		 * still within their 10 minutes (plan decision 17, carry (b)). Logs, traces and FVaRestError::Url use it, not the
+		 * Send() snapshot's, so a token refreshed while a request is out is scrubbed from that request's later lines.
+		 */
+		TSharedRef<const FVaRestRedactor, ESPMode::ThreadSafe> GetRedactor() const { return GetConfig()->Redactor.ToSharedRef(); }
 		/** Game thread: copy, edit, rebuild the chain and the redactor, swap */
 		void EditConfig(TFunctionRef<void(FClientConfig&)> Edit);
 

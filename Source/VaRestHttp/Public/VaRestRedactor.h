@@ -60,7 +60,7 @@ private:
  * The core redactor (Inspector 2.2, IN-13; WebSocket spec 19 item 3): URLs, headers and body excerpts, for logs and traces
  * alike. Immutable once built: a client publishes a new one when its rules or secrets change, and any thread may use a
  * published one. Bodies are never redacted on the game thread (Inspector 7): RedactBody and Describe* run on a background
- * task (VaRest::Http::GetRedactionPipe). What stays uncovered, as documented there: a secret that is not a known value and
+ * task (VaRest::Http::LaunchRedaction). What stays uncovered, as documented there: a secret that is not a known value and
  * sits in a path segment, in a text body under no key, or in opt-in binary; and a known value shorter than
  * FVaRestSecretSet::MinBytes, which is never scrubbed (a 7-character key or PIN).
  */

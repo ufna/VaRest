@@ -2,18 +2,23 @@
 
 #pragma once
 
-#include "Tasks/Pipe.h"
+#include "Templates/Function.h"
 
 namespace VaRest::Http
 {
 	/**
-	 * Core's redaction pipe (Inspector 7): body excerpts for logs (and M4's trace excerpts) are redacted there, in order,
-	 * never on the game thread. Null before StartupModule and after ShutdownModule; callers skip body excerpts then.
-	 * Game thread only (it checks): StopRedactionPipe deletes the pipe, so a launch from another thread could race the
-	 * delete (review M-10). M4's decode-task excerpts must make it an atomic with a shutdown flag first.
+	 * Core's redaction pipe (Inspector 7): body excerpts for logs and traces are redacted there, in order, never on the game
+	 * thread. Any thread (plan decision 16): false, and Body dropped, before StartRedactionPipe, after StopRedactionPipe, or
+	 * while it stops. Callers never hold the pipe, so none can race its delete (review M-10).
 	 */
-	UE::Tasks::FPipe* GetRedactionPipe();
+	bool LaunchRedaction(const TCHAR* DebugName, TUniqueFunction<void()>&& Body);
+	/** Game thread (StartupModule) */
 	void StartRedactionPipe();
-	/** Waits for the queued work, then deletes the pipe: FPipe's destructor checks it is idle (Pipe.h:40-43) */
+	/**
+	 * Game thread (ShutdownModule): refuses new launches, waits for launches already inside LaunchRedaction, then for the
+	 * queued work, then deletes the pipe -- FPipe's destructor checks it is idle (Pipe.h:40-43)
+	 */
 	void StopRedactionPipe();
+	/** Tests, game thread (where StopRedactionPipe deletes it): waits until the pipe is idle; false when there is none */
+	bool WaitForRedactionPipe();
 }

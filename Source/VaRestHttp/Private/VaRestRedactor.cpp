@@ -2,7 +2,10 @@
 
 #include "VaRestRedactor.h"
 
+#include "HAL/PlatformProcess.h"
 #include "Misc/Paths.h"
+#include "Misc/ScopeExit.h"
+#include "Tasks/Pipe.h"
 #include "VaRestJsonUtf8.h"
 #include "VaRestRedactionPipe.h"
 #include "VaRestSha256.h"
@@ -10,7 +13,14 @@
 
 namespace VaRest::Http::RedactorPrivate
 {
-	UE::Tasks::FPipe* Pipe = nullptr;
+	/**
+	 * Plan decision 16. Trivially destructible, so safe as statics (review I-4). Sequentially consistent on purpose: a
+	 * launcher raises Launching and then reads bStopping, the stopper raises bStopping and then reads Launching, so at
+	 * least one sees the other (the launch is refused, or the stopper waits for it).
+	 */
+	std::atomic<UE::Tasks::FPipe*> Pipe{ nullptr };
+	std::atomic<int32> Launching{ 0 };
+	std::atomic<bool> bStopping{ true };
 
 	TArray<uint8> ToUtf8(FStringView Text)
 	{
@@ -161,28 +171,64 @@ namespace VaRest::Http::RedactorPrivate
 	}
 }
 
-UE::Tasks::FPipe* VaRest::Http::GetRedactionPipe()
+bool VaRest::Http::LaunchRedaction(const TCHAR* DebugName, TUniqueFunction<void()>&& Body)
 {
-	check(IsInGameThread()); // review M-10: only the game thread launches on it
-	return RedactorPrivate::Pipe;
+	using namespace RedactorPrivate;
+	// Read first without counting, so a stop under steady launching drains at once instead of waiting for a gap
+	if (bStopping.load())
+	{
+		return false;
+	}
+	Launching.fetch_add(1);
+	ON_SCOPE_EXIT { Launching.fetch_sub(1); };
+	UE::Tasks::FPipe* Current = bStopping.load() ? nullptr : Pipe.load();
+	if (!Current)
+	{
+		return false;
+	}
+	// FPipe::Launch takes any thread: it reaches the pipe by atomics only and schedules the body, never runs it here
+	// (Pipe.h:62-80; a non-Inline task is scheduled, TaskPrivate.h:584-630)
+	Current->Launch(DebugName, MoveTemp(Body));
+	return true;
 }
 
 void VaRest::Http::StartRedactionPipe()
 {
-	check(!RedactorPrivate::Pipe);
-	RedactorPrivate::Pipe = new UE::Tasks::FPipe(TEXT("VaRest.Redaction"));
+	using namespace RedactorPrivate;
+	check(IsInGameThread());
+	check(!Pipe.load());
+	Pipe.store(new UE::Tasks::FPipe(TEXT("VaRest.Redaction")));
+	bStopping.store(false);
 }
 
 void VaRest::Http::StopRedactionPipe()
 {
+	using namespace RedactorPrivate;
+	check(IsInGameThread());
 	// ShutdownModule does not run in an `Automation RunTests ...; Quit` session (CLAUDE.md); a pipe left alive then is
 	// leaked on purpose, and its destructor's idle check never runs
-	if (UE::Tasks::FPipe* Existing = RedactorPrivate::Pipe)
+	bStopping.store(true);
+	while (Launching.load() != 0)
 	{
-		RedactorPrivate::Pipe = nullptr;
+		FPlatformProcess::Yield();
+	}
+	if (UE::Tasks::FPipe* Existing = Pipe.exchange(nullptr))
+	{
 		Existing->WaitUntilEmpty();
 		delete Existing;
 	}
+}
+
+bool VaRest::Http::WaitForRedactionPipe()
+{
+	check(IsInGameThread()); // the thread StopRedactionPipe deletes it on: the pipe read here outlives the wait
+	UE::Tasks::FPipe* Current = RedactorPrivate::Pipe.load();
+	if (!Current)
+	{
+		return false;
+	}
+	Current->WaitUntilEmpty();
+	return true;
 }
 
 void FVaRestSecretSet::Set(FName Slot, const FString& Value, double Now)

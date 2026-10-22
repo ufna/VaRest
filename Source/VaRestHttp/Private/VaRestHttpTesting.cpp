@@ -58,10 +58,7 @@ bool VaRest::Http::Testing::PumpUntil(TFunctionRef<bool()> Done, double TimeoutS
 
 void VaRest::Http::Testing::FlushRedactionPipe()
 {
-	if (UE::Tasks::FPipe* Pipe = VaRest::Http::GetRedactionPipe())
-	{
-		Pipe->WaitUntilEmpty();
-	}
+	VaRest::Http::WaitForRedactionPipe();
 }
 
 FString VaRest::Http::Testing::GetTestServerUrl()
