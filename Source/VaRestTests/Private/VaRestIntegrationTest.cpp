@@ -914,21 +914,61 @@ bool FVaRestIntegrationRetryTest::RunTest(const FString& Parameters)
 	{
 		return false;
 	}
-	// The flaky route closes the connection without a response: curl warns, and the engine logs the failed request. A
-	// count of -1 because libcurl may resend a dead keep-alive connection on its own, so the number of lines varies.
-	AddExpectedMessagePlain(TEXT("libcurl"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, -1);
-	AddExpectedMessagePlain(TEXT("completed with reason 'ConnectionError'"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, -1);
 	FVaRestClient Client = MakeClient(BaseUrl);
 	Client.WithRetry(QuickRetry(3));
 	// Own keys per run: the server counts calls per key, so no other test or run shares this state
 	const FString Key = FGuid::NewGuid().ToString(EGuidFormats::Digits);
+	{
+		// libcurl's Curl_retry_request resends any HTTP request on a fresh connect when a REUSED connection yields zero bytes
+		// (lib/transfer.c:690-735 in the engine's 8.12.1 source; the engine ships 8.15.0): on a pooled keep-alive socket the
+		// flaky route's refusals can be absorbed inside one VaRest attempt, and the test would not prove VaRest's retry. With
+		// reuse off no connection is reused, so every refusal reaches VaRest. CurlHttp.cpp:204-207 sets CURLOPT_FORBID_REUSE
+		// per handle from this cvar, and CurlHttpManager.cpp:131-141 (re-applied on change, :359-367, on the HTTP thread)
+		// drops the idle cap to 0. The cvar is ECVF_SaveForNextBoot: the guard restores it with Set(), which writes no ini.
+		TGuardConsoleVariable<bool> NoReuse(TEXT("http.CurlReuseConnectionEnabled"), false);
+		// FORBID_REUSE closes a connection after its transfer; it does not evict the idle ones earlier tests left in curl's
+		// pool, and one of them would be picked for the flaky request. So a burst of requests goes first: concurrent, so each
+		// takes a different idle connection (or opens a new one), and each closes its own when done. Eight is more than the
+		// tests before this one keep idle at once (the limiter test runs the most, with at most four in flight).
+		constexpr int32 WarmUps = 8;
+		TArray<TSharedRef<TTestOutcome<FVaRestJson>, ESPMode::ThreadSafe>> Burst;
+		for (int32 Index = 0; Index < WarmUps; ++Index)
+		{
+			Burst.Add(MakeOutcome<FVaRestJson>());
+			Observe(Client.Get(TEXT("/echo")), Burst.Last()).Send();
+		}
+		bool bBurstDone = true;
+		for (const auto& Done : Burst)
+		{
+			bBurstDone = Wait(Done) && bBurstDone;
+		}
+		if (!TestTrue(TEXT("the connection burst completes"), bBurstDone))
+		{
+			return false;
+		}
+		// The refusals are curl Warnings with its own text, and the engine logs the failed request (as in StatusAndErrors);
+		// -1 because the number of lines depends on how many refusals reach VaRest. "libcurl" is the narrowest text curl
+		// gives: the warning's wording ("Empty reply" / "Connection reset") varies with where the close lands.
+		AddExpectedMessagePlain(TEXT("libcurl"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, -1);
+		AddExpectedMessagePlain(TEXT("completed with reason 'ConnectionError'"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, -1);
+		auto Flaky = MakeOutcome<FVaRestJson>();
+		// Plan decision 15: curl reports a connection closed without a response as EHttpFailureReason::Other; it is retried
+		Observe(Client.Get(TEXT("/flaky")).Query(TEXT("n"), TEXT("2")).Query(TEXT("key"), Key), Flaky).Send();
+		if (!TestTrue(TEXT("the flaky route completes"), Wait(Flaky)))
+		{
+			return false;
+		}
+		if (Succeeded(*this, TEXT("the flaky route"), Flaky))
+		{
+			TestEqual(TEXT("... the server's third call"), Flaky->Value.GetValue()[TEXT("attempt")].AsInt(), 3);
+			TestTrue(TEXT("... after a VaRest retry (two refusals reached VaRest, three attempts at most)"),
+				Flaky->Response.Attempts >= 2 && Flaky->Response.Attempts <= 3);
+		}
+	}
 	auto After = MakeOutcome<FVaRestJson>();
-	auto Flaky = MakeOutcome<FVaRestJson>();
 	const double Start = FPlatformTime::Seconds();
 	Observe(Client.Get(TEXT("/retry-after/2")).Query(TEXT("key"), Key).Query(TEXT("seconds"), TEXT("1")), After).Send();
-	// Plan decision 15: curl reports a connection closed without a response as EHttpFailureReason::Other; it is retried
-	Observe(Client.Get(TEXT("/flaky")).Query(TEXT("n"), TEXT("2")).Query(TEXT("key"), Key), Flaky).Send();
-	if (!TestTrue(TEXT("both complete"), WaitAll(After, Flaky)))
+	if (!TestTrue(TEXT("the Retry-After route completes"), Wait(After)))
 	{
 		return false;
 	}
@@ -936,16 +976,6 @@ bool FVaRestIntegrationRetryTest::RunTest(const FString& Parameters)
 	{
 		TestEqual(TEXT("... on the third attempt"), After->Value.GetValue()[TEXT("attempt")].AsInt(), 3);
 		TestTrue(TEXT("... after two Retry-After: 1 waits"), FPlatformTime::Seconds() - Start >= 2.0);
-	}
-	if (Succeeded(*this, TEXT("the flaky route"), Flaky))
-	{
-		// The server counts the calls per key, whoever made them: it saw both refusals and then the answer. VaRest's own count
-		// is lower when libcurl resends on its own: measured here, a run alone reports 2 attempts and the same test inside the
-		// whole integration run reports 1 (a reused keep-alive connection that was closed, resent twice inside curl). So the
-		// retry itself is only proven by this route when the connection is fresh; the Retry-After case above is the
-		// deterministic proof.
-		TestEqual(TEXT("... the server's third call"), Flaky->Value.GetValue()[TEXT("attempt")].AsInt(), 3);
-		TestTrue(TEXT("... VaRest attempts: one to three"), Flaky->Response.Attempts >= 1 && Flaky->Response.Attempts <= 3);
 	}
 	return true;
 }

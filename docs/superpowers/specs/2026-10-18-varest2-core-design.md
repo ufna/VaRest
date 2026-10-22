@@ -372,7 +372,9 @@ jitter, retry on connection error, timeout, and statuses {408, 425, 429, 500, 50
 respect `Retry-After` (seconds or HTTP date, capped at 60 s); optional total `Deadline`.
 **Only idempotent verbs** (GET, HEAD, OPTIONS, PUT, DELETE) retry by default; POST/PATCH only with
 `.Idempotent()`. Timers run on the core ticker via an injectable clock (`IVaRestClock`), so tests run
-on virtual time.
+on virtual time. The platform transport may itself resend a request on a dead reused connection (libcurl's
+`Curl_retry_request`, whatever the verb), so `.Idempotent()` plus a server-side Idempotency-Key is the only defence for a
+non-idempotent call, and this rule governs only VaRest's own re-issues (M4a Task 23 review).
 
 ### 4.2 Auth and session
 

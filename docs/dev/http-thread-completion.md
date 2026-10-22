@@ -158,3 +158,15 @@ the engine refuses before it starts is then finished synchronously inside `Proce
 (`FinishRequestNotInHttpManager`, `HttpRequestCommon.cpp:226-231`), not on the HTTP thread; the pipeline's completion
 already hops to a game-thread task, so nothing is delivered inside `Send()`. File a bead with the failing test and the
 platform, and add the row above.
+
+## The curl transport may resend a request below VaRest's retry (bead VaRest-rrp)
+
+When a reused keep-alive connection yields zero response bytes, libcurl's `Curl_retry_request` (`lib/transfer.c:690-735`
+in the engine's 8.12.1 source; the engine ships 8.15.0) resends the request on a fresh connect, up to `CONN_MAX_RETRIES`
+(5), and the retry may pick another pooled connection. It does not look at the method: uploads and POST are resent too,
+provided the body can be rewound. This happens inside one transport attempt, below VaRest's retry policy, so it is
+invisible to `Response.Attempts` and to the Inspector, and a server may see the request more than once. The only
+defence for a non-idempotent call is `.Idempotent()` plus a server-side Idempotency-Key. The engine's
+`http.CurlReuseConnectionEnabled=false` (`CurlHttp.cpp:204-207`, `CurlHttpManager.cpp:131-141`) turns reuse off for new
+connections but does not evict connections already idle in the pool; `VaRest.Integration.Http.Retry` sends a burst of
+requests under it first for that reason.
