@@ -279,6 +279,8 @@ namespace VaRest::Http
 		{
 			return FVaRestAuthRefreshContext(Client, MoveTemp(InSession), InRefreshId);
 		}
+		/** The context's client, or an empty one when it is gone: for a built-in auth's own reads (BearerRefresh: the refresh URL's host) */
+		static FVaRestClient ClientOf(const FVaRestAuthRefreshContext& Context) { return Context.GetClient(); }
 	};
 
 	/**

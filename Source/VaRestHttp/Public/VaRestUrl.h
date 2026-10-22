@@ -39,6 +39,13 @@ namespace VaRest::Http
 	VARESTHTTP_API bool HasControlInAuthority(FStringView Url);
 
 	/**
+	 * The host of an "http(s)://..." URL as written: its authority (as HasControlInAuthority reads it) without the userinfo
+	 * and the port; an IPv6 literal keeps its brackets. Empty for any other URL. Hosts compare case-insensitively (RFC 3986
+	 * 3.2.2): the caller says ESearchCase::IgnoreCase.
+	 */
+	VARESTHTTP_API FString GetUrlHost(FStringView Url);
+
+	/**
 	 * "/users/{id}" with each {name} replaced by PercentEncode(value): one segment, so '/' in a value is %2F. The last
 	 * value given for a name wins. Errors (decision 10): a placeholder without a value, an empty value, a value that is "." or "..", a value whose name
 	 * the template lacks, '{' without '}', a stray '}', and "{}". An error's message never quotes the template, which may be

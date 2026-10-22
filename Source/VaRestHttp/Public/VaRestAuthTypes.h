@@ -87,7 +87,7 @@ struct VARESTHTTP_API FVaRestBearerRefreshConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VaRest|Http")
 	FString ExpiresInPath = TEXT("expiresIn");
 
-	/** A response with one of these refreshes the session and replays the request once (spec 4.2: 401, configurable) */
+	/** A response with one of these refreshes the session and replays the request once (spec 4.2: 401, configurable). Empty: refresh only before a known expiry. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VaRest|Http")
 	TArray<int32> RefreshStatuses = { 401 };
 

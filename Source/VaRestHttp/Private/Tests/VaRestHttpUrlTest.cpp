@@ -124,6 +124,12 @@ bool FVaRestHttpJoinTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("... after a '?'"), HasControlInAuthority(TEXT("https://h?q=a b")));
 	TestFalse(TEXT("... after a '#'"), HasControlInAuthority(TEXT("https://h#a b")));
 	TestFalse(TEXT("... no authority without a scheme"), HasControlInAuthority(TEXT("/a b")));
+	// Task 18 review M-2: the host, for BearerRefresh's "another host answered" -- as written, no userinfo, no port
+	TestEqualSensitive(TEXT("GetUrlHost: userinfo and port dropped, case kept"), GetUrlHost(TEXT(" https://u:p@Api.Test:8443/x?q#f ")), FString(TEXT("Api.Test")));
+	TestEqualSensitive(TEXT("... the last '@' ends the userinfo"), GetUrlHost(TEXT("http://u:p@ss@h/x")), FString(TEXT("h")));
+	TestEqualSensitive(TEXT("... an IPv6 literal keeps its brackets and loses the port"), GetUrlHost(TEXT("http://[::1]:8080/")), FString(TEXT("[::1]")));
+	TestEqualSensitive(TEXT("... ended by '?'"), GetUrlHost(TEXT("https://h?q=1")), FString(TEXT("h")));
+	TestTrue(TEXT("... none without an http(s) scheme"), GetUrlHost(TEXT("/auth/refresh")).IsEmpty() && GetUrlHost(TEXT("ftp://h/x")).IsEmpty());
 	return true;
 }
 

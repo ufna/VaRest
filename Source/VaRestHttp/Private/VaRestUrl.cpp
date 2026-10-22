@@ -311,6 +311,31 @@ bool VaRest::Http::HasNonAsciiHost(FStringView Url)
 	return false;
 }
 
+FString VaRest::Http::GetUrlHost(FStringView Url)
+{
+	const FStringView Trimmed = Url.TrimStartAndEnd();
+	int32 Start = 0;
+	int32 End = 0;
+	if (!UrlPrivate::FindAuthority(Trimmed, Start, End))
+	{
+		return FString();
+	}
+	FStringView Authority = Trimmed.Mid(Start, End - Start);
+	// RFC 3986 3.2: userinfo "@" host ":" port -- read to the last '@', so a stray '@' in a password is not taken for the host
+	int32 At = INDEX_NONE;
+	if (Authority.FindLastChar(TEXT('@'), At))
+	{
+		Authority.RightChopInline(At + 1);
+	}
+	int32 Cut = INDEX_NONE;
+	if (Authority.Len() > 0 && Authority[0] == TEXT('['))
+	{
+		// RFC 3986 3.2.2: an IP literal's ':' are its own; the port follows the ']'
+		return FString(Authority.FindChar(TEXT(']'), Cut) ? Authority.Left(Cut + 1) : Authority);
+	}
+	return FString(Authority.FindChar(TEXT(':'), Cut) ? Authority.Left(Cut) : Authority);
+}
+
 bool VaRest::Http::HasControlInAuthority(FStringView Url)
 {
 	int32 Start = 0;

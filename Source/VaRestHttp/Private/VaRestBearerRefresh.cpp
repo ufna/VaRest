@@ -3,6 +3,9 @@
 #include "VaRestAuth.h"
 
 #include "VaRestBody.h"
+#include "VaRestClientState.h"
+#include "VaRestHttpLog.h"
+#include "VaRestUrl.h"
 
 namespace VaRest::Http::BearerRefreshPrivate
 {
@@ -87,8 +90,11 @@ namespace VaRest::Http::BearerRefreshPrivate
 		return 0.0;
 	}
 
-	/** Game thread: the response was decoded as JSON on a task (spec 1, VaRestPipeline.cpp:949-952); only the path reads run here */
-	FVaRestAuthRefreshResult ReadRefresh(const FVaRestBearerRefreshConfig& Config, const TVaRestResult<FVaRestJson>& Result)
+	/**
+	 * Game thread: the response was decoded as JSON on a task (spec 1, VaRestPipeline.cpp:949-952); only the path reads run
+	 * here. RefreshHost: the host the refresh request was sent to (GetUrlHost), empty when unknown.
+	 */
+	FVaRestAuthRefreshResult ReadRefresh(const FVaRestBearerRefreshConfig& Config, const FString& RefreshHost, const TVaRestResult<FVaRestJson>& Result)
 	{
 		if (Result.IsSuccess())
 		{
@@ -109,6 +115,19 @@ namespace VaRest::Http::BearerRefreshPrivate
 		const int32 Status = Result.Response.Status;
 		const bool bRefused = Error.Kind == EVaRestErrorKind::Http && Error.HttpStatus >= 400 && Error.HttpStatus < 500 && Error.HttpStatus != 408 && Error.HttpStatus != 429;
 		const bool bMalformed = Error.Kind == EVaRestErrorKind::Decode && Status >= 200 && Status < 300;
+		if (bMalformed)
+		{
+			// Task 18 review M-2 (ruled): a 2xx that is not JSON from another host than the refresh URL's is a redirect's
+			// answer -- a captive portal's login page, curl following its 302 -- not the endpoint's "no", and must not cost the
+			// player the refresh token. Only with both hosts known: no EffectiveUrl is no sign of a redirect. Not the host
+			// in the message: the EffectiveUrl is not redacted (VaRestHttpTypes.h:248-249).
+			const FString AnsweredBy = GetUrlHost(Result.Response.EffectiveUrl);
+			if (!RefreshHost.IsEmpty() && !AnsweredBy.IsEmpty() && !AnsweredBy.Equals(RefreshHost, ESearchCase::IgnoreCase))
+			{
+				return FVaRestAuthRefreshResult::Failed(EVaRestErrorKind::Connection,
+					FString::Printf(TEXT("another host answered the refresh request (a redirect: a captive portal?): %s"), *Why));
+			}
+		}
 		if (bRefused || bMalformed)
 		{
 			return FVaRestAuthRefreshResult::Rejected(Why);
@@ -122,12 +141,15 @@ namespace VaRest::Http::BearerRefreshPrivate
 	class FBearerRefreshAuth final : public IVaRestAuth
 	{
 	public:
-		explicit FBearerRefreshAuth(const FVaRestBearerRefreshConfig& InConfig)
+		FBearerRefreshAuth(const FVaRestBearerRefreshConfig& InConfig, FString InConfigError)
 			: Config(InConfig)
+			, ConfigError(MoveTemp(InConfigError))
 		{
 		}
 
 		virtual FName GetAuthName() const override { return TEXT("BearerRefresh"); }
+
+		virtual FString GetConfigError() const override { return ConfigError; }
 
 		virtual bool Apply(FVaRestAuthTarget& Target) const override
 		{
@@ -141,7 +163,10 @@ namespace VaRest::Http::BearerRefreshPrivate
 
 		virtual bool CanRefresh(const FVaRestSessionData& Session) const override
 		{
-			return Session.HasRefreshToken();
+			// Task 18 review I-1 (ruling Q7): never with a configuration that cannot work. AuthApply refuses every request then,
+			// but the gate's proactive refresh runs before it (VaRestAuthGate.cpp:303), as does RefreshAuth (VaRestClient.cpp:733):
+			// a refresh sent with it would be Rejected and expire the session.
+			return ConfigError.IsEmpty() && Session.HasRefreshToken();
 		}
 
 		virtual bool NeedsRefresh(const FVaRestSessionData& Session, double Now) const override
@@ -163,9 +188,12 @@ namespace VaRest::Http::BearerRefreshPrivate
 		virtual void Refresh(const FVaRestAuthRefreshContext& Context, TUniqueFunction<void(FVaRestAuthRefreshResult&&)>&& Done) override
 		{
 			const FString& Token = Context.GetSession().RefreshToken;
+			// Task 18 review M-2: where the request goes, as Resolve joins it (JoinUrl), for a 2xx from another host
+			const FString RefreshHost = GetUrlHost(JoinUrl(FClientAccess::ClientOf(Context).GetBaseUrl(), Config.RefreshPath));
 			// Plan decision 23: through the context, so the request skips the auth stages, the envelope (the body is read raw),
-			// retry and the limiter's queue (ruling M-8), and carries the refresh's id (spec review I-2)
-			TVaRestRequest<FVaRestJson> Refreshing = Context.Request<FVaRestJson>(TEXTVIEW("POST"), Config.RefreshPath);
+			// retry and the limiter's queue (ruling M-8), and carries the refresh's id (spec review I-2). Task 18 review M-3:
+			// Accept, so an endpoint that negotiates the format answers JSON, not the form encoding some default to.
+			TVaRestRequest<FVaRestJson> Refreshing = Context.Request<FVaRestJson>(TEXTVIEW("POST"), Config.RefreshPath).Header(TEXT("Accept"), TEXT("application/json"));
 			if (Config.Style == EVaRestRefreshStyle::OAuth2Form)
 			{
 				// RFC 6749 6
@@ -183,9 +211,9 @@ namespace VaRest::Http::BearerRefreshPrivate
 				Refreshing = MoveTemp(Refreshing).Body(FVaRestJson::Object().Set(Config.RefreshTokenField, Token));
 			}
 			// The game thread (no OnHttpThread()): Done may be called from any thread, but the path reads need none
-			MoveTemp(Refreshing).OnComplete([Paths = Config, Finish = MoveTemp(Done)](const TVaRestResult<FVaRestJson>& Result) mutable
+			MoveTemp(Refreshing).OnComplete([Paths = Config, Host = RefreshHost, Finish = MoveTemp(Done)](const TVaRestResult<FVaRestJson>& Result) mutable
 			{
-				Finish(ReadRefresh(Paths, Result));
+				Finish(ReadRefresh(Paths, Host, Result));
 			}).Send();
 		}
 
@@ -210,10 +238,35 @@ namespace VaRest::Http::BearerRefreshPrivate
 
 	private:
 		FVaRestBearerRefreshConfig Config;
+		/** Ruling Q7: empty unless the factory found the configuration unusable */
+		FString ConfigError;
 	};
 }
 
 FVaRestAuth::FRef FVaRestAuth::BearerRefresh(const FVaRestBearerRefreshConfig& Config)
 {
-	return MakeShared<VaRest::Http::BearerRefreshPrivate::FBearerRefreshAuth, ESPMode::ThreadSafe>(Config);
+	// Task 18 review I-1, ruling Q7: a configuration that cannot work is said once here (each case its own pattern, for the
+	// tests' expected errors) and fails every request Kind=Config through GetConfigError, the session kept; CanRefresh
+	// refuses too, so nothing sends the refresh. Each of these would be Rejected at every refresh: a logout for a typo.
+	// A malformed path is not checked: VaRestJson has no path validator, only the walkers (VaRestJsonPath.cpp:67-146).
+	FString ConfigError;
+	if (Config.AccessTokenPath.IsEmpty())
+	{
+		// Path("") is the document itself (VaRestJsonPath.cpp:151-154): an object, whose AsString is ""
+		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: FVaRestAuth::BearerRefresh: AccessTokenPath is empty; requests fail with Kind=Config"));
+		ConfigError = TEXT("the BearerRefresh AccessTokenPath is empty");
+	}
+	else if (Config.RefreshPath.TrimStartAndEnd().IsEmpty())
+	{
+		// JoinUrl trims it (VaRestUrl.h:26-27): the refresh would POST to the base URL itself, which an absolute RefreshPath can name
+		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: FVaRestAuth::BearerRefresh: RefreshPath is empty; requests fail with Kind=Config"));
+		ConfigError = TEXT("the BearerRefresh RefreshPath is empty");
+	}
+	else if (Config.Style == EVaRestRefreshStyle::Json && Config.RefreshTokenField.IsEmpty())
+	{
+		// The body would be {"":"<token>"}. OAuth2Form never reads the field (it always sends refresh_token): no error there.
+		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: FVaRestAuth::BearerRefresh: the Json style's RefreshTokenField is empty; requests fail with Kind=Config"));
+		ConfigError = TEXT("the BearerRefresh RefreshTokenField is empty (Json style)");
+	}
+	return MakeShared<VaRest::Http::BearerRefreshPrivate::FBearerRefreshAuth, ESPMode::ThreadSafe>(Config, MoveTemp(ConfigError));
 }
