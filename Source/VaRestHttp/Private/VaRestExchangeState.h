@@ -148,10 +148,13 @@ namespace VaRest::Http
 		double PendingAttemptStart = -1.0;
 
 		/**
-		 * IN-14, game thread: the attempt whose 2xx response the decode task excerpts (0 = none). AttemptEnded sets it when it
-		 * announces that excerpt; OnChainDone hands it to the decode task only for the outcome of that same attempt.
+		 * IN-14, game thread: the attempt whose 2xx response the decode task excerpts (0 = none), and that response's size.
+		 * AttemptEnded sets it when it announces that excerpt; OnChainDone hands it to the decode task, and clears it, only
+		 * for the outcome of that same attempt. One still set at the next AttemptEnded or at Completed was never handed
+		 * over: Excerpts::ResolveDiscarded resolves it (Task 21 review M-1).
 		 */
 		int32 ExcerptOnDecodeAttempt = 0;
+		int64 ExcerptOnDecodeBytes = 0;
 
 		/**
 		 * Plan decision 7. Game thread. Set by a stage while it holds this exchange waiting (a backoff, a park behind a

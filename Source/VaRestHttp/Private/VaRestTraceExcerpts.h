@@ -82,7 +82,11 @@ namespace VaRest::Http
 			FAdmission Admitted;
 			/** The copy would pass the admission cap: Skipped, Backlog, emitted at once */
 			bool bBacklog = false;
-			/** IVaRestClock seconds of the hop: the excerpt's Time (the clock itself stays on the game thread, review I-1) */
+			/**
+			 * IVaRestClock seconds of the hop: the excerpt's Time, read when the job is prepared so the job holds no clock.
+			 * Not a threading rule: Now() is callable from any thread (VaRestClock.h:38), and EmitOnDecode reads
+			 * Finish.Clock->Now() on the decode task.
+			 */
 			double Time = 0.0;
 			/** RedactorFor(Ex), taken on the game thread: the pipe holds a ref to an immutable redactor, nothing of the exchange */
 			TSharedPtr<const FVaRestRedactor, ESPMode::ThreadSafe> Redactor;
@@ -107,7 +111,17 @@ namespace VaRest::Http
 		bool WillExcerptOnDecode(const FExchangeState& Ex, const FVaRestTransportResult& Result);
 		/** At AttemptEnded, every other response: its prefix copied here, redacted on the pipe */
 		FJob PrepareResponse(const FExchangeState& Ex, const FVaRestTransportResult& Result);
-		/** On the decode task, before the parse rewrites the body in place: no copy (IN-14) */
+		/**
+		 * On the decode task, before the parse rewrites the body in place: no copy (IN-14). Nothing when no sink wants
+		 * Bodies any more, as the pipe's path (Task 21 review M-2).
+		 */
 		void EmitOnDecode(const FFinish& Finish);
+		/**
+		 * Game thread, at AttemptEnded and at Completed, before their event (Task 21 review M-1): an excerpt AttemptEnded
+		 * announced for the decode task that OnChainDone never handed over (Ex.ExcerptOnDecodeAttempt still set) resolves
+		 * as Skipped: Discarded, once -- so the record can seal (Inspector 2.3). The marker is cleared either way; nothing
+		 * is emitted when no sink wants Bodies any more, as at a launch (LaunchJob).
+		 */
+		void ResolveDiscarded(FExchangeState& Ex);
 	}
 }

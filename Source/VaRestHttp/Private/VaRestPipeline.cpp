@@ -951,7 +951,7 @@ void VaRest::Http::FClientState::OnChainDone(const FVaRestExchangeRef& Exchange,
 		return;
 	}
 
-	if (Ex.ExcerptOnDecodeAttempt > 0 && Ex.ExcerptOnDecodeAttempt == Ex.Attempt && !Finish.Error.IsError())
+	if (Ex.ExcerptOnDecodeAttempt > 0 && Ex.ExcerptOnDecodeAttempt == Ex.Attempt && !Finish.Error.IsError() && Finish.Body.Num() > 0)
 	{
 		// IN-14: this response goes to the decoder; the task excerpts it from the body itself. The redactor is taken here, on
 		// the game thread (RedactorFor checks it): the Send() snapshot's secrets, what AuthApply joined in for the attempts
@@ -959,6 +959,11 @@ void VaRest::Http::FClientState::OnChainDone(const FVaRestExchangeRef& Exchange,
 		Finish.ExcerptAttempt = Ex.Attempt;
 		Finish.ExcerptRedactor = RedactorFor(Ex);
 		Finish.ExcerptCap = FVaRestTrace::GetDetailSettings().BodyCap;
+		// Task 21 review M-1: handed over, so the decode task resolves it. EmitOnDecode drops a handed-over excerpt only when
+		// no sink wants Bodies any more; the body check above keeps its empty-body return from dropping one. One not handed
+		// over (an error, an empty body a stage put there, a request finished first) stays marked and resolves as Skipped:
+		// Discarded (Excerpts::ResolveDiscarded).
+		Ex.ExcerptOnDecodeAttempt = 0;
 	}
 	Finish.bTimeDecode = FVaRestTrace::Detail() != EVaRestTraceDetail::None;
 	// Re-review N-6: a stage that waits (a backoff, a park) is ended here, as Complete ends it -- the decode task runs for

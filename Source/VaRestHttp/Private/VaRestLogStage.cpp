@@ -78,29 +78,13 @@ namespace VaRest::Http::LogStagePrivate
 
 	/**
 	 * Review M3: the multipart descriptors with their field bytes cut to what DescribeMultipart can read (the cap plus the
-	 * longest needle), all parts together. A cut field keeps its Size: that is how DescribeMultipart knows to drop a known
-	 * secret the cut split in two.
+	 * longest needle), all parts together -- the copy the trace's request excerpt makes too (CopyPartsWithin)
 	 */
 	TArray<FVaRestMultipartPart> CopyPartsForLog(TConstArrayView<FVaRestMultipartPart> Parts, const FVaRestRedactor& Redactor)
 	{
-		int64 Budget = static_cast<int64>(LogBodyCap) + Redactor.GetMaxNeedleBytes();
-		TArray<FVaRestMultipartPart> Copies;
-		Copies.Reserve(Parts.Num());
-		for (const FVaRestMultipartPart& Part : Parts)
-		{
-			FVaRestMultipartPart& Copied = Copies.AddDefaulted_GetRef();
-			Copied.Name = Part.Name;
-			Copied.FileName = Part.FileName;
-			Copied.ContentType = Part.ContentType;
-			Copied.FilePath = Part.FilePath;
-			Copied.Size = Part.Size;
-			Copied.bField = Part.bField;
-			const int32 Take = static_cast<int32>(FMath::Min<int64>(Part.Bytes.Num(), Budget));
-			Copied.Bytes.Append(Part.Bytes.GetData(), Take);
-			Budget -= Take;
-			CountCopied(Take);
-		}
-		return Copies;
+		const int64 Budget = static_cast<int64>(LogBodyCap) + Redactor.GetMaxNeedleBytes();
+		CountCopied(PartBytesWithin(Parts, Budget));
+		return CopyPartsWithin(Parts, Budget);
 	}
 
 	void LogRequestBody(const FExchangeState& Ex, const FRedactorRef& Redactor)

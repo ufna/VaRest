@@ -4329,4 +4329,126 @@ bool FVaRestHttpAuthChangeWhileParkedTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpGoldenRefreshTest, "VaRest.Http.Trace.Golden.RefreshParked",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpGoldenRefreshTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// IN-17: 401 -> refresh -> replay with two parked requests (GapBefore, AuthWait, AuthRefreshId). A golden of Task 17's
+	// gate: a failure here is a trace point of the gate (or of the attempt boundary it feeds) that moved.
+	FTestRig Rig;
+	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = HandRig(Rig);
+	FScopedTraceRecorder Scoped(EVaRestTraceDetail::Metadata);
+	auto First = MakeOutcome<FVaRestJson>();
+	const uint64 A = Observe(Rig.Client.Get(TEXT("/a")), First).Send().GetId();
+	if (!TestTrue(TEXT("A parked"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 1; }) && Rig.Drain() && Auth->IsPending()))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	auto Second = MakeOutcome<FVaRestJson>();
+	auto Third = MakeOutcome<FVaRestJson>();
+	const uint64 B = Observe(Rig.Client.Get(TEXT("/b")), Second).Send().GetId();
+	const uint64 C = Observe(Rig.Client.Get(TEXT("/c")), Third).Send().GetId();
+	Rig.Drain();
+	Rig.Clock->Advance(0.4);
+	Auth->Answer(FVaRestAuthRefreshResult::Refreshed(TEXT("new-access-123456")));
+	if (!TestTrue(TEXT("all complete"), PumpUntil([First, Second, Third] { return First->IsDone() && Second->IsDone() && Third->IsDone(); })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Drain();
+	FlushRedactionPipe();
+	const FTraceRecorder& Recorder = *Scoped.Recorder;
+	TestEqualSensitive(TEXT("A: 401, then the replay"), Recorder.KindsOf(A), FString(TEXT("Started,Dispatched,Ended,Dispatched,Ended,Completed")));
+	TestEqualSensitive(TEXT("B: one attempt"), Recorder.KindsOf(B), FString(TEXT("Started,Dispatched,Ended,Completed")));
+	TestEqualSensitive(TEXT("C: one attempt"), Recorder.KindsOf(C), FString(TEXT("Started,Dispatched,Ended,Completed")));
+	TestEqual(TEXT("one refresh for the three"), Auth->Refreshes, 1);
+	const TArray<FVaRestTraceAttemptDispatched> ForA = DispatchesOf(Recorder, A);
+	if (!TestEqual(TEXT("A dispatched twice"), ForA.Num(), 2))
+	{
+		return false;
+	}
+	TestTrue(TEXT("A's first attempt: at 0 s, no gap, no AuthWait, no refresh"), ForA[0].Attempt == 1 && ForA[0].AttemptStart == 0.0 && ForA[0].GapKind == EVaRestTraceGap::None
+		&& ForA[0].AuthWait == 0.0 && ForA[0].AuthRefreshId == 0);
+	// Spec review I-1 (Inspector 3.3): a replay's park is the Gap before its attempt, not inside it -- no AuthWait; a park
+	// before the first attempt is inside it (Auth), and the attempt starts when it parked
+	TestTrue(TEXT("A's replay: attempt 2 at 0.4 s, GapBefore SessionRefresh 0.4 s, no AuthWait, the refresh's id"), ForA[1].Attempt == 2 && ForA[1].AttemptStart == 0.4
+		&& ForA[1].GapKind == EVaRestTraceGap::SessionRefresh && FMath::IsNearlyEqual(ForA[1].GapSeconds, 0.4) && ForA[1].AuthWait == 0.0
+		&& ForA[1].AuthRefreshId == Auth->LastRefreshId);
+	TestTrue(TEXT("... the refresh has an id"), Auth->LastRefreshId != 0);
+	for (const uint64 Id : { B, C })
+	{
+		const TArray<FVaRestTraceAttemptDispatched> Parked = DispatchesOf(Recorder, Id);
+		TestTrue(FString::Printf(TEXT("#%llu: attempt 1 started at 0 s when it parked, no gap, AuthWait 0.4 s, the same refresh"), Id), Parked.Num() == 1 && Parked[0].Attempt == 1
+			&& Parked[0].AttemptStart == 0.0 && Parked[0].GapKind == EVaRestTraceGap::None && FMath::IsNearlyEqual(Parked[0].AuthWait, 0.4)
+			&& Parked[0].AuthRefreshId == Auth->LastRefreshId);
+	}
+	for (const uint64 Id : { A, B, C })
+	{
+		FString Why;
+		TestTrue(FString::Printf(TEXT("#%llu: Inspector 3.3's phases hold"), Id), PhasesHold(Recorder, Id, Why));
+		TestEqualSensitive(FString::Printf(TEXT("#%llu: ... (why not)"), Id), Why, FString());
+		const TArray<FVaRestTraceEvent> Events = Recorder.For(Id);
+		const FVaRestTraceEvent* Done = Events.FindByPredicate([](const FVaRestTraceEvent& Event) { return Event.Kind == EVaRestTraceKind::Completed; });
+		TestTrue(FString::Printf(TEXT("#%llu: Completed at 0.4 s, a success"), Id), Done && Done->Time == 0.4
+			&& Done->Payload.Get<FVaRestTraceCompleted>().Outcome == EVaRestTraceOutcome::Success);
+	}
+	const TArray<FVaRestTraceMarker> Markers = Recorder.MarkersOf(Rig.Client.GetId());
+	TestTrue(TEXT("IN-9: SessionRefreshed caused by A"), Markers.ContainsByPredicate([A](const FVaRestTraceMarker& Marker)
+	{
+		return Marker.Kind == EVaRestTraceMarkerKind::SessionRefreshed && Marker.CauseRequestId == A;
+	}));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpGoldenProactiveTest, "VaRest.Http.Trace.Golden.ProactiveRefresh",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpGoldenProactiveTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// IN-17 proactive refresh (Task 17): a known expiry inside the lead parks the request before its first attempt
+	FTestRig Rig;
+	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = HandRig(Rig);
+	Rig.Client.SetSession(TEXT("old-access-123456"), TEXT("old-refresh-123456"), 10.0);
+	FScopedTraceRecorder Scoped(EVaRestTraceDetail::Metadata);
+	auto Outcome = MakeOutcome<FVaRestJson>();
+	const uint64 Id = Observe(Rig.Client.Get(TEXT("/p")), Outcome).Send().GetId();
+	Rig.Drain();
+	if (!TestTrue(TEXT("parked before its first attempt"), Rig.Fake->NumCalls() == 0 && Auth->IsPending()))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Clock->Advance(0.3);
+	Auth->Answer(FVaRestAuthRefreshResult::Refreshed(TEXT("new-access-123456"), FString(), 3600.0));
+	if (!TestTrue(TEXT("completes"), Rig.Wait(Outcome)))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Drain();
+	FlushRedactionPipe();
+	const FTraceRecorder& Recorder = *Scoped.Recorder;
+	TestEqualSensitive(TEXT("one attempt, after the refresh"), Recorder.KindsOf(Id), FString(TEXT("Started,Dispatched,Ended,Completed")));
+	const TArray<FVaRestTraceAttemptDispatched> Dispatched = DispatchesOf(Recorder, Id);
+	TestTrue(TEXT("attempt 1 started at 0 s when it parked (spec review I-1), AuthWait 0.3 s, no gap"), Dispatched.Num() == 1 && Dispatched[0].AttemptStart == 0.0
+		&& FMath::IsNearlyEqual(Dispatched[0].AuthWait, 0.3) && Dispatched[0].GapKind == EVaRestTraceGap::None && Dispatched[0].AuthRefreshId == Auth->LastRefreshId);
+	TestTrue(TEXT("... the refresh has an id"), Auth->LastRefreshId != 0);
+	TestTrue(TEXT("... with the new token, ended 200"), Rig.Fake->NumCalls() == 1 && Outcome->SuccessCalls.load() == 1 && Outcome->Response.Attempts == 1);
+	FString Why;
+	TestTrue(TEXT("Inspector 3.3's phases hold"), PhasesHold(Recorder, Id, Why));
+	TestEqualSensitive(TEXT("... (why not)"), Why, FString());
+	TestTrue(TEXT("IN-9: SessionRefreshed caused by the request"), Recorder.MarkersOf(Rig.Client.GetId()).ContainsByPredicate([Id](const FVaRestTraceMarker& Marker)
+	{
+		return Marker.Kind == EVaRestTraceMarkerKind::SessionRefreshed && Marker.CauseRequestId == Id;
+	}));
+	return true;
+}
+
 #endif

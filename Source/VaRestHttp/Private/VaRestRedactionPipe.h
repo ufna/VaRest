@@ -2,9 +2,12 @@
 
 #pragma once
 
+#include "Containers/ArrayView.h"
 #include "Templates/Function.h"
 
 #include <atomic>
+
+struct FVaRestMultipartPart;
 
 namespace UE::Tasks
 {
@@ -93,4 +96,13 @@ namespace VaRest::Http
 	void StopRedactionPipe();
 	/** Tests, game thread (where StopRedactionPipe deletes it): waits until the pipe is idle; false when there is none */
 	bool WaitForRedactionPipe();
+
+	/**
+	 * What a game-thread copy of multipart parts for the pipe takes (the log's, review M3; the trace's, Task 21 review M-3):
+	 * the descriptors, with their field bytes cut to Budget in all parts together -- what DescribeMultipart can read is the
+	 * cap plus the longest needle. A cut field keeps its Size: that is how DescribeMultipart knows to drop a known secret the
+	 * cut split in two. PartBytesWithin is the bytes CopyPartsWithin copies, so a caller can admit them before it copies.
+	 */
+	int64 PartBytesWithin(TConstArrayView<FVaRestMultipartPart> Parts, int64 Budget);
+	TArray<FVaRestMultipartPart> CopyPartsWithin(TConstArrayView<FVaRestMultipartPart> Parts, int64 Budget);
 }

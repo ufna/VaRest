@@ -15,6 +15,7 @@
 #include "VaRestClientState.h"
 #include "VaRestHttpTesting.h"
 #include "VaRestRedactionPipe.h"
+#include "VaRestRetry.h"
 #include "VaRestSha256.h"
 #include "VaRestTraceExcerpts.h"
 
@@ -37,11 +38,15 @@ namespace VaRest::Http::ExcerptTestPrivate
 		return Found ? TOptional<FVaRestTraceExcerptEvent>(*Found) : TOptional<FVaRestTraceExcerptEvent>();
 	}
 
-	/** Cancels what the rig has in flight and pumps until it is done: the drain of a test that stops early (spec review M-5) */
+	/**
+	 * Cancels what the rig has in flight and pumps until it is done: the drain of a test that stops early (spec review M-5).
+	 * The pipe is flushed too (Task 21 review M-5): a redaction still queued would emit into the next test's recorder.
+	 */
 	void Abandon(VaRest::Http::Testing::FTestRig& Rig)
 	{
 		Rig.Client.CancelAll();
 		VaRest::Http::Testing::PumpUntil([&Rig] { return Rig.Client.GetInFlightCount() == 0; });
+		VaRest::Http::Testing::FlushRedactionPipe();
 	}
 
 	/** The first event of Kind for request Id, its payload copied out (For() returns a copy of the list) */
@@ -110,6 +115,151 @@ namespace VaRest::Http::ExcerptTestPrivate
 		};
 		return Job;
 	}
+
+	/**
+	 * Task 21 review M-1: the excerpts request Id's events announced (bExcerptPending) that never came -- "request" or
+	 * "response #N" -- comma-separated; empty when every announced excerpt resolved
+	 */
+	FString Unresolved(const VaRest::Http::Testing::FTraceRecorder& Recorder, uint64 Id)
+	{
+		const TArray<FVaRestTraceEvent> Events = Recorder.For(Id);
+		const auto Has = [&Events](EVaRestTraceExcerptOwner Owner, int32 Attempt)
+		{
+			return Events.ContainsByPredicate([Owner, Attempt](const FVaRestTraceEvent& Event)
+			{
+				return Event.Kind == EVaRestTraceKind::Excerpt && Event.Payload.Get<FVaRestTraceExcerptEvent>().Owner == Owner
+					&& Event.Payload.Get<FVaRestTraceExcerptEvent>().Attempt == Attempt;
+			});
+		};
+		TArray<FString> Missing;
+		for (const FVaRestTraceEvent& Event : Events)
+		{
+			if (Event.Kind == EVaRestTraceKind::Started && Event.Payload.Get<FVaRestTraceStarted>().bExcerptPending && !Has(EVaRestTraceExcerptOwner::Request, 0))
+			{
+				Missing.Add(TEXT("request"));
+			}
+			else if (Event.Kind == EVaRestTraceKind::AttemptEnded && Event.Payload.Get<FVaRestTraceAttemptEnded>().bExcerptPending)
+			{
+				const int32 Attempt = Event.Payload.Get<FVaRestTraceAttemptEnded>().Attempt;
+				if (!Has(EVaRestTraceExcerptOwner::Response, Attempt))
+				{
+					Missing.Add(FString::Printf(TEXT("response #%d"), Attempt));
+				}
+			}
+		}
+		return FString::Join(Missing, TEXT(", "));
+	}
+
+	/** Request Id's response excerpt events for Attempt, copied out with their Seq */
+	TArray<FVaRestTraceEvent> ResponseExcerpts(const VaRest::Http::Testing::FTraceRecorder& Recorder, uint64 Id, int32 Attempt)
+	{
+		TArray<FVaRestTraceEvent> Out;
+		for (const FVaRestTraceEvent& Event : Recorder.For(Id))
+		{
+			if (Event.Kind == EVaRestTraceKind::Excerpt && Event.Payload.Get<FVaRestTraceExcerptEvent>().Owner == EVaRestTraceExcerptOwner::Response
+				&& Event.Payload.Get<FVaRestTraceExcerptEvent>().Attempt == Attempt)
+			{
+				Out.Add(Event);
+			}
+		}
+		return Out;
+	}
+
+	/** The Seq of request Id's AttemptEnded for Attempt (Kind Completed: its Completed, Attempt ignored); 0 when there is none */
+	uint64 SeqOfAttempt(const VaRest::Http::Testing::FTraceRecorder& Recorder, uint64 Id, EVaRestTraceKind Kind, int32 Attempt)
+	{
+		for (const FVaRestTraceEvent& Event : Recorder.For(Id))
+		{
+			if (Event.Kind == Kind && (Kind != EVaRestTraceKind::AttemptEnded || Event.Payload.Get<FVaRestTraceAttemptEnded>().Attempt == Attempt))
+			{
+				return Event.Seq;
+			}
+		}
+		return 0;
+	}
+
+	/** True when Excerpts is one Skipped: Discarded excerpt */
+	bool IsOneDiscarded(const TArray<FVaRestTraceEvent>& Excerpts)
+	{
+		if (Excerpts.Num() != 1)
+		{
+			return false;
+		}
+		const FVaRestTraceExcerpt& Excerpt = Excerpts[0].Payload.Get<FVaRestTraceExcerptEvent>().Excerpt;
+		return Excerpt.Kind == EVaRestExcerptKind::Skipped && Excerpt.SkipReason == EVaRestExcerptSkip::Discarded;
+	}
+
+	/**
+	 * A sink whose Hook sees each game-thread event (not excerpts: those may come from a worker). Hook is set before AddSink
+	 * and left alone while the sink is attached.
+	 */
+	class FHookSink final : public IVaRestTraceSink
+	{
+	public:
+		explicit FHookSink(EVaRestTraceDetail Flags)
+		{
+			Detail.Flags = Flags;
+			Detail.BodyCap = 1024;
+		}
+		virtual FVaRestTraceDetailSettings GetDetail() const override { return Detail; }
+		virtual void OnAttached(const FVaRestTraceSnapshot&) override {}
+		virtual void OnEvent(const FVaRestTraceEvent& Event) override
+		{
+			if (Event.Kind != EVaRestTraceKind::Excerpt && Hook)
+			{
+				Hook(Event);
+			}
+		}
+
+		FVaRestTraceDetailSettings Detail;
+		TFunction<void(const FVaRestTraceEvent&)> Hook;
+	};
+
+	/** An Outer stage that answers a decodable 200 for a URL ending in /replaced with a 502 of its own: the 2xx never reaches the decoder */
+	class FReplaceOkStage final : public IVaRestStage
+	{
+	public:
+		virtual FName GetStageName() const override { return TEXT("ReplaceOk"); }
+		virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) override
+		{
+			const bool bReplace = Exchange->GetUrl().EndsWith(TEXT("/replaced"));
+			Next.Proceed(Exchange, [bReplace, Done = MoveTemp(OnOutcome)](FVaRestAttemptOutcome&& Outcome) mutable
+			{
+				if (bReplace && Outcome.Status == 200)
+				{
+					FVaRestAttemptOutcome Replaced;
+					Replaced.Status = 502;
+					Done(MoveTemp(Replaced));
+					return;
+				}
+				Done(MoveTemp(Outcome));
+			});
+		}
+	};
+
+	/** A PerAttempt stage that turns the first 200 for a URL ending in /again into an empty 503: the retry stage re-issues it */
+	class FFirstOkIsBusyStage final : public IVaRestStage
+	{
+	public:
+		virtual FName GetStageName() const override { return TEXT("FirstOkIsBusy"); }
+		virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) override
+		{
+			const bool bAgain = Exchange->GetUrl().EndsWith(TEXT("/again"));
+			Next.Proceed(Exchange, [bAgain, Once = Turned, Done = MoveTemp(OnOutcome)](FVaRestAttemptOutcome&& Outcome) mutable
+			{
+				if (bAgain && Outcome.Status == 200 && !*Once)
+				{
+					*Once = true;
+					FVaRestAttemptOutcome Busy;
+					Busy.Status = 503;
+					Done(MoveTemp(Busy));
+					return;
+				}
+				Done(MoveTemp(Outcome));
+			});
+		}
+		TSharedRef<bool, ESPMode::ThreadSafe> Turned = MakeShared<bool, ESPMode::ThreadSafe>(false);
+	};
 
 	/** Holds a test-owned gate's pipe busy until Release is set (or 10 s pass): what is launched behind it waits */
 	void HoldPipe(VaRest::Http::FRedactionGate& Gate, const TSharedRef<std::atomic<bool>, ESPMode::ThreadSafe>& Release)
@@ -321,7 +471,7 @@ bool FVaRestHttpExcerptAdmissionMergeTest::RunTest(const FString& Parameters)
 {
 	using namespace VaRest::Http::Testing;
 	// Task 5 review minor 2: a sink's MaxPendingExcerptBytes of 0 is the default, 16 MiB; the merge maps it before taking
-	// the largest, so a sink asking for less never shrinks a default sink's budget. Only a sink that receives excerpts has a say.
+	// the largest, so a sink asking for less never shrinks a default sink's budget. Only a sink that asks for excerpts (Bodies) has a say.
 	constexpr int64 Default = FVaRestTraceDetailSettings::DefaultMaxPendingExcerptBytes;
 	TestEqual(TEXT("the default is 16 MiB"), Default, static_cast<int64>(16 * 1024 * 1024));
 	FVaRestScopedSinkIsolation Isolation;
@@ -567,6 +717,222 @@ bool FVaRestHttpExcerptRefreshTest::RunTest(const FString& Parameters)
 		&& !Answer->Excerpt.ToText().Contains(TEXT("new-access-123456")) && !Answer->Excerpt.ToText().Contains(TEXT("new-refresh-123456")));
 	const TOptional<FVaRestTraceExcerptEvent> Asked = Find(RefreshExcerpts, EVaRestTraceExcerptOwner::Request);
 	TestTrue(TEXT("... and its request's excerpt hides the old refresh token"), Asked.IsSet() && !Asked->Excerpt.ToText().Contains(TEXT("old-refresh-123456")));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpExcerptDiscardedTest, "VaRest.Http.Trace.ExcerptDiscarded",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpExcerptDiscardedTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::ExcerptTestPrivate;
+	// Task 21 review M-1: every announced excerpt resolves. AttemptEnded announces a decodable 2xx's excerpt for the decode
+	// task; when a stage replaces that outcome the decode task never sees the body, and the excerpt resolves as Skipped:
+	// Discarded -- before Completed (a custom Outer stage's 502), or before the next attempt's AttemptEnded (a PerAttempt
+	// stage's 503 that the retry stage re-issues). A plain decoded 2xx keeps its one excerpt from the decode task.
+	FTestRig Rig;
+	FVaRestRetryPolicy Retry = FVaRestRetryPolicy::Exponential(1);
+	Retry.Backoff.Jitter = EVaRestJitter::None;
+	Rig.Client.WithRetry(Retry);
+	Rig.Client.Use(MakeShared<FReplaceOkStage, ESPMode::ThreadSafe>(), EVaRestStageSlot::Outer);
+	Rig.Client.Use(MakeShared<FFirstOkIsBusyStage, ESPMode::ThreadSafe>(), EVaRestStageSlot::PerAttempt);
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest&) { return Json(200, R"({"n":1})"); });
+	FScopedTraceRecorder Scoped(EVaRestTraceDetail::Metadata | EVaRestTraceDetail::Bodies, 1024);
+	const FTraceRecorder& Recorder = *Scoped.Recorder;
+	auto Replaced = MakeOutcome<FVaRestJson>();
+	auto Again = MakeOutcome<FVaRestJson>();
+	auto Plain = MakeOutcome<FVaRestJson>();
+	const uint64 ReplacedId = Observe(Rig.Client.Get(TEXT("/replaced")), Replaced).Send().GetId();
+	const uint64 AgainId = Observe(Rig.Client.Get(TEXT("/again")), Again).Send().GetId();
+	const uint64 PlainId = Observe(Rig.Client.Get(TEXT("/plain")), Plain).Send().GetId();
+	if (!TestTrue(TEXT("/again backs off, the others complete"), PumpUntil([&Rig, Replaced, Plain] { return Replaced->IsDone() && Plain->IsDone() && Rig.Clock->NumPendingTimers() == 1; })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Clock->Advance(0.5);
+	if (!TestTrue(TEXT("/again completes"), Rig.Wait(Again)))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Drain();
+	FlushRedactionPipe();
+
+	// A custom Outer stage replaced the 2xx: resolved before Completed, once
+	TestTrue(TEXT("/replaced: the stage's 502 is the answer"), Replaced->ErrorCalls.load() == 1 && Replaced->Error.HttpStatus == 502);
+	const TOptional<FVaRestTraceAttemptEnded> ReplacedEnded = First<FVaRestTraceAttemptEnded>(Recorder, ReplacedId, EVaRestTraceKind::AttemptEnded);
+	TestTrue(TEXT("/replaced: AttemptEnded announced the decode task's excerpt"), ReplacedEnded.IsSet() && ReplacedEnded->bExcerptPending && ReplacedEnded->Status == 200);
+	const TArray<FVaRestTraceEvent> ReplacedExcerpts = ResponseExcerpts(Recorder, ReplacedId, 1);
+	TestTrue(TEXT("/replaced: one excerpt, Skipped: Discarded"), IsOneDiscarded(ReplacedExcerpts));
+	TestTrue(TEXT("/replaced: ... with the announced response's size"), ReplacedExcerpts.Num() == 1
+		&& ReplacedExcerpts[0].Payload.Get<FVaRestTraceExcerptEvent>().Excerpt.TotalBytes == 7);
+	TestTrue(TEXT("/replaced: ... between its AttemptEnded and its Completed (nothing pending at Completed)"), ReplacedExcerpts.Num() == 1
+		&& ReplacedExcerpts[0].Seq > SeqOfAttempt(Recorder, ReplacedId, EVaRestTraceKind::AttemptEnded, 1)
+		&& ReplacedExcerpts[0].Seq < SeqOfAttempt(Recorder, ReplacedId, EVaRestTraceKind::Completed, 0));
+	TestEqualSensitive(TEXT("/replaced: no excerpt pending at the end"), Unresolved(Recorder, ReplacedId), FString());
+
+	// A PerAttempt stage turned attempt 1's 2xx into a 503 and the retry re-issued it: attempt 1's resolves before attempt 2's AttemptEnded
+	TestTrue(TEXT("/again: two attempts, the second decoded"), Again->SuccessCalls.load() == 1 && Again->Response.Attempts == 2);
+	const TArray<FVaRestTraceEvent> FirstAttempt = ResponseExcerpts(Recorder, AgainId, 1);
+	TestTrue(TEXT("/again: attempt 1's excerpt is Skipped: Discarded"), IsOneDiscarded(FirstAttempt));
+	TestTrue(TEXT("/again: ... emitted before attempt 2's AttemptEnded"), FirstAttempt.Num() == 1
+		&& FirstAttempt[0].Seq > SeqOfAttempt(Recorder, AgainId, EVaRestTraceKind::AttemptEnded, 1)
+		&& FirstAttempt[0].Seq < SeqOfAttempt(Recorder, AgainId, EVaRestTraceKind::AttemptEnded, 2));
+	const TArray<FVaRestTraceEvent> SecondAttempt = ResponseExcerpts(Recorder, AgainId, 2);
+	TestTrue(TEXT("/again: attempt 2's excerpt is the decode task's"), SecondAttempt.Num() == 1
+		&& SecondAttempt[0].Payload.Get<FVaRestTraceExcerptEvent>().Excerpt.Kind == EVaRestExcerptKind::Json);
+	TestEqualSensitive(TEXT("/again: no excerpt pending at the end"), Unresolved(Recorder, AgainId), FString());
+
+	// The control: handed to the decode task, which resolves it -- nothing else is emitted for it at Completed
+	const TArray<FVaRestTraceEvent> PlainExcerpts = ResponseExcerpts(Recorder, PlainId, 1);
+	TestTrue(TEXT("/plain: one excerpt, the decode task's"), PlainExcerpts.Num() == 1
+		&& PlainExcerpts[0].Payload.Get<FVaRestTraceExcerptEvent>().Excerpt.Kind == EVaRestExcerptKind::Json);
+	TestEqualSensitive(TEXT("/plain: no excerpt pending at the end"), Unresolved(Recorder, PlainId), FString());
+	TestTrue(TEXT("Inspector 9: only excerpts arrive off the game thread"), Recorder.OnlyExcerptsOffGameThread());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpExcerptDiscardedOnCancelTest, "VaRest.Http.Trace.ExcerptDiscardedOnCancel",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpExcerptDiscardedOnCancelTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::ExcerptTestPrivate;
+	// Task 21 review M-1: a game-thread Cancel() from a sink's OnEvent at the AttemptEnded of a decodable 2xx. AttemptEnded
+	// has announced the decode task's excerpt; the cancel finishes the request (Complete, deferred out of Cancel), so
+	// OnChainDone never hands the body to a decode task. The excerpt resolves as Skipped: Discarded before Completed.
+	FTestRig Rig;
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest&) { return Json(200, R"({"n":1})"); });
+	FScopedTraceRecorder Scoped(EVaRestTraceDetail::Metadata | EVaRestTraceDetail::Bodies, 1024);
+	const FTraceRecorder& Recorder = *Scoped.Recorder;
+	const TSharedRef<FVaRestRequestHandle, ESPMode::ThreadSafe> Target = MakeShared<FVaRestRequestHandle, ESPMode::ThreadSafe>();
+	const TSharedRef<FHookSink, ESPMode::ThreadSafe> Canceler = MakeShared<FHookSink, ESPMode::ThreadSafe>(EVaRestTraceDetail::Metadata);
+	Canceler->Hook = [Target](const FVaRestTraceEvent& Event)
+	{
+		if (Event.Kind == EVaRestTraceKind::AttemptEnded && Event.Payload.Get<FVaRestTraceAttemptEnded>().RequestId == Target->GetId())
+		{
+			Target->Cancel();
+		}
+	};
+	FVaRestTrace::AddSink(Canceler);
+	auto Outcome = MakeOutcome<FVaRestJson>();
+	// The answer comes from a later game-thread task (the fake queues it for a worker), never inside Send()
+	*Target = Observe(Rig.Client.Get(TEXT("/c")), Outcome).Send();
+	const uint64 Id = Target->GetId();
+	const bool bDone = Rig.Wait(Outcome);
+	FVaRestTrace::RemoveSink(Canceler);
+	if (!TestTrue(TEXT("completes"), bDone))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Drain();
+	FlushRedactionPipe();
+	TestTrue(TEXT("canceled from the sink"), Outcome->Error.Kind == EVaRestErrorKind::Canceled && Outcome->SuccessCalls.load() == 0);
+	TestEqualSensitive(TEXT("the sequence"), Recorder.KindsOf(Id), FString(TEXT("Started,Dispatched,Ended,Completed")));
+	const TOptional<FVaRestTraceAttemptEnded> Ended = First<FVaRestTraceAttemptEnded>(Recorder, Id, EVaRestTraceKind::AttemptEnded);
+	TestTrue(TEXT("AttemptEnded announced the decode task's excerpt"), Ended.IsSet() && Ended->bExcerptPending && Ended->Status == 200);
+	const TArray<FVaRestTraceEvent> Excerpts = ResponseExcerpts(Recorder, Id, 1);
+	TestTrue(TEXT("one excerpt, Skipped: Discarded"), IsOneDiscarded(Excerpts));
+	TestTrue(TEXT("... before Completed"), Excerpts.Num() == 1 && Excerpts[0].Seq > SeqOfAttempt(Recorder, Id, EVaRestTraceKind::AttemptEnded, 1)
+		&& Excerpts[0].Seq < SeqOfAttempt(Recorder, Id, EVaRestTraceKind::Completed, 0));
+	TestEqualSensitive(TEXT("no excerpt pending at the end"), Unresolved(Recorder, Id), FString());
+	const TOptional<FVaRestTraceCompleted> Done = First<FVaRestTraceCompleted>(Recorder, Id, EVaRestTraceKind::Completed);
+	TestTrue(TEXT("Completed Canceled"), Done.IsSet() && Done->Outcome == EVaRestTraceOutcome::Canceled);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpExcerptDecodeSinkGoneTest, "VaRest.Http.Trace.ExcerptOnDecodeSinkGone",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpExcerptDecodeSinkGoneTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::ExcerptTestPrivate;
+	// Task 21 review M-2: the decode task re-checks that a sink still wants Bodies, as the pipe's task does (LaunchJob). The
+	// only Bodies sink removes itself at the AttemptEnded that announced the decode task's excerpt; the Metadata sink left
+	// receives no excerpt (Emit delivers every event to every sink, so without the check it would).
+	FTestRig Rig;
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest&) { return Json(200, R"({"n":1})"); });
+	FScopedTraceRecorder Scoped(EVaRestTraceDetail::Metadata);
+	const FTraceRecorder& Recorder = *Scoped.Recorder;
+	const TSharedRef<uint64, ESPMode::ThreadSafe> TargetId = MakeShared<uint64, ESPMode::ThreadSafe>(0);
+	const TSharedRef<FHookSink, ESPMode::ThreadSafe> Leaving = MakeShared<FHookSink, ESPMode::ThreadSafe>(EVaRestTraceDetail::Metadata | EVaRestTraceDetail::Bodies);
+	Leaving->Hook = [TargetId, Weak = TWeakPtr<FHookSink, ESPMode::ThreadSafe>(Leaving)](const FVaRestTraceEvent& Event)
+	{
+		if (Event.Kind == EVaRestTraceKind::AttemptEnded && Event.Payload.Get<FVaRestTraceAttemptEnded>().RequestId == *TargetId)
+		{
+			if (const TSharedPtr<FHookSink, ESPMode::ThreadSafe> Self = Weak.Pin())
+			{
+				FVaRestTrace::RemoveSink(Self.ToSharedRef());
+			}
+		}
+	};
+	FVaRestTrace::AddSink(Leaving);
+	auto Outcome = MakeOutcome<FVaRestJson>();
+	*TargetId = Observe(Rig.Client.Get(TEXT("/d")), Outcome).Send().GetId();
+	const uint64 Id = *TargetId;
+	const bool bDone = Rig.Wait(Outcome);
+	FVaRestTrace::RemoveSink(Leaving);
+	if (!TestTrue(TEXT("completes"), bDone))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Drain();
+	FlushRedactionPipe();
+	TestTrue(TEXT("decoded"), Outcome->SuccessCalls.load() == 1);
+	const TOptional<FVaRestTraceAttemptEnded> Ended = First<FVaRestTraceAttemptEnded>(Recorder, Id, EVaRestTraceKind::AttemptEnded);
+	TestTrue(TEXT("AttemptEnded announced the excerpt while the Bodies sink was there"), Ended.IsSet() && Ended->bExcerptPending);
+	TestFalse(TEXT("no sink wants Bodies any more"), FVaRestTrace::Wants(EVaRestTraceDetail::Bodies));
+	TestEqual(TEXT("the decode task emitted nothing"), Recorder.ExcerptsOf(Id).Num(), 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpExcerptMultipartAdmissionTest, "VaRest.Http.Trace.ExcerptMultipartAdmission",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpExcerptMultipartAdmissionTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::ExcerptTestPrivate;
+	// Task 21 review M-3: a multipart request's excerpt is sized, admitted, then copied -- a refused admission copies nothing
+	FTestRig Rig;
+	FScopedTraceRecorder Scoped(EVaRestTraceDetail::Metadata | EVaRestTraceDetail::Bodies, 4096);
+	Scoped.Recorder->Detail.MaxPendingExcerptBytes = 100;
+	FVaRestTrace::RefreshDetail();
+	// Each request's whole life is measured (its Started may run from a later task than Send); its 200 "{}" is excerpted
+	// by the decode task, which copies nothing, so the request's excerpt is all the counter sees
+	auto Big = MakeOutcome<FVaRestJson>();
+	const int64 BeforeBig = Counters().TraceExcerptBytesCopied.load();
+	const uint64 BigId = Observe(Rig.Client.Post(TEXT("/big")).Body(FVaRestMultipart().AddField(TEXT("blob"), FString::ChrN(1000, TEXT('x')))), Big).Send().GetId();
+	if (!TestTrue(TEXT("completes"), Rig.Wait(Big) && Rig.Drain()))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	const int64 CopiedForBig = Counters().TraceExcerptBytesCopied.load() - BeforeBig;
+	auto Small = MakeOutcome<FVaRestJson>();
+	const int64 BeforeSmall = Counters().TraceExcerptBytesCopied.load();
+	const uint64 SmallId = Observe(Rig.Client.Post(TEXT("/small")).Body(FVaRestMultipart().AddField(TEXT("name"), TEXT("neo"))), Small).Send().GetId();
+	if (!TestTrue(TEXT("completes"), Rig.Wait(Small) && Rig.Drain()))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	const int64 CopiedForSmall = Counters().TraceExcerptBytesCopied.load() - BeforeSmall;
+	FlushRedactionPipe();
+	const TOptional<FVaRestTraceExcerptEvent> Skipped = Find(Scoped.Recorder->ExcerptsOf(BigId), EVaRestTraceExcerptOwner::Request);
+	TestTrue(TEXT("past the admission cap: Skipped: Backlog"), Skipped.IsSet() && Skipped->Excerpt.Kind == EVaRestExcerptKind::Skipped
+		&& Skipped->Excerpt.SkipReason == EVaRestExcerptSkip::Backlog);
+	TestEqual(TEXT("... and nothing was copied for it"), CopiedForBig, static_cast<int64>(0));
+	const TOptional<FVaRestTraceExcerptEvent> Admitted = Find(Scoped.Recorder->ExcerptsOf(SmallId), EVaRestTraceExcerptOwner::Request);
+	TestTrue(TEXT("under it: the parts"), Admitted.IsSet() && Admitted->Excerpt.Kind == EVaRestExcerptKind::Multipart && Admitted->Excerpt.ToText().Contains(TEXT("neo")));
+	TestEqual(TEXT("... its field's bytes copied, once"), CopiedForSmall, static_cast<int64>(3));
+	TestEqual(TEXT("the counter is back at 0"), VaRest::Http::Excerpts::PendingBytes(), static_cast<int64>(0));
 	return true;
 }
 #endif // VAREST_WITH_TRACE_EXCERPTS

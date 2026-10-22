@@ -94,7 +94,13 @@ enum class EVaRestExcerptSkip : uint8
 {
 	None,
 	Backlog,
-	Disabled
+	Disabled,
+	/**
+	 * Task 21 review M-1: AttemptEnded announced the excerpt for the decode task, and that attempt's response never reached
+	 * it (a custom stage replaced the outcome, or a cancel finished the request first). Emitted on the game thread, once,
+	 * right before the request's next AttemptEnded or its Completed: every announced excerpt resolves.
+	 */
+	Discarded
 };
 
 /** IN-6: a redacted body excerpt. FVaRestRedactor builds it (logs use it in M3); M4's Excerpt event carries it. */

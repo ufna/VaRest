@@ -4,6 +4,7 @@
 
 #include "VaRestClientState.h"
 #include "VaRestHttpStats.h"
+#include "VaRestHttpTesting.h"
 #include "VaRestRedactionPipe.h"
 #include "VaRestResultHandler.h"
 #include "VaRestTransport.h"
@@ -34,6 +35,16 @@ namespace VaRest::Http::ExcerptsPrivate
 		FVaRestTrace::Emit(EVaRestTraceKind::Excerpt, Time, FVaRestTracePayload(TInPlaceType<FVaRestTraceExcerptEvent>(), MoveTemp(Payload)));
 	}
 
+#if !UE_BUILD_SHIPPING
+	/** What the trace copied for excerpts on the game thread, after its admission (tests: Task 21 review M-3) */
+	void CountCopied(int64 Bytes)
+	{
+		Testing::Counters().TraceExcerptBytesCopied += Bytes;
+	}
+#else
+	void CountCopied(int64) {}
+#endif
+
 	/** At most Cap bytes copied and admitted, or a backlog skip */
 	Excerpts::FJob WithCopy(Excerpts::FJob&& Job, TConstArrayView<uint8> Bytes, int32 Cap, FString ContentType)
 	{
@@ -45,36 +56,12 @@ namespace VaRest::Http::ExcerptsPrivate
 			return MoveTemp(Job);
 		}
 		Job.Admitted = MoveTemp(Admission.GetValue());
+		CountCopied(Take);
 		Job.Redact = [Prefix = TArray<uint8>(Bytes.GetData(), Take), Type = MoveTemp(ContentType), Total = Job.TotalBytes, Cap](const FVaRestRedactor& Redactor)
 		{
 			return Redactor.RedactBody(Type, Prefix, Total, Cap);
 		};
 		return MoveTemp(Job);
-	}
-
-	/**
-	 * The parts with their field bytes cut to Budget in all, as the log copies them (CopyPartsForLog, VaRestLogStage.cpp:83-104,
-	 * review M3): a cut field keeps its Size, which is how DescribeMultipart knows to drop a known secret the cut split
-	 */
-	TArray<FVaRestMultipartPart> CopyParts(TConstArrayView<FVaRestMultipartPart> Parts, int64 Budget, int64& OutCopied)
-	{
-		OutCopied = 0;
-		TArray<FVaRestMultipartPart> Copies;
-		Copies.Reserve(Parts.Num());
-		for (const FVaRestMultipartPart& Part : Parts)
-		{
-			FVaRestMultipartPart& Copied = Copies.AddDefaulted_GetRef();
-			Copied.Name = Part.Name;
-			Copied.FileName = Part.FileName;
-			Copied.ContentType = Part.ContentType;
-			Copied.FilePath = Part.FilePath;
-			Copied.Size = Part.Size;
-			Copied.bField = Part.bField;
-			const int32 Take = static_cast<int32>(FMath::Min<int64>(Part.Bytes.Num(), FMath::Max<int64>(0, Budget - OutCopied)));
-			Copied.Bytes.Append(Part.Bytes.GetData(), Take);
-			OutCopied += Take;
-		}
-		return Copies;
 	}
 
 	/**
@@ -206,16 +193,19 @@ VaRest::Http::Excerpts::FJob VaRest::Http::Excerpts::PrepareRequest(const FExcha
 	}
 	if (Body.Kind == EVaRestBodyKind::Multipart)
 	{
-		int64 Copied = 0;
-		TArray<FVaRestMultipartPart> Parts = CopyParts(Body.PartDescriptors, static_cast<int64>(Detail.BodyCap) + Job.Redactor->GetMaxNeedleBytes(), Copied);
-		TOptional<FAdmission> Admission = TryAdmit(Copied);
+		// Task 21 review M-3: sized, admitted, then copied -- a refused admission copies nothing, as WithCopy. The copy is the
+		// log's (CopyPartsForLog, VaRestLogStage.cpp:83-88): DescribeMultipart's reach, a cut field keeping its Size.
+		const int64 Budget = static_cast<int64>(Detail.BodyCap) + Job.Redactor->GetMaxNeedleBytes();
+		const int64 Take = PartBytesWithin(Body.PartDescriptors, Budget);
+		TOptional<FAdmission> Admission = TryAdmit(Take);
 		if (!Admission.IsSet())
 		{
 			Job.bBacklog = true;
 			return Job;
 		}
 		Job.Admitted = MoveTemp(Admission.GetValue());
-		Job.Redact = [Described = MoveTemp(Parts), Total = Body.ContentLength, Cap = Detail.BodyCap](const FVaRestRedactor& Redactor)
+		CountCopied(Take);
+		Job.Redact = [Described = CopyPartsWithin(Body.PartDescriptors, Budget), Total = Body.ContentLength, Cap = Detail.BodyCap](const FVaRestRedactor& Redactor)
 		{
 			return Redactor.DescribeMultipart(Described, Total, Cap);
 		};
@@ -263,7 +253,9 @@ VaRest::Http::Excerpts::FJob VaRest::Http::Excerpts::PrepareResponse(const FExch
 
 void VaRest::Http::Excerpts::EmitOnDecode(const FFinish& Finish)
 {
-	if (Finish.ExcerptAttempt <= 0 || !Finish.ExcerptRedactor.IsValid() || Finish.Body.Num() == 0)
+	// Task 21 review M-2: Wanted() re-checked here, as the pipe's task does (LaunchJob): every sink that wanted bodies may
+	// have detached since AttemptEnded announced it, and then nobody waits for this excerpt
+	if (Finish.ExcerptAttempt <= 0 || !Finish.ExcerptRedactor.IsValid() || Finish.Body.Num() == 0 || !ExcerptsPrivate::Wanted())
 	{
 		return;
 	}
@@ -275,4 +267,26 @@ void VaRest::Http::Excerpts::EmitOnDecode(const FFinish& Finish)
 		Finish.ExcerptCap);
 	ExcerptsPrivate::Emit(EVaRestTraceExcerptOwner::Response, Finish.Response.RequestId, Finish.ExcerptAttempt, MoveTemp(Excerpt),
 		Finish.Clock.IsValid() ? Finish.Clock->Now() : 0.0);
+}
+
+void VaRest::Http::Excerpts::ResolveDiscarded(FExchangeState& Ex)
+{
+	const int32 Attempt = Ex.ExcerptOnDecodeAttempt;
+	if (Attempt <= 0)
+	{
+		return;
+	}
+	// Once: whatever follows, this attempt's excerpt is resolved
+	Ex.ExcerptOnDecodeAttempt = 0;
+	if (!ExcerptsPrivate::Wanted())
+	{
+		return;
+	}
+	LLM_SCOPE_BYTAG(VaRest_Trace);
+	FVaRestTraceExcerpt Skipped;
+	Skipped.Kind = EVaRestExcerptKind::Skipped;
+	Skipped.SkipReason = EVaRestExcerptSkip::Discarded;
+	Skipped.TotalBytes = Ex.ExcerptOnDecodeBytes;
+	Skipped.bTruncated = Skipped.TotalBytes > 0;
+	ExcerptsPrivate::Emit(EVaRestTraceExcerptOwner::Response, Ex.RequestId, Attempt, MoveTemp(Skipped), Ex.Config->Clock->Now());
 }

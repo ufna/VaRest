@@ -29,8 +29,11 @@ namespace VaRest::Http
 		 * decode task excerpts (FExchangeState::ExcerptOnDecodeAttempt, IN-14).
 		 */
 		void AttemptEnded(FExchangeState& Ex, const FVaRestTransportResult& Result);
-		/** IN-5, before any callback */
-		void Completed(const FExchangeState& Ex, const FFinish& Finish);
+		/**
+		 * IN-5, before any callback. Non-const: an announced decode excerpt that never reached the decode task resolves
+		 * first (Excerpts::ResolveDiscarded, Task 21 review M-1).
+		 */
+		void Completed(FExchangeState& Ex, const FFinish& Finish);
 		/** IN-8. Any thread; the event is emitted on the game thread. */
 		void Client(uint64 ClientId, const FClientConfig& Config, bool bCreated);
 		/** IN-4, game thread: stamps the exchange's request id, attempt and clock */

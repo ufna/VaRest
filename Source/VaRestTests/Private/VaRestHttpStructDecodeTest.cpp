@@ -131,4 +131,68 @@ bool FVaRestHttpEnvelopeStructTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpGoldenDecodeTest, "VaRest.Http.Trace.Golden.DecodeWarnings",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpGoldenDecodeTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRestTestsStructDecodePrivate;
+	// IN-17: a decode with warnings (tolerant: a success) and the same body strict (a Decode error). Here, not beside the
+	// other goldens in VaRestHttp: the decode needs a USTRUCT, and test USTRUCTs live in this module.
+	FTestRig Rig;
+	Rig.Fake->Enqueue(Json(200, Profile));
+	Rig.Fake->Enqueue(Json(200, Profile));
+	FScopedTraceRecorder Scoped(EVaRestTraceDetail::Metadata);
+	auto Tolerant = MakeOutcome<FVaRestHttpTestProfile>();
+	auto Strict = MakeOutcome<FVaRestHttpTestProfile>();
+	const uint64 A = Observe(Rig.Client.Get<FVaRestHttpTestProfile>(TEXT("/t")), Tolerant).Send().GetId();
+	const uint64 B = Observe(Rig.Client.Get<FVaRestHttpTestProfile>(TEXT("/s")).StrictDecode(), Strict).Send().GetId();
+	if (!TestTrue(TEXT("both complete"), PumpUntil([Tolerant, Strict] { return Tolerant->IsDone() && Strict->IsDone(); })))
+	{
+		// Spec review M-5: drained before the early return
+		Rig.Client.CancelAll();
+		PumpUntil([&Rig] { return Rig.Client.GetInFlightCount() == 0; });
+		Rig.Drain();
+		FlushRedactionPipe();
+		return false;
+	}
+	Rig.Drain();
+	FlushRedactionPipe();
+	for (const uint64 Id : { A, B })
+	{
+		TestEqualSensitive(FString::Printf(TEXT("#%llu: the sequence"), Id), Scoped.Recorder->KindsOf(Id), FString(TEXT("Started,Dispatched,Ended,Completed")));
+		FString Why;
+		TestTrue(FString::Printf(TEXT("#%llu: Inspector 3.3's phases hold"), Id), PhasesHold(*Scoped.Recorder, Id, Why));
+		TestEqualSensitive(FString::Printf(TEXT("#%llu: ... (why not)"), Id), Why, FString());
+	}
+	TOptional<FVaRestTraceCompleted> First;
+	TOptional<FVaRestTraceCompleted> Second;
+	for (const FVaRestTraceEvent& Event : Scoped.Recorder->For(A))
+	{
+		if (Event.Kind == EVaRestTraceKind::Completed)
+		{
+			First = Event.Payload.Get<FVaRestTraceCompleted>();
+		}
+	}
+	for (const FVaRestTraceEvent& Event : Scoped.Recorder->For(B))
+	{
+		if (Event.Kind == EVaRestTraceKind::Completed)
+		{
+			Second = Event.Payload.Get<FVaRestTraceCompleted>();
+		}
+	}
+	if (!TestTrue(TEXT("both Completed"), First.IsSet() && Second.IsSet()))
+	{
+		return false;
+	}
+	TestTrue(TEXT("tolerant: a success with one warning at its path, the result type, decode times"), First->Outcome == EVaRestTraceOutcome::Success
+		&& First->DecodeWarningCount == 1 && First->DecodeWarnings.Num() == 1 && First->DecodeWarnings[0].Path == TEXT("items[1].level")
+		&& First->ResultType == FName(TEXT("VaRestHttpTestProfile")) && First->DecodeStartAt >= 0.0 && First->DecodeEndAt >= First->DecodeStartAt);
+	TestTrue(TEXT("strict: a Decode error"), Second->Outcome == EVaRestTraceOutcome::Error && Second->Error.Kind == EVaRestErrorKind::Decode);
+	TestTrue(TEXT("... the same result type, decode timed"), Second->ResultType == FName(TEXT("VaRestHttpTestProfile")) && Second->DecodeStartAt >= 0.0
+		&& Second->DecodeEndAt >= Second->DecodeStartAt);
+	return true;
+}
+
 #endif

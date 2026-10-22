@@ -260,6 +260,37 @@ bool VaRest::Http::WaitForRedactionPipe()
 	return RedactorPrivate::Gate.Wait();
 }
 
+int64 VaRest::Http::PartBytesWithin(TConstArrayView<FVaRestMultipartPart> Parts, int64 Budget)
+{
+	int64 Taken = 0;
+	for (const FVaRestMultipartPart& Part : Parts)
+	{
+		Taken += FMath::Min<int64>(Part.Bytes.Num(), FMath::Max<int64>(0, Budget - Taken));
+	}
+	return Taken;
+}
+
+TArray<FVaRestMultipartPart> VaRest::Http::CopyPartsWithin(TConstArrayView<FVaRestMultipartPart> Parts, int64 Budget)
+{
+	int64 Taken = 0;
+	TArray<FVaRestMultipartPart> Copies;
+	Copies.Reserve(Parts.Num());
+	for (const FVaRestMultipartPart& Part : Parts)
+	{
+		FVaRestMultipartPart& Copied = Copies.AddDefaulted_GetRef();
+		Copied.Name = Part.Name;
+		Copied.FileName = Part.FileName;
+		Copied.ContentType = Part.ContentType;
+		Copied.FilePath = Part.FilePath;
+		Copied.Size = Part.Size;
+		Copied.bField = Part.bField;
+		const int32 Take = static_cast<int32>(FMath::Min<int64>(Part.Bytes.Num(), FMath::Max<int64>(0, Budget - Taken)));
+		Copied.Bytes.Append(Part.Bytes.GetData(), Take);
+		Taken += Take;
+	}
+	return Copies;
+}
+
 void FVaRestSecretSet::Set(FName Slot, const FString& Value, double Now)
 {
 	if (const FString* Old = Current.Find(Slot))

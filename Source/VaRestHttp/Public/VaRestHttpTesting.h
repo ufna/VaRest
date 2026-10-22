@@ -30,6 +30,8 @@ namespace VaRest::Http::Testing
 		std::atomic<int32> ExchangesDestroyedOffGameThread{ 0 };
 		/** Bytes body logging copied on the game thread (task 14 review M7: at most the cap per body, Inspector 7) */
 		std::atomic<int64> LogBodyBytesCopied{ 0 };
+		/** Bytes the trace copied on the game thread for excerpts, each after its admission (Task 21 review M-3: a refused one copies none) */
+		std::atomic<int64> TraceExcerptBytesCopied{ 0 };
 		/**
 		 * Decode tasks started (game thread, as the task is launched) and those that have queued their result for the game
 		 * thread (counted last, on the worker): equal when no decode is in flight (FTestRig::Drain, final review M10)
@@ -268,6 +270,41 @@ namespace VaRest::Http::Testing
 		TArray<FVaRestTraceSnapshot> Snapshots;
 		std::atomic<bool> bNonExcerptOffGameThread{ false };
 	};
+
+	/**
+	 * Spec review I-1, Inspector 3.3 ("an attempt's in-attempt phases sum to its wall span ... checked by the golden tests",
+	 * IN-17): for every attempt of request Id, Prepare = dispatch - AttemptStart - AuthWait - LimiterWait is not negative,
+	 * and TransportDoneAt (when stamped) is not before the dispatch. False with OutWhy naming the attempt.
+	 */
+	inline bool PhasesHold(const FTraceRecorder& Recorder, uint64 Id, FString& OutWhy)
+	{
+		TMap<int32, double> DispatchedAt;
+		for (const FVaRestTraceEvent& Event : Recorder.For(Id))
+		{
+			if (Event.Kind == EVaRestTraceKind::AttemptDispatched)
+			{
+				const FVaRestTraceAttemptDispatched& Dispatched = Event.Payload.Get<FVaRestTraceAttemptDispatched>();
+				const double Prepare = Event.Time - Dispatched.AttemptStart - Dispatched.AuthWait - Dispatched.LimiterWait;
+				if (Prepare < -1e-9)
+				{
+					OutWhy = FString::Printf(TEXT("attempt %d: Prepare %.6f s"), Dispatched.Attempt, Prepare);
+					return false;
+				}
+				DispatchedAt.Add(Dispatched.Attempt, Event.Time);
+			}
+			else if (Event.Kind == EVaRestTraceKind::AttemptEnded)
+			{
+				const FVaRestTraceAttemptEnded& Ended = Event.Payload.Get<FVaRestTraceAttemptEnded>();
+				const double* At = DispatchedAt.Find(Ended.Attempt);
+				if (At && Ended.TransportDoneAt >= 0.0 && Ended.TransportDoneAt < *At - 1e-9)
+				{
+					OutWhy = FString::Printf(TEXT("attempt %d: TransportDoneAt %.6f s before its dispatch at %.6f s"), Ended.Attempt, Ended.TransportDoneAt, *At);
+					return false;
+				}
+			}
+		}
+		return true;
+	}
 
 	/** An FVaRestScopedSinkIsolation with one FTraceRecorder added inside it, removed when this goes. Game thread. */
 	struct VARESTHTTP_API FScopedTraceRecorder

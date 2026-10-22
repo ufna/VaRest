@@ -199,6 +199,10 @@ void VaRest::Http::TracePoints::AttemptDispatched(const FExchangeState& Ex)
 
 void VaRest::Http::TracePoints::AttemptEnded(FExchangeState& Ex, const FVaRestTransportResult& Result)
 {
+	// Task 21 review M-1: an earlier attempt's decode excerpt that never reached the decode task (a custom stage replaced its
+	// 2xx and the request was re-issued) resolves before this attempt's event; checked whatever the mask, so the marker
+	// never outlives its attempt
+	Excerpts::ResolveDiscarded(Ex);
 	if (FVaRestTrace::Detail() == EVaRestTraceDetail::None)
 	{
 		return;
@@ -235,6 +239,7 @@ void VaRest::Http::TracePoints::AttemptEnded(FExchangeState& Ex, const FVaRestTr
 	if (Excerpts::WillExcerptOnDecode(Ex, Result))
 	{
 		Ex.ExcerptOnDecodeAttempt = Ex.Attempt;
+		Ex.ExcerptOnDecodeBytes = Result.Body.Num();
 		Payload.bExcerptPending = true;
 	}
 	else
@@ -246,8 +251,12 @@ void VaRest::Http::TracePoints::AttemptEnded(FExchangeState& Ex, const FVaRestTr
 	Job.Launch();
 }
 
-void VaRest::Http::TracePoints::Completed(const FExchangeState& Ex, const FFinish& Finish)
+void VaRest::Http::TracePoints::Completed(FExchangeState& Ex, const FFinish& Finish)
 {
+	// Task 21 review M-1: before Completed, so the record has nothing pending when it completes (Inspector 2.3's sealing):
+	// the last attempt's decode excerpt, announced and never handed to the decode task -- a custom Outer stage replaced the
+	// 2xx, or a Cancel() (a sink's OnEvent at that AttemptEnded) finished the request first
+	Excerpts::ResolveDiscarded(Ex);
 	if (FVaRestTrace::Detail() == EVaRestTraceDetail::None)
 	{
 		return;

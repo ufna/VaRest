@@ -67,8 +67,9 @@ namespace VaRest::Http::TracePrivate
 				Merged.BinaryCap = FMath::Max(Merged.BinaryCap, One.BinaryCap);
 				Merged.FrameCap = FMath::Max(Merged.FrameCap, One.FrameCap);
 				// Task 5 review minor 2: a sink's 0 means the default, so it is mapped before the max -- a 1234 sink beside a
-				// default one must not shrink the default one's budget to 1234. Only a sink that receives excerpts (Bodies) has
-				// a say: a Metadata sink's default would otherwise lift a Bodies sink's smaller budget.
+				// default one must not shrink the default one's budget to 1234. Only a sink that asks for excerpts (Bodies) has
+				// a say: a Metadata sink's default would otherwise lift a Bodies sink's smaller budget. (Every sink receives the
+				// excerpts all the same: Emit delivers every event to every sink, VaRestTrace.cpp:213-216.)
 				if (EnumHasAnyFlags(One.Flags, EVaRestTraceDetail::Bodies))
 				{
 					const int64 Budget = One.MaxPendingExcerptBytes > 0 ? One.MaxPendingExcerptBytes : FVaRestTraceDetailSettings::DefaultMaxPendingExcerptBytes;
