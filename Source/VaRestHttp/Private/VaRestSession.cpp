@@ -28,7 +28,7 @@ namespace VaRest::Http::SessionPrivate
 	/**
 	 * Concurrency review I-1 (ruled): the waiters of an ended refresh run from ONE later game-thread task that holds them,
 	 * so no request callback and no dispatch runs inside the session call that ended the refresh -- M3 decision 3's rule
-	 * for configuration calls (VaRestClientState.cpp:265-268, the limiter's grants after a Publish). A waiter whose request
+	 * for configuration calls (VaRestClientState.cpp:268-271, the limiter's grants after a Publish). A waiter whose request
 	 * was canceled meanwhile finds it answered and returns; one that LeaveRefresh dropped is not in this list any more.
 	 * The task holds the state while the waiters run, as RunSessionChange does (concurrency review C-1): a waiter may drop
 	 * the last FVaRestClient, and the state then goes after the last waiter, not under one. Until the task runs it holds the
@@ -462,6 +462,13 @@ void VaRest::Http::FClientState::JoinRefresh(uint64 WaiterId, const TSharedRef<I
 	{
 		StartRefresh(Auth);
 	}
+}
+
+void VaRest::Http::FClientState::JoinRefreshInFlight(uint64 WaiterId, FRefreshWaiter&& OnDone)
+{
+	check(IsInGameThread());
+	checkf(Session.Refresh.IsValid(), TEXT("VaRest: JoinRefreshInFlight with no refresh in flight (IsRefreshing() first)"));
+	Session.Refresh->Waiters.Emplace(WaiterId, MoveTemp(OnDone));
 }
 
 void VaRest::Http::FClientState::LeaveRefresh(uint64 WaiterId)

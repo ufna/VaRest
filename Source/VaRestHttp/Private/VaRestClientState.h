@@ -160,6 +160,11 @@ namespace VaRest::Http
 		 * from a later game-thread task -- never inside this call (concurrency review I-1).
 		 */
 		void JoinRefresh(uint64 WaiterId, const TSharedRef<IVaRestAuth, ESPMode::ThreadSafe>& Auth, uint64 CauseRequestId, FRefreshWaiter&& OnDone);
+		/**
+		 * Task 17 review M-8 (ruled): waits for the refresh in flight -- whatever auth started it, and whether or not the
+		 * current one could refresh. Only while one runs (IsRefreshing); OnDone as JoinRefresh's.
+		 */
+		void JoinRefreshInFlight(uint64 WaiterId, FRefreshWaiter&& OnDone);
 		/** A parked request was canceled: its waiter goes uncalled; the refresh goes on */
 		void LeaveRefresh(uint64 WaiterId);
 		/** Inside a change only: the auth's answer for RefreshId (a stale one is ignored); plan decision 3, ruling I-7 */
@@ -307,6 +312,12 @@ namespace VaRest::Http
 	void AppendRedactKeys(TArray<FString>& Into, TConstArrayView<FString> Keys);
 	/** The Basic line of an attempt that ended in the limiter's queue (ruling I-3: it never reaches the log stage) */
 	void LogEndedInQueue(const FExchangeState& Ex, const FVaRestAttemptOutcome& Outcome);
+	/**
+	 * The Basic line of an attempt that ended in its Auth phase, parked behind a refresh before it reached the boundary
+	 * (ruling I-3, spec review I-1). Ex.PendingAttemptStart is still the park's start. The caller writes it only for a
+	 * request still in the chain whose answer is not accepted, as the limiter's abort does.
+	 */
+	void LogEndedInPark(const FExchangeState& Ex, const FVaRestAttemptOutcome& Outcome);
 	/** The cvar VaRest.LogLevel when it is 0..3, else the client's level */
 	EVaRestLogLevel EffectiveLogLevel(EVaRestLogLevel ClientLevel);
 	/** Spec 4.5: "Logged bodies are truncated to 4 KiB" */

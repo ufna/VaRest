@@ -702,19 +702,7 @@ void FVaRestClient::RefreshAuth(TUniqueFunction<void(EVaRestAuthRefreshOutcome O
 	// this client
 	const TSharedPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> Pinned = State;
 	const TSharedPtr<IVaRestAuth, ESPMode::ThreadSafe> Auth = Pinned.IsValid() ? Pinned->GetConfig()->Auth : nullptr;
-	if (!Auth.IsValid() || !Auth->CanRefresh(Pinned->GetSessionData()))
-	{
-		// Spec review I-5: nothing to refresh with is the configuration's answer -- and still from a later task (decision 3)
-		UE::Tasks::Launch(TEXT("VaRest.RefreshAuth"), [Done = MoveTemp(OnDone)]() mutable
-		{
-			if (Done)
-			{
-				Done(EVaRestAuthRefreshOutcome::Failed, EVaRestErrorKind::Config);
-			}
-		}, UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
-		return;
-	}
-	Pinned->JoinRefresh(Pinned->NewWaiterId(), Auth.ToSharedRef(), 0, [Done = MoveTemp(OnDone)](const VaRest::Http::FRefreshEnded& End) mutable
+	VaRest::Http::FRefreshWaiter Waiter = [Done = MoveTemp(OnDone)](const VaRest::Http::FRefreshEnded& End) mutable
 	{
 		if (!Done)
 		{
@@ -733,7 +721,29 @@ void FVaRestClient::RefreshAuth(TUniqueFunction<void(EVaRestAuthRefreshOutcome O
 			Done(EVaRestAuthRefreshOutcome::Rejected, EVaRestErrorKind::None);
 			break;
 		}
-	});
+	};
+	if (Pinned.IsValid() && Pinned->IsRefreshing())
+	{
+		// Task 17 review M-8 (ruled): a refresh in flight is waited for whatever the current auth is -- one replaced since by
+		// an auth that cannot refresh, or none (WithAuth does not end a refresh, Task 16 review M-5): the refresh exists and
+		// its end applies to the session, as the parked requests' does (the auth gate parks every request while one runs)
+		Pinned->JoinRefreshInFlight(Pinned->NewWaiterId(), MoveTemp(Waiter));
+		return;
+	}
+	if (!Auth.IsValid() || !Auth->CanRefresh(Pinned->GetSessionData()))
+	{
+		// Spec review I-5: nothing to refresh with, and no refresh to wait for, is the configuration's answer -- (Failed,
+		// Config) through the same waiter, and still from a later task (decision 3)
+		UE::Tasks::Launch(TEXT("VaRest.RefreshAuth"), [Refuse = MoveTemp(Waiter)]() mutable
+		{
+			VaRest::Http::FRefreshEnded Refused;
+			Refused.End = VaRest::Http::ERefreshEnd::Failed;
+			Refused.Kind = EVaRestErrorKind::Config;
+			Refuse(Refused);
+		}, UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
+		return;
+	}
+	Pinned->JoinRefresh(Pinned->NewWaiterId(), Auth.ToSharedRef(), 0, MoveTemp(Waiter));
 }
 
 FVaRestClient& FVaRestClient::Use(FVaRestStageRef Stage, EVaRestStageSlot Slot)

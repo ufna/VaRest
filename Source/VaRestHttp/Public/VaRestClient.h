@@ -827,13 +827,14 @@ public:
 	/** WebSocket spec 19 item 2: a refresh is due -- no access token but a refresh token, or a known expiry within the auth's lead time */
 	bool NeedsAuthRefresh() const;
 	/**
-	 * WebSocket spec 19 item 2: refresh the session now, sharing a refresh already in flight (single flight, spec 4.2).
+	 * WebSocket spec 19 item 2: refresh the session now, sharing a refresh already in flight (single flight, spec 4.2) --
+	 * also one an auth this client no longer has started (WithAuth does not end it), whatever the current auth is.
 	 * OnDone(Outcome, FailedKind), from a later game-thread task -- never inside this call (decision 3):
 	 * - Refreshed: the session has new credentials (FailedKind None).
 	 * - Rejected: the session is gone -- the refresh endpoint rejected it (the client has already expired the session and
 	 *   fired OnSessionExpired), or the game cleared or expired it meanwhile. Do not call NotifySessionExpired: it is done.
-	 * - Failed: the session stays; FailedKind says why -- Connection or Timeout (try again later), Config (no auth, nothing
-	 *   to refresh with, or a refresh the configuration refuses).
+	 * - Failed: the session stays; FailedKind says why -- Connection or Timeout (try again later), Config (no refresh in
+	 *   flight and no auth or nothing to refresh with, or a refresh the configuration refuses).
 	 * Spec review I-5: a socket must not treat a Wi-Fi blip as a logout (ruling Q1).
 	 * Lifetime (Task 16 review M-4): OnDone waits for as long as the auth holds its Done; no watchdog ends that wait (ruling
 	 * I-4: a re-login screen may hold it), so a caller that needs a bound keeps its own timer and ignores a late answer. The

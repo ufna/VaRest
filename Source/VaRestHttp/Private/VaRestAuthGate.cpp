@@ -4,6 +4,7 @@
 
 #include "VaRestClientState.h"
 #include "VaRestExchangeState.h"
+#include "VaRestHttpLog.h"
 #include "VaRestRetryInternal.h"
 
 namespace VaRest::Http::AuthGatePrivate
@@ -46,8 +47,12 @@ namespace VaRest::Http::AuthGatePrivate
 
 	using FRunRef = TSharedRef<FRun, ESPMode::ThreadSafe>;
 
-	FVaRestAttemptOutcome FailureFor(const FRefreshEnded& End)
+	FVaRestAttemptOutcome FailureFor(const FExchangeState& Ex, const FRefreshEnded& End)
 	{
+		// Task 17 review M-5, Task 14 review M-1's rule: the refresh's message is the auth's text, third-party, and
+		// FVaRestError::Message must hold no credential (the trace scrubs its own copy; the game's is this one) -- scrubbed
+		// by this exchange's redactor, which still knows a token an expiry retired, then escaped
+		const FString Why = EscapeControlsForLog(RedactorFor(Ex)->ScrubText(End.Message));
 		FVaRestAttemptOutcome Out;
 		switch (End.End)
 		{
@@ -66,7 +71,7 @@ namespace VaRest::Http::AuthGatePrivate
 				Out.Failure = End.Kind == EVaRestErrorKind::Timeout ? EVaRestTransportFailure::Timeout : EVaRestTransportFailure::Connection;
 				Out.FailureDetail = TEXT("AuthRefreshFailed");
 			}
-			Out.FailureMessage = FString::Printf(TEXT("the session refresh failed: %s"), *End.Message);
+			Out.FailureMessage = FString::Printf(TEXT("the session refresh failed: %s"), *Why);
 			break;
 		case ERefreshEnd::Cleared:
 			Out.Failure = EVaRestTransportFailure::Other;
@@ -76,10 +81,25 @@ namespace VaRest::Http::AuthGatePrivate
 		default:
 			Out.Failure = EVaRestTransportFailure::Other;
 			Out.FailureDetail = TEXT("AuthRejected");
-			Out.FailureMessage = FString::Printf(TEXT("the session refresh was rejected: %s"), *End.Message);
+			Out.FailureMessage = FString::Printf(TEXT("the session refresh was rejected: %s"), *Why);
 			break;
 		}
 		return Out;
+	}
+
+	/**
+	 * Task 17 review I-1 (ruling I-3 as spec review I-1 extends it): a park before an attempt is that attempt's Auth phase,
+	 * so an end that answers it without a dispatch writes the attempt's Basic line (LogEndedInPark) -- before
+	 * PendingAttemptStart is reset, as that is when the attempt started. A replay's park (PendingAttemptStart -1) is a Gap
+	 * outside any attempt and stays silent, as a backoff does; so does an end for a request whose answer is accepted or
+	 * that left the chain (EndWaits), as the limiter's abort (VaRestPipeline.cpp:374-377).
+	 */
+	void LogParkEnd(const FExchangeState& Ex, const FVaRestAttemptOutcome& Outcome)
+	{
+		if (Ex.PendingAttemptStart >= 0.0 && Ex.Phase == EVaRestExchangePhase::InChain && !Ex.bCompletionQueued)
+		{
+			LogEndedInPark(Ex, Outcome);
+		}
 	}
 
 	/**
@@ -112,10 +132,12 @@ namespace VaRest::Http::AuthGatePrivate
 			}
 			// Unconditionally: one stage waits at a time, so the hook is still this park's own (as Retry's backoff timer)
 			Late.Interrupt.Reset();
+			Late.State->LeaveRefresh(WaiterId);
+			FVaRestAttemptOutcome Ended = MakeDeadlineOutcome();
+			LogParkEnd(Late, Ended);
 			// M4 plan re-review N-11: no attempt follows this park; a stage that re-issues after it starts a fresh one
 			Late.PendingAttemptStart = -1.0;
-			Late.State->LeaveRefresh(WaiterId);
-			Pinned->Answer(MakeDeadlineOutcome());
+			Pinned->Answer(MoveTemp(Ended));
 		});
 	}
 
@@ -146,11 +168,14 @@ namespace VaRest::Http::AuthGatePrivate
 			}
 			FExchangeState& Stopped = Internals(*Pinned->Exchange);
 			Stopped.Config->Clock->ClearTimer(Pinned->DeadlineTimer);
-			// M4 plan re-review N-11: no attempt follows this park; a stage that re-issues after it starts a fresh one
-			Stopped.PendingAttemptStart = -1.0;
 			// Concurrency review I-5: the waiter goes uncalled, the refresh goes on for the others
 			Stopped.State->LeaveRefresh(WaiterId);
-			Pinned->Answer(FVaRestAttemptOutcome::Canceled());
+			FVaRestAttemptOutcome Ended = FVaRestAttemptOutcome::Canceled();
+			// A Cancel() writes the line; EndWaits (the answer accepted) does not
+			LogParkEnd(Stopped, Ended);
+			// M4 plan re-review N-11: no attempt follows this park; a stage that re-issues after it starts a fresh one
+			Stopped.PendingAttemptStart = -1.0;
+			Pinned->Answer(MoveTemp(Ended));
 			return true;
 		};
 		if (Ex.DeadlineAt > 0.0)
@@ -172,19 +197,21 @@ namespace VaRest::Http::AuthGatePrivate
 			Back.Config->Clock->ClearTimer(Run->DeadlineTimer);
 			if (End.End != ERefreshEnd::Ready || IsOwnerGone(Back))
 			{
+				FVaRestAttemptOutcome Ended;
+				if (End.End != ERefreshEnd::Ready)
+				{
+					Ended = FailureFor(Back, End);
+				}
+				else
+				{
+					// Spec 3.2: "owner gone -> no callbacks, no further retries"
+					MarkOwnerGone(Back);
+					Ended = FVaRestAttemptOutcome::Canceled();
+				}
+				LogParkEnd(Back, Ended);
 				// No attempt follows this park: a retry after it (a Failed refresh is retryable) starts its own attempt
 				Back.PendingAttemptStart = -1.0;
-			}
-			if (End.End != ERefreshEnd::Ready)
-			{
-				Run->Answer(FailureFor(End));
-				return;
-			}
-			if (IsOwnerGone(Back))
-			{
-				// Spec 3.2: "owner gone -> no callbacks, no further retries"
-				MarkOwnerGone(Back);
-				Run->Answer(FVaRestAttemptOutcome::Canceled());
+				Run->Answer(MoveTemp(Ended));
 				return;
 			}
 			const double Seconds = Back.Config->Clock->Now() - ParkedAt;
@@ -213,9 +240,13 @@ namespace VaRest::Http::AuthGatePrivate
 		// As Retry (VaRestRetry.cpp:176): a canceled or finished request, one whose owner is gone, or one whose answer is
 		// already accepted -- being decoded, or its delivery queued (a custom Outer stage in front answered while this
 		// attempt ran) -- is not parked: a park now would start a refresh for a request already being delivered, and
-		// EndWaits, which ran when that answer was accepted, would never end it (re-review N-6)
+		// EndWaits, which ran when that answer was accepted, would never end it (re-review N-6). Task 17 review M-3 (ruled):
+		// at or past the retry deadline no attempt may start (plan decision 10), so the 401 is the answer -- DecideRetry's
+		// rule with no delay (VaRestRetry.cpp:102-107), which answers the last attempt's outcome; Timeout (Deadline) stays
+		// for a park the deadline cuts (ArmParkDeadline)
 		if (Ex.bFinished || Ex.bCompletionQueued || Ex.Phase != EVaRestExchangePhase::InChain || Run->Exchange->IsCancelRequested() || IsOwnerGone(Ex)
-			|| Run->bReplayed || Outcome.IsTransportFailure() || !Run->Auth->IsAuthFailure(Outcome.Status))
+			|| Run->bReplayed || Outcome.IsTransportFailure() || !Run->Auth->IsAuthFailure(Outcome.Status)
+			|| (Ex.DeadlineAt > 0.0 && Ex.Config->Clock->Now() >= Ex.DeadlineAt))
 		{
 			Run->Answer(MoveTemp(Outcome));
 			return;

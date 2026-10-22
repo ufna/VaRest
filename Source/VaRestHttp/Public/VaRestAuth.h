@@ -168,8 +168,9 @@ public:
 	 * second call is ignored. Done dropped uncalled -- an error path that forgets it, an SDK that frees its callback -- ends
 	 * the refresh as Failed(Connection), the session kept (concurrency review I-4). Holding Done without calling it is
 	 * allowed (a re-login screen): parked requests wait, each bounded by its own retry deadline and Cancel() (CancelAll(),
-	 * engine exit); one whose owner goes meanwhile gets no callback, and ends when its park does. No watchdog ends the
-	 * refresh (ruling I-4). Send the refresh request with Context.Request(), never through the client.
+	 * engine exit); one whose owner goes meanwhile gets no callback, and ends when its park does -- until then the client
+	 * holds the request, its callbacks and everything they capture (Task 17 review M-4). No watchdog ends the refresh
+	 * (ruling I-4). Send the refresh request with Context.Request(), never through the client.
 	 */
 	virtual void Refresh(const FVaRestAuthRefreshContext& Context, TUniqueFunction<void(FVaRestAuthRefreshResult&&)>&& Done)
 	{

@@ -330,6 +330,37 @@ void VaRest::Http::LogEndedInQueue(const FExchangeState& Ex, const FVaRestAttemp
 	LogStagePrivate::LogOutcome(Ex, Ex.LogLevel, Ex.Config->Clock->Now(), Outcome);
 }
 
+void VaRest::Http::LogEndedInPark(const FExchangeState& Ex, const FVaRestAttemptOutcome& Outcome)
+{
+	// Ruling I-3 as spec review I-1 extends it (Task 17 review I-1): a park behind a session refresh before an attempt is
+	// that attempt's Auth phase -- it started when it parked (PendingAttemptStart) -- and an attempt the park ends (a
+	// rejected or failed refresh, a logout, the deadline, a cancel, the owner gone) never reaches the log stage. Its Basic
+	// line is written as that stage would have, with the same gate as FLogStage: the attempt's own 0 ms, the wait behind
+	// the refresh apart. Not LogOutcome: the boundary has not run, so AttemptUrl is not made yet and LimiterWait is an
+	// earlier attempt's; the URL is the request's, as the error carries it, redacted, then escaped.
+	if (Ex.LogLevel == EVaRestLogLevel::None || !UE_LOG_ACTIVE(LogVaRestHttp, Warning))
+	{
+		return;
+	}
+	const bool bCanceled = Outcome.Failure == EVaRestTransportFailure::Canceled;
+	if (bCanceled && !UE_LOG_ACTIVE(LogVaRestHttp, Log))
+	{
+		return;
+	}
+	const double WaitMs = Ex.PendingAttemptStart >= 0.0 ? FMath::Max(0.0, (Ex.Config->Clock->Now() - Ex.PendingAttemptStart) * 1000.0) : 0.0;
+	const FString Url = LogStagePrivate::ShownUrl(RedactorFor(Ex), Ex.Url);
+	const FString ShownVerb = EscapeForLog(Ex.Verb);
+	if (bCanceled)
+	{
+		UE_LOG(LogVaRestHttp, Log, TEXT("#%llu %s %s -> canceled (0 ms, %.0f ms auth wait)"), Ex.RequestId, *ShownVerb, *Url, WaitMs);
+	}
+	else
+	{
+		UE_LOG(LogVaRestHttp, Warning, TEXT("#%llu %s %s -> %s %s (0 ms, %.0f ms auth wait)"), Ex.RequestId, *ShownVerb, *Url, LexToString(Outcome.Failure),
+			*EscapeForLog(Outcome.FailureDetail.ToString()), WaitMs);
+	}
+}
+
 FVaRestStageRef VaRest::Http::MakeLogStage()
 {
 	return MakeShared<LogStagePrivate::FLogStage, ESPMode::ThreadSafe>();
