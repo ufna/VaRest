@@ -335,7 +335,7 @@ namespace VaRest::Http::PipelinePrivate
 					if (!Granted.bFinished && Exchange->IsCancelRequested())
 					{
 						// Ruling I-3: flagged while it waited with no Abort behind it (a worker's Cancel() until its hop runs,
-						// VaRestClient.cpp:245-246). Proceed answers it Canceled below, before the log stage, so its Basic
+						// VaRestClient.cpp:254-255). Proceed answers it Canceled below, before the log stage, so its Basic
 						// line is written here, as for an abort. The flag is never cleared, so Proceed's own read agrees.
 						LogEndedInQueue(Granted, FVaRestAttemptOutcome::Canceled());
 					}

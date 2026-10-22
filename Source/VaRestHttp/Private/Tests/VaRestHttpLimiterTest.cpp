@@ -491,7 +491,7 @@ bool FVaRestHttpLimiterExitsTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("refused: the holder and the next one finish"), Rig.Wait(Holder) && Rig.Wait(AfterRefused));
 
 	// Flagged while queued, with no game-thread Cancel() behind it -- the state a worker's Cancel() leaves until its hop
-	// runs (VaRestClient.cpp:245-246). Only the grant can see it: Proceed answers Canceled there, and no Abort can, since
+	// runs (VaRestClient.cpp:254-255). Only the grant can see it: Proceed answers Canceled there, and no Abort can, since
 	// only FClientState::Cancel calls one. Nothing here depends on the order of game-thread tasks (review Minor 6).
 	auto Holder2 = MakeOutcome<FVaRestJson>();
 	Observe(Rig.Client.Get(TEXT("/hold-2")), Holder2).Send();
@@ -786,7 +786,7 @@ bool FVaRestHttpLimiterCanceledAtGrantTest::RunTest(const FString& Parameters)
 	using namespace VaRest::Http::Testing;
 	using namespace VaRest::Http::LimiterTestPrivate;
 	// Ruling I-3: a request flagged as canceled while it waits, with no game-thread Cancel() behind it (a worker's Cancel()
-	// until its hop runs, VaRestClient.cpp:245-246), is answered Canceled at its grant, so it never reaches the log stage,
+	// until its hop runs, VaRestClient.cpp:254-255), is answered Canceled at its grant, so it never reaches the log stage,
 	// which is after the limiter now. Its Basic line is written at the grant, as for one aborted in the queue: 0 ms of its
 	// own, the wait apart.
 	TGuardConsoleVariable<int32> Level(TEXT("VaRest.LogLevel"), -1);

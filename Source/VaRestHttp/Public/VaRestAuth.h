@@ -213,4 +213,21 @@ public:
 	static FRef ApiKey(EVaRestApiKeyPlacement InPlacement, FStringView InName, FStringView InKey);
 	/** Authorization: Basic base64(user:password), UTF-8. A user holding ':' (RFC 7617 2) logs an Error and fails each request Kind=Config (ruling Q7). */
 	static FRef Basic(FStringView InUser, FStringView InPassword);
+	/**
+	 * Spec 4.2 BearerRefresh: the access token as Bearer; on a refresh status (401) or a known expiry within the lead time,
+	 * one refresh shared by every request (Task 16): a POST of the refresh token to Config.RefreshPath, the new tokens read
+	 * from the raw response at Config's paths. The endpoint's own "no" -- a 4xx other than 408 and 429, or a success that
+	 * is not JSON or has no access token -- expires the session; anything else keeps it (no answer, a timeout, 408, 429,
+	 * 5xx, a refusal by the configuration such as HTTP disabled), and the parked requests fail with that kind (plan
+	 * decision 3, ruling I-7). The proactive lead is RefreshLeadSeconds, at most half the token's lifetime (concurrency
+	 * review M-7). Each path's last segment becomes a redaction key (plan decision 22).
+	 * What bounds a refresh: its request is built on the client (FVaRestAuthRefreshContext::Request), so it has the client's
+	 * WithTimeout() like any request, and with none the engine's defaults (HttpModule.cpp:96-98: no total timeout, 30 s to
+	 * connect, 30 s of activity). BearerRefresh sets no total timeout of its own (the config has no field for one): a refresh
+	 * endpoint that stops answering ends at the activity timeout, Kind=Connection, the session kept; one that trickles bytes
+	 * forever is bounded only by a client total. A parked request is bounded by its own retry Deadline and Cancel().
+	 * The response is decoded as JSON off the game thread under the client's MaxJsonBytes (a larger 2xx is a malformed
+	 * success: Rejected); only the path reads run on the game thread.
+	 */
+	static FRef BearerRefresh(const FVaRestBearerRefreshConfig& Config);
 };
