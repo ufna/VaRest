@@ -1319,4 +1319,62 @@ bool FVaRestHttpExcerptPerDispatchTest::RunTest(const FString& Parameters)
 }
 #endif // VAREST_WITH_TRACE_EXCERPTS
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpTraceCancelAtDispatchTest, "VaRest.Http.Trace.CancelAtDispatch",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpTraceCancelAtDispatchTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::ExcerptTestPrivate;
+	// M4a final review A2 (review C M-1): a sink's OnEvent at AttemptDispatched cancels the request (code that is not
+	// VaRest's may cancel at any emit, concurrency review M-5). The transport is never started, and the dispatch the sinks
+	// saw gets its matching AttemptEnded{Canceled}. The request leaves the limiter's queue from a later task, after a
+	// blocker, so its handle is known when it is dispatched.
+	FTestRig Rig;
+	Rig.Client.WithMaxConcurrent(1);
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest& Request) { return Request.Url.EndsWith(TEXT("/blocker")) ? FVaRestFakeResponse::Manual() : Json(200, "{}"); });
+	FScopedTraceRecorder Scoped(EVaRestTraceDetail::Metadata);
+	const FTraceRecorder& Recorder = *Scoped.Recorder;
+	const TSharedRef<FVaRestRequestHandle, ESPMode::ThreadSafe> Target = MakeShared<FVaRestRequestHandle, ESPMode::ThreadSafe>();
+	const TSharedRef<FHookSink, ESPMode::ThreadSafe> Canceler = MakeShared<FHookSink, ESPMode::ThreadSafe>(EVaRestTraceDetail::Metadata);
+	Canceler->Hook = [Target](const FVaRestTraceEvent& Event)
+	{
+		if (Event.Kind == EVaRestTraceKind::AttemptDispatched && Event.Payload.Get<FVaRestTraceAttemptDispatched>().RequestId == Target->GetId())
+		{
+			Target->Cancel();
+		}
+	};
+	FVaRestTrace::AddSink(Canceler);
+	auto Blocker = MakeOutcome<FVaRestJson>();
+	auto Outcome = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/blocker")), Blocker).Send();
+	*Target = Observe(Rig.Client.Get(TEXT("/target")), Outcome).Send();
+	const uint64 Id = Target->GetId();
+	if (!TestEqual(TEXT("the blocker holds the one slot"), Rig.Fake->NumCalls(), 1))
+	{
+		FVaRestTrace::RemoveSink(Canceler);
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Fake->Complete(0, Json(200, "{}"));
+	const bool bDone = Rig.Wait(Outcome) && Rig.Wait(Blocker);
+	FVaRestTrace::RemoveSink(Canceler);
+	if (!TestTrue(TEXT("both complete"), bDone))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Drain();
+	TestTrue(TEXT("canceled from the sink"), Outcome->Error.Kind == EVaRestErrorKind::Canceled && Outcome->ErrorCalls.load() == 1 && Outcome->SuccessCalls.load() == 0);
+	TestEqual(TEXT("its transport call was never started"), Rig.Fake->NumCalls(), 1);
+	TestEqualSensitive(TEXT("the dispatch is paired with its end"), Recorder.KindsOf(Id), FString(TEXT("Started,Dispatched,Ended,Completed")));
+	const TOptional<FVaRestTraceAttemptEnded> Ended = First<FVaRestTraceAttemptEnded>(Recorder, Id, EVaRestTraceKind::AttemptEnded);
+	TestTrue(TEXT("... AttemptEnded{1, Failure Canceled}, no excerpt"), Ended.IsSet() && Ended->Attempt == 1 && Ended->Failure == EVaRestTransportFailure::Canceled
+		&& !Ended->bExcerptPending && Ended->Status == 0);
+	FString Why;
+	TestTrue(TEXT("Inspector 3.3: the phases hold"), PhasesHold(Recorder, Id, Why));
+	TestEqualSensitive(TEXT("... (why not)"), Why, FString());
+	return true;
+}
+
 #endif

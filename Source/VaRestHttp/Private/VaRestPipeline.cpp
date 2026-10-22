@@ -561,6 +561,23 @@ namespace VaRest::Http::PipelinePrivate
 			Ex.NextGapSeconds = 0.0;
 			Ex.AuthWait = 0.0;
 			Ex.AuthRefreshId = 0;
+			if (Exchange->IsCancelRequested() || Ex.bFinished || Ex.bCompletionQueued)
+			{
+				// M4a final review A2 (review C M-1): the emit ran code that is not VaRest's -- a trace sink -- and it may
+				// cancel (concurrency review M-5's rule, kept at every other emit). No attempt goes out after Cancel() returned
+				// (spec 3.2: "no further attempt"), and none would hold a slot until the transport answered. The dispatch the
+				// sinks saw gets its matching end, so the pair holds (Inspector 3.3); the answer is Canceled, which meets the
+				// queued completion's guards on its way up.
+				FVaRestTransportResult Unsent;
+				Unsent.Failure = EVaRestTransportFailure::Canceled;
+				Unsent.FailureDetail = TEXT("Canceled");
+				if (!Ex.bFinished)
+				{
+					TracePoints::AttemptEnded(Ex, Unsent, ThisDispatch, /*bCurrent*/ true);
+				}
+				OnOutcome(FVaRestAttemptOutcome::Canceled());
+				return;
+			}
 			// A call still held here belongs to a PerAttempt stage that proceeded again while it ran (a hedge; the stage
 			// contract does not promise concurrent trips): this dispatch becomes the live one, and the other's progress chain
 			// stops (ScheduleProgress), its end arriving as a stale one
