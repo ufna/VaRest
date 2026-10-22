@@ -17,6 +17,9 @@ public class VaRestTests : ModuleRules
 			"Engine",
 			"VaRestJson",
 			"VaRestHttp",
+			// WebSocket W1: the transport's integration suite (VaRest.Integration.WebSocket.Transport.*) and its test hooks
+			// (VaRestSocketTesting.h)
+			"VaRestWebSocket",
 			"VaRest", // v1, for Bench.VaRest.Http.RequestPath (its HTTP and Json dependencies are public, VaRest.Build.cs:21-31)
 			// WebSocket W0 probe: the SSL module's context and certificate manager, which the engine's transport uses
 			// (WebSockets.Build.cs:118-119)
