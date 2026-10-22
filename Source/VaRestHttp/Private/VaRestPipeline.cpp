@@ -256,6 +256,49 @@ namespace VaRest::Http::PipelinePrivate
 		}
 	};
 
+	/**
+	 * A fire this close to DeadlineAt counts as the deadline. The virtual clock keeps whole nanoseconds, so at a timer's due
+	 * time Now() can read one ULP below a double DeadlineAt, and a re-arm for that rest rounds to 0 ns and fires again at
+	 * the same instant, forever (the secret-expiry loop of M3 plan re-review N-I3, m3-plan-rereview-spec.md).
+	 */
+	constexpr double QueueDeadlineSlack = 1e-3;
+
+	/**
+	 * Concurrency review M-1: the deadline's timer while an attempt waits in the limiter's queue. At DeadlineAt it takes the
+	 * entry out of the queue and FLimiterStage's abort answers Deadline. Weak: the queue entry holds the exchange already.
+	 * A fire before DeadlineAt on the exchange's clock re-arms for the rest (Task 9 review minor 2): the real clock's core
+	 * ticker counts game-time deltas, which a fixed timestep can run faster than Now() (FVaRestRealClock), and a Deadline
+	 * answered early is not retryable. The engine re-arms its own activity timer the same way (HttpRequestCommon.cpp:478-484).
+	 */
+	void ArmQueueDeadline(FExchangeState& Ex, const FVaRestExchangeRef& Exchange, double Delay)
+	{
+		Ex.QueueDeadline = Ex.Config->Clock->SetTimer(Delay, [Weak = TWeakPtr<FVaRestExchange, ESPMode::ThreadSafe>(Exchange)]
+		{
+			const TSharedPtr<FVaRestExchange, ESPMode::ThreadSafe> Pinned = Weak.Pin();
+			if (!Pinned.IsValid())
+			{
+				return;
+			}
+			FExchangeState& Late = Internals(*Pinned);
+			Late.QueueDeadline.Invalidate();
+			if (!Late.bInLimiterQueue)
+			{
+				return;
+			}
+			const double Rest = Late.DeadlineAt - Late.Config->Clock->Now();
+			if (Rest > QueueDeadlineSlack)
+			{
+				ArmQueueDeadline(Late, Pinned.ToSharedRef(), Rest);
+				return;
+			}
+			Late.bQueueDeadlinePassed = true;
+			if (!Late.State->GetLimiter().Abort(Late.RequestId))
+			{
+				Late.bQueueDeadlinePassed = false;
+			}
+		});
+	}
+
 	/** Spec 4.6 as amended (ruling I-3): the first stage of every attempt, right after the attempt boundary */
 	class FLimiterStage final : public IVaRestStage
 	{
@@ -328,29 +371,10 @@ namespace VaRest::Http::PipelinePrivate
 			if (Ex.bInLimiterQueue && Ex.DeadlineAt > 0.0 && !Ex.QueueDeadline.IsValid())
 			{
 				// Concurrency review M-1: armed, not only checked at the grant, so a wait behind long requests ends at the
-				// deadline. The timer takes the entry out of the queue; the abort above answers Deadline. Weak: the queue
-				// entry holds the exchange already. An entry granted inside Acquire has bInLimiterQueue false again by now,
-				// so no timer is armed for it; a valid handle is the timer of an entry queued while this call ran (a stage
-				// that re-issued synchronously), and is kept.
-				Ex.QueueDeadline = Ex.Config->Clock->SetTimer(FMath::Max(0.0, Ex.DeadlineAt - EnqueuedAt),
-					[Weak = TWeakPtr<FVaRestExchange, ESPMode::ThreadSafe>(Exchange)]
-				{
-					const TSharedPtr<FVaRestExchange, ESPMode::ThreadSafe> Pinned = Weak.Pin();
-					if (!Pinned.IsValid())
-					{
-						return;
-					}
-					FExchangeState& Late = Internals(*Pinned);
-					Late.QueueDeadline.Invalidate();
-					if (Late.bInLimiterQueue)
-					{
-						Late.bQueueDeadlinePassed = true;
-						if (!Late.State->GetLimiter().Abort(Late.RequestId))
-						{
-							Late.bQueueDeadlinePassed = false;
-						}
-					}
-				});
+				// deadline (ArmQueueDeadline). An entry granted inside Acquire has bInLimiterQueue false again by now, so no
+				// timer is armed for it; a valid handle is the timer of an entry queued while this call ran (a stage that
+				// re-issued synchronously), and is kept.
+				ArmQueueDeadline(Ex, Exchange, FMath::Max(0.0, Ex.DeadlineAt - EnqueuedAt));
 			}
 		}
 	};
@@ -386,8 +410,12 @@ namespace VaRest::Http::PipelinePrivate
 				OnOutcome(MoveTemp(Refused));
 				return;
 			}
+			// Decision 30 (review I-5), resolved here so every transport gets final values (Task 9 review I-1): the
+			// activity timeout is the request's own, else its own total, so the engine's 30 s idle default
+			// ([HTTP] HttpActivityTimeout, HttpRequestCommon.cpp:733-736) never fires before a total the request set. 0
+			// leaves the engine's default.
 			double AttemptTimeout = Ex.Timeout;
-			double AttemptActivity = Ex.ActivityTimeout;
+			double AttemptActivity = Ex.ActivityTimeout > 0.f ? Ex.ActivityTimeout : FMath::Max(Ex.Timeout, 0.f);
 			if (Ex.DeadlineAt > 0.0)
 			{
 				// Plan decision 10 (spec 4.7, "plus the retry Deadline across attempts"): the time left bounds this attempt,
@@ -398,13 +426,12 @@ namespace VaRest::Http::PipelinePrivate
 					OnOutcome(MakeDeadlineOutcome());
 					return;
 				}
-				// The controller's Task 9 ruling: the deadline only shortens. The total is the request's own cut to the time
-				// left, or the time left when it set none. The activity timeout is what applies without a deadline -- the
-				// request's own, else its own total (M3 decision 30), never the time left -- cut to the time left; with
-				// neither, the engine's idle default stays, so a stalled attempt still fails at it and is retried (the
-				// total, at most the time left now, ends the attempt by the deadline whatever that default is).
-				const double OwnActivity = Ex.ActivityTimeout > 0.f ? Ex.ActivityTimeout : FMath::Max(Ex.Timeout, 0.f);
-				AttemptActivity = OwnActivity > 0.0 ? FMath::Min(OwnActivity, Left) : FVaRestTransportRequest::ActivityEngineDefault;
+				// The controller's Task 9 ruling: the deadline only shortens what is set. The total is the request's own cut to
+				// the time left, or the time left when it set none; the activity timeout is the one above (never the time
+				// left) cut to the time left, and with neither timeout set it stays 0, the engine's idle default, so a
+				// stalled attempt still fails at it and is retried (the total, at most the time left now, ends the attempt by
+				// the deadline whatever that default is).
+				AttemptActivity = AttemptActivity > 0.0 ? FMath::Min(AttemptActivity, Left) : 0.0;
 				AttemptTimeout = AttemptTimeout > 0.0 ? FMath::Min(AttemptTimeout, Left) : Left;
 			}
 			if (!Ex.SaveTo.IsEmpty())
@@ -1054,6 +1081,10 @@ void VaRest::Http::FClientState::Cancel(const FVaRestExchangeRef& Exchange, EVaR
 	{
 		// Plan decision 7: a stage holds it waiting (a backoff, a park behind a refresh); it answers Canceled through the
 		// chain, so every Outer stage gets its one outcome. Taken first: answering may let a stage set another.
+		// Defence in depth (Task 9 review minor 4): without this block Cancel falls through to Complete, whose deferral
+		// (ApiDepth > 0 here) runs EndWaits and reaches the same hook -- Task 9's restore (a) passes for that reason. This
+		// keeps Cancel's promise from resting on that path: a hook a stage installs that Complete's deferral would not
+		// reach (a Complete that stops deferring, or a wait EndWaits does not end) is still ended here, inside Cancel().
 		TUniqueFunction<bool()> Wake = MoveTemp(Ex.Interrupt);
 		Ex.Interrupt.Reset();
 		if (Wake())

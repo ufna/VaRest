@@ -46,17 +46,17 @@ struct FVaRestTransportRequest
 	/** Multipart with file parts, streamed with IHttpRequest::SetContentFromStream */
 	TArray<FVaRestBodySegment> BodySegments;
 	/**
-	 * Seconds; 0 = VaRest sets none (spec 4.7). With Timeout > 0 and ActivityTimeout 0 the HTTP transport also sets the
-	 * engine's activity timeout to Timeout, so the engine's 30 s idle default never fires first (review I-5).
-	 * ActivityTimeout ActivityEngineDefault (negative): VaRest sets none even with a Timeout, so the engine's idle default
-	 * applies -- a Timeout that is only the retry deadline's time left (plan decision 10) must not replace it.
+	 * Seconds, final (spec 4.7): a value above 0 is this attempt's total timeout, 0 leaves the engine's default ([HTTP]
+	 * HttpTotalTimeout). Never negative. The core has already cut it to the retry deadline's time left (plan decision 10).
 	 */
 	float Timeout = 0.f;
+	/**
+	 * Seconds without any transfer, final: a value above 0 is this attempt's activity timeout, 0 leaves the engine's idle
+	 * default ([HTTP] HttpActivityTimeout, 30 s). Never negative. The core has already applied decision 30 (a request with
+	 * a total and no activity timeout of its own gets its total here, so the engine's 30 s cannot fire first; review I-5)
+	 * and the deadline's cut, so a transport sets it as it is and never derives it from Timeout (Task 9 review I-1).
+	 */
 	float ActivityTimeout = 0.f;
-
-	/** ActivityTimeout: the engine's own idle default, whatever Timeout is (the controller's Task 9 ruling) */
-	static constexpr float ActivityEngineDefault = -1.f;
-
 	EVaRestPriority Priority = EVaRestPriority::Normal;
 	/** Non-empty: stream the response body into this file (SaveTo's temp file) instead of memory */
 	FString ResponseFile;
@@ -129,6 +129,8 @@ public:
 	 * returns; the core moves the result to the game thread itself (spec 1). A transport that destroys OnComplete without
 	 * calling it (the engine does at HTTP module shutdown and with NullHttp) still finishes the request: the core wraps
 	 * OnComplete so that its destruction reports Failure Other, detail TransportDropped (review I-3).
+	 * Request.Timeout and Request.ActivityTimeout are final (decision 30 and the retry deadline are applied): set each that
+	 * is above 0 as it is, leave the engine's default for one that is 0, and derive neither from the other.
 	 */
 	virtual TSharedRef<IVaRestTransportCall, ESPMode::ThreadSafe> Start(FVaRestTransportRequest&& Request, FVaRestTransportComplete&& OnComplete) = 0;
 

@@ -55,9 +55,8 @@ public:
 
 	/**
 	 * Seconds; 0 (default) = none. The engine's [HTTP] HttpActivityTimeout (30 s, HttpModule.cpp:98), applied as the
-	 * engine applies it: to a call for which the HTTP transport sets no activity timeout (EffectiveActivityTimeout is 0),
-	 * ending its silence as Connection, detail ActivityTimeout. A call with only a Timeout keeps no activity timer here:
-	 * its total fires first or with it.
+	 * engine applies it (HttpRequestCommon.cpp:733-736): to a call whose ActivityTimeout is 0, ending its silence as
+	 * Connection, detail ActivityTimeout.
 	 */
 	float EngineActivityTimeout = 0.f;
 
@@ -111,7 +110,7 @@ private:
 		FVaRestTimerHandle TimeoutTimer;
 		FVaRestTimerHandle ActivityTimer;
 		double LastActivityAt = 0.0;
-		/** The activity timeout this call runs with: its own, or EngineActivityTimeout when the transport would set none */
+		/** The activity timeout this call runs with: its own, or EngineActivityTimeout when it has none */
 		float Activity = 0.f;
 	};
 

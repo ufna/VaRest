@@ -7,7 +7,6 @@
 #include "Misc/FileHelper.h"
 #include "Tasks/Pipe.h"
 #include "Tasks/Task.h"
-#include "VaRestHttpTransportInternal.h"
 #include "VaRestTrace.h"
 
 class FVaRestFakeTransport::FCallHandle final : public IVaRestTransportCall
@@ -183,8 +182,8 @@ TSharedRef<IVaRestTransportCall, ESPMode::ThreadSafe> FVaRestFakeTransport::Star
 			}
 		});
 	}
-	Entry->Activity = Req.ActivityTimeout > 0.f ? Req.ActivityTimeout
-		: VaRest::Http::EffectiveActivityTimeout(Req.Timeout, Req.ActivityTimeout) <= 0.f ? EngineActivityTimeout : 0.f;
+	// Final values (IVaRestTransport::Start): 0 leaves the engine's idle default, which EngineActivityTimeout emulates
+	Entry->Activity = Req.ActivityTimeout > 0.f ? Req.ActivityTimeout : EngineActivityTimeout;
 	if (Entry->Activity > 0.f && (bWaits || Response.Delay > Entry->Activity))
 	{
 		ArmActivity(Index);

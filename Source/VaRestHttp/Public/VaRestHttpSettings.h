@@ -36,7 +36,10 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Requests", meta = (ClampMin = "1"))
 	int32 MaxConcurrent = 16;
 
-	/** Seconds for a whole attempt; 0 = the engine's default ([HTTP] HttpTotalTimeout, 0 = none) */
+	/**
+	 * Seconds for a whole attempt; 0 = the engine's default ([HTTP] HttpTotalTimeout, 0 = none), or under a retry policy's
+	 * Deadline the time left to it (plan decision 10)
+	 */
 	UPROPERTY(config, EditAnywhere, Category = "Requests", meta = (ClampMin = "0"))
 	float Timeout = 0.f;
 

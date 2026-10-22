@@ -376,8 +376,8 @@ public:
 	/**
 	 * Spec 4.7, per attempt: a value above 0 replaces the client's; 0 (or less) keeps the client's -- unlike MaxJsonBytes(0),
 	 * which lifts the client's cap (final review M6). There is no "no timeout" for one request: to let one long download
-	 * outlive the client's total, pass a larger total here. With a total and no activity timeout the transport bounds
-	 * silence by the total too, so the engine's 30 s idle default never fires first (decision 30); on Mac and iOS the
+	 * outlive the client's total, pass a larger total here. With a total and no activity timeout the activity timeout is
+	 * the total too, so the engine's 30 s idle default never fires first (decision 30); on Mac and iOS the
 	 * engine's connection timeout still caps silence (docs/dev/http-thread-completion.md).
 	 */
 	TVaRestRequest Timeout(float TotalSeconds, float ActivitySeconds = 0.f) &&
@@ -599,7 +599,8 @@ public:
 	FVaRestClient& WithMaxConcurrent(int32 MaxConcurrent);
 	/**
 	 * Spec 3.1 / 4.7: seconds per attempt; 0 = the engine's default ([HTTP] HttpTotalTimeout, HttpActivityTimeout). An
-	 * activity of 0 with a total above 0 bounds silence by the total (decision 30).
+	 * activity of 0 with a total above 0 bounds silence by the total (decision 30). Under a retry policy's Deadline both are
+	 * cut to the time left, and a total of 0 is the time left (plan decision 10).
 	 */
 	FVaRestClient& WithTimeout(float Total, float Activity = 0.f);
 	/** Spec 4.5; the cvar VaRest.LogLevel (>= 0) overrides every client's */

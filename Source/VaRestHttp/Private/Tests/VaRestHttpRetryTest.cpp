@@ -2,7 +2,6 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
-#include "Algo/Count.h"
 #include "HAL/FileManager.h"
 #include "HAL/IConsoleManager.h"
 #include "Misc/AutomationTest.h"
@@ -16,7 +15,6 @@
 #include "VaRestExchangeState.h"
 #include "VaRestHttpSettings.h"
 #include "VaRestHttpTesting.h"
-#include "VaRestHttpTransportInternal.h"
 #include "VaRestRetry.h"
 #include "VaRestRetryInternal.h"
 #include "VaRestTrace.h"
@@ -151,35 +149,6 @@ namespace VaRest::Http::RetryTestPrivate
 		TWeakPtr<FVaRestExchange, ESPMode::ThreadSafe> Kept;
 		/** What reached this stage from behind it after it had answered */
 		TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> LateAnswers = MakeShared<std::atomic<int32>, ESPMode::ThreadSafe>(0);
-	};
-
-	/** An Outer stage that forwards every outcome and records each request's, game thread (concurrency review I-5's probe) */
-	class FOutcomeLog final : public IVaRestStage
-	{
-	public:
-		virtual FName GetStageName() const override { return TEXT("OutcomeLog"); }
-		virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) override
-		{
-			Next.Proceed(Exchange, [Into = Seen, Id = Exchange->GetRequestId(), Done = MoveTemp(OnOutcome)](FVaRestAttemptOutcome&& Outcome) mutable
-			{
-				Into->FindOrAdd(Id).Add(Outcome.Failure);
-				Done(MoveTemp(Outcome));
-			});
-		}
-
-		int32 Count(uint64 RequestId, EVaRestTransportFailure Failure) const
-		{
-			const TArray<EVaRestTransportFailure>* Found = Seen->Find(RequestId);
-			return Found ? static_cast<int32>(Algo::Count(*Found, Failure)) : 0;
-		}
-
-		int32 Total(uint64 RequestId) const
-		{
-			const TArray<EVaRestTransportFailure>* Found = Seen->Find(RequestId);
-			return Found ? Found->Num() : 0;
-		}
-
-		TSharedRef<TMap<uint64, TArray<EVaRestTransportFailure>>, ESPMode::ThreadSafe> Seen = MakeShared<TMap<uint64, TArray<EVaRestTransportFailure>>, ESPMode::ThreadSafe>();
 	};
 
 	/** A PerAttempt stage that answers its first attempt itself, inside Process, with Code; later attempts go through */
@@ -1061,7 +1030,7 @@ bool FVaRestHttpRetryCancelEarlyTest::RunTest(const FString& Parameters)
 	// VaRestClient.h WithMaxConcurrent), Retry backs off, and the request still holds that stale call. Cancel() and
 	// shutdown must end the wait anyway: the timer goes and every Outer stage gets its one Canceled, inside the call.
 	FTestRig Rig;
-	const TSharedRef<FOutcomeLog, ESPMode::ThreadSafe> Probe = MakeShared<FOutcomeLog, ESPMode::ThreadSafe>();
+	const TSharedRef<FOutcomeProbe, ESPMode::ThreadSafe> Probe = MakeShared<FOutcomeProbe, ESPMode::ThreadSafe>();
 	const TSharedRef<FHoldingOuter, ESPMode::ThreadSafe> Early = MakeShared<FHoldingOuter, ESPMode::ThreadSafe>(true);
 	Rig.Client.Use(Probe, EVaRestStageSlot::Outer).Use(Early, EVaRestStageSlot::PerAttempt).WithRetry(Exact(3));
 	Rig.Fake->SetResponder([](const FVaRestTransportRequest&) { return FVaRestFakeResponse::Manual(); });
@@ -1287,6 +1256,34 @@ namespace VaRest::Http::RetryTestPrivate
 	private:
 		TSharedRef<FVaRestVirtualClock, ESPMode::ThreadSafe> Clock;
 		double Delay = 0.0;
+	};
+
+	/**
+	 * Virtual time whose timers fire early: a core ticker fed game-time deltas that run faster than Now(), as a fixed
+	 * timestep can (FVaRestRealClock; Task 9 review minor 2). A timer fires after Ratio of its delay, but at least MinStep
+	 * later -- a frame.
+	 */
+	class FEarlyClock final : public IVaRestClock
+	{
+	public:
+		FEarlyClock(TSharedRef<FVaRestVirtualClock, ESPMode::ThreadSafe> InTime, double InRatio, double InMinStep)
+			: Time(MoveTemp(InTime))
+			, Ratio(InRatio)
+			, MinStep(InMinStep)
+		{
+		}
+
+		virtual double Now() const override { return Time->Now(); }
+		virtual FVaRestTimerHandle SetTimer(double DelaySeconds, TUniqueFunction<void()>&& Callback) override
+		{
+			return Time->SetTimer(FMath::Max(DelaySeconds * Ratio, MinStep), MoveTemp(Callback));
+		}
+		virtual void ClearTimer(FVaRestTimerHandle& Handle) override { Time->ClearTimer(Handle); }
+
+	private:
+		TSharedRef<FVaRestVirtualClock, ESPMode::ThreadSafe> Time;
+		double Ratio = 1.0;
+		double MinStep = 0.0;
 	};
 
 	/**
@@ -1857,10 +1854,10 @@ bool FVaRestHttpRetryDeadlineIdleTest::RunTest(const FString& Parameters)
 		return false;
 	}
 	const float FirstTotal = Rig.Fake->GetCall(0).Request.Timeout;
-	// IHttpRequest has no activity getter (IHttpRequest.h:341-347): the applied value is the function the transport calls
-	const float FirstActivity = VaRest::Http::EffectiveActivityTimeout(FirstTotal, Rig.Fake->GetCall(0).Request.ActivityTimeout);
+	// Final values (IVaRestTransport::Start): the transport sets what it is given, and 0 leaves the engine's default
+	const float FirstActivity = Rig.Fake->GetCall(0).Request.ActivityTimeout;
 	TestTrue(TEXT("no timeout set: the time left is the total cap, 300 s"), FMath::IsNearlyEqual(FirstTotal, 300.f, 1e-3f));
-	TestEqual(TEXT("... and the activity timeout applied is the engine's default (VaRest sets none), not 300 s"), FirstActivity, 0.f);
+	TestEqual(TEXT("... and the activity timeout handed over is 0, the engine's default, not 300 s"), FirstActivity, 0.f);
 	Rig.Clock->Advance(30.0);
 	if (!TestTrue(TEXT("the stall ends at the idle default; a retry is armed"), PumpUntil([&Rig]
 		{
@@ -1952,6 +1949,99 @@ bool FVaRestHttpRetryDeadlineActivityTest::RunTest(const FString& Parameters)
 	}
 	TestTrue(TEXT("... after two attempts: a third would start past it"), Silent->ErrorCalls.load() == 1 && Silent->Error.Attempts == 2
 		&& Short.Fake->NumCalls() == 2);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpRetryQueueDeadlineClearedTest, "VaRest.Http.Retry.QueueDeadlineCleared",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpRetryQueueDeadlineClearedTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::RetryTestPrivate;
+	// Task 9 review minor 1: the deadline's queue timer goes with every exit from the queue before the deadline -- the
+	// grant and the abort (a Cancel()) -- not only when it fires
+	FTestRig Rig;
+	Rig.Client.WithMaxConcurrent(1).WithRetry(Exact(3).WithDeadline(10.f));
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest& Request) { return Request.Url.EndsWith(TEXT("/hold")) ? FVaRestFakeResponse::Manual() : Json(200); });
+	auto Hold = MakeOutcome<FVaRestJson>();
+	auto Granted = MakeOutcome<FVaRestJson>();
+	auto Canceled = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/hold")).NoRetry(), Hold).Send();
+	Observe(Rig.Client.Get(TEXT("/granted")), Granted).Send();
+	const FVaRestRequestHandle CanceledHandle = Observe(Rig.Client.Get(TEXT("/canceled")), Canceled).Send();
+	// The held call has no timeout (the rig sets none) and arms nothing: the two queue timers are all there is
+	if (!TestTrue(TEXT("one holds the slot; two wait, each with its deadline's timer"), PumpUntil([&Rig]
+		{
+			return Rig.Fake->NumCalls() == 1 && Rig.Clock->NumPendingTimers() == 2;
+		})))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	CanceledHandle.Cancel();
+	TestEqual(TEXT("canceled in the queue: its timer goes with it"), Rig.Clock->NumPendingTimers(), 1);
+	if (!TestTrue(TEXT("... and it ends Canceled"), PumpUntil([Canceled] { return Canceled->IsDone(); })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Fake->Complete(0, Json(200));
+	if (!TestTrue(TEXT("the slot frees: the other is granted and completes"), PumpUntil([Hold, Granted] { return Hold->IsDone() && Granted->IsDone(); })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Drain();
+	TestEqual(TEXT("granted from the queue: its timer went with the grant"), Rig.Clock->NumPendingTimers(), 0);
+	TestTrue(TEXT("... it succeeded; the canceled one is Canceled"), Granted->SuccessCalls.load() == 1 && Canceled->Error.Kind == EVaRestErrorKind::Canceled);
+	TestEqual(TEXT("two dispatched"), Rig.Fake->NumCalls(), 2);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpRetryQueueDeadlineEarlyTest, "VaRest.Http.Retry.QueueDeadlineNotEarly",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpRetryQueueDeadlineEarlyTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::RetryTestPrivate;
+	// Task 9 review minor 2: on a clock whose timers fire early (half the delay, at least 0.1 s), the queue's deadline
+	// timer fires at 0.5, 0.75, 0.875 and 0.975 s, before the 1 s deadline on Now(): each fire re-arms for the rest, and
+	// only the one at 1.075 s ends the wait -- an early Deadline is not retryable
+	FTestRig Rig;
+	Rig.Client.WithClock(MakeShared<FEarlyClock, ESPMode::ThreadSafe>(Rig.Clock, 0.5, 0.1)).WithMaxConcurrent(1).WithRetry(Exact(3).WithDeadline(1.f));
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest& Request) { return Request.Url.EndsWith(TEXT("/hold")) ? FVaRestFakeResponse::Manual() : Json(200); });
+	auto Hold = MakeOutcome<FVaRestJson>();
+	auto Late = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/hold")).NoRetry(), Hold).Send();
+	Observe(Rig.Client.Get(TEXT("/late")), Late).Send();
+	if (!TestTrue(TEXT("one holds the slot"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 1; })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Clock->Advance(0.9);
+	Rig.Drain();
+	TestFalse(TEXT("early fires do not end the wait: still queued at 0.9 s"), Late->IsDone());
+	TestEqual(TEXT("... with its timer re-armed"), Rig.Clock->NumPendingTimers(), 1);
+	Rig.Clock->Advance(0.3);
+	if (!TestTrue(TEXT("past the deadline on Now(), the wait ends"), PumpUntil([Late] { return Late->IsDone(); })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	TestTrue(TEXT("... as Timeout, not retryable, saying Deadline"), Late->Error.Kind == EVaRestErrorKind::Timeout && !Late->Error.bRetryable
+		&& Late->Error.Message.Contains(TEXT("Deadline")));
+	Rig.Fake->Complete(0, Json(200));
+	if (!TestTrue(TEXT("the holder completes"), PumpUntil([Hold] { return Hold->IsDone(); })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Drain();
+	TestEqual(TEXT("the late one never reached the transport"), Rig.Fake->NumCalls(), 1);
+	TestEqual(TEXT("nothing left armed"), Rig.Clock->NumPendingTimers(), 0);
 	return true;
 }
 

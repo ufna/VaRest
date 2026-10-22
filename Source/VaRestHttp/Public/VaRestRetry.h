@@ -53,10 +53,13 @@ struct VARESTHTTP_API FVaRestRetryPolicy
 
 	/**
 	 * Seconds from the request's start; 0 = none (spec 4.1, 4.7; plan decision 10). No retry starts at or past it, and an
-	 * attempt that would start past it fails Kind=Timeout without connecting. Waiting in the limiter's queue counts. It
-	 * only shortens an attempt's timeouts: the total and activity timeouts are cut to the time left, and without a total
-	 * timeout the time left is the total; the engine's idle default (with no timeout set) still applies, so a stalled
-	 * attempt fails at it and can be retried.
+	 * attempt that would start past it -- caught at dispatch or while it waits in the limiter's queue, where waiting counts
+	 * -- fails Kind=Timeout, detail Deadline, not retryable, without connecting. An attempt's total and activity timeouts
+	 * are cut to the time left; with no total timeout set the time left is the total (it replaces [HTTP] HttpTotalTimeout,
+	 * which is 0, none, by default), and with neither timeout set the engine's idle default ([HTTP] HttpActivityTimeout)
+	 * still applies, so a stalled attempt fails at it and can be retried. An attempt that started and then ran out of the
+	 * time left fails as any timed-out attempt does (Kind=Timeout, detail TimedOut, bRetryable; or Connection, detail
+	 * ActivityTimeout, when its activity timeout ends it first), not as Deadline, though no retry follows it.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VaRest|Http", meta = (ClampMin = "0"))
 	float Deadline = 0.f;

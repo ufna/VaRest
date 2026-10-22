@@ -237,16 +237,19 @@ namespace VaRest::Http::HttpTransportPrivate
 		{
 			return FailBeforeConnect(Http, Completion, TEXT("BodyRejected"));
 		}
+		// Final values (IVaRestTransport::Start): the transport stage resolved decision 30 and the retry deadline; 0 leaves
+		// the engine's default. On Apple the connection timeout still caps silence: NSURLSession's timeoutInterval is
+		// [HTTP] HttpConnectionTimeout (30 s, BaseEngine.ini:40; AppleHttp.cpp:736-738), and an activity timeout above it
+		// logs "HttpConnectionTimeout can't be less than HttpActivityTimeout" as a Warning on every such request
+		// (AppleHttp.cpp:740-749; task 7 review M-9) -- .Timeout(60) without an activity timeout is one.
+		// docs/dev/http-thread-completion.md (Task 17) records both.
 		if (Request.Timeout > 0.f)
 		{
 			Http->SetTimeout(Request.Timeout);
 		}
-		// Decision 30. On Apple the connection timeout still caps silence at 30 s, with a Warning per request above it
-		// (EffectiveActivityTimeout, task 7 review M-9)
-		const float Activity = EffectiveActivityTimeout(Request.Timeout, Request.ActivityTimeout);
-		if (Activity > 0.f)
+		if (Request.ActivityTimeout > 0.f)
 		{
-			Http->SetActivityTimeout(Activity);
+			Http->SetActivityTimeout(Request.ActivityTimeout);
 		}
 		Http->SetPriority(MapPriority(Request.Priority));
 		// Spec 1: complete on the HTTP thread; the completion below only moves bytes and dispatches. Spec 9's fallback
@@ -429,17 +432,6 @@ namespace VaRest::Http::HttpTransportPrivate
 		Http->ProcessRequest();
 		return MakeShared<FCall, ESPMode::ThreadSafe>(WeakHttp, Completion);
 	}
-}
-
-float VaRest::Http::EffectiveActivityTimeout(float TotalSeconds, float ActivitySeconds)
-{
-	if (ActivitySeconds > 0.f)
-	{
-		return ActivitySeconds;
-	}
-	// FVaRestTransportRequest::ActivityEngineDefault: the total is the retry deadline's time left, not a timeout the
-	// request set, so the engine's idle default stays (the controller's Task 9 ruling)
-	return ActivitySeconds < 0.f ? 0.f : FMath::Max(TotalSeconds, 0.f);
 }
 
 bool VaRest::Http::ShouldCountUpload(int64 UploadTotal, bool bProgressCallback, bool bReportProgress, bool bCurlMayRewind)

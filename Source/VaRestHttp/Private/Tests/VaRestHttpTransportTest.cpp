@@ -374,14 +374,24 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpTransportTimeoutsTest, "VaRest.Http.
 
 bool FVaRestHttpTransportTimeoutsTest::RunTest(const FString& Parameters)
 {
-	using VaRest::Http::EffectiveActivityTimeout;
-	// Review I-5. IHttpRequest has GetTimeout (IHttpRequest.h:341-347) but no activity getter, so the applied value is
-	// the function the transport calls, tested here
-	TestEqual(TEXT("a total timeout alone also bounds silence, so the engine's 30 s default cannot fire first"), EffectiveActivityTimeout(60.f, 0.f), 60.f);
-	TestEqual(TEXT("an explicit activity timeout wins"), EffectiveActivityTimeout(60.f, 5.f), 5.f);
-	TestEqual(TEXT("neither: VaRest sets none (the engine's defaults apply)"), EffectiveActivityTimeout(0.f, 0.f), 0.f);
-	TestEqual(TEXT("ActivityEngineDefault: none even with a total -- one that is only the deadline's time left (Task 9 ruling)"),
-		EffectiveActivityTimeout(60.f, FVaRestTransportRequest::ActivityEngineDefault), 0.f);
+	using namespace VaRest::Http::Testing;
+	// Review I-5, resolved by the transport stage (Task 9 review I-1): a transport receives final values and sets them as
+	// they are (IVaRestTransport::Start). IHttpRequest has GetTimeout (IHttpRequest.h:341-347) but no activity getter, so
+	// the values are read where the stage hands them over.
+	FTestRig Rig;
+	Rig.Client.Get(TEXT("/total")).Timeout(60.f).Send();
+	Rig.Client.Get(TEXT("/both")).Timeout(60.f, 5.f).Send();
+	Rig.Client.Get(TEXT("/neither")).Send();
+	if (!TestTrue(TEXT("all three reach the transport"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 3; })))
+	{
+		PumpUntil([&Rig] { return Rig.Client.GetInFlightCount() == 0; });
+		return false;
+	}
+	TestEqual(TEXT("a total timeout alone also bounds silence, so the engine's 30 s default cannot fire first"), Rig.Fake->GetCall(0).Request.ActivityTimeout, 60.f);
+	TestEqual(TEXT("an explicit activity timeout wins"), Rig.Fake->GetCall(1).Request.ActivityTimeout, 5.f);
+	TestTrue(TEXT("neither: VaRest sets none (the engine's defaults apply)"), Rig.Fake->GetCall(2).Request.Timeout == 0.f
+		&& Rig.Fake->GetCall(2).Request.ActivityTimeout == 0.f);
+	TestTrue(TEXT("all three end"), PumpUntil([&Rig] { return Rig.Client.GetInFlightCount() == 0; }));
 	return true;
 }
 
