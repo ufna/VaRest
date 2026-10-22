@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "VaRestRetry.h"
 #include "VaRestStage.h"
 
 #include <atomic>
@@ -85,6 +86,39 @@ namespace VaRest::Http
 		FVaRestProgress LastProgress;
 		bool bInLimiterQueue = false;
 
+		// Retry (Tasks 8-9), set by Resolve:
+		/** The request's Retry()/NoRetry(), from Send */
+		TOptional<FVaRestRetryPolicy> RetryOverride;
+		/** That, else the client's (WithRetry) */
+		FVaRestRetryPolicy RetryPolicy = FVaRestRetryPolicy::Disabled();
+		/** Spec 4.1: an enabled policy, and an idempotent verb or Idempotent() */
+		bool bRetryEligible = false;
+		/** Plan decision 8: a later attempt can need the body again, so the transport stage copies it */
+		bool bMayReissue = false;
+		/** Plan decision 10 (Task 9): clock seconds; 0 = none */
+		double DeadlineAt = 0.0;
+		int32 RetriesDone = 0;
+
+		/**
+		 * Plan decision 7. Game thread. Set by a stage while it holds this exchange waiting (a backoff, a park behind a
+		 * refresh); FClientState::Cancel takes it and calls it, and the stage answers Canceled through the chain. Complete
+		 * calls it too when something else finished the request while it waited (concurrency review M-3), so the wait's
+		 * timer or park goes with it, and so does OnChainDone before it hands a result to the decode task (re-review N-6).
+		 * It returns true when it answered; false (the stage's state is already gone) lets Cancel finish the request itself
+		 * (review M-4). The stage clears it when the wait ends. It holds the stage's state weakly, so it makes no cycle
+		 * through this exchange.
+		 */
+		TUniqueFunction<bool()> Interrupt;
+
+		/**
+		 * IN-2: what the next AttemptDispatched reports; the transport stage resets both after the dispatch. For a Backoff
+		 * gap the attempt boundary measures NextGapSeconds from LastAttemptEndedAt (spec review M-10).
+		 */
+		EVaRestTraceGap NextGap = EVaRestTraceGap::None;
+		double NextGapSeconds = 0.0;
+		/** Clock seconds: when the last attempt's outcome reached the retry stage (the same game-thread call as its end) */
+		double LastAttemptEndedAt = 0.0;
+
 		// Life (game thread, except the atomics):
 		EVaRestExchangePhase Phase = EVaRestExchangePhase::Created;
 		EVaRestCancelReason CancelReason = EVaRestCancelReason::None;
@@ -118,5 +152,22 @@ namespace VaRest::Http
 	inline const FExchangeState& Internals(const FVaRestExchange& Exchange)
 	{
 		return FExchangeAccess::Get(Exchange);
+	}
+
+	/** Game thread. IsValid() is false for an object marked as garbage, not only for one collected (WeakObjectPtr.h:290) */
+	inline bool IsOwnerGone(const FExchangeState& Ex)
+	{
+		return Ex.bHasOwner && !Ex.Owner.IsValid();
+	}
+
+	/** Game thread */
+	inline void MarkOwnerGone(FExchangeState& Ex)
+	{
+		// Silence wins over an earlier User cancel (review C-2); Shutdown is silent too, and stays
+		if (Ex.CancelReason != EVaRestCancelReason::Shutdown)
+		{
+			Ex.CancelReason = EVaRestCancelReason::OwnerGone;
+		}
+		Ex.bCancelRequested = true;
 	}
 }

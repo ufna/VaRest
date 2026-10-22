@@ -11,6 +11,7 @@
 #include "VaRestExchangeState.h"
 #include "VaRestHttpLog.h"
 #include "VaRestHttpTesting.h"
+#include "VaRestRetryInternal.h"
 #include "VaRestTracePoints.h"
 #include "VaRestUrl.h"
 
@@ -122,22 +123,6 @@ namespace VaRest::Http::PipelinePrivate
 		TSharedPtr<FVaRestExchange, ESPMode::ThreadSafe> Held;
 		FVaRestOutcomeCallback Outcome;
 	};
-
-	bool IsOwnerGone(const FExchangeState& Ex)
-	{
-		// IsValid() is false for an object marked as garbage, not only for one collected (WeakObjectPtr.h:290)
-		return Ex.bHasOwner && !Ex.Owner.IsValid();
-	}
-
-	void MarkOwnerGone(FExchangeState& Ex)
-	{
-		// Silence wins over an earlier User cancel (review C-2); Shutdown is silent too, and stays
-		if (Ex.CancelReason != EVaRestCancelReason::Shutdown)
-		{
-			Ex.CancelReason = EVaRestCancelReason::OwnerGone;
-		}
-		Ex.bCancelRequested = true;
-	}
 
 	/** Decision 8's throttle: the game thread reads the probe this often while an attempt runs */
 	constexpr double ProgressInterval = 0.1;
@@ -259,6 +244,12 @@ namespace VaRest::Http::PipelinePrivate
 			FExchangeState& Ex = Internals(*Exchange);
 			++Ex.Attempt;
 			Ex.AttemptStartedAt = Ex.Config->Clock->Now();
+			if (Ex.NextGap == EVaRestTraceGap::Backoff)
+			{
+				// Spec review M-10 (Inspector 3.3: from the previous attempt's end to this attempt's start): what passed,
+				// not the delay asked for -- a real-clock ticker fires up to a frame late
+				Ex.NextGapSeconds = FMath::Max(0.0, Ex.AttemptStartedAt - Ex.LastAttemptEndedAt);
+			}
 			Ex.AttemptHeaders = Ex.RequestHeaders;
 			Ex.LimiterWait = 0.0;
 			Next.Proceed(Exchange, MoveTemp(OnOutcome));
@@ -376,9 +367,9 @@ namespace VaRest::Http::PipelinePrivate
 			{
 				Request.BodyFile = Ex.Body.FilePath;
 			}
-			else if (Cfg.bMayReissue)
+			else if (Ex.bMayReissue)
 			{
-				// A later attempt needs the body again (decision 12)
+				// A later attempt needs the body again (decision 12, plan decision 8)
 				Request.BodySegments = Ex.Body.Segments;
 				Request.Body = Ex.Body.Bytes;
 			}
@@ -413,6 +404,9 @@ namespace VaRest::Http::PipelinePrivate
 			}
 			// IN-2: on the game thread, immediately before the transport starts
 			TracePoints::AttemptDispatched(Ex);
+			// The gap was this attempt's; the next one reports its own (IN-2)
+			Ex.NextGap = EVaRestTraceGap::None;
+			Ex.NextGapSeconds = 0.0;
 			Ex.TransportCall = Cfg.Transport->Start(MoveTemp(Request), [Guard = FCompletionGuard(Exchange, MoveTemp(OnOutcome))](FVaRestTransportResult&& Result) mutable
 			{
 				Guard.Deliver(MoveTemp(Result));
@@ -616,6 +610,10 @@ bool VaRest::Http::FClientState::Resolve(FExchangeState& Exchange, FString& OutE
 		Exchange.RequestHeaders.Set(TEXT("Idempotency-Key"), FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower));
 	}
 
+	// Spec 4.1, plan decisions 1 and 8
+	Exchange.RetryPolicy = Exchange.RetryOverride.IsSet() ? Exchange.RetryOverride.GetValue() : Cfg.Retry;
+	Exchange.bRetryEligible = Exchange.RetryPolicy.IsEnabled() && (Exchange.bIdempotent || IsIdempotentVerb(Exchange.Verb));
+	Exchange.bMayReissue = Cfg.bMayReissue || Exchange.bRetryEligible;
 	Exchange.Timeout = Exchange.TimeoutOverride.Get(Cfg.Timeout);
 	Exchange.ActivityTimeout = Exchange.ActivityTimeoutOverride.Get(Cfg.ActivityTimeout);
 	Exchange.MaxJsonBytes = Exchange.MaxJsonBytesOverride.Get(Cfg.MaxJsonBytes);
@@ -793,7 +791,17 @@ void VaRest::Http::FClientState::OnChainDone(const FVaRestExchangeRef& Exchange,
 	}
 
 	Finish.bTimeDecode = FVaRestTrace::Detail() != EVaRestTraceDetail::None;
+	// Re-review N-6: a stage that waits (a backoff, a park) is ended here, as Complete ends it -- the decode task runs for
+	// a while before Complete, and a timer or a refresh's end in that window would start a network attempt for a request
+	// already being delivered. Taken before the phase moves; run after it, so a Canceled the hook sends back up the chain
+	// meets OnChainDone's guard (Phase != InChain) instead of counting as a second outcome.
+	TUniqueFunction<bool()> Wake = MoveTemp(Ex.Interrupt);
+	Ex.Interrupt.Reset();
 	Ex.Phase = EVaRestExchangePhase::Decoding;
+	if (Wake)
+	{
+		Wake();
+	}
 	// The handler goes with the task and comes back with the result: nothing else touches it meanwhile
 	TUniquePtr<IResultHandler> Handler = MoveTemp(Ex.Handler);
 	// The exchange travels as a TSharedPtr moved into the continuation, so the worker never drops the last reference
@@ -864,6 +872,15 @@ void VaRest::Http::FClientState::Complete(const FVaRestExchangeRef& Exchange, FF
 	}
 	Ex.bFinished = true;
 	Ex.Phase = EVaRestExchangePhase::Done;
+	if (Ex.Interrupt)
+	{
+		// Concurrency review M-3: something other than Cancel finished a request a stage holds waiting (a custom Outer stage
+		// in front of Retry answering by itself): the hook clears that stage's timer or park, and its Canceled lands on a
+		// finished request, which OnChainDone ignores
+		TUniqueFunction<bool()> Wake = MoveTemp(Ex.Interrupt);
+		Ex.Interrupt.Reset();
+		Wake();
+	}
 
 	const FClientConfig& Cfg = *Ex.Config;
 	Finish.Response.Elapsed = Cfg.Clock->Now() - Ex.StartedAt;
@@ -958,6 +975,18 @@ void VaRest::Http::FClientState::Cancel(const FVaRestExchangeRef& Exchange, EVaR
 		// The transport answers Canceled through the normal path, which releases what the attempt holds
 		Ex.TransportCall->Cancel();
 		return;
+	}
+	if (Ex.Interrupt)
+	{
+		// Plan decision 7: a stage holds it waiting (a backoff, a park behind a refresh); it answers Canceled through the
+		// chain, so every Outer stage gets its one outcome. Taken first: answering may let a stage set another.
+		TUniqueFunction<bool()> Wake = MoveTemp(Ex.Interrupt);
+		Ex.Interrupt.Reset();
+		if (Wake())
+		{
+			return;
+		}
+		// Concurrency review M-4: nothing answered (the stage's state is gone); finish it below, as for any other holder
 	}
 	// Held by a custom stage, or its answer is queued for the game thread: finish now; what arrives later is ignored
 	Complete(Exchange, MakeFinish(Ex));

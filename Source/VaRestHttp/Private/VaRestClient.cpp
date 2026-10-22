@@ -183,6 +183,7 @@ FVaRestRequestHandle VaRest::Http::FRequestSpecAccess::Send(TUniquePtr<FRequestS
 	Ex.MaxJsonBytesOverride = Spec->MaxJsonBytes;
 	Ex.Naming = Spec->Naming;
 	Ex.bStrictDecode = Spec->bStrictDecode;
+	Ex.RetryOverride = MoveTemp(Spec->Retry);
 	Ex.Owner = Spec->Owner;
 	Ex.bHasOwner = Spec->bHasOwner;
 	Ex.SourceFile = SourceFile;
@@ -368,6 +369,15 @@ FVaRestClient& FVaRestClient::WithRandomSeed(int32 Seed)
 	if (State.IsValid())
 	{
 		State->GetRandom().Initialize(Seed);
+	}
+	return *this;
+}
+
+FVaRestClient& FVaRestClient::WithRetry(const FVaRestRetryPolicy& Policy)
+{
+	if (State.IsValid())
+	{
+		State->EditConfig([&Policy](VaRest::Http::FClientConfig& Edited) { Edited.Retry = Policy; });
 	}
 	return *this;
 }

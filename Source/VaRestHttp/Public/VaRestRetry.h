@@ -24,7 +24,10 @@ struct VARESTHTTP_API FVaRestRetryPolicy
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VaRest|Http")
 	FVaRestBackoff Backoff;
 
-	/** The statuses retried (spec 4.1) */
+	/**
+	 * The statuses retried (spec 4.1). Only error statuses are read: a success (2xx) listed here has no effect, since a
+	 * success is never retried.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VaRest|Http")
 	TArray<int32> RetryStatuses = { 408, 425, 429, 500, 502, 503, 504 };
 

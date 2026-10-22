@@ -10,6 +10,7 @@
 #include "VaRestHttpTypes.h"
 #include "VaRestJsonConvert.h"
 #include "VaRestResultHandler.h"
+#include "VaRestRetry.h"
 #include "VaRestUrl.h"
 #include "VaRestStage.h"
 
@@ -73,6 +74,8 @@ namespace VaRest::Http
 		TOptional<int64> MaxJsonBytes;
 		EVaRestJsonNaming Naming = EVaRestJsonNaming::CamelCase;
 		bool bStrictDecode = false;
+		/** Retry() / NoRetry(); unset: the client's policy */
+		TOptional<FVaRestRetryPolicy> Retry;
 		/** The current body is a struct, encoded with Naming: Naming() now fails. A later Body() or BodyFile() clears it. */
 		bool bStructBodySet = false;
 		TUniquePtr<IResultHandler> Handler;
@@ -422,7 +425,31 @@ public:
 		return MoveTemp(*this);
 	}
 
-	/** Spec 3.2: weak. Once the owner is gone there are no callbacks and no further attempts. */
+	/**
+	 * Spec 4.1: this request's retry policy, replacing the client's (WithRetry). A request is retried only when it is
+	 * idempotent: GET, HEAD, OPTIONS, PUT or DELETE, or marked Idempotent(). A retry is a new attempt through the limiter,
+	 * behind whoever waits there (spec 4.6), on the request's clock; Cancel() and the owner's destruction stop it while it
+	 * waits.
+	 */
+	TVaRestRequest Retry(const FVaRestRetryPolicy& InPolicy) &&
+	{
+		Spec->Retry = InPolicy;
+		return MoveTemp(*this);
+	}
+
+	/** No retry for this request, whatever the client's policy */
+	TVaRestRequest NoRetry() &&
+	{
+		Spec->Retry = FVaRestRetryPolicy::Disabled();
+		return MoveTemp(*this);
+	}
+
+	/**
+	 * Spec 3.2: weak. Once the owner is gone there are no callbacks and no further attempts. An owner that goes while the
+	 * request waits -- backing off before a retry, or parked behind a session refresh (Task 17) -- is noticed when that
+	 * wait ends (the timer fires, the refresh finishes); until then the request keeps its callbacks, what they capture and
+	 * the client alive, and counts in GetInFlightCount(). Cancel() ends a wait at once.
+	 */
 	TVaRestRequest Owner(const UObject* InOwner) &&
 	{
 		Spec->Owner = InOwner;
@@ -545,6 +572,11 @@ public:
 	FVaRestClient& WithClock(TSharedRef<IVaRestClock, ESPMode::ThreadSafe> Clock);
 	/** Game thread: seeds the stream retry jitter draws from (plan decision 26), so a test knows each delay */
 	FVaRestClient& WithRandomSeed(int32 Seed);
+	/**
+	 * Spec 4.1: the retry policy of this client's requests (a request's Retry()/NoRetry() replaces it). Without one a client
+	 * does not retry (plan decision 1). Game thread; requests already sent keep the policy they started with.
+	 */
+	FVaRestClient& WithRetry(const FVaRestRetryPolicy& Policy);
 	/** The largest response body parsed as JSON (decision 20); 0 = none. Default: UVaRestHttpSettings::MaxJsonBytes (32 MiB). */
 	FVaRestClient& WithMaxJsonBytes(int64 Bytes);
 	/**

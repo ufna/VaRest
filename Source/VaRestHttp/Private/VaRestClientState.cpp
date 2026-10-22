@@ -6,6 +6,7 @@
 #include "Misc/ScopeLock.h"
 #include "Tasks/Task.h"
 #include "VaRestHttpTesting.h"
+#include "VaRestRetryInternal.h"
 #include "VaRestTracePoints.h"
 
 namespace VaRest::Http::ClientStatePrivate
@@ -173,6 +174,8 @@ void VaRest::Http::FClientState::Publish(const TSharedRef<FClientConfig, ESPMode
 			bReissue |= Entry.Key->MayReissue();
 		}
 	}
+	// Spec 4.1 and plan decision 2: retry is the first built-in Outer stage (M4b puts offline queue and cache in front of it)
+	NewChain->Add(MakeRetryStage());
 	NewChain->Add(MakeAttemptBoundaryStage());
 	// Ruling I-3 (spec 4.6 as amended): the first stage of every attempt. A custom PerAttempt stage's signature, the log
 	// lines and, once Task 14's AuthApply follows the limiter, an auth's credentials are written when the request leaves

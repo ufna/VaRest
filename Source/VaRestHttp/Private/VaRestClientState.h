@@ -9,6 +9,7 @@
 #include "VaRestExchangeState.h"
 #include "VaRestLimiter.h"
 #include "VaRestRedactor.h"
+#include "VaRestRetry.h"
 #include "VaRestStage.h"
 
 namespace VaRest::Http
@@ -26,6 +27,8 @@ namespace VaRest::Http
 		float Timeout = 0.f;
 		float ActivityTimeout = 0.f;
 		int64 MaxJsonBytes = 32 * 1024 * 1024;
+		/** Spec 4.1, WithRetry: none until set (plan decision 1); a request's Retry()/NoRetry() replaces it */
+		FVaRestRetryPolicy Retry = FVaRestRetryPolicy::Disabled();
 		/** The project's (UVaRestHttpSettings::RedactedKeys) and this client's additions (WithRedactedKeys) */
 		TArray<FString> RedactedKeys;
 		TArray<TPair<FVaRestStageRef, EVaRestStageSlot>> CustomStages;

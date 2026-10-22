@@ -165,6 +165,8 @@ void VaRest::Http::TracePoints::AttemptDispatched(const FExchangeState& Ex)
 	Payload.Attempt = Ex.Attempt;
 	Payload.AttemptStart = Ex.AttemptStartedAt;
 	Payload.LimiterWait = Ex.LimiterWait;
+	Payload.GapKind = Ex.NextGap;
+	Payload.GapSeconds = Ex.NextGapSeconds;
 	if (FVaRestTrace::Wants(EVaRestTraceDetail::Headers))
 	{
 		Payload.Headers = RedactorFor(Ex)->RedactHeaders(Ex.AttemptHeaders);
