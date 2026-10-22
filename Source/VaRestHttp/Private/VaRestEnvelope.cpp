@@ -79,7 +79,8 @@ TOptional<FString> FVaRestEnvelope::MatchText(const FVaRestJson& Value)
 		return FString(Value.AsBool() ? TEXT("true") : TEXT("false"));
 	case EVaRestJsonType::Number:
 	{
-		// Integral doubles convert too (VaRestJsonNode.h:108-157, NodeToInt64 and NodeToUInt64): 200, 200.0 and 2e2 all render "200"
+		// Integral doubles in [-2^63, 2^64) convert too (VaRestJsonNode.h:108-163, NodeToInt64 and NodeToUInt64): 200, 200.0
+		// and 2e2 all render "200"
 		if (const TOptional<int64> Signed = Value.TryGet<int64>())
 		{
 			return LexToString(Signed.GetValue());
@@ -88,13 +89,9 @@ TOptional<FString> FVaRestEnvelope::MatchText(const FVaRestJson& Value)
 		{
 			return LexToString(Unsigned.GetValue());
 		}
-		const double Number = Value.AsDouble();
-		if (FMath::IsFinite(Number) && FMath::TruncToDouble(Number) == Number)
-		{
-			// Integral past 64 bits: still no fraction and no exponent
-			return FString::Printf(TEXT("%.0f"), Number);
-		}
-		// Shortest round-trip text: the writer's (RapidJSON's Writer::Double, VaRestJsonSax.h:49)
+		// Any other number -- a fraction, or an integral double past 64 bits -- is the writer's shortest round-trip text
+		// (RapidJSON's Writer::Double, VaRestJsonSax.h:49): 1e300 is "1e300". Not %.0f (Task 10 review minor 1): that prints
+		// the double's exact binary expansion, 301 digits that no server and no SuccessValues entry ever spells.
 		return Value.ToString(EVaRestJsonFormat::Condensed);
 	}
 	default:
@@ -116,7 +113,16 @@ void FVaRestEnvelope::ReadErrorFields(const FVaRestJson& Body, FString& OutCode,
 {
 	using namespace VaRest::Http::EnvelopePrivate;
 	OutCode = ErrorCodePath.IsEmpty() ? FString() : Shown(FieldText(Body.Path(ErrorCodePath)));
-	OutMessage = ErrorMessagePath.IsEmpty() ? FString() : FieldText(Body.Path(ErrorMessagePath));
+	if (ErrorMessagePath.IsEmpty())
+	{
+		OutMessage.Reset();
+		return;
+	}
+	// A string (or a scalar) is the server's own user-facing text and stays whole; an object or an array is only a fallback
+	// rendering of what was there, capped like every shown value (Task 10 review minor 2)
+	const FVaRestJson Found = Body.Path(ErrorMessagePath);
+	TOptional<FString> Text = MatchText(Found);
+	OutMessage = Text.IsSet() ? MoveTemp(Text.GetValue()) : Shown(ValueText(Found));
 }
 
 FVaRestEnvelopeResult FVaRestEnvelope::Evaluate(const FVaRestJson& Body) const
@@ -134,7 +140,8 @@ FVaRestEnvelopeResult FVaRestEnvelope::Evaluate(const FVaRestJson& Body) const
 			Out.bSuccess = false;
 			Out.bDataFound = false;
 			Out.FailedPath = SuccessPath;
-			Out.Expected = FString::Join(SuccessValues, TEXT("|"));
+			// An empty allow-list allows nothing (Task 10 review minor 4): it says so, not "..., not )"
+			Out.Expected = SuccessValues.Num() > 0 ? FString::Join(SuccessValues, TEXT("|")) : FString(TEXT("(none)"));
 			// The body's own text for display (IN-5): what the server sent, not what was compared
 			Out.Actual = Found.IsValid() ? Shown(ValueText(Found)) : FString(TEXT("(missing)"));
 			ReadErrorFields(Body, Out.Code, Out.Message);

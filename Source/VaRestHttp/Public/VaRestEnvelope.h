@@ -35,8 +35,9 @@ struct VARESTHTTP_API FVaRestEnvelopeResult
  * (plan decision 27). Applied to FVaRestJson, struct and void results (plan decision 9); raw results get the body as it came.
  * Paths are FVaRestJson::Path's: "data", "result.items[0]", or a JSON pointer ("/a.b/c"). SuccessValues compare as text,
  * case-sensitive (ruling Q3; MatchText): a string by its content; true and false as "true" and "false"; an integral number
- * as its decimal with no fraction and no exponent (200, 200.0 and 2e2 are all "200"); any other number as its shortest
- * round-trip text ("1.5"); null, an object or an array never match. So {"200"} accepts 200 and "200", and {"true"}
+ * in [-2^63, 2^64) as its decimal with no fraction and no exponent (200, 200.0 and 2e2 are all "200"); any other number --
+ * a fraction, or an integral one past 64 bits -- as its shortest round-trip text ("1.5", "1e300"); null, an object or an
+ * array never match. So {"200"} accepts 200 and "200", and {"true"}
  * accepts true and "true": one envelope works for servers that send the same flag as a string or as a number.
  */
 USTRUCT(BlueprintType)
@@ -52,7 +53,10 @@ struct VARESTHTTP_API FVaRestEnvelope
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VaRest|Http")
 	FString SuccessPath;
 
-	/** SuccessPath's value must be one of these, as MatchText renders it ("true", "200", "OK"); a 2xx whose value is not is Kind=Server */
+	/**
+	 * SuccessPath's value must be one of these, as MatchText renders it ("true", "200", "OK"); a 2xx whose value is not is
+	 * Kind=Server. Empty with a SuccessPath allows nothing: every response fails.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VaRest|Http")
 	TArray<FString> SuccessValues;
 
@@ -79,7 +83,10 @@ struct VARESTHTTP_API FVaRestEnvelope
 	/** WebSocket spec 19 item 6: Body through this envelope. Any thread: it only reads Body (spec 2.2's thread contract). */
 	FVaRestEnvelopeResult Evaluate(const FVaRestJson& Body) const;
 
-	/** ErrorCodePath's and ErrorMessagePath's values in Body, as text; empty when absent */
+	/**
+	 * ErrorCodePath's and ErrorMessagePath's values in Body, as text (MatchText's, else condensed JSON); empty when absent.
+	 * A string message is kept whole; an object or an array is capped at 256 characters.
+	 */
 	void ReadErrorFields(const FVaRestJson& Body, FString& OutCode, FString& OutMessage) const;
 
 	/**

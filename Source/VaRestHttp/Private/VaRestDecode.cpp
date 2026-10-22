@@ -6,6 +6,8 @@
 #include "HAL/PlatformFileManager.h"
 #include "Misc/Guid.h"
 #include "Misc/Paths.h"
+#include "VaRestHttpLog.h"
+#include "VaRestHttpTesting.h"
 #include "VaRestJsonUtf8.h"
 
 namespace VaRest::Http::DecodePrivate
@@ -99,7 +101,96 @@ bool VaRest::Http::DecodeJson(FFinish& Finish, FVaRestJson& Out)
 		return false;
 	}
 	Out = Parsed.StealValue();
+	// Spec 3.4, plan decision 9: on this task, next to the parse, so the envelope costs no second parse
+	return ApplyEnvelope(Finish, Out);
+}
+
+bool VaRest::Http::ApplyEnvelope(FFinish& Finish, FVaRestJson& InOut)
+{
+	if (!Finish.Envelope.IsValid())
+	{
+		return true;
+	}
+	const FVaRestEnvelope& Applied = *Finish.Envelope;
+	const FVaRestEnvelopeResult Result = Applied.Evaluate(InOut);
+	// IN-11 (spec review M-14): the trace's strings are built only when the mask was set at the finish
+	if (Finish.bTimeDecode)
+	{
+		FVaRestTraceEnvelope& Trace = Finish.EnvelopeTrace;
+		Trace.bApplied = true;
+		Trace.DataPath = Applied.DataPath;
+		if (!Result.bSuccess)
+		{
+			Trace.PredicatePath = Result.FailedPath;
+			Trace.Expected = Result.Expected;
+			Trace.Actual = Result.Actual;
+			Trace.Code = Result.Code;
+			Trace.Message = Result.Message;
+		}
+	}
+	if (!Result.bSuccess)
+	{
+		// Spec 3.4: "A 2xx response whose predicate fails becomes Kind=Server" -- made here, after the retry stage decided on
+		// this attempt's status, so it is never retried (Error.bRetryable false)
+		Finish.Error = Result.ToError(InOut, Finish.Response.Status);
+		InOut = FVaRestJson();
+		return false;
+	}
+	if (!Result.bDataFound)
+	{
+		Finish.bEnvelopeDataMissing = true;
+		Finish.EnvelopeBody = InOut;
+	}
+	InOut = Result.Data;
 	return true;
+}
+
+void VaRest::Http::CheckEnvelopePredicate(FFinish& Finish)
+{
+	if (!Finish.Envelope.IsValid() || !Finish.Envelope->HasPredicate() || Finish.Body.Num() == 0 || Finish.Response.Status == 204 || Finish.bBodyInFile)
+	{
+		return;
+	}
+	const FString& ContentType = Finish.Response.ContentType;
+	if (!IsJsonContentType(ContentType) && !(ContentType.IsEmpty() && DecodePrivate::LooksLikeJson(Finish.Body)))
+	{
+		return;
+	}
+	// A void result decodes nothing: a broken body, or one over MaxJsonBytes (refused before parsing, as DecodeJson does), is
+	// no envelope failure -- but the predicate never ran, which the request's Basic line says (spec review M-13)
+	FString Unchecked;
+	const int64 Cap = Finish.ParseOptions.MaxInputBytes;
+	if (Cap > 0 && Finish.Body.Num() > Cap)
+	{
+		Unchecked = FString::Printf(TEXT("the body is %d bytes, over the MaxJsonBytes limit of %lld"), Finish.Body.Num(), Cap);
+	}
+	else
+	{
+#if !UE_BUILD_SHIPPING
+		// Concurrency review I-6: counted where the parse happens -- OnChainDone sends a void result with a predicate to a task
+		if (IsInGameThread())
+		{
+			++Testing::Counters().EnvelopeParsesOnGameThread;
+		}
+#endif
+		// A copy, not ParseOwned: the bytes stay whole for Response.Body (KeepBody(), or an error's diagnostics)
+		TValueOrError<FVaRestJson, FVaRestJsonError> Parsed = FVaRestJson::Parse(TConstArrayView<uint8>(Finish.Body), Finish.ParseOptions);
+		if (Parsed.HasValue())
+		{
+			FVaRestJson ParsedBody = Parsed.StealValue();
+			ApplyEnvelope(Finish, ParsedBody);
+			return;
+		}
+		// The parser's own text: a reason and a position, never the body's bytes (VaRestJsonReader.cpp:96-98, :108)
+		const FVaRestJsonError& JsonError = Parsed.GetError();
+		Unchecked = JsonError.Offset >= 0
+			? FString::Printf(TEXT("the body is not valid JSON: %s (byte %lld)"), *JsonError.Message, JsonError.Offset)
+			: FString::Printf(TEXT("the body is not valid JSON: %s"), *JsonError.Message);
+	}
+	if (Finish.LogLevel != EVaRestLogLevel::None && UE_LOG_ACTIVE(LogVaRestHttp, Warning))
+	{
+		UE_LOG(LogVaRestHttp, Warning, TEXT("#%llu VaRest: the envelope's predicate could not be checked (%s)"), Finish.Response.RequestId, *EscapeForLog(Unchecked));
+	}
 }
 
 bool VaRest::Http::DecodeStruct(FFinish& Finish, const UScriptStruct* Struct, void* Data)
@@ -111,6 +202,15 @@ bool VaRest::Http::DecodeStruct(FFinish& Finish, const UScriptStruct* Struct, vo
 	}
 	if (!Json.IsValid())
 	{
+		if (Finish.bEnvelopeDataMissing)
+		{
+			// Plan decision 9: a struct names the missing path instead of decoding to its defaults
+			Finish.Error.Kind = EVaRestErrorKind::Decode;
+			Finish.Error.Message = FString::Printf(TEXT("the envelope's data path \"%s\" is not in the response"), *Finish.Envelope->DataPath);
+			Finish.Error.Path = Finish.Envelope->DataPath;
+			Finish.Error.Body = Finish.EnvelopeBody;
+			return false;
+		}
 		return true; // 204 or empty: the struct keeps its defaults (spec 3.2)
 	}
 	FVaRestJsonDecodeReport Report;
@@ -149,6 +249,29 @@ void VaRest::Http::ProcessErrorBody(FFinish& Finish)
 		if (Parsed.HasValue())
 		{
 			Finish.Error.Body = Parsed.StealValue();
+		}
+	}
+	if (Finish.Envelope.IsValid() && Finish.Envelope->bParseErrorBodies && Finish.Error.Body.IsValid())
+	{
+		// Spec 3.4: "bParseErrorBodies (read message/code from 4xx/5xx bodies)"
+		FString Code;
+		FString Message;
+		Finish.Envelope->ReadErrorFields(Finish.Error.Body, Code, Message);
+		if (!Code.IsEmpty())
+		{
+			Finish.Error.Code = Code;
+		}
+		if (!Message.IsEmpty())
+		{
+			Finish.Error.Message = Message;
+		}
+		// IN-11 (spec review M-14): only when the trace mask was set at the finish
+		if (Finish.bTimeDecode)
+		{
+			Finish.EnvelopeTrace.bApplied = true;
+			Finish.EnvelopeTrace.DataPath = Finish.Envelope->DataPath;
+			Finish.EnvelopeTrace.Code = MoveTemp(Code);
+			Finish.EnvelopeTrace.Message = MoveTemp(Message);
 		}
 	}
 	if (!Finish.Error.Body.IsValid())

@@ -248,6 +248,11 @@ void VaRest::Http::TracePoints::Completed(const FExchangeState& Ex, const FFinis
 		Warning.Path = Redactor.ScrubText(Warnings[Index].Path);
 		Warning.Message = Redactor.ScrubText(Warnings[Index].Message);
 	}
+	// IN-5 Envelope; Actual, Code and Message are the server's text: scrubbed like every captured string (Inspector 2.2 layer 3)
+	Payload.Envelope = Finish.EnvelopeTrace;
+	Payload.Envelope.Actual = Redactor.ScrubText(Payload.Envelope.Actual);
+	Payload.Envelope.Code = Redactor.ScrubText(Payload.Envelope.Code);
+	Payload.Envelope.Message = Redactor.ScrubText(Payload.Envelope.Message);
 	FVaRestTrace::Emit(EVaRestTraceKind::Completed, Ex.Config->Clock->Now(), FVaRestTracePayload(TInPlaceType<FVaRestTraceCompleted>(), MoveTemp(Payload)));
 }
 

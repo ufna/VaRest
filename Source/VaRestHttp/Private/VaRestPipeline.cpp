@@ -600,6 +600,8 @@ VaRest::Http::FFinish VaRest::Http::FClientState::MakeFinish(const FExchangeStat
 	Finish.DecodeOptions = Exchange.DecodeOptions;
 	Finish.ParseOptions.MaxInputBytes = Exchange.MaxJsonBytes;
 	Finish.Clock = Exchange.Config->Clock;
+	Finish.Envelope = Exchange.Envelope;
+	Finish.LogLevel = Exchange.LogLevel;
 	return Finish;
 }
 
@@ -710,6 +712,20 @@ bool VaRest::Http::FClientState::Resolve(FExchangeState& Exchange, FString& OutE
 	// Plan decision 10: an absolute time on the request's clock; Enter stamped StartedAt before Resolve
 	const float Deadline = Exchange.RetryPolicy.Deadline;
 	Exchange.DeadlineAt = FMath::IsFinite(Deadline) && Deadline > 0.f ? Exchange.StartedAt + Deadline : 0.0;
+	// Spec 3.4: the request's own, else the client's; NoEnvelope() none. Once per logical request: only the final attempt is
+	// decoded (OnChainDone), so the envelope judges that one, after the retry stage has decided on every attempt's status.
+	if (Exchange.bNoEnvelope)
+	{
+		Exchange.Envelope.Reset();
+	}
+	else if (Exchange.EnvelopeOverride.IsSet())
+	{
+		Exchange.Envelope = MakeShared<const FVaRestEnvelope, ESPMode::ThreadSafe>(Exchange.EnvelopeOverride.GetValue());
+	}
+	else
+	{
+		Exchange.Envelope = Cfg.Envelope;
+	}
 	Exchange.Timeout = Exchange.TimeoutOverride.Get(Cfg.Timeout);
 	Exchange.ActivityTimeout = Exchange.ActivityTimeoutOverride.Get(Cfg.ActivityTimeout);
 	Exchange.MaxJsonBytes = Exchange.MaxJsonBytesOverride.Get(Cfg.MaxJsonBytes);
@@ -874,8 +890,10 @@ void VaRest::Http::FClientState::OnChainDone(const FVaRestExchangeRef& Exchange,
 	// A download to finish (SaveTo's success, from the transport or from a stage, review M1) or to clean up: disk IO, never
 	// on the game thread
 	const bool bDownload = !Finish.TempFile.IsEmpty() || (!Finish.SaveTo.IsEmpty() && !Finish.Error.IsError());
+	// Plan decision 9: a void result with a predicate is parsed too, on the task, never here (concurrency review I-6)
+	const bool bEnvelopeCheck = Finish.Envelope.IsValid() && Finish.Envelope->HasPredicate() && Ex.Handler->AppliesEnvelope() && !Finish.bBodyInFile;
 	const bool bTask = bDownload
-		|| (Finish.Error.IsError() ? Finish.Error.Kind == EVaRestErrorKind::Http && bHasBody : Ex.Handler->DecodesBody() && bHasBody);
+		|| (Finish.Error.IsError() ? Finish.Error.Kind == EVaRestErrorKind::Http && bHasBody : (Ex.Handler->DecodesBody() || bEnvelopeCheck) && bHasBody);
 	if (!bTask)
 	{
 		// Nothing to parse (no body, raw bytes, void): the game thread only moves things

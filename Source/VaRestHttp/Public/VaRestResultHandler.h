@@ -4,9 +4,11 @@
 
 #include "CoreMinimal.h"
 #include "VaRestClock.h"
+#include "VaRestEnvelope.h"
 #include "VaRestHttpTypes.h"
 #include "VaRestJson.h"
 #include "VaRestJsonConvert.h"
+#include "VaRestTrace.h"
 
 #include <type_traits>
 
@@ -33,6 +35,15 @@ namespace VaRest::Http
 		double DecodeStartAt = -1.0;
 		double DecodeEndAt = -1.0;
 		TSharedPtr<IVaRestClock, ESPMode::ThreadSafe> Clock;
+		/** Spec 3.4: applied on the decode task (plan decision 9); null = none */
+		TSharedPtr<const FVaRestEnvelope, ESPMode::ThreadSafe> Envelope;
+		/** IN-5: what the envelope did, for Completed (unscrubbed here; the trace point scrubs it). Filled only when bTimeDecode (IN-11). */
+		FVaRestTraceEnvelope EnvelopeTrace;
+		/** The envelope's DataPath named nothing: a struct result fails (plan decision 9) and keeps EnvelopeBody as its error body */
+		bool bEnvelopeDataMissing = false;
+		FVaRestJson EnvelopeBody;
+		/** The request's effective log level: the decode task's one line (a void predicate it could not check, spec review M-13) */
+		EVaRestLogLevel LogLevel = EVaRestLogLevel::None;
 	};
 
 	/** The typed half of a request: one result type's decode and callbacks (TResultHandler<T>) */
@@ -47,7 +58,13 @@ namespace VaRest::Http
 		virtual bool DecodesBody() const = 0;
 		/** The body is parsed as JSON (FVaRestJson, a struct): the transport applies MaxJsonBytes to it (reviews M-6, M13) */
 		virtual bool DecodesJson() const = 0;
-		/** A 2xx response into the typed value; a failure sets Finish.Error (Kind Decode). A background task when DecodesBody(), else the game thread. */
+		/** Spec 3.4 / plan decision 9: FVaRestJson and struct results unwrap; void ones check the predicate; raw ones are left alone */
+		virtual bool AppliesEnvelope() const = 0;
+		/**
+		 * A 2xx response into the typed value; a failure sets Finish.Error (Kind Decode, or Kind Server from the envelope). A
+		 * background task when DecodesBody(), or for a void result whose envelope has a predicate and a body to judge; else
+		 * the game thread.
+		 */
 		virtual void Decode(FFinish& Finish) = 0;
 		/** OnSuccess or OnError, then OnComplete. The game thread, or a background task with OnHttpThread(). */
 		virtual void Deliver(FFinish& Finish) = 0;
@@ -62,6 +79,13 @@ namespace VaRest::Http
 	 * in situ, zero-copy thanks to its slack (spec 2.1); KeepBody() copies it first. Background thread.
 	 */
 	VARESTHTTP_API bool DecodeJson(FFinish& Finish, FVaRestJson& Out);
+
+	/**
+	 * Plan decision 9: a void result's envelope predicate -- a JSON body (by type, or sniffed without one) is parsed (a copy;
+	 * void keeps no value) and a failed predicate sets a Kind=Server error. Nothing to judge without a predicate, without a
+	 * body, for 204, for a body in a SaveTo file, or for a body that is not JSON. Background thread.
+	 */
+	VARESTHTTP_API void CheckEnvelopePredicate(FFinish& Finish);
 
 	/**
 	 * DecodeJson, then FVaRestJsonConvert::JsonToStruct into Data, an initialised instance of Struct. Warnings land in
@@ -134,6 +158,11 @@ namespace VaRest::Http
 		virtual bool DecodesJson() const override
 		{
 			return DecodesBody() && !std::is_same_v<T, FString>;
+		}
+
+		virtual bool AppliesEnvelope() const override
+		{
+			return std::is_same_v<T, FVaRestJson> || bIsStruct;
 		}
 
 		virtual void Decode(FFinish& Finish) override
@@ -229,7 +258,19 @@ namespace VaRest::Http
 		virtual FName GetResultType() const override { return NAME_None; }
 		virtual bool DecodesBody() const override { return false; }
 		virtual bool DecodesJson() const override { return false; }
-		virtual void Decode(FFinish& Finish) override { ReleaseBody(Finish); }
+		virtual bool AppliesEnvelope() const override { return true; }
+
+		virtual void Decode(FFinish& Finish) override
+		{
+			CheckEnvelopePredicate(Finish);
+			if (Finish.Error.IsError())
+			{
+				// Spec 3.2: raw bytes "are kept on error for diagnostics"; the predicate parsed a copy, so they are whole
+				Finish.Response.Body = MoveTemp(Finish.Body);
+				return;
+			}
+			ReleaseBody(Finish);
+		}
 
 		virtual void Deliver(FFinish& Finish) override
 		{

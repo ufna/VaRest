@@ -7,6 +7,7 @@
 #include "Misc/SourceLocation.h"
 #include "UObject/WeakObjectPtr.h"
 #include "VaRestBody.h"
+#include "VaRestEnvelope.h"
 #include "VaRestHttpTypes.h"
 #include "VaRestJsonConvert.h"
 #include "VaRestResultHandler.h"
@@ -76,6 +77,10 @@ namespace VaRest::Http
 		bool bStrictDecode = false;
 		/** Retry() / NoRetry(); unset: the client's policy */
 		TOptional<FVaRestRetryPolicy> Retry;
+		/** Envelope(); unset with bNoEnvelope false: the client's */
+		TOptional<FVaRestEnvelope> Envelope;
+		/** NoEnvelope() */
+		bool bNoEnvelope = false;
 		/** The current body is a struct, encoded with Naming: Naming() now fails. A later Body() or BodyFile() clears it. */
 		bool bStructBodySet = false;
 		TUniquePtr<IResultHandler> Handler;
@@ -445,6 +450,26 @@ public:
 	}
 
 	/**
+	 * Spec 3.4: this request's envelope, replacing the client's (WithEnvelope). See FVaRestEnvelope for which results it
+	 * applies to. It judges the final attempt only: a retry is decided on each attempt's status first, so an envelope's
+	 * Kind=Server failure is never retried.
+	 */
+	TVaRestRequest Envelope(const FVaRestEnvelope& InEnvelope) &&
+	{
+		Spec->Envelope = InEnvelope;
+		Spec->bNoEnvelope = false;
+		return MoveTemp(*this);
+	}
+
+	/** The body as it comes, whatever the client's envelope */
+	TVaRestRequest NoEnvelope() &&
+	{
+		Spec->Envelope.Reset();
+		Spec->bNoEnvelope = true;
+		return MoveTemp(*this);
+	}
+
+	/**
 	 * Spec 3.2: weak. Once the owner is gone there are no callbacks and no further attempts. An owner that goes while the
 	 * request waits -- backing off before a retry, or parked behind a session refresh (Task 17) -- is noticed when that
 	 * wait ends (the timer fires, the refresh finishes); until then the request keeps its callbacks, what they capture and
@@ -577,6 +602,12 @@ public:
 	 * does not retry (plan decision 1). Game thread; requests already sent keep the policy they started with.
 	 */
 	FVaRestClient& WithRetry(const FVaRestRetryPolicy& Policy);
+	/**
+	 * Spec 3.4: the envelope of this client's responses (a request's Envelope() or NoEnvelope() replaces it). Game thread;
+	 * requests already sent keep the envelope they started with.
+	 */
+	FVaRestClient& WithEnvelope(const FVaRestEnvelope& InEnvelope);
+	FVaRestClient& WithoutEnvelope();
 	/** The largest response body parsed as JSON (decision 20); 0 = none. Default: UVaRestHttpSettings::MaxJsonBytes (32 MiB). */
 	FVaRestClient& WithMaxJsonBytes(int64 Bytes);
 	/**

@@ -7,6 +7,14 @@
 
 namespace VaRest::Http
 {
+	/**
+	 * Spec 3.4 on a parsed body (plan decision 9): InOut becomes the data, or the body stays in Finish.Error.Body and
+	 * Finish.Error is a Kind=Server failure (false; InOut is then invalid). A DataPath that names nothing leaves InOut
+	 * invalid and sets bEnvelopeDataMissing. Records EnvelopeTrace when bTimeDecode. True without an envelope. Background
+	 * thread.
+	 */
+	bool ApplyEnvelope(FFinish& Finish, FVaRestJson& InOut);
+
 	/** Spec 3.3: "RawBody | first 4 KiB of a non-JSON error body" */
 	inline constexpr int32 RawBodyCap = 4096;
 

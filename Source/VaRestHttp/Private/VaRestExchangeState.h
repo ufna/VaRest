@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "VaRestEnvelope.h"
 #include "VaRestRetry.h"
 #include "VaRestStage.h"
 
@@ -102,6 +103,14 @@ namespace VaRest::Http
 		/** Set by that timer before it takes the entry out of the queue: the abort answers Deadline, not Canceled */
 		bool bQueueDeadlinePassed = false;
 		int32 RetriesDone = 0;
+
+		// Envelope (Task 11):
+		/** The request's Envelope(), from Send */
+		TOptional<FVaRestEnvelope> EnvelopeOverride;
+		/** NoEnvelope(), from Send */
+		bool bNoEnvelope = false;
+		/** Spec 3.4, set by Resolve: the request's, else the client's; null with NoEnvelope() or none configured */
+		TSharedPtr<const FVaRestEnvelope, ESPMode::ThreadSafe> Envelope;
 
 		/**
 		 * Plan decision 7. Game thread. Set by a stage while it holds this exchange waiting (a backoff, a park behind a

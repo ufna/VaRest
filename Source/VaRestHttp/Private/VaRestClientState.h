@@ -6,6 +6,7 @@
 #include "Math/RandomStream.h"
 #include "Misc/ScopeRWLock.h"
 #include "VaRestClient.h"
+#include "VaRestEnvelope.h"
 #include "VaRestExchangeState.h"
 #include "VaRestLimiter.h"
 #include "VaRestRedactor.h"
@@ -29,6 +30,8 @@ namespace VaRest::Http
 		int64 MaxJsonBytes = 32 * 1024 * 1024;
 		/** Spec 4.1, WithRetry: none until set (plan decision 1); a request's Retry()/NoRetry() replaces it */
 		FVaRestRetryPolicy Retry = FVaRestRetryPolicy::Disabled();
+		/** Spec 3.4, WithEnvelope: null = none; a request's Envelope()/NoEnvelope() replaces it. Shared, immutable: decode tasks read it. */
+		TSharedPtr<const FVaRestEnvelope, ESPMode::ThreadSafe> Envelope;
 		/** The project's (UVaRestHttpSettings::RedactedKeys) and this client's additions (WithRedactedKeys) */
 		TArray<FString> RedactedKeys;
 		TArray<TPair<FVaRestStageRef, EVaRestStageSlot>> CustomStages;

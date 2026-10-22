@@ -266,7 +266,10 @@ struct FVaRestTraceDecodeWarning
 	FString Message;
 };
 
-/** M4 fills it */
+/**
+ * IN-5: what the response envelope did (spec 3.4). bApplied: one judged a 2xx body, or read a 4xx/5xx body's fields
+ * (bParseErrorBodies). The predicate's fields are set only when it failed; Actual, Code and Message are value-scrubbed.
+ */
 struct FVaRestTraceEnvelope
 {
 	bool bApplied = false;

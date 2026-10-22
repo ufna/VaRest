@@ -19,6 +19,8 @@ namespace VaRest::Http::Testing
 	{
 		std::atomic<int32> DecodesOnGameThread{ 0 };
 		std::atomic<int32> DecodesOffGameThread{ 0 };
+		/** CheckEnvelopePredicate's parses that ran on the game thread: a void result's predicate must parse on its task (plan decision 9) */
+		std::atomic<int32> EnvelopeParsesOnGameThread{ 0 };
 		/** ~FClientState off the game thread (review I-1: it must not happen) */
 		std::atomic<int32> ClientStatesDestroyedOffGameThread{ 0 };
 		/**

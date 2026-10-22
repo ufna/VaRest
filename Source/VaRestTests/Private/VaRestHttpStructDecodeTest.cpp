@@ -4,6 +4,7 @@
 
 #include "Misc/AutomationTest.h"
 #include "VaRestClient.h"
+#include "VaRestEnvelope.h"
 #include "VaRestHttpTestTypes.h"
 #include "VaRestHttpTesting.h"
 
@@ -96,6 +97,37 @@ bool FVaRestHttpEmptyBodiesTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("an empty 200 JSON body: success with an invalid handle"), JsonEmpty->SuccessCalls == 1 && JsonEmpty->Value.IsSet() && !JsonEmpty->Value->IsValid());
 	TestTrue(TEXT("an empty 200 struct body: success with the defaults"), StructEmpty->SuccessCalls == 1 && StructEmpty->Value.IsSet() && StructEmpty->Value->Score == 7);
 	TestTrue(TEXT("204: success with the defaults, whatever its body"), NoContent->SuccessCalls == 1 && NoContent->Value.IsSet() && NoContent->Value->Score == 7);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpEnvelopeStructTest, "VaRest.Http.Envelope.Struct",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpEnvelopeStructTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRestTestsStructDecodePrivate;
+	FTestRig Rig;
+	Rig.Client.WithEnvelope(FVaRestEnvelope::DataAt(TEXT("data")).SuccessWhen(TEXT("ok"), { TEXT("true") }));
+	Rig.Fake->Enqueue(Json(200, R"({"ok":true,"data":{"id":5,"name":"neo"}})"));
+	Rig.Fake->Enqueue(Json(200, R"({"ok":true})"));
+	auto Wrapped = MakeOutcome<FVaRestHttpTestProfile>();
+	auto Missing = MakeOutcome<FVaRestHttpTestProfile>();
+	Observe(Rig.Client.Get<FVaRestHttpTestProfile>(TEXT("/a")), Wrapped).Send();
+	Observe(Rig.Client.Get<FVaRestHttpTestProfile>(TEXT("/b")), Missing).Send();
+	if (!TestTrue(TEXT("both complete"), PumpUntil([Wrapped, Missing] { return Wrapped->IsDone() && Missing->IsDone(); })))
+	{
+		// Spec review M-5: drained before the early return
+		Rig.Client.CancelAll();
+		PumpUntil([&Rig] { return Rig.Client.GetInFlightCount() == 0; });
+		return false;
+	}
+	const FVaRestHttpTestProfile Unset;
+	TestTrue(TEXT("the struct decoded from the data"), Wrapped->SuccessCalls.load() == 1 && Wrapped->Value.Get(Unset).Id == 5);
+	// Plan decision 9: a struct names the missing path instead of decoding to its defaults
+	TestTrue(TEXT("no data for a struct: Kind Decode at the data path"), Missing->Error.Kind == EVaRestErrorKind::Decode && Missing->Error.Path == TEXT("data")
+		&& Missing->Error.Message.Contains(TEXT("\"data\"")));
+	TestTrue(TEXT("... with the body as the error body"), Missing->Error.Body.IsValid() && Missing->Error.Body.Get(TEXT("ok")).AsBool());
 	return true;
 }
 

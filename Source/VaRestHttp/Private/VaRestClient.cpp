@@ -184,6 +184,8 @@ FVaRestRequestHandle VaRest::Http::FRequestSpecAccess::Send(TUniquePtr<FRequestS
 	Ex.Naming = Spec->Naming;
 	Ex.bStrictDecode = Spec->bStrictDecode;
 	Ex.RetryOverride = MoveTemp(Spec->Retry);
+	Ex.EnvelopeOverride = MoveTemp(Spec->Envelope);
+	Ex.bNoEnvelope = Spec->bNoEnvelope;
 	Ex.Owner = Spec->Owner;
 	Ex.bHasOwner = Spec->bHasOwner;
 	Ex.SourceFile = SourceFile;
@@ -378,6 +380,26 @@ FVaRestClient& FVaRestClient::WithRetry(const FVaRestRetryPolicy& Policy)
 	if (State.IsValid())
 	{
 		State->EditConfig([&Policy](VaRest::Http::FClientConfig& Edited) { Edited.Retry = Policy; });
+	}
+	return *this;
+}
+
+FVaRestClient& FVaRestClient::WithEnvelope(const FVaRestEnvelope& InEnvelope)
+{
+	if (State.IsValid())
+	{
+		// One immutable copy, shared by every request that snapshots this configuration and read on their decode tasks
+		TSharedRef<const FVaRestEnvelope, ESPMode::ThreadSafe> Shared = MakeShared<const FVaRestEnvelope, ESPMode::ThreadSafe>(InEnvelope);
+		State->EditConfig([&Shared](VaRest::Http::FClientConfig& Edited) { Edited.Envelope = Shared; });
+	}
+	return *this;
+}
+
+FVaRestClient& FVaRestClient::WithoutEnvelope()
+{
+	if (State.IsValid())
+	{
+		State->EditConfig([](VaRest::Http::FClientConfig& Edited) { Edited.Envelope.Reset(); });
 	}
 	return *this;
 }
