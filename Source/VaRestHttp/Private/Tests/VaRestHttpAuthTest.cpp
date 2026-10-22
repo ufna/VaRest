@@ -2595,6 +2595,28 @@ bool FVaRestHttpAuthShutdownWaitersTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthShutdownRefusalTest, "VaRest.Http.Auth.RefreshAuthRefusalAtShutdown",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthShutdownRefusalTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// M4a final review B7 (review B m-7): RefreshAuth's own answer, when nothing can refresh the session, follows decision 2
+	// as the refresh's waiters do (ShutdownDropsRefreshWaiters): at engine exit OnDone is destroyed inside the call,
+	// uncalled, and no task is launched for it. CancelForShutdown() is process-wide: nothing else of VaRest runs here.
+	FTestRig Plain;
+	VaRest::Http::FClientState::CancelForShutdown();
+	ON_SCOPE_EXIT { VaRest::Http::FClientState::ResetShutdownInternal(); };
+	const FRefreshAnswers Answers = MakeAnswers();
+	const TSharedRef<int32, ESPMode::ThreadSafe> Held = MakeShared<int32, ESPMode::ThreadSafe>(0);
+	Plain.Client.RefreshAuth([Answers, Kept = Held](EVaRestAuthRefreshOutcome Outcome, EVaRestErrorKind FailedKind) { Answers->Emplace(Outcome, FailedKind); });
+	TestEqual(TEXT("decision 2: OnDone is gone when the call returns (only this test holds the probe)"), Held.GetSharedReferenceCount(), 1);
+	Plain.Drain();
+	TestEqual(TEXT("... and is never called"), Answers->Num(), 0);
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthInFlightEntryTest, "VaRest.Http.Auth.InFlightEntryIsTheExchange",
 	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
 

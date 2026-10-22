@@ -749,6 +749,13 @@ void FVaRestClient::RefreshAuth(TUniqueFunction<void(EVaRestAuthRefreshOutcome O
 		// that cannot refresh this session (no refresh token, a Bearer), is Unavailable: the 401 that asked is the answer, as
 		// the auth gate answers an HTTP 401 it cannot refresh (VaRestAuthGate.cpp:273-278) -- not Config, which would show a
 		// refused token as a typo (WebSocket spec 3.3).
+		if (VaRest::Http::FClientState::IsShuttingDown())
+		{
+			// M4a final review B7 (review B m-7): at engine exit no callback runs (decision 2), as the refresh's own waiters and
+			// the auth's answer are dropped then (VaRestSession.cpp:45-48, :103-107): OnDone goes here, uncalled, on the game
+			// thread, and nothing is launched into a task system that may be going
+			return;
+		}
 		const bool bMisconfigured = Auth.IsValid() && !Auth->GetConfigError().IsEmpty();
 		UE::Tasks::Launch(TEXT("VaRest.RefreshAuth"), [Answer = MoveTemp(OnDone), bMisconfigured]() mutable
 		{
