@@ -134,6 +134,15 @@ namespace VaRest::Http
 		 * credentials" replay compares it (Task 17). Not Generation: a session header must not use up the replay (M-6).
 		 */
 		uint32 AppliedCredentialGeneration = 0;
+		/**
+		 * IN-2: seconds this attempt waited behind a refresh inside it (a park before it started, its Inspector 3.3 Auth
+		 * phase), and that refresh's id (also for a replay, whose park is its Gap instead); the auth gate sets both for each
+		 * attempt it lets through, and the transport stage resets them after the dispatch
+		 */
+		double AuthWait = 0.0;
+		uint64 AuthRefreshId = 0;
+		/** Spec review I-1: when an attempt that has not started parked behind a refresh; the boundary starts it there. -1 = none. */
+		double PendingAttemptStart = -1.0;
 
 		/**
 		 * Plan decision 7. Game thread. Set by a stage while it holds this exchange waiting (a backoff, a park behind a

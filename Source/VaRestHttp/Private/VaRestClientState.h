@@ -138,8 +138,9 @@ namespace VaRest::Http
 		/** Logout: tokens, headers and the session's secret slots; OnSessionChanged(Cleared). Nothing happens to an empty session. */
 		void ClearSession();
 		/**
-		 * A rejected refresh (Task 16) or NotifySessionExpired: the tokens go, the headers stay; OnSessionExpired queued.
-		 * Once: a session with no token left queues nothing (concurrency review I-2).
+		 * NotifySessionExpired: the tokens go, the headers stay, a refresh in flight ends (Rejected); OnSessionExpired queued.
+		 * Once: a session with no token left and no refresh in flight queues nothing (concurrency review I-2). A rejected
+		 * refresh (FinishRefresh) expires through ExpireSessionNow instead (Task 16 review M-1).
 		 */
 		void ExpireSession(uint64 CauseRequestId, FStringView Why);
 		/** Spec 4.2: the session as JSON (Task 13). Game thread; not a change. */
@@ -224,6 +225,11 @@ namespace VaRest::Http
 		void StartRefresh(const TSharedRef<IVaRestAuth, ESPMode::ThreadSafe>& Auth);
 		/** Inside a change only: ends the refresh in flight without its result -- the game changed the session (Ready, Cleared) or it expired (Rejected) */
 		void EndRefresh(ERefreshEnd EndKind, const TCHAR* Message);
+		/**
+		 * Inside a change only: ExpireSession without its already-expired return -- FinishRefresh(Rejected)'s one expiry,
+		 * also for a session that had no token (an auth that refreshes from none; Task 16 review M-1)
+		 */
+		void ExpireSessionNow(uint64 CauseRequestId, FStringView Why);
 
 		const uint64 ClientId;
 		mutable FRWLock ConfigLock;

@@ -175,6 +175,9 @@ void VaRest::Http::TracePoints::AttemptDispatched(const FExchangeState& Ex)
 	Payload.LimiterWait = Ex.LimiterWait;
 	Payload.GapKind = Ex.NextGap;
 	Payload.GapSeconds = Ex.NextGapSeconds;
+	// Inspector 3.3 (spec review I-1): a park before the attempt is its Auth phase; a replay's park is its Gap instead
+	Payload.AuthWait = Ex.AuthWait;
+	Payload.AuthRefreshId = Ex.AuthRefreshId;
 	if (FVaRestTrace::Wants(EVaRestTraceDetail::Headers))
 	{
 		Payload.Headers = RedactorFor(Ex)->RedactHeaders(Ex.AttemptHeaders);

@@ -16,4 +16,7 @@ namespace VaRest::Http
 
 	/** Spec 4.2, per attempt: the first built-in PerAttempt stage, before the custom ones (they sign the final headers) */
 	FVaRestStageRef MakeAuthApplyStage();
+
+	/** Spec 4.2: the built-in Outer stage after retry -- parks, refreshes, replays once through the attempt boundary */
+	FVaRestStageRef MakeAuthGateStage();
 }

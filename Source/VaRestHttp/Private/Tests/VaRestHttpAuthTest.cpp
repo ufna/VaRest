@@ -205,11 +205,11 @@ namespace VaRest::Http::AuthTestPrivate
 			return true;
 		}
 
-		virtual bool CanRefresh(const FVaRestSessionData& Session) const override { return Session.HasRefreshToken(); }
+		virtual bool CanRefresh(const FVaRestSessionData& Session) const override { return bFromNothing || Session.HasRefreshToken(); }
 
 		virtual bool NeedsRefresh(const FVaRestSessionData& Session, double Now) const override
 		{
-			return Session.HasRefreshToken() && (!Session.HasAccessToken() || (Session.ExpiresAt > 0.0 && Now >= Session.ExpiresAt - 30.0));
+			return CanRefresh(Session) && (!Session.HasAccessToken() || (Session.ExpiresAt > 0.0 && Now >= Session.ExpiresAt - 30.0));
 		}
 
 		virtual void Refresh(const FVaRestAuthRefreshContext& Context, TUniqueFunction<void(FVaRestAuthRefreshResult&&)>&& Done) override
@@ -239,6 +239,8 @@ namespace VaRest::Http::AuthTestPrivate
 
 		int32 Refreshes = 0;
 		uint64 LastRefreshId = 0;
+		/** Task 16 review M-1: an auth that refreshes from no token at all (a platform ticket): CanRefresh is always true */
+		bool bFromNothing = false;
 
 	private:
 		TUniqueFunction<void(FVaRestAuthRefreshResult&&)> Pending;
@@ -288,6 +290,190 @@ namespace VaRest::Http::AuthTestPrivate
 	TUniqueFunction<void(EVaRestAuthRefreshOutcome, EVaRestErrorKind)> Record(const FRefreshAnswers& Into)
 	{
 		return [Into](EVaRestAuthRefreshOutcome Outcome, EVaRestErrorKind FailedKind) { Into->Emplace(Outcome, FailedKind); };
+	}
+
+	/**
+	 * As VaRest.Http.Retry.QueueDeadlineNotEarly's clock (Task 9 review minor 2): the real clock's core ticker counts
+	 * game-time deltas, which a fixed timestep can run faster than Now(), so its timers may fire early -- here at Ratio of
+	 * the delay, at least MinStep
+	 */
+	class FEarlyClock final : public IVaRestClock
+	{
+	public:
+		FEarlyClock(TSharedRef<FVaRestVirtualClock, ESPMode::ThreadSafe> InTime, double InRatio, double InMinStep)
+			: Time(MoveTemp(InTime))
+			, Ratio(InRatio)
+			, MinStep(InMinStep)
+		{
+		}
+
+		virtual double Now() const override { return Time->Now(); }
+		virtual FVaRestTimerHandle SetTimer(double DelaySeconds, TUniqueFunction<void()>&& Callback) override
+		{
+			return Time->SetTimer(FMath::Max(DelaySeconds * Ratio, MinStep), MoveTemp(Callback));
+		}
+		virtual void ClearTimer(FVaRestTimerHandle& Handle) override { Time->ClearTimer(Handle); }
+
+	private:
+		TSharedRef<FVaRestVirtualClock, ESPMode::ThreadSafe> Time;
+		double Ratio = 1.0;
+		double MinStep = 0.0;
+	};
+
+	/** A PerAttempt stage that remembers each exchange it sees, weakly (a strong one would hold the client: state -> chain -> stage) */
+	class FExchangeGrab final : public IVaRestStage
+	{
+	public:
+		virtual FName GetStageName() const override { return TEXT("ExchangeGrab"); }
+		virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) override
+		{
+			Seen.Add(Exchange);
+			Next.Proceed(Exchange, MoveTemp(OnOutcome));
+		}
+
+		TArray<TWeakPtr<FVaRestExchange, ESPMode::ThreadSafe>> Seen;
+	};
+
+	/** A PerAttempt stage that holds each attempt instead of sending it, until the test answers it (game thread, synchronously) */
+	class FHeldAttempt final : public IVaRestStage
+	{
+	public:
+		virtual FName GetStageName() const override { return TEXT("HeldAttempt"); }
+		virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) override
+		{
+			Held = MoveTemp(OnOutcome);
+		}
+
+		bool IsHolding() const { return static_cast<bool>(Held); }
+
+		void Answer(int32 Status)
+		{
+			if (Held)
+			{
+				FVaRestOutcomeCallback Done = MoveTemp(Held);
+				Held.Reset();
+				FVaRestAttemptOutcome Outcome;
+				Outcome.Status = Status;
+				Done(MoveTemp(Outcome));
+			}
+		}
+
+	private:
+		FVaRestOutcomeCallback Held;
+	};
+
+	/**
+	 * An Outer stage in front of Retry that can answer the request itself while its attempt is still out (a cache serving a
+	 * stored body): a JSON 200, which the pipeline then decodes on a task (Phase Decoding until that task comes back)
+	 */
+	class FEarlyAnswer final : public IVaRestStage
+	{
+	public:
+		virtual FName GetStageName() const override { return TEXT("EarlyAnswer"); }
+		virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) override
+		{
+			const TSharedRef<FVaRestOutcomeCallback, ESPMode::ThreadSafe> Shared = MakeShared<FVaRestOutcomeCallback, ESPMode::ThreadSafe>(MoveTemp(OnOutcome));
+			Up = Shared;
+			// The attempt's own outcome, after the early answer, goes nowhere: the stage answered once already
+			Next.Proceed(Exchange, [Shared](FVaRestAttemptOutcome&& Outcome)
+			{
+				if (*Shared)
+				{
+					FVaRestOutcomeCallback Last = MoveTemp(*Shared);
+					Shared->Reset();
+					Last(MoveTemp(Outcome));
+				}
+			});
+		}
+
+		void AnswerNow()
+		{
+			const TSharedPtr<FVaRestOutcomeCallback, ESPMode::ThreadSafe> Shared = Up.Pin();
+			if (Shared.IsValid() && *Shared)
+			{
+				FVaRestOutcomeCallback Last = MoveTemp(*Shared);
+				Shared->Reset();
+				FVaRestAttemptOutcome Stored;
+				Stored.Status = 200;
+				Stored.ContentType = TEXT("application/json");
+				Stored.Body.Append(reinterpret_cast<const uint8*>("{}"), 2);
+				Last(MoveTemp(Stored));
+			}
+		}
+
+	private:
+		TWeakPtr<FVaRestOutcomeCallback, ESPMode::ThreadSafe> Up;
+	};
+
+	/** A PerAttempt stage that answers the first attempt itself, before the transport stage (a 503), and sends the rest */
+	class FFirstAnswered final : public IVaRestStage
+	{
+	public:
+		virtual FName GetStageName() const override { return TEXT("FirstAnswered"); }
+		virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) override
+		{
+			if (++Attempts == 1)
+			{
+				FVaRestAttemptOutcome Busy;
+				Busy.Status = 503;
+				OnOutcome(MoveTemp(Busy));
+				return;
+			}
+			Next.Proceed(Exchange, MoveTemp(OnOutcome));
+		}
+
+		int32 Attempts = 0;
+	};
+
+	/**
+	 * A PerAttempt stage that breaks its contract (IVaRestStage::Process: "Call OnOutcome exactly once"): it answers each
+	 * attempt twice, inside Process, with Status (as VaRest.Http.Retry's FReportsTwice)
+	 */
+	class FReportsTwice final : public IVaRestStage
+	{
+	public:
+		explicit FReportsTwice(int32 InStatus)
+			: Status(InStatus)
+		{
+		}
+
+		virtual FName GetStageName() const override { return TEXT("ReportsTwice"); }
+		virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) override
+		{
+			++Attempts;
+			for (int32 Pass = 0; Pass < 2; ++Pass)
+			{
+				FVaRestAttemptOutcome Outcome;
+				Outcome.Status = Status;
+				OnOutcome(MoveTemp(Outcome));
+			}
+		}
+
+		int32 Attempts = 0;
+
+	private:
+		int32 Status = 0;
+	};
+
+	/**
+	 * As VaRest.Http.Auth.RefreshIdInUseEnsures: ensureAlways reports every time only while core.EnsureAlwaysEnabled is on
+	 * (AssertionMacros.cpp:136-140, :948) and every ensure is handled at HandleEnsurePercent 100
+	 * (GenericPlatformMisc.cpp:2058-2068, :2070-2094); under other settings the count is chance. False (and an Info) then.
+	 */
+	bool EnsuresReportEachTime(FAutomationTestBase& Test)
+	{
+		IConsoleVariable* Always = IConsoleManager::Get().FindConsoleVariable(TEXT("core.EnsureAlwaysEnabled"));
+		float Percent = 100.f;
+		if (!GConfig || !GConfig->GetFloat(TEXT("Core.System"), TEXT("HandleEnsurePercent"), Percent, GEngineIni))
+		{
+			FParse::Value(FCommandLine::Get(), TEXT("handleensurepercent="), Percent);
+		}
+		if (!Always || !Always->GetBool() || Percent < 100.f)
+		{
+			Test.AddInfo(TEXT("core.EnsureAlwaysEnabled is off or HandleEnsurePercent is below 100: ensureAlways does not report every failure here; nothing to check"));
+			return false;
+		}
+		return true;
 	}
 }
 
@@ -1425,6 +1611,988 @@ bool FVaRestHttpAuthRefreshIdInUseTest::RunTest(const FString& Parameters)
 #else
 	AddInfo(TEXT("ensures are compiled out: nothing to check"));
 #endif
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthSingleFlightTest, "VaRest.Http.Auth.SingleFlight",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthSingleFlightTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	FTestRig Rig;
+	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = HandRig(Rig);
+	FScopedTraceRecorder Scoped(EVaRestTraceDetail::Metadata);
+	TArray<TSharedRef<TTestOutcome<FVaRestJson>, ESPMode::ThreadSafe>> Outcomes;
+	TArray<uint64> Ids;
+	for (int32 Index = 0; Index < 20; ++Index)
+	{
+		Outcomes.Add(MakeOutcome<FVaRestJson>());
+		Ids.Add(Observe(Rig.Client.Get(FString::Printf(TEXT("/p/%d"), Index)), Outcomes.Last()).Send().GetId());
+	}
+	if (!TestTrue(TEXT("twenty 401s, one refresh"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 20; }) && Rig.Drain() && Auth->IsPending()))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	// Spec 4.2: "or start while it runs" -- these park before their first attempt
+	for (int32 Index = 0; Index < 2; ++Index)
+	{
+		Outcomes.Add(MakeOutcome<FVaRestJson>());
+		Ids.Add(Observe(Rig.Client.Get(FString::Printf(TEXT("/late/%d"), Index)), Outcomes.Last()).Send().GetId());
+	}
+	Rig.Drain();
+	TestEqual(TEXT("the late ones wait: no call yet"), Rig.Fake->NumCalls(), 20);
+	TestEqual(TEXT("one refresh for all of them"), Auth->Refreshes, 1);
+	Rig.Clock->Advance(0.25);
+	Auth->Answer(FVaRestAuthRefreshResult::Refreshed(TEXT("new-access-123456"), TEXT("new-refresh-123456")));
+	const auto AllDone = [&Outcomes] { for (const auto& One : Outcomes) { if (!One->IsDone()) { return false; } } return true; };
+	if (!TestTrue(TEXT("all complete"), PumpUntil(AllDone)))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	int32 Successes = 0;
+	for (int32 Index = 0; Index < Outcomes.Num(); ++Index)
+	{
+		Successes += Outcomes[Index]->SuccessCalls.load();
+		TestEqual(FString::Printf(TEXT("request %d: attempts"), Index), Outcomes[Index]->Response.Attempts, Index < 20 ? 2 : 1);
+	}
+	TestEqual(TEXT("all succeed"), Successes, 22);
+	TestEqual(TEXT("each 401 replayed once, each late one sent once"), Rig.Fake->NumCalls(), 42);
+	TestEqual(TEXT("still one refresh"), Auth->Refreshes, 1);
+	TestEqualSensitive(TEXT("the session holds the new tokens"), Rig.Client.GetSession().RefreshToken, FString(TEXT("new-refresh-123456")));
+
+	// IN-2: a replay's gap is the refresh; a late request's first attempt waited for it
+	const TArray<FVaRestTraceAttemptDispatched> Replayed = DispatchesOf(*Scoped.Recorder, Ids[0]);
+	const TArray<FVaRestTraceAttemptDispatched> Late = DispatchesOf(*Scoped.Recorder, Ids[20]);
+	if (!TestTrue(TEXT("two dispatches, then one"), Replayed.Num() == 2 && Late.Num() == 1))
+	{
+		return false;
+	}
+	// Spec review I-1 (Inspector 3.3): a replay's park is the Gap before it, outside its attempt -- no AuthWait; a park
+	// before the first attempt is inside it, which starts when it parked
+	TestTrue(TEXT("the replay: GapBefore SessionRefresh 0.25 s, no AuthWait, the refresh's id"), Replayed[1].GapKind == EVaRestTraceGap::SessionRefresh
+		&& FMath::IsNearlyEqual(Replayed[1].GapSeconds, 0.25) && Replayed[1].AuthWait == 0.0 && Replayed[1].AuthRefreshId == Auth->LastRefreshId);
+	TestTrue(TEXT("the late one: attempt 1 started when it parked, AuthWait 0.25 s, the same refresh"), Late[0].GapKind == EVaRestTraceGap::None
+		&& Late[0].AttemptStart == 0.0 && FMath::IsNearlyEqual(Late[0].AuthWait, 0.25) && Late[0].AuthRefreshId == Auth->LastRefreshId && Late[0].Attempt == 1);
+	const TArray<FVaRestTraceMarker> Markers = Scoped.Recorder->MarkersOf(Rig.Client.GetId());
+	TestTrue(TEXT("IN-9: SessionRefreshed, caused by one of the 401s"), Markers.ContainsByPredicate([&Ids](const FVaRestTraceMarker& Marker)
+	{
+		return Marker.Kind == EVaRestTraceMarkerKind::SessionRefreshed && Ids.Contains(Marker.CauseRequestId);
+	}));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthRejectedTest, "VaRest.Http.Auth.RefreshRejected",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthRejectedTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	FTestRig Rig;
+	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = HandRig(Rig);
+	TSharedRef<int32, ESPMode::ThreadSafe> Expired = MakeShared<int32, ESPMode::ThreadSafe>(0);
+	Rig.Client.OnSessionExpired().AddLambda([Expired] { ++*Expired; });
+	auto A = MakeOutcome<FVaRestJson>();
+	auto B = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/a")), A).Send();
+	Observe(Rig.Client.Get(TEXT("/b")), B).Send();
+	if (!TestTrue(TEXT("both parked"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 2; }) && Rig.Drain() && Auth->IsPending()))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Auth->Answer(FVaRestAuthRefreshResult::Rejected(TEXT("the refresh endpoint answered 400")));
+	if (!TestTrue(TEXT("both complete"), PumpUntil([A, B] { return A->IsDone() && B->IsDone(); })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	TestTrue(TEXT("spec 4.2: parked requests fail Kind Auth, not retryable"), A->Error.Kind == EVaRestErrorKind::Auth && B->Error.Kind == EVaRestErrorKind::Auth
+		&& !A->Error.bRetryable && A->Error.Message.Contains(TEXT("rejected")));
+	TestEqual(TEXT("... and the client fires OnSessionExpired once"), *Expired, 1);
+	TestTrue(TEXT("plan decision 3: a rejected refresh drops the tokens"), !Rig.Client.GetSession().HasAccessToken() && !Rig.Client.GetSession().HasRefreshToken());
+	auto After = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/c")), After).Send();
+	TestTrue(TEXT("the next request: no credentials, not sent"), Rig.Wait(After) && After->Error.Kind == EVaRestErrorKind::Auth && Rig.Fake->NumCalls() == 2);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthFailedTest, "VaRest.Http.Auth.RefreshFailedKeepsSession",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthFailedTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// Plan decision 3, rulings Q1 and I-7; spec review I-3 (Review Focus line 2): twenty requests park on their 401s, two
+	// more start while the refresh runs, and the refresh fails on the network -- one refresh, each request fails once,
+	// none replays, the player stays logged in
+	FTestRig Rig;
+	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = HandRig(Rig);
+	TSharedRef<int32, ESPMode::ThreadSafe> Expired = MakeShared<int32, ESPMode::ThreadSafe>(0);
+	Rig.Client.OnSessionExpired().AddLambda([Expired] { ++*Expired; });
+	TArray<TSharedRef<TTestOutcome<FVaRestJson>, ESPMode::ThreadSafe>> Outcomes;
+	for (int32 Index = 0; Index < 20; ++Index)
+	{
+		Outcomes.Add(MakeOutcome<FVaRestJson>());
+		Observe(Rig.Client.Get(FString::Printf(TEXT("/p/%d"), Index)), Outcomes.Last()).Send();
+	}
+	if (!TestTrue(TEXT("twenty 401s, one refresh"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 20; }) && Rig.Drain() && Auth->IsPending()))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	for (int32 Index = 0; Index < 2; ++Index)
+	{
+		Outcomes.Add(MakeOutcome<FVaRestJson>());
+		Observe(Rig.Client.Get(FString::Printf(TEXT("/late/%d"), Index)), Outcomes.Last()).Send();
+	}
+	Rig.Drain();
+	Auth->Answer(FVaRestAuthRefreshResult::Failed(EVaRestErrorKind::Connection, TEXT("the refresh endpoint did not answer")));
+	const auto AllDone = [&Outcomes] { for (const auto& One : Outcomes) { if (!One->IsDone()) { return false; } } return true; };
+	if (!TestTrue(TEXT("all complete"), PumpUntil(AllDone)))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Drain();
+	TestEqual(TEXT("one refresh"), Auth->Refreshes, 1);
+	bool bEachOnce = true;
+	for (const auto& One : Outcomes)
+	{
+		bEachOnce &= One->ErrorCalls.load() == 1 && One->CompleteCalls.load() == 1 && One->SuccessCalls.load() == 0
+			&& One->Error.Kind == EVaRestErrorKind::Connection && One->Error.bRetryable && One->Error.Message.Contains(TEXT("AuthRefreshFailed"));
+	}
+	TestTrue(TEXT("each fails once, as the refresh did: Connection, retryable, saying why"), bEachOnce);
+	TestEqual(TEXT("none replayed; the late ones were never sent"), Rig.Fake->NumCalls(), 20);
+	TestTrue(TEXT("the session is kept"), Rig.Client.GetSession().AccessToken == TEXT("old-access-123456") && Rig.Client.GetSession().HasRefreshToken());
+	TestEqual(TEXT("no OnSessionExpired"), *Expired, 0);
+
+	// Ruling I-7's row: a refresh the configuration refuses (HTTP disabled) keeps the session too, and is not retryable
+	auto Refused = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/c")), Refused).Send();
+	if (!TestTrue(TEXT("the next 401 starts a new refresh"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 21; }) && Rig.Drain() && Auth->Refreshes == 2))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Auth->Answer(FVaRestAuthRefreshResult::Failed(EVaRestErrorKind::Config, TEXT("HttpDisabled")));
+	TestTrue(TEXT("HTTP disabled: session kept, the parked request Kind Config, not retryable"), Rig.Wait(Refused) && Refused->Error.Kind == EVaRestErrorKind::Config
+		&& !Refused->Error.bRetryable && Rig.Client.GetSession().HasRefreshToken() && *Expired == 0);
+
+	auto B = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/b")), B).Send();
+	if (!TestTrue(TEXT("a third refresh"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 22; }) && Rig.Drain() && Auth->Refreshes == 3))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Auth->Answer(FVaRestAuthRefreshResult::Refreshed(TEXT("new-access-123456")));
+	TestTrue(TEXT("... which works"), Rig.Wait(B) && B->SuccessCalls.load() == 1);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthStopTest, "VaRest.Http.Auth.StopWhileParked",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthStopTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	FTestRig Rig;
+	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = HandRig(Rig);
+	// Concurrency review I-5: an Outer stage sees decision 7's one outcome per request; the waiter count shows LeaveRefresh
+	const TSharedRef<FOutcomeProbe, ESPMode::ThreadSafe> Probe = MakeShared<FOutcomeProbe, ESPMode::ThreadSafe>();
+	Rig.Client.Use(Probe, EVaRestStageSlot::Outer);
+	const TSharedPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> State = VaRest::Http::FClientAccess::State(Rig.Client);
+	UObject* Owner = NewObject<UVaRestHttpSettings>(GetTransientPackage(), NAME_None, RF_Transient);
+	auto Canceled = MakeOutcome<FVaRestJson>();
+	auto Owned = MakeOutcome<FVaRestJson>();
+	auto ShutDown = MakeOutcome<FVaRestJson>();
+	const FVaRestRequestHandle Handle = Observe(Rig.Client.Get(TEXT("/c")), Canceled).Send();
+	const FVaRestRequestHandle OwnedHandle = Observe(Rig.Client.Get(TEXT("/o")).Owner(Owner), Owned).Send();
+	const FVaRestRequestHandle ShutDownHandle = Observe(Rig.Client.Get(TEXT("/s")).Tag(TEXT("Exit")), ShutDown).Send();
+	if (!TestTrue(TEXT("all three parked"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 3; }) && Rig.Drain() && Auth->IsPending()
+		&& State->NumRefreshWaitersInternal() == 3))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Handle.Cancel();
+	// Inside Cancel(), before any pump: the park's interrupt left the refresh and answered through the chain (decision 7)
+	TestEqual(TEXT("Cancel() leaves the refresh: two waiters left"), State->NumRefreshWaitersInternal(), 2);
+	TestEqual(TEXT("... and the Outer stage got its one Canceled inside Cancel()"), Probe->Count(Handle.GetId(), EVaRestTransportFailure::Canceled), 1);
+	if (!TestTrue(TEXT("Cancel() ends the park"), PumpUntil([Canceled] { return Canceled->IsDone(); })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	TestTrue(TEXT("... one OnError(Canceled), one OnComplete"), Canceled->ErrorCalls.load() == 1 && Canceled->CompleteCalls.load() == 1
+		&& Canceled->Error.Kind == EVaRestErrorKind::Canceled);
+	VaRest::Http::FClientAccess::State(Rig.Client)->CancelAll(TEXT("Exit"), EVaRestCancelReason::Shutdown);
+	Owner->MarkAsGarbage();
+	Auth->Answer(FVaRestAuthRefreshResult::Refreshed(TEXT("new-access-123456")));
+	if (!TestTrue(TEXT("nothing left in flight"), PumpUntil([&Rig] { return Rig.Client.GetInFlightCount() == 0; })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Drain();
+	TestEqual(TEXT("no replay after any stop"), Rig.Fake->NumCalls(), 3);
+	TestEqual(TEXT("shutdown and owner gone: no callbacks"), ShutDown->CompleteCalls.load() + Owned->CompleteCalls.load() + ShutDown->ErrorCalls.load()
+		+ Owned->ErrorCalls.load(), 0);
+	TestEqualSensitive(TEXT("the refresh still updates the session"), Rig.Client.GetSession().AccessToken, FString(TEXT("new-access-123456")));
+	TestTrue(TEXT("each stop: one outcome for the Outer stage, a Canceled"), Probe->Total(Handle.GetId()) == 1 && Probe->Total(OwnedHandle.GetId()) == 1
+		&& Probe->Total(ShutDownHandle.GetId()) == 1 && Probe->Count(OwnedHandle.GetId(), EVaRestTransportFailure::Canceled) == 1
+		&& Probe->Count(ShutDownHandle.GetId(), EVaRestTransportFailure::Canceled) == 1);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthProactiveTest, "VaRest.Http.Auth.Proactive",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthProactiveTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	FTestRig Rig;
+	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = HandRig(Rig);
+	// Spec 4.2: "proactively 30 s before a known expiry"
+	Rig.Client.SetSession(TEXT("old-access-123456"), TEXT("old-refresh-123456"), 20.0);
+	TestTrue(TEXT("WS 19 item 2: NeedsAuthRefresh"), Rig.Client.NeedsAuthRefresh());
+	FScopedTraceRecorder Scoped(EVaRestTraceDetail::Metadata);
+	auto Outcome = MakeOutcome<FVaRestJson>();
+	const FVaRestRequestHandle Handle = Observe(Rig.Client.Get(TEXT("/p")), Outcome).Send();
+	Rig.Drain();
+	if (!TestTrue(TEXT("parked before its first attempt"), Rig.Fake->NumCalls() == 0 && Auth->IsPending()))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Clock->Advance(0.5);
+	Auth->Answer(FVaRestAuthRefreshResult::Refreshed(TEXT("new-access-123456"), FString(), 3600.0));
+	if (!TestTrue(TEXT("completes"), Rig.Wait(Outcome)))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	TestTrue(TEXT("one attempt, with the new token"), Outcome->SuccessCalls.load() == 1 && Outcome->Response.Attempts == 1 && Rig.Fake->NumCalls() == 1);
+	const TArray<FVaRestTraceAttemptDispatched> Dispatched = DispatchesOf(*Scoped.Recorder, Handle.GetId());
+	TestTrue(TEXT("IN-2: attempt 1 started at the park (spec review I-1), AuthWait 0.5 s, no gap"), Dispatched.Num() == 1 && Dispatched[0].AttemptStart == 0.0
+		&& FMath::IsNearlyEqual(Dispatched[0].AuthWait, 0.5) && Dispatched[0].GapKind == EVaRestTraceGap::None);
+	TestFalse(TEXT("an hour left: no refresh due"), Rig.Client.NeedsAuthRefresh());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthReplayOnceTest, "VaRest.Http.Auth.ReplayOnce",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthReplayOnceTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	FTestRig Rig;
+	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = HandRig(Rig);
+	AcceptTokens(Rig, {});
+	auto Outcome = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/never")), Outcome).Send();
+	if (!TestTrue(TEXT("parked"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 1; }) && Rig.Drain() && Auth->IsPending()))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Auth->Answer(FVaRestAuthRefreshResult::Refreshed(TEXT("new-access-123456")));
+	if (!TestTrue(TEXT("completes"), Rig.Wait(Outcome)))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	TestTrue(TEXT("spec 4.2 \"replay once\": the second 401 is the answer"), Outcome->Error.Kind == EVaRestErrorKind::Http && Outcome->Error.HttpStatus == 401
+		&& Outcome->Response.Attempts == 2);
+	TestEqual(TEXT("... no second refresh"), Auth->Refreshes, 1);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthGameChangesTest, "VaRest.Http.Auth.GameChangesWhileRefreshing",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthGameChangesTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	FTestRig Rig;
+	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = HandRig(Rig);
+	AcceptTokens(Rig, { TEXT("game-access-123456"), TEXT("new-access-123456") });
+	const auto ParkOne = [&Rig, &Auth](const TCHAR* Path, const TSharedRef<TTestOutcome<FVaRestJson>, ESPMode::ThreadSafe>& Outcome)
+	{
+		const int32 Before = Rig.Fake->NumCalls();
+		Observe(Rig.Client.Get(Path), Outcome).Send();
+		return PumpUntil([&Rig, Before] { return Rig.Fake->NumCalls() == Before + 1; }) && Rig.Drain() && Auth->IsPending();
+	};
+	// A login by the game while a refresh runs: the parked request goes with the game's token; the refresh's late answer is dropped
+	auto A = MakeOutcome<FVaRestJson>();
+	if (!TestTrue(TEXT("A parked"), ParkOne(TEXT("/a"), A)))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	const int32 BeforeLogin = Rig.Fake->NumCalls();
+	Rig.Client.SetBearerToken(TEXT("game-access-123456"));
+	// Concurrency review I-1: the waiters resume from a later game-thread task, so nothing is dispatched inside the call
+	TestEqual(TEXT("decision 3: A's replay is not dispatched inside SetBearerToken()"), Rig.Fake->NumCalls(), BeforeLogin);
+	TestTrue(TEXT("A replays with the game's token"), Rig.Wait(A) && A->SuccessCalls.load() == 1);
+	Auth->Answer(FVaRestAuthRefreshResult::Refreshed(TEXT("new-access-123456")));
+	// Re-review N-3: Done's answer is applied from a later game-thread task (FRefreshDoneGuard): let it land first
+	Rig.Drain();
+	TestEqualSensitive(TEXT("the late refresh changes nothing"), Rig.Client.GetSession().AccessToken, FString(TEXT("game-access-123456")));
+
+	// A logout while a refresh runs: Kind Auth, SessionCleared
+	AcceptTokens(Rig, {});
+	auto B = MakeOutcome<FVaRestJson>();
+	if (!TestTrue(TEXT("B parked"), ParkOne(TEXT("/b"), B)))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Client.ClearSession();
+	TestFalse(TEXT("decision 3: B's callbacks do not run inside ClearSession()"), B->IsDone());
+	TestTrue(TEXT("B fails Kind Auth, the session cleared"), Rig.Wait(B) && B->Error.Kind == EVaRestErrorKind::Auth && B->Error.Message.Contains(TEXT("SessionCleared")));
+
+	// A socket's NotifySessionExpired while a refresh runs: Kind Auth, rejected
+	Rig.Client.SetSession(TEXT("old-access-123456"), TEXT("old-refresh-123456"));
+	auto C = MakeOutcome<FVaRestJson>();
+	if (!TestTrue(TEXT("C parked"), ParkOne(TEXT("/c"), C)))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Client.NotifySessionExpired();
+	TestFalse(TEXT("... nor C's inside NotifySessionExpired()"), C->IsDone());
+	TestTrue(TEXT("C fails Kind Auth"), Rig.Wait(C) && C->Error.Kind == EVaRestErrorKind::Auth && C->Error.Message.Contains(TEXT("AuthRejected")));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthExpiredOnceTest, "VaRest.Http.Auth.ExpiredOnce",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthExpiredOnceTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// Concurrency review I-2: a parked request's OnError calls NotifySessionExpired -- the documented call for a terminal
+	// auth failure -- after its refresh was rejected, which already expired the session: one expiry, one OnSessionExpired
+	FTestRig Rig;
+	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = HandRig(Rig);
+	TSharedRef<int32, ESPMode::ThreadSafe> Expired = MakeShared<int32, ESPMode::ThreadSafe>(0);
+	Rig.Client.OnSessionExpired().AddLambda([Expired] { ++*Expired; });
+	const TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> AuthErrors = MakeShared<std::atomic<int32>, ESPMode::ThreadSafe>(0);
+	auto Parked = MakeOutcome<FVaRestJson>();
+	// After Observe: this OnError replaces its recorder; OnComplete still records
+	Observe(Rig.Client.Get(TEXT("/a")), Parked).OnError([AuthErrors, Notifier = Rig.Client](const FVaRestError& Error) mutable
+	{
+		*AuthErrors += Error.Kind == EVaRestErrorKind::Auth ? 1 : 0;
+		Notifier.NotifySessionExpired();
+	}).Send();
+	if (!TestTrue(TEXT("parked"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 1; }) && Rig.Drain() && Auth->IsPending()))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Auth->Answer(FVaRestAuthRefreshResult::Rejected(TEXT("the refresh endpoint answered 400")));
+	if (!TestTrue(TEXT("completes"), Rig.Wait(Parked)))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Drain();
+	TestEqual(TEXT("the request failed Kind Auth"), AuthErrors->load(), 1);
+	TestEqual(TEXT("one expiry, one OnSessionExpired"), *Expired, 1);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthDroppedTest, "VaRest.Http.Auth.RefreshDropped",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthDroppedTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// Concurrency review I-4: an auth drops its Done uncalled; the parked request still ends (Connection, retryable: no
+	// logout), and the next 401 refreshes again
+	FTestRig Rig;
+	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = HandRig(Rig);
+	const TSharedPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> State = VaRest::Http::FClientAccess::State(Rig.Client);
+	auto Parked = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/a")), Parked).Send();
+	if (!TestTrue(TEXT("parked"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 1; }) && Rig.Drain() && Auth->IsPending()))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Auth->Drop();
+	if (!TestTrue(TEXT("the parked request ends"), Rig.Wait(Parked)))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	TestTrue(TEXT("... Connection, retryable"), Parked->Error.Kind == EVaRestErrorKind::Connection && Parked->Error.bRetryable);
+	TestTrue(TEXT("no refresh left running, none due, the session kept"), !State->IsRefreshing() && !Rig.Client.NeedsAuthRefresh()
+		&& Rig.Client.GetSession().HasRefreshToken());
+	auto Next = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/b")), Next).Send();
+	if (!TestTrue(TEXT("a new 401 starts a second refresh"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 2; }) && Rig.Drain() && Auth->Refreshes == 2))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Auth->Answer(FVaRestAuthRefreshResult::Refreshed(TEXT("new-access-123456")));
+	TestTrue(TEXT("... which works"), Rig.Wait(Next) && Next->SuccessCalls.load() == 1);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthDropsClientParkedTest, "VaRest.Http.Auth.HandlerDropsClientWhileParked",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthDropsClientParkedTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// Concurrency review C-1, its parked half: a parked request's OnError drops the last client during a logout. With
+	// I-1 the callback runs from a later game-thread task, not inside ClearSession; that task holds the exchange, and so
+	// the state, while it runs.
+	FTestRig Rig;
+	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = HandRig(Rig);
+	AcceptTokens(Rig, {});
+	const TSharedRef<FVaRestClient, ESPMode::ThreadSafe> Holder = MakeShared<FVaRestClient, ESPMode::ThreadSafe>(Rig.Client);
+	Rig.Client = FVaRestClient(); // the holder is the only handle now
+	const TWeakPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> Weak = VaRest::Http::FClientAccess::State(*Holder);
+	const TSharedRef<TArray<bool>, ESPMode::ThreadSafe> Alive = MakeShared<TArray<bool>, ESPMode::ThreadSafe>();
+	auto Parked = MakeOutcome<FVaRestJson>();
+	Observe(Holder->Get(TEXT("/b")), Parked).OnError([Holder, Weak, Alive](const FVaRestError&)
+	{
+		const TSharedRef<FVaRestClient, ESPMode::ThreadSafe> Owner = Holder;
+		const TWeakPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> Watched = Weak;
+		const TSharedRef<TArray<bool>, ESPMode::ThreadSafe> Into = Alive;
+		*Owner = FVaRestClient();
+		Into->Add(Watched.IsValid());
+	}).Send();
+	if (!TestTrue(TEXT("parked"), PumpUntil([&Rig, &Auth] { return Rig.Fake->NumCalls() == 1 && Auth->IsPending(); })))
+	{
+		Holder->CancelAll();
+		PumpUntil([Parked] { return Parked->IsDone(); });
+		return false;
+	}
+	Holder->ClearSession();
+	TestEqual(TEXT("concurrency review I-1: the callback does not run inside ClearSession()"), Alive->Num(), 0);
+	TestTrue(TEXT("it runs later, the state alive inside it"), PumpUntil([Alive] { return Alive->Num() == 1; }) && (*Alive)[0]);
+	TestTrue(TEXT("... and the state goes once the request is done"), PumpUntil([Weak] { return !Weak.IsValid(); }));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthParkDeadlineTest, "VaRest.Http.Auth.ParkEndsAtItsDeadline",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthParkDeadlineTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// Concurrency review M-1: a park is bounded by the request's retry deadline. Behind a refresh the auth holds open (a
+	// re-login screen, ruling I-4) the request ends at its deadline -- Timeout (Deadline), not retryable -- and leaves the
+	// refresh, which runs on and replays nothing for it. On a clock whose timers fire early (half the delay, at least
+	// 0.1 s) the park's timer re-arms for the rest, as the queue's does (Task 9 review minor 2): it fires at 0.5, 0.75,
+	// 0.875 and 0.975 s before the 1 s deadline on Now(), and only the one at 1.075 s ends the park.
+	FTestRig Rig;
+	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = HandRig(Rig);
+	Rig.Client.WithClock(MakeShared<FEarlyClock, ESPMode::ThreadSafe>(Rig.Clock, 0.5, 0.1));
+	const TSharedRef<FOutcomeProbe, ESPMode::ThreadSafe> Probe = MakeShared<FOutcomeProbe, ESPMode::ThreadSafe>();
+	Rig.Client.Use(Probe, EVaRestStageSlot::Outer);
+	const TSharedPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> State = VaRest::Http::FClientAccess::State(Rig.Client);
+	auto Parked = MakeOutcome<FVaRestJson>();
+	// Disabled, so nothing is retried: the deadline alone (plan decision 10: set for any policy with one)
+	const FVaRestRequestHandle Handle = Observe(Rig.Client.Get(TEXT("/a")).Retry(FVaRestRetryPolicy::Disabled().WithDeadline(1.f)), Parked).Send();
+	if (!TestTrue(TEXT("parked on its 401"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 1; }) && Rig.Drain() && Auth->IsPending()
+		&& State->NumRefreshWaitersInternal() == 1))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Clock->Advance(0.9);
+	Rig.Drain();
+	TestFalse(TEXT("early fires do not end the park: still parked at 0.9 s"), Parked->IsDone());
+	TestEqual(TEXT("... still waiting on the refresh"), State->NumRefreshWaitersInternal(), 1);
+	Rig.Clock->Advance(0.3);
+	if (!TestTrue(TEXT("past the deadline on Now(), the park ends"), PumpUntil([Parked] { return Parked->IsDone(); })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	TestTrue(TEXT("... as Timeout, not retryable, saying Deadline"), Parked->Error.Kind == EVaRestErrorKind::Timeout && !Parked->Error.bRetryable
+		&& Parked->Error.Message.Contains(TEXT("Deadline")));
+	TestTrue(TEXT("... once: one OnError, one OnComplete, one outcome for the Outer stage"), Parked->ErrorCalls.load() == 1 && Parked->CompleteCalls.load() == 1
+		&& Probe->Total(Handle.GetId()) == 1);
+	TestEqual(TEXT("it left the refresh"), State->NumRefreshWaitersInternal(), 0);
+	TestTrue(TEXT("... which runs on"), State->IsRefreshing() && Auth->IsPending());
+	TestEqual(TEXT("nothing left armed"), Rig.Clock->NumPendingTimers(), 0);
+	Auth->Answer(FVaRestAuthRefreshResult::Refreshed(TEXT("new-access-123456")));
+	Rig.Drain();
+	TestEqual(TEXT("the refresh's end replays nothing for it"), Rig.Fake->NumCalls(), 1);
+	TestEqual(TEXT("... and delivers nothing more"), Parked->CompleteCalls.load(), 1);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthParkHoldsNoSlotTest, "VaRest.Http.Auth.ParkHoldsNoSlot",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthParkHoldsNoSlotTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// Task 4: an attempt holds its limiter slot until it answers. The gate is an Outer stage, before the attempt boundary and
+	// the limiter, so a parked request holds none: with one slot, two requests park on their 401s (the second was granted the
+	// slot the first freed) and a NoAuth() request, which the gate passes, still goes out at once
+	FTestRig Rig;
+	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = HandRig(Rig);
+	Rig.Client.WithMaxConcurrent(1);
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest& Request)
+	{
+		return Request.Url.EndsWith(TEXT("/free")) || Request.Headers.Get(TEXT("Authorization")) == TEXT("Bearer new-access-123456") ? Json(200) : Json(401);
+	});
+	const TSharedPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> State = VaRest::Http::FClientAccess::State(Rig.Client);
+	VaRest::Http::FLimiter& Limiter = State->GetLimiter();
+	auto A = MakeOutcome<FVaRestJson>();
+	auto B = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/a")), A).Send();
+	Observe(Rig.Client.Get(TEXT("/b")), B).Send();
+	if (!TestTrue(TEXT("both parked, one after the other through the one slot"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 2; }) && Rig.Drain()
+		&& Auth->IsPending() && State->NumRefreshWaitersInternal() == 2))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	TestTrue(TEXT("parked: no slot held, nothing queued"), Limiter.NumActive() == 0 && Limiter.NumQueued() == 0);
+	auto Free = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/free")).NoAuth(), Free).Send();
+	TestTrue(TEXT("a NoAuth() request takes the slot at once and completes"), Rig.Wait(Free) && Free->SuccessCalls.load() == 1);
+	Auth->Answer(FVaRestAuthRefreshResult::Refreshed(TEXT("new-access-123456")));
+	if (!TestTrue(TEXT("both replay and complete"), PumpUntil([A, B] { return A->IsDone() && B->IsDone(); })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	TestTrue(TEXT("... with the new token"), A->SuccessCalls.load() == 1 && B->SuccessCalls.load() == 1 && Rig.Fake->NumCalls() == 5);
+	Rig.Drain();
+	TestTrue(TEXT("the books are empty"), Limiter.NumActive() == 0 && Limiter.NumQueued() == 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthReplayBodyTest, "VaRest.Http.Auth.ReplaySendsTheBodyAgain",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthReplayBodyTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// Plan decision 8: a body is moved into the engine unless something may send it again. A POST is not retried (spec 4.1),
+	// but an auth that can refresh may replay it, so Resolve copies its body and the replay sends the same bytes
+	FTestRig Rig;
+	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = HandRig(Rig);
+	auto Posted = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Post(TEXT("/p")).Body(TEXT("{\"name\":\"value\"}")), Posted).Send();
+	if (!TestTrue(TEXT("the POST parked on its 401"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 1; }) && Rig.Drain() && Auth->IsPending()))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Auth->Answer(FVaRestAuthRefreshResult::Refreshed(TEXT("new-access-123456")));
+	if (!TestTrue(TEXT("replayed once, and it succeeds"), Rig.Wait(Posted) && Posted->SuccessCalls.load() == 1 && Rig.Fake->NumCalls() == 2))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	const TArray<uint8> First = Rig.Fake->ReadBody(0);
+	const TArray<uint8> Replayed = Rig.Fake->ReadBody(1);
+	TestTrue(TEXT("the replay sent the same body"), First.Num() > 0 && First == Replayed);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthNoParkAfterAnswerTest, "VaRest.Http.Auth.NoParkAfterTheAnswer",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthNoParkAfterAnswerTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// Re-review N-6's family (Task 8 re-review), for the gate: a custom Outer stage in front answers the request while its
+	// attempt is still out, and the pipeline accepts that answer (Phase Decoding: OnChainDone already ran EndWaits). The
+	// attempt's own 401 then comes back: the gate answers it up, as Retry does (VaRestRetry.cpp:176), instead of parking
+	// -- a park now would start a refresh for a request already being delivered, and nothing would end its wait
+	FTestRig Rig;
+	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = HandRig(Rig);
+	const TSharedRef<FEarlyAnswer, ESPMode::ThreadSafe> Early = MakeShared<FEarlyAnswer, ESPMode::ThreadSafe>();
+	const TSharedRef<FHeldAttempt, ESPMode::ThreadSafe> Held = MakeShared<FHeldAttempt, ESPMode::ThreadSafe>();
+	Rig.Client.Use(Early, EVaRestStageSlot::Outer).Use(Held, EVaRestStageSlot::PerAttempt);
+	auto Outcome = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/a")), Outcome).Send();
+	if (!TestTrue(TEXT("the attempt is out"), PumpUntil([Held] { return Held->IsHolding(); })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	// Synchronously, before any pump: the decode task's result comes back only through a game-thread task
+	Early->AnswerNow();
+	Held->Answer(401);
+	TestEqual(TEXT("the late 401 after an accepted answer starts no refresh"), Auth->Refreshes, 0);
+	if (!TestTrue(TEXT("the early answer is delivered"), Rig.Wait(Outcome) && Outcome->SuccessCalls.load() == 1))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Drain();
+	TestTrue(TEXT("... once, and no refresh runs"), Outcome->CompleteCalls.load() == 1 && Auth->Refreshes == 0 && !Auth->IsPending());
+	// Drains a refresh the bug would have left (restore-the-bug only)
+	Auth->Answer(FVaRestAuthRefreshResult::Refreshed(TEXT("new-access-123456")));
+	Rig.Drain();
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthReportsTwiceTest, "VaRest.Http.Auth.AttemptReportedTwice",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthReportsTwiceTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// As Retry's StartAttempt (Task 8 re-review, out of scope 2): a PerAttempt stage that reports an attempt twice (review
+	// C-3: the second report is ignored) must not answer a request the first report parked. The limiter passes every report
+	// up (only its Release is once-only), so the gate takes one per attempt itself.
+	FTestRig Rig;
+	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = HandRig(Rig);
+	const TSharedRef<FReportsTwice, ESPMode::ThreadSafe> Twice = MakeShared<FReportsTwice, ESPMode::ThreadSafe>(401);
+	Rig.Client.Use(Twice, EVaRestStageSlot::PerAttempt);
+	auto Outcome = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/a")), Outcome).Send();
+	Rig.Drain();
+	if (!TestTrue(TEXT("the first report parked it; the second did not answer it"), Twice->Attempts == 1 && Auth->IsPending() && !Outcome->IsDone()))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Auth->Answer(FVaRestAuthRefreshResult::Refreshed(TEXT("new-access-123456")));
+	if (!TestTrue(TEXT("replayed once: the 401 of attempt 2 is the answer"), Rig.Wait(Outcome) && Twice->Attempts == 2 && Outcome->Error.HttpStatus == 401
+		&& Outcome->Response.Attempts == 2))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Drain();
+	TestTrue(TEXT("... once, after one refresh"), Outcome->ErrorCalls.load() == 1 && Outcome->CompleteCalls.load() == 1 && Auth->Refreshes == 1);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthRejectedFromNothingTest, "VaRest.Http.Auth.RejectedFromNothingExpiresOnce",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthRejectedFromNothingTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// Task 16 review M-1 (ruled): an auth that refreshes from no token (a platform ticket) on a session that starts empty.
+	// FinishRefresh takes the refresh out before it expires the session, so ExpireSession's already-expired return
+	// (concurrency review I-2) saw nothing left to expire: the waiters were told Rejected and the game heard nothing. Spec
+	// 4.2: a rejection "fires OnSessionExpired (once)" -- here also when the socket calls NotifySessionExpired anyway.
+	FTestRig Rig;
+	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = MakeShared<FHandAuth, ESPMode::ThreadSafe>();
+	Auth->bFromNothing = true;
+	Rig.Client.WithAuth(Auth);
+	AcceptTokens(Rig, { TEXT("new-access-123456") });
+	TSharedRef<int32, ESPMode::ThreadSafe> Expired = MakeShared<int32, ESPMode::ThreadSafe>(0);
+	Rig.Client.OnSessionExpired().AddLambda([Expired] { ++*Expired; });
+	TestTrue(TEXT("the session starts empty, and a refresh is due"), !Rig.Client.GetSession().HasAccessToken() && !Rig.Client.GetSession().HasRefreshToken()
+		&& Rig.Client.NeedsAuthRefresh());
+	auto Parked = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/a")), Parked).Send();
+	Rig.Drain();
+	if (!TestTrue(TEXT("the request parks before its first attempt; one refresh"), Rig.Fake->NumCalls() == 0 && Auth->IsPending() && Auth->Refreshes == 1))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	const FRefreshAnswers Socket = MakeAnswers();
+	Rig.Client.RefreshAuth([Socket, Notifier = Rig.Client](EVaRestAuthRefreshOutcome Outcome, EVaRestErrorKind FailedKind) mutable
+	{
+		Socket->Emplace(Outcome, FailedKind);
+		Notifier.NotifySessionExpired();
+	});
+	TestEqual(TEXT("... a socket shares it"), Auth->Refreshes, 1);
+	Auth->Answer(FVaRestAuthRefreshResult::Rejected(TEXT("the platform refused the ticket")));
+	if (!TestTrue(TEXT("both told"), PumpUntil([Parked, Socket] { return Parked->IsDone() && Socket->Num() == 1; })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Drain();
+	TestTrue(TEXT("the request fails Kind Auth; the socket is told Rejected"), Parked->Error.Kind == EVaRestErrorKind::Auth
+		&& (*Socket)[0] == FRefreshAnswer(EVaRestAuthRefreshOutcome::Rejected, EVaRestErrorKind::None));
+	TestEqual(TEXT("ruling M-1: OnSessionExpired once, with no token to drop"), *Expired, 1);
+	TestEqual(TEXT("nothing was sent"), Rig.Fake->NumCalls(), 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthFailedKindTest, "VaRest.Http.Auth.RefreshFailedKindNormalized",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthFailedKindTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// Task 16 review M-2: a Failed result built by hand with a kind the Failed() factory would not keep (Auth) -- the field
+	// is public, and Task 15 review M-5 ruled that hand-built results matter. FinishRefresh keeps Timeout and Config and
+	// makes the rest Connection, as the factory does, so a socket and a parked request agree about one refresh.
+	FTestRig Rig;
+	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = HandRig(Rig);
+	auto Parked = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/a")), Parked).Send();
+	if (!TestTrue(TEXT("parked"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 1; }) && Rig.Drain() && Auth->IsPending()))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	const FRefreshAnswers Socket = MakeAnswers();
+	Rig.Client.RefreshAuth(Record(Socket));
+	FVaRestAuthRefreshResult ByHand;
+	ByHand.Outcome = EVaRestAuthRefreshOutcome::Failed;
+	ByHand.FailedKind = EVaRestErrorKind::Auth;
+	ByHand.Message = TEXT("built by hand");
+	Auth->Answer(MoveTemp(ByHand));
+	if (!TestTrue(TEXT("both told"), PumpUntil([Parked, Socket] { return Parked->IsDone() && Socket->Num() == 1; })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	TestTrue(TEXT("the socket: (Failed, Connection), as Failed(Auth, ...) would have made it"),
+		(*Socket)[0] == FRefreshAnswer(EVaRestAuthRefreshOutcome::Failed, EVaRestErrorKind::Connection));
+	TestTrue(TEXT("the parked request agrees: Connection, retryable"), Parked->Error.Kind == EVaRestErrorKind::Connection && Parked->Error.bRetryable);
+	TestTrue(TEXT("the session is kept"), Rig.Client.GetSession().AccessToken.Equals(TEXT("old-access-123456"), ESearchCase::CaseSensitive)
+		&& Rig.Client.GetSession().HasRefreshToken());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthRefreshAnnouncesTest, "VaRest.Http.Auth.RefreshAnnouncesOnlyAChange",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthRefreshAnnouncesTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// Task 16 review M-3: FinishRefresh(Refreshed) fires OnSessionChanged(Refreshed) -- sockets depend on it (WebSocket
+	// spec 19 item 2) -- once; and, as SetTokensByGame, only when the tokens changed: a refresh that returns the very tokens
+	// the session holds announces nothing, while its waiters still go on (Ready)
+	FTestRig Rig;
+	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = HandRig(Rig);
+	const TSharedRef<TArray<EVaRestSessionChange>, ESPMode::ThreadSafe> Changes = MakeShared<TArray<EVaRestSessionChange>, ESPMode::ThreadSafe>();
+	Rig.Client.OnSessionChanged().AddLambda([Changes](EVaRestSessionChange Change) { Changes->Add(Change); });
+	const FRefreshAnswers First = MakeAnswers();
+	Rig.Client.RefreshAuth(Record(First));
+	Auth->Answer(FVaRestAuthRefreshResult::Refreshed(TEXT("new-access-123456"), TEXT("new-refresh-123456")));
+	if (!TestTrue(TEXT("Refreshed"), PumpUntil([First] { return First->Num() == 1; })
+		&& (*First)[0] == FRefreshAnswer(EVaRestAuthRefreshOutcome::Refreshed, EVaRestErrorKind::None)))
+	{
+		return false;
+	}
+	Rig.Drain();
+	TestTrue(TEXT("new tokens: OnSessionChanged(Refreshed), once"), Changes->Num() == 1 && (*Changes)[0] == EVaRestSessionChange::Refreshed);
+	const FRefreshAnswers Same = MakeAnswers();
+	Rig.Client.RefreshAuth(Record(Same));
+	// The access token it holds, the refresh token kept (empty), no expiry -- as before: UpdateTokens changes nothing
+	Auth->Answer(FVaRestAuthRefreshResult::Refreshed(TEXT("new-access-123456")));
+	TestTrue(TEXT("the same tokens: the waiter still goes on"), PumpUntil([Same] { return Same->Num() == 1; })
+		&& (*Same)[0] == FRefreshAnswer(EVaRestAuthRefreshOutcome::Refreshed, EVaRestErrorKind::None));
+	Rig.Drain();
+	TestEqual(TEXT("... and nothing is announced"), Changes->Num(), 1);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthShutdownWaitersTest, "VaRest.Http.Auth.ShutdownDropsRefreshWaiters",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthShutdownWaitersTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// Task 16 review M-6: at engine exit no callback runs (decision 2). The shutdown cancel takes a parked request out of the
+	// refresh, silently; the auth's late answer is dropped (FRefreshDoneGuard::Post); and a session change that ends the
+	// refresh -- a logout during exit -- drops its other waiters uncalled instead of running them from a later task.
+	// CancelForShutdown() is process-wide (VaRest.Http.Cancel.AllAndShutdown): run it where no other VaRest traffic matters.
+	FTestRig Rig;
+	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = HandRig(Rig);
+	const TSharedPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> State = VaRest::Http::FClientAccess::State(Rig.Client);
+	auto Parked = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/a")), Parked).Send();
+	if (!TestTrue(TEXT("parked"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 1; }) && Rig.Drain() && Auth->IsPending()))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	const FRefreshAnswers Socket = MakeAnswers();
+	Rig.Client.RefreshAuth(Record(Socket));
+	TestEqual(TEXT("two waiters"), State->NumRefreshWaitersInternal(), 2);
+	VaRest::Http::FClientState::CancelForShutdown();
+	// Review N-6: the editor goes on, so every later test must send again -- also when this test returns early
+	ON_SCOPE_EXIT { VaRest::Http::FClientState::ResetShutdownInternal(); };
+	TestEqual(TEXT("the shutdown cancel took the parked request out"), State->NumRefreshWaitersInternal(), 1);
+	Rig.Client.ClearSession();
+	TestFalse(TEXT("the logout ended the refresh"), State->IsRefreshing());
+	TestTrue(TEXT("the request finishes"), PumpUntil([&Rig] { return Rig.Client.GetInFlightCount() == 0; }));
+	Rig.Drain();
+	TestEqual(TEXT("decision 2: the socket's waiter is dropped at engine exit, never called"), Socket->Num(), 0);
+	TestEqual(TEXT("... and the parked request delivers nothing"), Parked->CompleteCalls.load() + Parked->ErrorCalls.load(), 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthInFlightEntryTest, "VaRest.Http.Auth.InFlightEntryIsTheExchange",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthInFlightEntryTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+#if DO_ENSURE
+	if (!EnsuresReportEachTime(*this))
+	{
+		return true;
+	}
+	// Task 16 review M-7: the in-flight map's entry is compared, not only its id. Two exchanges under one id (a context made
+	// twice with it, Task 15 review M-1): Enter ensures for the second, and the first to complete removes only its own entry
+	// -- the second stays in flight, so CancelAll and the shutdown cancel still reach it. The same exchange entered again (no
+	// path does today; harmless) is not another exchange: no ensure.
+	TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> Fired = MakeShared<std::atomic<int32>, ESPMode::ThreadSafe>(0);
+	const TFunction<bool(const FEnsureHandlerArgs&)> Outer = GetEnsureHandler();
+	SetEnsureHandler([Fired, Outer](const FEnsureHandlerArgs& Args)
+	{
+		if (Args.Message && FCString::Strstr(Args.Message, TEXT("is already in flight on this client")))
+		{
+			++*Fired;
+			return true;
+		}
+		return Outer ? Outer(Args) : false;
+	});
+	ON_SCOPE_EXIT { SetEnsureHandler(Outer); };
+	FTestRig Rig;
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest&) { return FVaRestFakeResponse::Manual(); });
+	const TSharedRef<FExchangeGrab, ESPMode::ThreadSafe> Grab = MakeShared<FExchangeGrab, ESPMode::ThreadSafe>();
+	Rig.Client.Use(Grab, EVaRestStageSlot::PerAttempt);
+	const uint64 RefreshId = FVaRestTrace::NewRequestId();
+	const FVaRestAuthRefreshContext FirstContext = VaRest::Http::FClientAccess::MakeRefreshContext(Rig.Client, FVaRestSessionData(), RefreshId);
+	const FVaRestAuthRefreshContext SecondContext = VaRest::Http::FClientAccess::MakeRefreshContext(Rig.Client, FVaRestSessionData(), RefreshId);
+	auto First = MakeOutcome<FVaRestJson>();
+	auto Second = MakeOutcome<FVaRestJson>();
+	Observe(FirstContext.Request(TEXT("POST"), TEXT("/auth/first")).Body(TEXT("{}")), First).Send();
+	Observe(SecondContext.Request(TEXT("POST"), TEXT("/auth/second")).Body(TEXT("{}")), Second).Send();
+	if (!TestTrue(TEXT("both held at the transport"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 2; })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	TestEqual(TEXT("the second exchange under the id ensured"), Fired->load(), 1);
+	Rig.Fake->Complete(0, Json(200));
+	if (!TestTrue(TEXT("the first completes"), Rig.Wait(First)))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Drain();
+	TestEqual(TEXT("ruling M-7: the second is still in flight"), Rig.Client.GetInFlightCount(), 1);
+	Rig.Client.CancelAll();
+	TestTrue(TEXT("... so CancelAll reaches it"), Rig.Wait(Second) && Second->Error.Kind == EVaRestErrorKind::Canceled);
+	if (!Second->IsDone())
+	{
+		// Drains what an id-keyed removal would have left behind (restore-the-bug only)
+		Rig.Fake->Complete(1, Json(200));
+		Rig.Wait(Second);
+	}
+	Rig.Drain();
+
+	auto Again = MakeOutcome<FVaRestJson>();
+	const FVaRestRequestHandle Handle = Observe(Rig.Client.Get(TEXT("/again")), Again).Send();
+	if (!TestTrue(TEXT("held at the transport"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 3; })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	TSharedPtr<FVaRestExchange, ESPMode::ThreadSafe> Exchange;
+	for (const TWeakPtr<FVaRestExchange, ESPMode::ThreadSafe>& Seen : Grab->Seen)
+	{
+		const TSharedPtr<FVaRestExchange, ESPMode::ThreadSafe> Pinned = Seen.Pin();
+		if (Pinned.IsValid() && Pinned->GetRequestId() == Handle.GetId())
+		{
+			Exchange = Pinned;
+		}
+	}
+	if (!TestTrue(TEXT("its exchange"), Exchange.IsValid()))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	// Flagged and its transport call canceled; that Canceled comes back only through a game-thread task, so the exchange is
+	// still in flight, in the chain, when it enters again: Enter finishes it Canceled (decision 3: from a later task)
+	Handle.Cancel();
+	VaRest::Http::FClientAccess::State(Rig.Client)->Enter(Exchange.ToSharedRef());
+	TestEqual(TEXT("the same exchange entered again: no ensure"), Fired->load(), 1);
+	TestTrue(TEXT("it completes once, Canceled"), Rig.Wait(Again) && Again->Error.Kind == EVaRestErrorKind::Canceled);
+	Rig.Drain();
+	TestTrue(TEXT("... one OnError, one OnComplete, nothing left in flight"), Again->ErrorCalls.load() == 1 && Again->CompleteCalls.load() == 1
+		&& Rig.Client.GetInFlightCount() == 0);
+#else
+	AddInfo(TEXT("ensures are compiled out: nothing to check"));
+#endif
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthWaitPerAttemptTest, "VaRest.Http.Auth.AuthWaitIsPerAttempt",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthWaitPerAttemptTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// IN-2: AuthWait and AuthRefreshId are each attempt's own. The transport stage resets them after a dispatch, but an
+	// attempt a stage answers before the transport (here a PerAttempt stage's 503) never gets there: the gate sets both on
+	// every pass, so the retry's attempt, which waited behind no refresh, does not report attempt 1's park
+	FTestRig Rig;
+	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = HandRig(Rig);
+	Rig.Client.SetSession(TEXT("old-access-123456"), TEXT("old-refresh-123456"), 20.0);
+	const TSharedRef<FFirstAnswered, ESPMode::ThreadSafe> First = MakeShared<FFirstAnswered, ESPMode::ThreadSafe>();
+	Rig.Client.Use(First, EVaRestStageSlot::PerAttempt);
+	FScopedTraceRecorder Scoped(EVaRestTraceDetail::Metadata);
+	auto Outcome = MakeOutcome<FVaRestJson>();
+	const FVaRestRequestHandle Handle = Observe(Rig.Client.Get(TEXT("/p")).Retry(ExactRetry(1)), Outcome).Send();
+	Rig.Drain();
+	if (!TestTrue(TEXT("parked before attempt 1 (a due expiry)"), Rig.Fake->NumCalls() == 0 && Auth->IsPending()))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Clock->Advance(0.5);
+	Auth->Answer(FVaRestAuthRefreshResult::Refreshed(TEXT("new-access-123456"), FString(), 3600.0));
+	if (!TestTrue(TEXT("attempt 1 answered by the stage, a backoff armed"), PumpUntil([First] { return First->Attempts == 1; }) && Rig.Drain()))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Clock->Advance(60.0);
+	if (!TestTrue(TEXT("attempt 2 sent and succeeds"), Rig.Wait(Outcome) && Outcome->SuccessCalls.load() == 1 && Outcome->Response.Attempts == 2
+		&& Rig.Fake->NumCalls() == 1))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	const TArray<FVaRestTraceAttemptDispatched> Dispatched = DispatchesOf(*Scoped.Recorder, Handle.GetId());
+	TestTrue(TEXT("attempt 2's dispatch: a backoff gap, no AuthWait, no refresh id"), Dispatched.Num() == 1 && Dispatched[0].Attempt == 2
+		&& Dispatched[0].GapKind == EVaRestTraceGap::Backoff && Dispatched[0].AuthWait == 0.0 && Dispatched[0].AuthRefreshId == 0);
 	return true;
 }
 

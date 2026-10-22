@@ -32,10 +32,20 @@ namespace VaRest::Http::SessionPrivate
 	 * was canceled meanwhile finds it answered and returns; one that LeaveRefresh dropped is not in this list any more.
 	 * The task holds the state while the waiters run, as RunSessionChange does (concurrency review C-1): a waiter may drop
 	 * the last FVaRestClient, and the state then goes after the last waiter, not under one. Until the task runs it holds the
-	 * state weakly, so an ended refresh keeps no client alive; the waiters of a state already gone are still told.
+	 * state weakly, so an ended refresh keeps no client alive: the waiters of a refresh that ended before its state went are
+	 * still told (Task 16 review M-4). A refresh still in flight when the state goes never ends: its waiters die with the
+	 * state, uncalled, on the game thread (~FClientState sends them there, concurrency review M-9). Only RefreshAuth's
+	 * waiters can meet that: a parked request's waiter holds its exchange, and so the state.
+	 * At engine exit nothing is told (Task 16 review M-6): no callback runs then (decision 2), as FRefreshDoneGuard::Post
+	 * drops the auth's answer, and the waiters die here, uncalled, on the game thread. The shutdown cancel has already taken
+	 * every parked request out (its interrupt hook leaves the refresh), so what dies here is RefreshAuth's.
 	 */
 	void ResolveWaitersLater(FClientState& Owner, TUniquePtr<FRefreshInFlight>&& Ended, FRefreshEnded&& End)
 	{
+		if (FClientState::IsShuttingDown())
+		{
+			return;
+		}
 		UE::Tasks::Launch(TEXT("VaRest.RefreshEnded"),
 			[Weak = TWeakPtr<FClientState, ESPMode::ThreadSafe>(Owner.AsShared()), Waiting = MoveTemp(Ended), Result = MoveTemp(End)]() mutable
 			{
@@ -275,14 +285,21 @@ void VaRest::Http::FClientState::ClearSession()
 void VaRest::Http::FClientState::ExpireSession(uint64 CauseRequestId, FStringView Why)
 {
 	CheckInSessionChange();
-	FVaRestSessionData& Data = Session.Data;
+	const FVaRestSessionData& Data = Session.Data;
 	if (!Data.HasAccessToken() && !Data.HasRefreshToken() && !Session.Refresh.IsValid())
 	{
 		// Concurrency review I-2: expired already -- a parked request's OnError calling NotifySessionExpired after a
 		// rejected refresh, a listener of OnSessionExpired calling it again: one expiry, one event. A refresh in flight
-		// (an auth that refreshes from no token) is not expired yet: it ends below.
+		// (an auth that refreshes from no token) is not expired yet: it ends in ExpireSessionNow.
 		return;
 	}
+	ExpireSessionNow(CauseRequestId, Why);
+}
+
+void VaRest::Http::FClientState::ExpireSessionNow(uint64 CauseRequestId, FStringView Why)
+{
+	CheckInSessionChange();
+	FVaRestSessionData& Data = Session.Data;
 	Data.AccessToken.Reset();
 	Data.RefreshToken.Reset();
 	Data.ExpiresAt = 0.0;
@@ -290,8 +307,8 @@ void VaRest::Http::FClientState::ExpireSession(uint64 CauseRequestId, FStringVie
 	++Data.Generation;
 	++Data.CredentialGeneration;
 	PublishSessionSecrets();
-	// Its waiters fail Kind=Auth; FinishRefresh(Rejected) took its refresh out before it came here, so this is the game's
-	// NotifySessionExpired (or a socket's) ending one still running
+	// NotifySessionExpired (the game's, or a socket's) ending a refresh still running: its waiters fail Kind=Auth. From
+	// FinishRefresh(Rejected) there is none: it took its refresh out before it came here, and tells the waiters itself.
 	EndRefresh(ERefreshEnd::Rejected, TEXT("AuthRejected"));
 	FSessionEvent& Event = Session.Pending.AddDefaulted_GetRef();
 	Event.bExpired = true;
@@ -485,16 +502,23 @@ void VaRest::Http::FClientState::FinishRefresh(uint64 RefreshId, FVaRestAuthRefr
 	if (Result.Outcome == EVaRestAuthRefreshOutcome::Refreshed && !Result.AccessToken.IsEmpty() && IsValidHeaderValue(Result.AccessToken)
 		&& IsValidHeaderValue(Result.RefreshToken))
 	{
-		// A refresh response's expires_in is the new token's whole lifetime (re-review N-10), as a login's is
-		UpdateTokens(Result.AccessToken, Result.RefreshToken.IsEmpty() ? nullptr : &Result.RefreshToken, Result.ExpiresInSeconds, Result.ExpiresInSeconds);
+		// A refresh response's expires_in is the new token's whole lifetime (re-review N-10), as a login's is. Task 16 review
+		// M-3: announced only when something changed, as SetTokensByGame announces; the same tokens back (and no expiry)
+		// are no event, while the waiters still go on with them (Ready)
 		End.End = ERefreshEnd::Ready;
-		AnnounceSession(EVaRestSessionChange::Refreshed, Ended->CauseRequestId, TEXT("refreshed by the auth"));
+		if (UpdateTokens(Result.AccessToken, Result.RefreshToken.IsEmpty() ? nullptr : &Result.RefreshToken, Result.ExpiresInSeconds, Result.ExpiresInSeconds))
+		{
+			AnnounceSession(EVaRestSessionChange::Refreshed, Ended->CauseRequestId, TEXT("refreshed by the auth"));
+		}
 	}
 	else if (Result.Outcome == EVaRestAuthRefreshOutcome::Failed)
 	{
-		// Plan decision 3, ruling I-7: the session stays; the waiters fail with the refresh's kind
+		// Plan decision 3, ruling I-7: the session stays; the waiters fail with the refresh's kind. Task 16 review M-2: kept
+		// as the Failed() factory keeps it (VaRestAuth.cpp:35) -- Timeout and Config, the rest Connection -- since the field
+		// is public and a result built by hand counts (Task 15 review M-5): a socket's RefreshAuth and a parked request
+		// (the auth gate's FailureFor) then agree about one refresh
 		End.End = ERefreshEnd::Failed;
-		End.Kind = Result.FailedKind;
+		End.Kind = Result.FailedKind == EVaRestErrorKind::Timeout || Result.FailedKind == EVaRestErrorKind::Config ? Result.FailedKind : EVaRestErrorKind::Connection;
 	}
 	else
 	{
@@ -504,7 +528,11 @@ void VaRest::Http::FClientState::FinishRefresh(uint64 RefreshId, FVaRestAuthRefr
 		{
 			End.Message = TEXT("the refresh gave no usable access token");
 		}
-		ExpireSession(Ended->CauseRequestId, End.Message);
+		// Task 16 review M-1 (ruled): forced. The refresh is out of Session.Refresh already, so ExpireSession's already-expired
+		// return (concurrency review I-2) would find a session with no token -- an auth that refreshes from none, a platform
+		// ticket -- and queue nothing: the waiters told Rejected, the game nothing. This is the rejection's one expiry (spec
+		// 4.2: "fires OnSessionExpired (once)"); a later NotifySessionExpired finds it expired.
+		ExpireSessionNow(Ended->CauseRequestId, End.Message);
 	}
 	// The events queued above reach the listeners when this change returns; the waiters run after, from their own task
 	SessionPrivate::ResolveWaitersLater(*this, MoveTemp(Ended), MoveTemp(End));

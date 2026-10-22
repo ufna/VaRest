@@ -167,8 +167,9 @@ public:
 	 * 16). Call Done exactly once, from any thread: the core finishes the refresh on the game thread, from a later task; a
 	 * second call is ignored. Done dropped uncalled -- an error path that forgets it, an SDK that frees its callback -- ends
 	 * the refresh as Failed(Connection), the session kept (concurrency review I-4). Holding Done without calling it is
-	 * allowed (a re-login screen): parked requests wait, each bounded by its own retry deadline, Cancel() and its owner; no
-	 * watchdog ends the refresh (ruling I-4). Send the refresh request with Context.Request(), never through the client.
+	 * allowed (a re-login screen): parked requests wait, each bounded by its own retry deadline and Cancel() (CancelAll(),
+	 * engine exit); one whose owner goes meanwhile gets no callback, and ends when its park does. No watchdog ends the
+	 * refresh (ruling I-4). Send the refresh request with Context.Request(), never through the client.
 	 */
 	virtual void Refresh(const FVaRestAuthRefreshContext& Context, TUniqueFunction<void(FVaRestAuthRefreshResult&&)>&& Done)
 	{

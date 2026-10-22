@@ -243,7 +243,11 @@ namespace VaRest::Http::PipelinePrivate
 		{
 			FExchangeState& Ex = Internals(*Exchange);
 			++Ex.Attempt;
-			Ex.AttemptStartedAt = Ex.Config->Clock->Now();
+			// Spec review I-1 (Inspector 3.3): an attempt parked behind a refresh before it started (the auth gate) started
+			// when it parked -- its Auth phase is inside its span, so Prepare (dispatch - start - Auth - Queued) is never
+			// negative. Taken once: a later pass is another attempt.
+			Ex.AttemptStartedAt = Ex.PendingAttemptStart >= 0.0 ? Ex.PendingAttemptStart : Ex.Config->Clock->Now();
+			Ex.PendingAttemptStart = -1.0;
 			if (Ex.NextGap == EVaRestTraceGap::Backoff)
 			{
 				// Spec review M-10 (Inspector 3.3: from the previous attempt's end to this attempt's start): what passed,
@@ -257,13 +261,6 @@ namespace VaRest::Http::PipelinePrivate
 			Next.Proceed(Exchange, MoveTemp(OnOutcome));
 		}
 	};
-
-	/**
-	 * A fire this close to DeadlineAt counts as the deadline. The virtual clock keeps whole nanoseconds, so at a timer's due
-	 * time Now() can read one ULP below a double DeadlineAt, and a re-arm for that rest rounds to 0 ns and fires again at
-	 * the same instant, forever (the secret-expiry loop of M3 plan re-review N-I3, m3-plan-rereview-spec.md).
-	 */
-	constexpr double QueueDeadlineSlack = 1e-3;
 
 	/**
 	 * Concurrency review M-1: the deadline's timer while an attempt waits in the limiter's queue. At DeadlineAt it takes the
@@ -288,7 +285,7 @@ namespace VaRest::Http::PipelinePrivate
 				return;
 			}
 			const double Rest = Late.DeadlineAt - Late.Config->Clock->Now();
-			if (Rest > QueueDeadlineSlack)
+			if (Rest > DeadlineTimerSlack)
 			{
 				ArmQueueDeadline(Late, Pinned.ToSharedRef(), Rest);
 				return;
@@ -506,9 +503,11 @@ namespace VaRest::Http::PipelinePrivate
 			}
 			// IN-2: on the game thread, immediately before the transport starts
 			TracePoints::AttemptDispatched(Ex);
-			// The gap was this attempt's; the next one reports its own (IN-2)
+			// The gap was this attempt's; the next one reports its own (IN-2), and so its own wait behind a refresh
 			Ex.NextGap = EVaRestTraceGap::None;
 			Ex.NextGapSeconds = 0.0;
+			Ex.AuthWait = 0.0;
+			Ex.AuthRefreshId = 0;
 			Ex.TransportCall = Cfg.Transport->Start(MoveTemp(Request), [Guard = FCompletionGuard(Exchange, MoveTemp(OnOutcome))](FVaRestTransportResult&& Result) mutable
 			{
 				Guard.Deliver(MoveTemp(Result));
@@ -722,7 +721,11 @@ bool VaRest::Http::FClientState::Resolve(FExchangeState& Exchange, FString& OutE
 	// Spec 4.1, plan decisions 1 and 8
 	Exchange.RetryPolicy = Exchange.RetryOverride.IsSet() ? Exchange.RetryOverride.GetValue() : Cfg.Retry;
 	Exchange.bRetryEligible = Exchange.RetryPolicy.IsEnabled() && (Exchange.bIdempotent || IsIdempotentVerb(Exchange.Verb));
-	Exchange.bMayReissue = Cfg.bMayReissue || Exchange.bRetryEligible;
+	// Plan decision 8: the body is copied only when something may send it again -- a custom stage, a retry, or a session
+	// replay (the auth gate, spec 4.2): an auth that can refresh this session may replay any verb after a 401
+	const bool bAuthMayReplay = Cfg.Auth.IsValid() && Exchange.AuthMode != EVaRestAuthMode::None && !Exchange.bIsAuthRefresh
+		&& Cfg.Auth->CanRefresh(GetSessionData());
+	Exchange.bMayReissue = Cfg.bMayReissue || Exchange.bRetryEligible || bAuthMayReplay;
 	// Plan decision 10: an absolute time on the request's clock; Enter stamped StartedAt before Resolve
 	const float Deadline = Exchange.RetryPolicy.Deadline;
 	Exchange.DeadlineAt = FMath::IsFinite(Deadline) && Deadline > 0.f ? Exchange.StartedAt + Deadline : 0.0;
@@ -766,10 +769,12 @@ void VaRest::Http::FClientState::Enter(const FVaRestExchangeRef& Exchange)
 	Ex.StartedAt = Ex.Config->Clock->Now();
 	Ex.Phase = EVaRestExchangePhase::InChain;
 	// Task 15 review M-1: a refresh request's id is preset (spec review I-2), and a second exchange under one id would
-	// replace the first here -- CancelAll and the shutdown cancel would no longer see it, and whichever ended first would
-	// remove the other's entry (Complete). Only FClientAccess::MakeRefreshContext can make one with an id in use. Always:
-	// each duplicate is the same bug, not only the session's first (AssertionMacros.cpp:970-975).
-	ensureAlwaysMsgf(!InFlight.Contains(Ex.RequestId), TEXT("VaRest: request id #%llu is already in flight on this client (a refresh context made with an id in use)"), Ex.RequestId);
+	// replace the first here -- CancelAll and the shutdown cancel would no longer see the first (Complete removes only its
+	// own entry, Task 16 review M-7, so the second stays reachable). Only FClientAccess::MakeRefreshContext can make one with
+	// an id in use. Always: each duplicate is the same bug, not only the session's first (AssertionMacros.cpp:970-975).
+	// Task 16 review M-7: another exchange under the id, not this one entered again (harmless: the entry stays its own).
+	const FVaRestExchangeRef* InUse = InFlight.Find(Ex.RequestId);
+	ensureAlwaysMsgf(!InUse || *InUse == Exchange, TEXT("VaRest: request id #%llu is already in flight on this client (a refresh context made with an id in use)"), Ex.RequestId);
 	InFlight.Add(Ex.RequestId, Exchange);
 	if (IsShuttingDown())
 	{
@@ -1032,7 +1037,12 @@ void VaRest::Http::FClientState::Complete(const FVaRestExchangeRef& Exchange, FF
 	}
 
 	Ex.bDone = true;
-	InFlight.Remove(Ex.RequestId);
+	// Task 16 review M-7: this exchange's own entry only. A second exchange that Enter let in under the same id (it ensures)
+	// replaced it; removing by id would take that one out, and CancelAll and the shutdown cancel would no longer reach it.
+	if (const FVaRestExchangeRef* Entry = InFlight.Find(Ex.RequestId); Entry && *Entry == Exchange)
+	{
+		InFlight.Remove(Ex.RequestId);
+	}
 	// IN-5: before any callback, OnHttpThread ones included, and also when none will run (owner gone, shutdown)
 	TracePoints::Completed(Ex, Finish);
 	// The request has ended: its cached union goes (a late outcome's line rebuilds one). What its attempts applied

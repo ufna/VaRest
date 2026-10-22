@@ -38,4 +38,14 @@ namespace VaRest::Http
 
 	/** Plan decision 10: what an attempt that would start past the retry deadline answers -- Kind=Timeout, not retryable */
 	FVaRestAttemptOutcome MakeDeadlineOutcome();
+
+	/**
+	 * A deadline timer that fires this close to DeadlineAt counts as the deadline. The virtual clock keeps whole nanoseconds,
+	 * so at a timer's due time Now() can read one ULP below a double DeadlineAt, and a re-arm for that rest rounds to 0 ns
+	 * and fires again at the same instant, forever (the secret-expiry loop of M3 plan re-review N-I3,
+	 * m3-plan-rereview-spec.md). Any rest above it is re-armed, never answered early: the real clock's core ticker counts
+	 * game-time deltas, which a fixed timestep can run faster than Now() (FVaRestRealClock, Task 9 review minor 2). Used by
+	 * the limiter queue's deadline timer (VaRestPipeline.cpp) and the auth gate's park (VaRestAuthGate.cpp).
+	 */
+	inline constexpr double DeadlineTimerSlack = 1e-3;
 }

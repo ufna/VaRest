@@ -801,9 +801,16 @@ public:
 	 * already sent keep the auth they started with (spec 3.1); the session they apply is the live one (plan decision 6). The
 	 * secret values the auth it replaces held and this one does not are retired: still scrubbed for 10 minutes, then
 	 * forgotten (Inspector D21). ClearSession() and ClearSecretValues() leave an auth's values alone.
+	 * A session refresh in flight is not ended by this (Task 16 review M-5, ruled): the refresh belongs to the session, so it
+	 * runs to its end with the auth that started it and its result applies to the session -- a rejection expires it -- and
+	 * requests parked behind it keep their Send()-time auth. The game's own session calls end it: new tokens from
+	 * SetBearerToken(), SetSession() or ImportSession(), ClearSession(), NotifySessionExpired().
 	 */
 	FVaRestClient& WithAuth(TSharedRef<IVaRestAuth, ESPMode::ThreadSafe> InAuth);
-	/** No auth: requests carry the session headers only. The auth's secret values are retired, as WithAuth retires them. */
+	/**
+	 * No auth: requests carry the session headers only. The auth's secret values are retired, as WithAuth retires them. As
+	 * with WithAuth, a session refresh in flight runs to its end and its result applies to the session.
+	 */
 	FVaRestClient& WithoutAuth();
 	/** Spec 3.1: WithAuth(FVaRestAuth::Bearer()) and SetBearerToken(InToken) */
 	FVaRestClient& WithBearer(FStringView InToken);
@@ -828,6 +835,12 @@ public:
 	 * - Failed: the session stays; FailedKind says why -- Connection or Timeout (try again later), Config (no auth, nothing
 	 *   to refresh with, or a refresh the configuration refuses).
 	 * Spec review I-5: a socket must not treat a Wi-Fi blip as a logout (ruling Q1).
+	 * Lifetime (Task 16 review M-4): OnDone waits for as long as the auth holds its Done; no watchdog ends that wait (ruling
+	 * I-4: a re-login screen may hold it), so a caller that needs a bound keeps its own timer and ignores a late answer. The
+	 * client holds OnDone, and everything it captures, until the refresh ends: capturing this FVaRestClient in it keeps the
+	 * client alive that long, so capture your own object weakly instead. If the client goes first -- its last handle
+	 * dropped while none of its requests is in flight -- OnDone is destroyed uncalled, on the game thread; at engine exit it
+	 * is destroyed uncalled too (decision 2).
 	 */
 	void RefreshAuth(TUniqueFunction<void(EVaRestAuthRefreshOutcome Outcome, EVaRestErrorKind FailedKind)>&& OnDone);
 

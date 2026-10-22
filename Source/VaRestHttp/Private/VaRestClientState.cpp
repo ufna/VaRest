@@ -223,6 +223,9 @@ void VaRest::Http::FClientState::Publish(const TSharedRef<FClientConfig, ESPMode
 	}
 	// Spec 4.1 and plan decision 2: retry is the first built-in Outer stage (M4b puts offline queue and cache in front of it)
 	NewChain->Add(MakeRetryStage());
+	// Spec 4.2: after retry (a replay is not a retry, plan decision 2), before the boundary (a replay is a new attempt) and
+	// the limiter (a parked request holds no slot)
+	NewChain->Add(MakeAuthGateStage());
 	NewChain->Add(MakeAttemptBoundaryStage());
 	// Ruling I-3 (spec 4.6 as amended): the first stage of every attempt. A custom PerAttempt stage's signature, the log
 	// lines and an auth's credentials are written when the request leaves the queue, so none of them goes stale while it
