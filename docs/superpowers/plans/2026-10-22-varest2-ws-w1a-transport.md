@@ -18,16 +18,16 @@ Spec §17 row W1 holds about twenty features. Written to this project's density 
 
 1. **The seam is pull-based.** Decision: `IVaRestSocketConnection::PopEvents` moves the queued events out; an optional `OnEvents` callback, given to `Connect`, runs on the producing thread after events are queued, and only schedules work; the consumer reports delivered inbound bytes with `Consumed(Bytes)`. Why: spec §2.1 makes the event queue SPSC "service thread → pipe" and §7.1 puts the consumer on a `UE::Tasks::FPipe` (W3), so the transport must not decide where events are handled; tests and W2 poll. Cost if wrong: W3 wraps a push-style sink around `OnEvents`.
 2. **Exactly one terminal event per connection.** Decision: `Error` for an attempt that never opened (its `End.Code` is 0, spec §14), `Closed` for one that did; nothing after it (the link drops a later event with an Error log line, a transport bug made loud). Why: spec §2.1 lists both without saying which is which; W2's generation guard and classification need one end per attempt. Cost if wrong: none plausible.
-3. **When the terminal event is queued.** Decision: when VaRest *kills* a connection (connect deadline, `CloseTimeout`, a pending attempt closed or released) the event is queued at that decision and the connection is detached, while LWS tears TCP down in the background (up to about 1 s later, decision 12); a close handshake reports when the connection ends (at most `CloseTimeout` later). Why: a kill's latency is LWS's (T26), not the deadline's; reporting at the decision makes `ConnectTimeout` exact -- unless the service thread itself is blocked in LWS 3.0's synchronous DNS (`getaddrinfo` inside `lws_client_connect_2`, review conc I-4; W1b B9, VaRest-gi0, resolves off the thread). An attempt VaRest ended sends nothing more: `APPEND_HANDSHAKE_HEADER` and `FILTER_PRE_ESTABLISH` return -1 and the certificate check refuses once its state is `Ended`, and the kill is armed again after every `lws_service` return, because LWS's own stage timers replace a pending timeout (`lws_generate_client_handshake` calls `lws_set_timeout(wsi, 0, 0)`; review conc I-1, `Close.CancelSendsNothing`). Cost if wrong: W2 sees an end slightly before the fd is closed.
+3. **When the terminal event is queued.** Decision: when VaRest *kills* a connection (connect deadline, `CloseTimeout`, a pending attempt closed or released) the event is queued at that decision and the connection is detached, while LWS tears TCP down in the background (up to about 1 s later, decision 12); a close handshake reports when the connection ends (at most `CloseTimeout` later). Why: a kill's latency is LWS's (T26), not the deadline's; reporting at the decision makes `ConnectTimeout` exact -- unless the service thread itself is blocked in LWS 3.0's synchronous DNS (`getaddrinfo` inside `lws_client_connect_2`, review conc I-4; W1b B9, VaRest-gi0, resolves off the thread). An attempt VaRest ended sends nothing more: `APPEND_HANDSHAKE_HEADER` and `FILTER_PRE_ESTABLISH` return -1 and the certificate check refuses once its state is `Ended`, and a kill that has not landed one timeout walk after it was armed (`KillRearmSeconds`, 1.25 s) is armed again, because LWS's own stage timers can replace a pending timeout (`lws_generate_client_handshake` calls `lws_set_timeout(wsi, 0, 0)`; review conc I-1, `Close.CancelSendsNothing`). Not on every pass: each `lws_set_timeout` restarts the timeout at the current second, so re-arming every pass postpones the kill whenever the service thread is busy (re-review N-1, `Timeout.KillLatencyBusy`). Cost if wrong: W2 sees an end slightly before the fd is closed.
 4. **`bWasClean` for a close VaRest started** means the connection ended before `CloseTimeout` and before LWS's own 5 s close-ack timer: an end by that timer, after our close frame and with no close from the peer, is not clean (review conc I-5: with `CloseTimeout` above about 5 s LWS's timer ends the unanswered close first, `Timeout.CloseLongerThanAck`). Why: LWS 3.0 raises no callback for the peer's reply to our close (`close> > WRITEABLE > CLIENT_CLOSED > WSI_DESTROY`, [close.ours_sequence]), so an echo and a bare TCP end cannot be told apart except by time; the spec (§2.5, D26) already says the server's final close reply is not reported. Cost if wrong: one field's meaning in the docs, and a server that echoes after 4.75 s counted unclean.
 5. **Close and release before the open.** Decision: `Close()` on an attempt still connecting kills it and queues `Error{Canceled, By=Client}`; dropping the last handle is `Close(1001, "released")` when open (spec §1.4) and a cancel when pending; a released handle's events are discarded. Why: there is no close frame before the open; spec §3.1 abandons such attempts. Cost if wrong: none.
 6. **Frames are moved, not shared, and fragmented in place.** Decision: `FVaRestSocketFrame` owns a `TArray<uint8>` with `Offset >= FrameHeadroom` (16 = `LWS_PRE` on every target, `libwebsockets.h:4773`; a `static_assert` holds it) before the payload (SW-4); fragment *k* is written from `Storage + Offset + k*64 KiB`, its header going into the last 16 bytes of fragment *k-1*, already handed to LWS. Why: LWS masks a client payload in place (RFC 6455 §5.3) and copies the unsent rest of a truncated write into its own buffer (T10, `libwebsockets.h:4910-4932`), so after `lws_write` returns the bytes before the next fragment are free; no copy per fragment. Cost if wrong: one copy per fragment.
 7. **The buffered amount is exact to within one fragment.** Decision: bytes are counted at `Send` (game thread) and released after their `lws_write` — at once, or, when `lws_partial_buffered` says LWS still holds part of it, at the next `WRITEABLE` or the next service-loop sweep that sees the flag clear (`libwebsockets.h:6021-6037`: "never set at the start of a writeable callback"). `Drained` follows spec §2.4. Why: `lws_partial_buffered` is a flag, not a count [tx.large_write_result]; with 64 KiB fragments the error is at most one fragment (VaRest-8zj item 5; Task 14 amends §2.4). Cost if wrong: `OnDrained` one fragment late.
-8. **One LWS context per process (VaRest-rti).** Decision: VaRest makes its context once per process and keeps it until engine exit (only a fork re-creates it). In modular builds it is made at the first `Connect` — VaRest's LWS copy is its own there [coexist.lws_symbol_owner], re-checked for `VaRestWebSocket` in Task 14. In shared-copy builds (`IS_MONOLITHIC || UE_MERGED_MODULES`) where another LWS-linking engine module (`WebSockets`, `WebSocketServer`, `WebSocketNetworking`, `HttpNetworkReplayStreaming`) is linked, `VaRestWebSocket`'s `StartupModule` first loads the engine's `WebSockets` module (if linked: its one context then exists before any VaRest handshake) and then creates VaRest's context (before game code can start an engine handshake). This refines ruling Q2's letter (review spec M-9): in a shared copy where none of those modules is linked, nobody else makes a context, so VaRest makes its own at the first `Connect`, as in modular builds -- equally safe. A failed start is latched: `FService::Start` never calls `lws_create_context` again after one failure, because a retry could run under an engine wss handshake (review conc I-2). No VaRest context is made while a VaRest wss attempt that LWS has not destroyed exists: a module-wide count (`TlsHandshakesInFlight`, raised in `FConn::Start`, lowered at `CLIENT_ESTABLISHED` or `WSI_DESTROY`) refuses `FService::Start` while it is not 0 (review conc I-3) -- an attempt that has *ended* still runs its handshake until LWS destroys it. Residual risk, documented in spec §1.2, not claimed closed: `WebSocketServer`, `WebSocketNetworking` and `HttpNetworkReplayStreaming` create contexts when game code starts them, and a module that starts before `VaRestWebSocket` (`PreDefault`, or earlier in `Default`) can already have an engine wss handshake in flight at VaRest's `StartupModule` (review conc M-11); a handshake in flight at such a creation can crash, and VaRest cannot see or serialise those creations (rti note M-6). Test transports make their own contexts, one at a time, each made only after the previous one's connections were destroyed. Why: every `lws_create_context` re-allocates its copy's `openssl_websocket_private_data_index`, which the client verify callback dereferences unchecked [coexist.context_create_reallocates_ssl_index]. Cost if wrong: a monolithic game that links `WebSockets` but never uses it pays one engine context, one VaRest context and the root store at startup (W1b's monolithic run measures it).
+8. **One LWS context per process (VaRest-rti).** Decision: VaRest makes its context once per process and keeps it until engine exit (only a fork re-creates it). In modular builds it is made at the first `Connect` — VaRest's LWS copy is its own there [coexist.lws_symbol_owner], re-checked for `VaRestWebSocket` in Task 14. In shared-copy builds (`IS_MONOLITHIC || UE_MERGED_MODULES`) where another LWS-linking engine module (`WebSockets`, `WebSocketServer`, `WebSocketNetworking`, `HttpNetworkReplayStreaming`) is linked, `VaRestWebSocket`'s `StartupModule` first loads the engine's `WebSockets` module (if linked: its one context then exists before any VaRest handshake) and then creates VaRest's context (before game code can start an engine handshake). This refines ruling Q2's letter (review spec M-9): in a shared copy where none of those modules is linked, nobody else makes a context, so VaRest makes its own at the first `Connect`, as in modular builds -- equally safe. A failed start is latched: `FService::Start` never calls `lws_create_context` again after one failure, because a retry could run under an engine wss handshake (review conc I-2). No VaRest context is made while a VaRest wss attempt that LWS has not destroyed exists: a module-wide count (`TlsHandshakesInFlight`, raised by `FTransport::Connect` on the game thread -- where `FService::Start` reads it, so no window opens between a connect and another transport's start (re-review N-2) -- and lowered at `CLIENT_ESTABLISHED`, `WSI_DESTROY`, a refused connect or the `FConn`'s destruction) refuses `FService::Start` while it is not 0 (review conc I-3) -- an attempt that has *ended* still runs its handshake until LWS destroys it. Residual risk, documented in spec §1.2, not claimed closed: `WebSocketServer`, `WebSocketNetworking` and `HttpNetworkReplayStreaming` create contexts when game code starts them, and a module that starts before `VaRestWebSocket` (`PreDefault`, or earlier in `Default`) can already have an engine wss handshake in flight at VaRest's `StartupModule` (review conc M-11); a handshake in flight at such a creation can crash, and VaRest cannot see or serialise those creations (rti note M-6). Test transports make their own contexts, one at a time, each made only after the previous one's connections were destroyed. Why: every `lws_create_context` re-allocates its copy's `openssl_websocket_private_data_index`, which the client verify callback dereferences unchecked [coexist.context_create_reallocates_ssl_index]. Cost if wrong: a monolithic game that links `WebSockets` but never uses it pays one engine context, one VaRest context and the root store at startup (W1b's monolithic run measures it).
 9. **IP-literal wss is verified by VaRest (VaRest-sjj).** Decision: in `PERFORM_SERVER_CERT_VERIFICATION`, an error `X509_V_ERR_HOSTNAME_MISMATCH` (62) at depth 0 on an IP-literal host is cleared when `X509_check_ip_asc` finds the IP in the leaf's SAN; OpenSSL's later checks (signatures, dates) still run and still fail on their own errors (they follow `check_id` in OpenSSL 1.1.1's `verify_chain`, and LWS keeps OpenSSL's verdict unless the error is reset, `libwebsockets.h:1015-1044`). A refused certificate is `Failure = TlsVerification` with the X509 error and depth in `Detail`; Task 14 amends §3.4 to make it terminal, captive portals included (ruling Q3: the game reconnects explicitly). VaRest's verdict is a free function, `EvaluateServerCertificate`, so a unit test runs it inside OpenSSL's real verification on leaves made in memory (right IP, wrong IP, DNS-only SAN, untrusted; review spec I-5), and the wrong IP is also tested against the server through the verify callback (`Tls.WrongIp`, review conc M-10). Why: refusing `wss://<ip>` at `Connect` would break servers with IP certificates; LWS 3.0 checks an IP host as a DNS name and always fails it [tls.hostname_ip_literal]. Cost if wrong: about 20 lines in the TLS path to drop.
 10. **Redirects are refused at the second `APPEND_HANDSHAKE_HEADER` (VaRest-2rt, ruling Q2).** Decision: the first `APPEND_HANDSHAKE_HEADER` of an attempt appends; any later one appends nothing and returns -1, so the second request never goes out [hs.redirect_veto] and LWS gives no `CONNECTION_ERROR` (the transport reports the end itself); a certificate check on a `ws://` attempt (a redirect to wss, [hs.redirect_to_tls]), or on a wss attempt after its first `APPEND_HANDSHAKE_HEADER` (a redirected wss attempt makes its second TLS handshake before its second `APPEND`), fails it; `FILTER_PRE_ESTABLISH` rejects a second-request response as a second guard. `Failure = Redirect`, `HttpStatus = 0`: LWS 3.0 follows the 3xx before any callback sees the status. Whether LWS replays appended headers by itself is measured by a probe test (Task 10); the count under a configured proxy is W1b's (rti note M-7), and until it is known the test runner starts the editor without the proxy variables (review conc M-12). The certificate-check guard also refuses a TLS 1.2 renegotiation after the request, which OpenSSL 1.1.1 clients accept by default (review conc M-14): rare, and left so. Cost if wrong: a server that relies on an upgrade redirect needs its final URL (ruling Q2's own cost).
 11. **libwebsockets' error strings decide a failure; `lws_http_client_http_response` is never called.** Decision: every status VaRest reports comes from the `CONNECTION_ERROR` string ("unauthorized" 401, "forbidden" 403, "not 101, was N"); the full table is Task 5's. Why: the strings carry every status the function returns there [hs.status_in_connection_error.refused], and without a header table it dereferences NULL (T18). Cost if wrong: none.
-12. **Kills report at the deadline; the wait is short while one is in flight (VaRest-wcv).** Decision: `lws_service` waits at most 30 s with no connection (commands wake it), 1 s with connections (spec §2.1), and 100 ms while a kill is in flight or LWS holds a partial write; the time from a kill to `WSI_DESTROY` is counted and Task 11 asserts it stays under 1.6 s (`Timeout.KillLatency`). The kill is armed again after every `lws_service` return until `WSI_DESTROY` (review conc I-1): LWS's stage timers overwrite it. Why: LWS walks its timeouts only when the wall-clock second changed, on a return of `lws_service` (T26), so a 1 s cap alone can land a kill about 2 s late. Cost if wrong: an fd lives a second longer.
+12. **Kills report at the deadline; the wait is short while one is in flight (VaRest-wcv).** Decision: `lws_service` waits at most 30 s with no connection (commands wake it), 1 s with connections (spec §2.1), and 100 ms while a kill is in flight or LWS holds a partial write; the time from a kill to `WSI_DESTROY` is counted and Task 11 asserts it stays under 1.6 s (`Timeout.KillLatency`). A kill that has not landed 1.25 s after it was armed is armed again, until `WSI_DESTROY` (review conc I-1: LWS's stage timers can overwrite it), never on every pass (re-review N-1: each `lws_set_timeout` restarts the timeout at the current second, `__lws_set_timeout` storing `time()`, so a busy service thread would postpone the kill; `Timeout.KillLatencyBusy` asserts the 1.6 s bound with a busy neighbour). Why: LWS walks its timeouts only when the wall-clock second changed, on a return of `lws_service` (T26), so a 1 s cap alone can land a kill about 2 s late. Cost if wrong: an fd lives a second longer.
 13. **VaRest parses the URL itself, on the game thread.** Decision: `ws`, `wss`, and outside Shipping `wss+insecure`; no user info, no fragment; ASCII hosts only (IDN needs punycode, as `VaRest::Http::HasNonAsciiHost` refuses for HTTP); IPv6 in brackets; path and query bytes past ASCII, spaces and controls percent-encoded (RFC 3987 §3.1, as `VaRest::Http::JoinUrl`); `http(s)://` stays the socket layer's sugar (spec §3.2), not the transport's. Why: `lws_parse_uri` writes into its input and takes any scheme (`libwebsockets.h:5800-5819`), and a bad URL must be classified before the service thread runs. Cost if wrong: a URL form some server needs is refused with `BadUrl`.
 14. **Header rules.** Decision: names are RFC 7230 tokens; values are VCHAR, space or tab; `Host`, `Upgrade`, `Connection`, `Origin` and `Sec-WebSocket-*` are refused (LWS writes them, or VaRest does from `Origin`/`Protocols`); subprotocols are tokens offered once (case-sensitive), joined with ", " (LWS skips the spaces when it matches the selection); the header block is refused over 32 KiB on the game thread, and checked again against the room LWS reports in `APPEND_HANDSHAKE_HEADER` (T5, [hs.append_header_space]: 32482 bytes for a short path). Why: spec §2.2 and D23; a duplicate `Origin` or `Sec-WebSocket-Protocol` breaks the upgrade. Cost if wrong: an app that set one of them as a header gets `BadHandshake`.
 15. **The allowlist is the engine's filter on the scheme and host only.** Decision: `UE::Core::FURLRequestFilter(TEXT("Online.HttpManager"), GEngineIni)` per connect on the game thread, given `scheme://host[:port]` (no path, no query: its refusal line at `LogCore` prints the URL it was given, `URLRequestFilter.cpp:136-140`), `wss+insecure` as `wss`; no bypass key. A project whose `[Online.HttpManager https]` lists domains must add `[Online.HttpManager wss]` too: the filter refuses a scheme it has no section for (`URLRequestFilter.cpp:131-140`). Tests inject the map (decision 19), never the ini. Why: spec §2.2, E7. Cost if wrong: one doc line.
@@ -110,7 +110,7 @@ Source/VaRestWebSocket/
   Private/Tests/VaRestSocketFakeTest.cpp                        NEW (T3)
   Private/Tests/VaRestSocketTargetTest.cpp                      NEW (T4)
   Private/Tests/VaRestLwsErrorsTest.cpp                         NEW (T5)
-  Private/Tests/VaRestLwsServiceTest.cpp                        NEW (T6); startup policy (T7)
+  Private/Tests/VaRestLwsServiceTest.cpp                        NEW (T6), the startup policy's test included
   Private/Tests/VaRestLwsTlsTest.cpp                            NEW (T13): EvaluateServerCertificate in OpenSSL's verification, in-memory leaves
 Source/VaRestTests/VaRestTests.Build.cs                         + VaRestWebSocket (T1); + Projects (T13)
 Source/VaRestTests/Private/WebSocket/VaRestWsTestUtil.h/.cpp    NEW (T7): site, schemes, transport, events, journal
@@ -2475,7 +2475,7 @@ Every client string of the bundled archive that LWS 3.0 can hand `CLIENT_CONNECT
 
 **Interfaces:**
 - Consumes: `EVaRestSocketFailure` (Task 2).
-- Produces: `struct VaRest::WebSocket::Lws::FConnectionErrorClass { EVaRestSocketFailure Failure = Unknown; int32 HttpStatus = 0; bool bEmpty = false; }` (`bEmpty`: the string was empty after trimming; the connection decides by elapsed time, review conc M-2); `FConnectionErrorClass VaRest::WebSocket::Lws::ClassifyConnectionError(FStringView Text)` (any thread; no LWS include needed).
+- Produces: `struct VaRest::WebSocket::Lws::FConnectionErrorClass { EVaRestSocketFailure Failure = Unknown; int32 HttpStatus = 0; bool bEmpty = false; }` (`bEmpty`: the string was empty after trimming; the connection decides by elapsed time, review conc M-2); `LwsConnectStageSeconds = 20.0`; `FConnectionErrorClass VaRest::WebSocket::Lws::ClassifyEmptyConnectionError(double TookSeconds, FString& OutDetail)` (any thread; re-review: conc-M-2's elapsed branch, table-tested); `FConnectionErrorClass VaRest::WebSocket::Lws::ClassifyConnectionError(FStringView Text)` (any thread; no LWS include needed).
 
 - [ ] **Step 1: Write the failing test** — create `Source/VaRestWebSocket/Private/Tests/VaRestLwsErrorsTest.cpp`:
 
@@ -2564,6 +2564,27 @@ bool FVaRestLwsErrorsTest::RunTest(const FString& Parameters)
 	const TCHAR JustNul[] = { 0 };
 	TestTrue(TEXT("... and so is a lone NUL"), ClassifyConnectionError(FStringView(JustNul, 1)).bEmpty);
 	TestFalse(TEXT("a real string is not"), ClassifyConnectionError(TEXT("read failed")).bEmpty);
+	// ... and the connection splits it by the time the attempt took (re-review: conc-M-2's elapsed branch)
+	struct FEmptyRow
+	{
+		double Took;
+		EVaRestSocketFailure Failure;
+		const TCHAR* DetailHas;
+	};
+	const FEmptyRow EmptyRows[] = {
+		{ 0.2, EVaRestSocketFailure::Unknown, TEXT("empty CONNECTION_ERROR") },          // a kill VaRest did not make
+		{ 19.4, EVaRestSocketFailure::Unknown, TEXT("empty CONNECTION_ERROR") },
+		{ 19.5, EVaRestSocketFailure::ConnectTimeout, TEXT("20 s connect stage") },     // LWS's fixed TCP-connect timer (review conc M-1)
+		{ 20.1, EVaRestSocketFailure::ConnectTimeout, TEXT("20 s connect stage") },
+		{ 60.3, EVaRestSocketFailure::ConnectTimeout, TEXT("timeout_secs") },           // the context's backstop
+	};
+	for (const FEmptyRow& Row : EmptyRows)
+	{
+		FString Detail;
+		const FConnectionErrorClass Class = ClassifyEmptyConnectionError(Row.Took, Detail);
+		TestTrue(FString::Printf(TEXT("an empty string after %.1f s is %s (got %s)"), Row.Took, LexToString(Row.Failure), LexToString(Class.Failure)), Class.Failure == Row.Failure);
+		TestTrue(FString::Printf(TEXT("... its detail names it (%s)"), *Detail), Detail.Contains(Row.DetailHas, ESearchCase::CaseSensitive));
+	}
 	return true;
 }
 
@@ -2608,6 +2629,19 @@ namespace VaRest::WebSocket::Lws
 	 * overrides what this says.
 	 */
 	FConnectionErrorClass ClassifyConnectionError(FStringView Text);
+
+	/**
+	 * LWS's own timer for the TCP connect and the proxy exchange, fixed in 3.0 whatever timeout_secs says (review conc M-1:
+	 * lws_client_connect_2 arms (2 | 8 | 1, 20) at client.c.o 0x572-0x57f, 0x7b6-0x7c3, 0x843-0x850 of the Release archive)
+	 */
+	inline constexpr double LwsConnectStageSeconds = 20.0;
+
+	/**
+	 * Any thread: an empty CONNECTION_ERROR (bEmpty) by the time the attempt took (review conc M-1, M-2; re-review: a pure
+	 * function, so the split is table-tested). From LwsConnectStageSeconds - 0.5 on it is LWS's own stage timer --
+	 * ConnectTimeout; before, Unknown (a kill VaRest did not make). OutDetail says which, with the time
+	 */
+	FConnectionErrorClass ClassifyEmptyConnectionError(double TookSeconds, FString& OutDetail);
 }
 ```
 
@@ -2730,6 +2764,24 @@ VaRest::WebSocket::Lws::FConnectionErrorClass VaRest::WebSocket::Lws::ClassifyCo
 	}
 	return Out;
 }
+
+VaRest::WebSocket::Lws::FConnectionErrorClass VaRest::WebSocket::Lws::ClassifyEmptyConnectionError(double TookSeconds, FString& OutDetail)
+{
+	// "" is one of LWS's stage timers -- its fixed 20 s for the TCP connect and the proxy, or timeout_secs -- or a kill VaRest
+	// did not make. VaRest's own ConnectTimeout (at most timeout_secs) normally fires first, so only the time taken tells them apart
+	FConnectionErrorClass Out;
+	Out.bEmpty = true;
+	if (TookSeconds >= LwsConnectStageSeconds - 0.5)
+	{
+		Out.Failure = EVaRestSocketFailure::ConnectTimeout;
+		OutDetail = FString::Printf(TEXT("libwebsockets' own handshake timeout after %.1f s (its 20 s connect stage, or timeout_secs)"), TookSeconds);
+	}
+	else
+	{
+		OutDetail = FString::Printf(TEXT("an empty CONNECTION_ERROR from libwebsockets after %.1f s"), TookSeconds);
+	}
+	return Out;
+}
 ```
 
 - [ ] **Step 5: Run it**
@@ -2737,7 +2789,7 @@ VaRest::WebSocket::Lws::FConnectionErrorClass VaRest::WebSocket::Lws::ClassifyCo
 Run: `Tools/run_tests.sh VaRest.WebSocket.Lws.ConnectError`
 Expected: `run_tests: 1 passed, 0 failed`.
 
-- [ ] **Step 6: Restore-the-bug** — delete the `read failed` row: the test FAILS at `"read failed" is NoUpgradeResponse` (22 A2's string); restore; PASSES. Then make the 3xx branch always `UpgradeRefused`: FAILS at `"... was 302" is Redirect`; restore; PASSES. Then delete the `if (Trimmed.IsEmpty())` block: FAILS at "an empty string is flagged empty" (review conc M-2); restore; PASSES.
+- [ ] **Step 6: Restore-the-bug** — delete the `read failed` row: the test FAILS at `"read failed" is NoUpgradeResponse` (22 A2's string); restore; PASSES. Then make the 3xx branch always `UpgradeRefused`: FAILS at `"... was 302" is Redirect`; restore; PASSES. Then delete the `if (Trimmed.IsEmpty())` block: FAILS at "an empty string is flagged empty" (review conc M-2); restore; PASSES. Then make `ClassifyEmptyConnectionError` always `ConnectTimeout` (the old classification): FAILS at "an empty string after 0.2 s is Unknown"; restore; PASSES.
 
 - [ ] **Step 7: Commit**
 
@@ -2760,9 +2812,9 @@ Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 - Test: `Source/VaRestWebSocket/Private/Tests/VaRestLwsServiceTest.cpp`
 
 **Interfaces:**
-- Consumes: `VaRestLwsInclude.h`, `LogVaRestSocket`, `VaRest_WebSocket` (Task 1); `FrameHeadroom` (Task 2).
+- Consumes: `VaRestLwsInclude.h`, `LogVaRestSocket`, `VaRest_WebSocket` (Task 1); `FrameHeadroom` (Task 2); `VaRest::WebSocket::MaxConnectTimeoutSeconds` (Task 3, `VaRestSocketTransport.h`, which `VaRestLwsService.cpp` includes; re-review A-8).
 - Produces:
-  - constants in `VaRest::WebSocket::Lws`: `LwsCloseAckSeconds = 5.0`, `LwsConnectStageSeconds = 20.0`, `FragmentBytes = 64 * 1024`, `RxBufferBytes = 64 * 1024`, `HeaderBufferBytes = 32 * 1024`
+  - constants in `VaRest::WebSocket::Lws`: `LwsCloseAckSeconds = 5.0`, `KillRearmSeconds = 1.25`, `FragmentBytes = 64 * 1024`, `RxBufferBytes = 64 * 1024`, `HeaderBufferBytes = 32 * 1024`
   - `struct FServiceOptions { int32 IdleWaitMs = 30000; int32 ActiveWaitCapMs = 1000; int32 ShortWaitCapMs = 100; TArray<uint8> ExtraTrustedPem; FString TcpAddressOverride; bool bOverrideAllowlist = false; TArray<TPair<FString, TArray<FString>>> Allowlist; FString ThreadName = TEXT("VaRestLws"); double ExitFlushSeconds = 0.25; bool bFailThreadForTest = false; }`
   - `struct FServiceCounters { std::atomic<int32> LiveConnections, KillsIssued, KillsLanded, CommandsRun, ContextCreations, UnsentCloses; std::atomic<double> LastKillToDestroySeconds{-1}, MaxKillToDestroySeconds{-1}; }`
   - `std::atomic<int32>& TlsHandshakesInFlight()` (any thread; module-wide: VaRest's wss attempts LWS has neither established nor destroyed, review conc I-3)
@@ -3151,10 +3203,10 @@ namespace VaRest::WebSocket::Lws
 	/** LWS's own close-ack wait after our close frame, fixed in 3.0 (T20: ops-ws.c.o rops_handle_POLLOUT_ws 0x103c-0x104a) */
 	inline constexpr double LwsCloseAckSeconds = 5.0;
 	/**
-	 * LWS's own timer for the TCP connect and the proxy exchange, fixed in 3.0 whatever timeout_secs says (review conc M-1:
-	 * lws_client_connect_2 arms (2 | 8 | 1, 20) at client.c.o 0x572-0x57f, 0x7b6-0x7c3, 0x843-0x850 of the Release archive)
+	 * A pending kill that has not landed this long after it was armed is armed again (review conc I-1, re-review N-1): one
+	 * timeout walk -- LWS walks only when the wall-clock second changed (T26) -- plus a margin. Shorter re-arms postpone the kill
 	 */
-	inline constexpr double LwsConnectStageSeconds = 20.0;
+	inline constexpr double KillRearmSeconds = 1.25;
 	/** A message goes out in fragments of at most this many bytes (spec 2.4, 15) */
 	inline constexpr int32 FragmentBytes = 64 * 1024;
 	/** The one protocol's receive buffer, the engine's (LwsWebSocketsManager.cpp:166; spec 2.1) */
@@ -3327,7 +3379,8 @@ namespace VaRest::WebSocket::Lws
 
 	/**
 	 * Any thread: VaRest's wss attempts, across every service of this module, that LWS has neither established
-	 * (CLIENT_ESTABLISHED) nor destroyed (WSI_DESTROY) -- raised by FConn::Start, lowered once (review conc I-3, VaRest-rti).
+	 * (CLIENT_ESTABLISHED) nor destroyed (WSI_DESTROY) -- raised by FTransport::Connect on the game thread, where
+	 * FService::Start reads it (re-review N-2), lowered once by the FConn (review conc I-3, VaRest-rti).
 	 * Every lws_create_context re-allocates this LWS copy's OpenSSL ex-data index that their verify callbacks read
 	 * unchecked [coexist.context_create_reallocates_ssl_index], so FService::Start refuses while it is not 0
 	 */
@@ -3844,10 +3897,10 @@ The first real connection: `FConn` connects with Task 4's target, appends the he
 - Test: `Source/VaRestTests/Private/WebSocket/VaRestWsConnectTest.cpp`
 
 **Interfaces:**
-- Consumes: Tasks 2-6: `FVaRestSocketFrame`, `FVaRestSocketEvent`, `FSocketLink`, `PrepareTarget`, `IsAllowedByFilter`, `ClassifyConnectionError`, `FService`, `IServiceConnection`, `FServiceOptions`, `Utf8Copy`, `ShouldCreateAtStartup`, `SanitizeCloseCode`, `CloseReasonBytes`.
+- Consumes: Tasks 2-6: `FVaRestSocketFrame`, `FVaRestSocketEvent`, `FSocketLink`, `PrepareTarget`, `IsAllowedByFilter`, `ClassifyConnectionError`, `ClassifyEmptyConnectionError`, `LwsConnectStageSeconds` (Task 5), `FService`, `IServiceConnection`, `FServiceOptions`, `FServiceCounters` (`UnsentCloses`, `ContextCreations`), `TlsHandshakesInFlight()`, `KillRearmSeconds`, `Utf8Copy`, `ShouldCreateAtStartup` (Task 6), `SanitizeCloseCode`, `CloseReasonBytes` (Task 2) (re-review A-17).
 - Produces:
   - `VARESTWEBSOCKET_API TSharedRef<IVaRestSocketTransport, ESPMode::ThreadSafe> VaRest::WebSocket::GetDefaultTransport()` (any thread; its `Connect` is game thread)
-  - `class VaRest::WebSocket::Lws::FConn final : public IServiceConnection` with `Prepare(const FServiceOptions&)` (game thread), `GetLabel()`, the `IServiceConnection` overrides, and the commands `Send(FService&, FVaRestSocketFrame&&)`, `Close(FService&, int32 Code, TArray<uint8>&& Reason, EVaRestSocketCloseBy, EVaRestSocketFailure)`, `Release(FService&)`, `static FConn* Find(FService&, uint64)` (service thread). Private state later tasks extend: `PendingFailure`/`PendingDetail`, `AppendCalls`, `Outbox`, `HeldBytes`, the close fields (`bCloseQueued`, `bCloseSent`, `bCloseCounted`, `CloseSentAt`, `CloseCode`, `CloseReason`, `CloseBy`, `CloseFailure`), `Owner` (the service, set by `Start`), `bTlsCounted`; private functions `OnAppendHeaders`, `OnFilterPreEstablish`, `OnEstablished`, `OnWriteable`, `OnConnectionError`, `OnEnded`, `OnDestroyed`, `Kill`, `ReleaseHeld`, `DropOutbox`, `EndPreOpen`, `EndOpen`, `UncountTls`, `UncountClose`. An attempt in state `Ended` refuses `APPEND_HANDSHAKE_HEADER` and `FILTER_PRE_ESTABLISH` (-1) and every later task's certificate check (1); `CheckDeadlines` re-arms an issued kill before anything else (review conc I-1) -- Tasks 9 and 11 keep both when they extend these functions.
+  - `class VaRest::WebSocket::Lws::FConn final : public IServiceConnection` with `Prepare(const FServiceOptions&)` (game thread), `GetLabel()`, the `IServiceConnection` overrides, and the commands `Send(FService&, FVaRestSocketFrame&&)`, `Close(FService&, int32 Code, TArray<uint8>&& Reason, EVaRestSocketCloseBy, EVaRestSocketFailure)`, `Release(FService&)`, `static FConn* Find(FService&, uint64)` (service thread). Private state later tasks extend: `PendingFailure`/`PendingDetail`, `AppendCalls`, `Outbox`, `HeldBytes`, the close fields (`bCloseQueued`, `bCloseSent`, `bCloseCounted`, `CloseSentAt`, `CloseCode`, `CloseReason`, `CloseBy`, `CloseFailure`), `Owner` (the service, set by `Start`), `bTlsCounted`, `KillArmedAt`; public `NeedsTlsCount()`/`MarkTlsCounted()` (game thread, `FTransport::Connect` counts a wss attempt before queuing it, re-review N-2) and a destructor that uncounts; private functions `OnAppendHeaders`, `OnFilterPreEstablish`, `OnEstablished`, `OnWriteable`, `OnConnectionError`, `OnEnded`, `OnDestroyed`, `Kill`, `ReleaseHeld`, `DropOutbox`, `EndPreOpen`, `EndOpen`, `UncountTls`, `UncountClose`. An attempt in state `Ended` refuses `APPEND_HANDSHAKE_HEADER` and `FILTER_PRE_ESTABLISH` (-1) and every later task's certificate check (1); `CheckDeadlines` re-arms an issued kill that has not landed `KillRearmSeconds` after it was armed, before anything else (review conc I-1, re-review N-1) -- Tasks 9 and 11 keep both when they extend these functions.
   - `class VaRest::WebSocket::Lws::FTransport final : public IVaRestSocketTransport { explicit FTransport(FServiceOptions); Connect; bool EnsureStarted(); void Shutdown(); void ResetAfterFork(); const FServiceCounters* GetCounters() const; }`, `FTransport& GetDefault()`, `void OnModuleStartup()`, `void ShutdownDefault()`, `void ResetDefaultAfterFork()` (game thread)
   - `VaRestSocketTesting.h`: `struct FLwsTransportOptions { TArray<uint8> ExtraTrustedPem; FString TcpAddressOverride; bool bOverrideAllowlist; TArray<TPair<FString, TArray<FString>>> Allowlist; int32 ActiveWaitCapMs = 1000; int32 ShortWaitCapMs = 100; double ExitFlushSeconds = 0.25; bool bFailThreadForTest = false; }`, `struct FLwsCounters { int32 LiveConnections, KillsIssued, KillsLanded, ContextCreations, UnsentCloses; double LastKillToDestroySeconds, MaxKillToDestroySeconds; }`, `class ILwsTestTransport : public IVaRestSocketTransport { virtual void Shutdown() = 0; virtual FLwsCounters GetCounters() const = 0; }`, `MakeLwsTransport(FLwsTransportOptions)`, `DescribeLwsCopy()`, `GetLwsCreateContextAddress()`, `DescribeLwsLogLevel()`, `int32 GetTlsHandshakesInFlight()` (any thread), `class FScopedTlsHandshakeInFlight` (raises the module-wide count for its scope, review conc I-3) (all `VARESTWEBSOCKET_API`, game thread unless noted, `WITH_DEV_AUTOMATION_TESTS`)
   - `VaRestWsTestUtil.h` (namespace `VaRest::WsTest`): `FSite`, `FindSite`, `FScheme`, `Schemes`, `NewKey`, `MakeTransport`, `ExpectLwsLines`, `FEvents` (`WaitFor`, `WaitType`, `WaitEnd`, `WaitMessages`, `Find`, `GetEnd`, `GetMessages`, `Count`, `GetAll`, `Pull`, `Describe`, `bAcknowledge`, `Connection`), `Visit`, `IsError`, `FetchJournal`, `FetchBytes`, `JournalEvents`, `JournalHeader`, `JournalCloseCode`, `Request`, `Utf8`, `Sha256Hex`
@@ -3897,7 +3950,8 @@ namespace VaRest::WsTest
 	/**
 	 * A transport of its own -- context and thread -- with TCP to the server's host (plan decision 19) and, with bTrustTestCa,
 	 * the test CA trusted (GET /tls/ca.pem, fetched once). Null, with an AddError, when the CA could not be fetched. Shut it
-	 * down before the test returns (ON_SCOPE_EXIT), and never make one while another has a wss attempt in flight (VaRest-rti).
+	 * down before the test returns (ON_SCOPE_EXIT), and never make one while another transport still has a wss attempt that
+	 * LWS has not destroyed (its LiveConnections back to 0): an ended attempt still runs its handshake (VaRest-rti; re-review N-5).
 	 */
 	TSharedPtr<VaRest::WebSocket::Testing::ILwsTestTransport, ESPMode::ThreadSafe> MakeTransport(FAutomationTestBase& Test, const FSite& Site, bool bTrustTestCa = true);
 
@@ -4805,9 +4859,11 @@ bool FVaRestWsConnectTlsCountedTest::RunTest(const FString& Parameters)
 	{
 		return false;
 	}
-	// Review conc I-3: a wss attempt counts from its connect until LWS establishes or destroys it
+	// Review conc I-3: a wss attempt counts from its connect until LWS establishes or destroys it. Re-review N-2: from the
+	// moment Connect returns, on the game thread, with no pumping
 	FEvents Pending(Transport->Connect(Request(Both[1], TEXT("/ws/hang?ms=20000&key=") + NewKey())));
-	TestTrue(TEXT("a pending wss attempt is counted"), VaRest::Http::Testing::PumpUntil([] { return GetTlsHandshakesInFlight() == 1; }, 5.0, true));
+	TestEqual(TEXT("a wss attempt is counted as soon as Connect returns"), GetTlsHandshakesInFlight(), 1);
+	TestTrue(TEXT("... and while it is pending"), VaRest::Http::Testing::PumpUntil([] { return GetTlsHandshakesInFlight() == 1; }, 5.0, true));
 	const FString PlainKey = NewKey();
 	FEvents Plain(Transport->Connect(Request(Both[0], TEXT("/ws/hang?ms=20000&key=") + PlainKey)));
 	// Until the ws upgrade reached the server, so its Start has run. FetchJournal pumps by itself (PumpUntil is not
@@ -4920,9 +4976,16 @@ namespace VaRest::WebSocket::Lws
 	public:
 		FConn(uint64 InId, TSharedRef<FSocketLink, ESPMode::ThreadSafe> InLink, FVaRestSocketConnectRequest&& InRequest);
 
+		/** Any thread: the last owner drops it -- a wss attempt still counted leaves TlsHandshakesInFlight() (re-review N-2: an Adopt command dropped unrun) */
+		virtual ~FConn() override;
+
 		/** Game thread, inside Connect: checks and encodes the request (spec 2.2); a failure is reported by Start, from the service thread (E7) */
 		void Prepare(const FServiceOptions& Options);
 		const FString& GetLabel() const { return Label; }
+		/** Game thread, inside Connect: a wss target that Prepare took */
+		bool NeedsTlsCount() const { return Target.bTls && PendingFailure == EVaRestSocketFailure::None; }
+		/** Game thread, inside Connect, before the Adopt command is queued: raises TlsHandshakesInFlight() for this attempt (re-review N-2) */
+		void MarkTlsCounted();
 
 		// ---- IServiceConnection (service thread)
 		virtual uint64 GetId() const override { return Id; }
@@ -4989,6 +5052,8 @@ namespace VaRest::WebSocket::Lws
 		FString SelectedProtocol;
 		bool bKillIssued = false;
 		double KillAt = 0.0;
+		/** When the pending kill was last armed: Kill sets it, CheckDeadlines' re-arm moves it (re-review N-1) */
+		double KillArmedAt = 0.0;
 		// ---- the outbox (plan decisions 6, 7, 18)
 		TArray<FVaRestSocketFrame> Outbox;
 		/** Bytes of a write LWS still holds (lws_partial_buffered); released once it says the write drained */
@@ -5035,6 +5100,21 @@ VaRest::WebSocket::Lws::FConn::FConn(uint64 InId, TSharedRef<FSocketLink, ESPMod
 	Label = Request.LogName.IsEmpty() ? FString::Printf(TEXT("ws#%llu"), static_cast<unsigned long long>(Id)) : Request.LogName;
 }
 
+VaRest::WebSocket::Lws::FConn::~FConn()
+{
+	UncountTls();
+}
+
+void VaRest::WebSocket::Lws::FConn::MarkTlsCounted()
+{
+	check(IsInGameThread());
+	if (!bTlsCounted)
+	{
+		TlsHandshakesInFlight().fetch_add(1);
+		bTlsCounted = true;
+	}
+}
+
 VaRest::WebSocket::Lws::FConn* VaRest::WebSocket::Lws::FConn::Find(FService& Service, uint64 InId)
 {
 	return static_cast<FConn*>(Service.Find(InId));
@@ -5078,6 +5158,7 @@ void VaRest::WebSocket::Lws::FConn::Start(FService& Service)
 	if (Service.IsShuttingDown())
 	{
 		EndPreOpen(EVaRestSocketFailure::Shutdown, EVaRestSocketCloseBy::Transport, 0, TEXT("the transport shut down before the connect"));
+		UncountTls();
 		bDestroyed = true;
 		return;
 	}
@@ -5110,13 +5191,9 @@ void VaRest::WebSocket::Lws::FConn::Start(FService& Service)
 	// The wsi early, so a kill reaches an attempt that has not opened yet (libwebsockets.h:3441-3451)
 	Info.pwsi = &Wsi;
 	State = EConnState::Connecting;
-	if (Target.bTls)
-	{
-		// Review conc I-3 (VaRest-rti): from before the connect until LWS establishes or destroys it, no VaRest service makes a
-		// context (FService::Start). Counted for the whole upgrade, not only the TLS handshake: conservative, and simple
-		TlsHandshakesInFlight().fetch_add(1);
-		bTlsCounted = true;
-	}
+	// Review conc I-3 (VaRest-rti): a wss attempt was counted by FTransport::Connect on the game thread (MarkTlsCounted,
+	// re-review N-2) and stays counted until LWS establishes or destroys it -- the whole upgrade, not only the TLS handshake:
+	// conservative, and simple. UncountTls lowers it once
 	// Ruling Q5: LWS 3.0 resolves the address itself, synchronously, here on the service thread (getaddrinfo inside
 	// lws_client_connect_2, review conc I-4), and tries the first address it returns only; W1b B9 (VaRest-gi0) resolves on
 	// UE::Tasks and falls back to the next address
@@ -5255,19 +5332,8 @@ void VaRest::WebSocket::Lws::FConn::OnConnectionError(const void* In, size_t Len
 	FString Detail = FString::Printf(TEXT("libwebsockets: \"%s\""), *Text);
 	if (Class.bEmpty)
 	{
-		// Review conc M-1, M-2: "" is one of LWS's stage timers -- its fixed 20 s for the TCP connect and the proxy, or
-		// timeout_secs -- or a kill VaRest did not make. VaRest's own deadline (at most timeout_secs) normally fires first,
-		// so only the time taken tells them apart
-		const double Took = FPlatformTime::Seconds() - StartedAt;
-		if (Took >= LwsConnectStageSeconds - 0.5)
-		{
-			Class.Failure = EVaRestSocketFailure::ConnectTimeout;
-			Detail = FString::Printf(TEXT("libwebsockets' own handshake timeout after %.1f s (its 20 s connect stage, or timeout_secs)"), Took);
-		}
-		else
-		{
-			Detail = FString::Printf(TEXT("an empty CONNECTION_ERROR from libwebsockets after %.1f s"), Took);
-		}
+		// Review conc M-1, M-2: which of LWS's own timers, or a kill VaRest did not make, by the time taken (Task 5)
+		Class = ClassifyEmptyConnectionError(FPlatformTime::Seconds() - StartedAt, Detail);
 	}
 	const EVaRestSocketCloseBy By = Class.Failure == EVaRestSocketFailure::ConnectTimeout ? EVaRestSocketCloseBy::Timeout : EVaRestSocketCloseBy::Transport;
 	EndPreOpen(Class.Failure, By, Class.HttpStatus, MoveTemp(Detail));
@@ -5328,6 +5394,7 @@ void VaRest::WebSocket::Lws::FConn::Kill(FService& Service)
 	}
 	bKillIssued = true;
 	KillAt = FPlatformTime::Seconds();
+	KillArmedAt = KillAt;
 	Service.GetCounters().KillsIssued.fetch_add(1);
 	// T14, T26: the connection ends at LWS's next timeout walk; the wait stays short until it does (WantsShortWait, VaRest-wcv)
 	lws_set_timeout(Wsi, PENDING_TIMEOUT_USER_REASON_BASE, LWS_TO_KILL_ASYNC);
@@ -5335,12 +5402,17 @@ void VaRest::WebSocket::Lws::FConn::Kill(FService& Service)
 
 void VaRest::WebSocket::Lws::FConn::CheckDeadlines(FService& Service, double Now)
 {
-	if (bKillIssued && !bDestroyed && Wsi)
+	if (bKillIssued && !bDestroyed && Wsi && Now - KillArmedAt >= KillRearmSeconds)
 	{
 		// Review conc I-1: LWS's own stage timers replace a pending timeout (lws_client_socket_service and
-		// lws_generate_client_handshake call lws_set_timeout themselves), so the kill is armed again after every lws_service
-		// return until WSI_DESTROY. Outside any callback, as libwebsockets.h:4673-4679 allows for LWS_TO_KILL_ASYNC
+		// lws_generate_client_handshake call lws_set_timeout themselves), so a kill that has not landed one timeout walk
+		// after it was armed (T26) is armed again, until WSI_DESTROY. Re-review N-1: not on every pass -- each
+		// lws_set_timeout restarts the timeout at the current second (__lws_set_timeout stores time() as
+		// pending_timeout_set, libwebsockets.c.o 0x1275-0x1287), so a re-arm made after a second changed and before that
+		// second's walk would postpone the kill again and again while the service thread is busy in callbacks. Outside any
+		// callback, as libwebsockets.h:4673-4679 allows for LWS_TO_KILL_ASYNC
 		lws_set_timeout(Wsi, PENDING_TIMEOUT_USER_REASON_BASE, LWS_TO_KILL_ASYNC);
+		KillArmedAt = Now;
 	}
 	if (bDestroyed || State == EConnState::Ended)
 	{
@@ -5514,15 +5586,15 @@ int32 VaRest::WebSocket::Lws::FConn::OnWriteable(lws* InWsi)
 	if (Outbox.Num() > 0)
 	{
 		FVaRestSocketFrame& Head = Outbox[0];
-		const int64 Size = Head.Length;
+		const int64 FrameSize = Head.Length;
 		const int32 Protocol = Head.Kind == EVaRestSocketFrameKind::Text ? LWS_WRITE_TEXT : LWS_WRITE_BINARY;
 		// One lws_write per WRITEABLE: a second in one callback returns -1 and is lost (spec 2.4) [tx.two_writes_one_writeable]
-		const int Wrote = lws_write(InWsi, Head.Storage.GetData() + Head.Offset, static_cast<size_t>(Size), static_cast<lws_write_protocol>(Protocol));
+		const int Wrote = lws_write(InWsi, Head.Storage.GetData() + Head.Offset, static_cast<size_t>(FrameSize), static_cast<lws_write_protocol>(Protocol));
 		// LWS sent the bytes or copied the rest into its own buffer (T10): the frame can go
 		Outbox.RemoveAt(0);
 		if (Wrote < 0)
 		{
-			Link->BufferedBytes.fetch_sub(Size);
+			Link->BufferedBytes.fetch_sub(FrameSize);
 			EndOpen(1006, FString(), false, EVaRestSocketCloseBy::Transport, EVaRestSocketFailure::None, TEXT("lws_write failed"));
 			return -1;
 		}
@@ -5530,11 +5602,11 @@ int32 VaRest::WebSocket::Lws::FConn::OnWriteable(lws* InWsi)
 		// [tx.partial_after_fragment]. lws_partial_buffered says LWS still holds part of this one [tx.large_write_result]
 		if (lws_partial_buffered(InWsi))
 		{
-			HeldBytes += Size;
+			HeldBytes += FrameSize;
 		}
 		else
 		{
-			Link->ReleaseBuffered(Size);
+			Link->ReleaseBuffered(FrameSize);
 		}
 		if (Outbox.Num() > 0 || bCloseQueued || HeldBytes > 0)
 		{
@@ -5838,6 +5910,12 @@ TSharedRef<IVaRestSocketConnection, ESPMode::ThreadSafe> VaRest::WebSocket::Lws:
 		Link->Push(MoveTemp(Event), false);
 		AsyncTask(ENamedThreads::GameThread, [Link] { Link->Notify(); });
 		return MakeShared<FHandle, ESPMode::ThreadSafe>(TWeakPtr<FService, ESPMode::ThreadSafe>(), ConnId, Link, Label);
+	}
+	if (Conn->NeedsTlsCount())
+	{
+		// Re-review N-2: counted here, on the game thread, where every FService::Start reads the count, so a transport started
+		// right after this Connect -- before the service thread ran the Adopt -- still sees the attempt (VaRest-rti, I-3)
+		Conn->MarkTlsCounted();
 	}
 	Service->Enqueue([Moved = MoveTemp(Conn)](FService& Self) mutable { Self.Adopt(MoveTemp(Moved)); });
 	return MakeShared<FHandle, ESPMode::ThreadSafe>(Service, ConnId, Link, Label);
@@ -6170,7 +6248,7 @@ and add above the `timeout` line the comment `# No proxy variables until W1b B1 
 Run: `Tools/run_tests.sh VaRest.Integration.WebSocket.Transport.Connect` then `Tools/run_tests.sh --no-build Probe.VaRest.Lws.Connect.LocalhostAddress`
 Expected: `run_tests: 14 passed, 0 failed` (Open, Handshake, Origin, Protocols, Refused, BadRequest, NotAllowed, HeaderRoom, Write, Release, Shutdown, Default, StartRefusals, TlsHandshakeCounted); then `run_tests: 1 passed, 0 failed`. Read the probe's AddInfo line in the log (`grep -n "ws://localhost against" <Host>/Saved/Logs/VaRestTests.log`) and put it in the task report: Task 14 records it on VaRest-gi0 (ruling Q5).
 
-- [ ] **Step 11: Restore-the-bug** — (a) E7: in `FTransport::Connect`, when `Conn` holds a `PendingFailure` after `Prepare`, push its Error right there with `Link->Push(MoveTemp(Event))` (notify at once, on the game thread) and do not enqueue the connection: `Connect.BadRequest` FAILS at "never on the game thread, so never inside Connect"; restore; PASSES. (b) In `FConn::OnFilterPreEstablish`, drop the `lws_hdr_copy` block: `Connect.Protocols` FAILS at "the second offered protocol, selected"; restore; PASSES. (c) In `FConn::Release`, replace the `Close(...)` with `Kill(Service)`: `Connect.Release` FAILS at "the server got 1001" (-1: no close frame); restore; PASSES. (d) Review conc I-2: in `FService::Start` delete `|| bStartFailed`: `Connect.StartRefusals` FAILS at "one lws_create_context for both connects" (2; the error line comes twice); restore; PASSES. (e) Review conc I-3: in `FConn::OnDestroyed` delete `UncountTls();`, and run `Connect.TlsHandshakeCounted` alone (a count left at 1 refuses every later context in that run): it FAILS at "the count is back to 0" (the cancelled wss attempt never reached `CLIENT_ESTABLISHED`); restore; PASSES. (f) Review conc M-12: `http_proxy=http://127.0.0.1:9 Tools/run_tests.sh --no-build VaRest.Integration.WebSocket.Transport.Connect.Open` PASSES; take the `env -u ...` back out of `Tools/run_tests.sh` and run the same line: it FAILS (every connect goes to a proxy that is not there); restore; PASSES.
+- [ ] **Step 11: Restore-the-bug** — (a) E7: in `FTransport::Connect`, when `Conn` holds a `PendingFailure` after `Prepare`, push its Error right there with `Link->Push(MoveTemp(Event))` (notify at once, on the game thread) and do not enqueue the connection: `Connect.BadRequest` FAILS at "never on the game thread, so never inside Connect"; restore; PASSES. (b) In `FConn::OnFilterPreEstablish`, drop the `lws_hdr_copy` block: `Connect.Protocols` FAILS at "the second offered protocol, selected"; restore; PASSES. (c) In `FConn::Release`, replace the `Close(...)` with `Kill(Service)`: `Connect.Release` FAILS at "the server got 1001" (-1: no close frame); restore; PASSES. (d) Review conc I-2: in `FService::Start` delete `|| bStartFailed`: `Connect.StartRefusals` FAILS at "one lws_create_context for both connects" (2; the error line comes twice); restore; PASSES. (e) Review conc I-3: in `FConn::OnDestroyed` delete `UncountTls();` (and in `~FConn`, its backstop), and run `Connect.TlsHandshakeCounted` alone (a count left at 1 refuses every later context in that run): it FAILS at "the count is back to 0" (the cancelled wss attempt never reached `CLIENT_ESTABLISHED`); restore; PASSES. (f) Review conc M-12, re-review N-4: `http_proxy=http://127.0.0.1:9 no_proxy=127.0.0.1,localhost Tools/run_tests.sh --no-build VaRest.Integration.WebSocket.Transport.Connect.Open` PASSES; take the `env -u ...` back out of `Tools/run_tests.sh` and run the same line: it FAILS at "opened" for ws and wss (LWS takes the proxy from the environment; `no_proxy` keeps the engine's curl -- which honours it -- fetching `/tls/ca.pem` directly, so only libwebsockets can fail the test); restore; PASSES. If the run without `env -u` PASSES, LWS 3.0 does not use the variable on this path: report it, it is a W1b B1 fact. (g) Re-review N-2: move the count back to the service thread (delete the `NeedsTlsCount()` block in `FTransport::Connect` and raise the count at the top of `FConn::Start`): `Connect.TlsHandshakeCounted` FAILS at "counted as soon as Connect returns" (0: the service thread has not run the Adopt yet, nearly always); restore; PASSES.
 
 - [ ] **Step 12: The suite so far**
 
@@ -6839,8 +6917,9 @@ bool FVaRestWsCloseShutdownFlushTest::RunTest(const FString& Parameters)
 		return false;
 	}
 	// Review conc M-3: at engine exit the hub's 1001 closes (spec 1.4) are queued just before the transport shuts down.
-	// Shutdown lets the service thread write them first (ExitFlushSeconds, 0.25 s). The close waits behind 2 MiB in 32
-	// fragments, one WRITEABLE each, so a Shutdown that did not wait would stop the thread long before it
+	// Shutdown lets the service thread write them first (ExitFlushSeconds, 0.25 s). The close waits behind 8 MiB: about 128
+	// service passes, one 64 KiB fragment each (re-review N-3: 2 MiB was only 1-3 times the about 1 ms a Shutdown that did
+	// not wait takes to stop the thread; the server unmasks in one XOR, ws.py:193-199, so the real run stays far inside 0.25 s)
 	for (const FScheme& Scheme : Schemes(Site))
 	{
 		// One transport per scheme, made after the previous one was shut down (VaRest-rti)
@@ -6861,7 +6940,7 @@ bool FVaRestWsCloseShutdownFlushTest::RunTest(const FString& Parameters)
 			continue;
 		}
 		TArray<uint8> Payload;
-		Payload.SetNumZeroed(2 * 1024 * 1024);
+		Payload.SetNumZeroed(8 * 1024 * 1024);
 		Events.Connection->Send(FVaRestSocketFrame::Binary(Payload));
 		Events.Connection->Close(1001, TEXT("shutdown"));
 		Exiting->Shutdown();
@@ -7017,7 +7096,7 @@ and at the end of the members, after `EVaRestSocketFailure CloseFailure = EVaRes
 	CloseDeadline = FPlatformTime::Seconds() + Request.CloseTimeout;
 ```
 
-and add `#include "HAL/PlatformTime.h"` to the file's includes.
+(`HAL/PlatformTime.h` is already among the file's includes since Task 7, for `CloseSentAt`.)
 
 - [ ] **Step 5: The peer's close, the deadline** — in `Source/VaRestWebSocket/Private/VaRestLwsConn.cpp`:
 
@@ -7066,11 +7145,13 @@ In `FConn::OnEnded`, replace everything from `if (bCloseQueued)` to the end of t
 		// too. Review conc I-5: an end by LWS's own close-ack timer -- 5 s after our close frame (T20) -- with no close from the
 		// peer is the unanswered close CloseTimeout exists for: not clean. Above about 5 s LWS's timer ends it before VaRest's
 		// deadline; at 5 s both can fire in one lws_service return, LWS's first
-		const bool bAckTimedOut = bCloseSent && !bPeerClosed && FPlatformTime::Seconds() - CloseSentAt >= LwsCloseAckSeconds - 0.25;
+		const double SinceCloseSent = FPlatformTime::Seconds() - CloseSentAt;
+		const bool bAckTimedOut = bCloseSent && !bPeerClosed && SinceCloseSent >= LwsCloseAckSeconds - 0.25;
 		const int32 Code = bCloseSent ? CloseCode : (bPeerClosed ? Peer.Code : 1006);
 		FString Reason = bCloseSent ? Utf8ToString(CloseReason) : (bPeerClosed ? Peer.Reason : FString());
+		// Re-review N-8: worded by what VaRest knows -- an echo arriving just before LWS's timer cannot be seen
 		EndOpen(Code, MoveTemp(Reason), (bCloseSent || bPeerClosed) && !bAckTimedOut, CloseBy, CloseFailure,
-			bAckTimedOut ? FString(TEXT("libwebsockets' 5 s close-ack timer passed without the server's echo")) : FString());
+			bAckTimedOut ? FString::Printf(TEXT("the connection ended %.1f s after our close frame, at or past libwebsockets' 5 s close-ack timer"), SinceCloseSent) : FString());
 		return;
 	}
 	if (bPeerClosed)
@@ -7091,10 +7172,13 @@ Replace `FConn::CheckDeadlines` and `FConn::NextDeadline` with:
 void VaRest::WebSocket::Lws::FConn::CheckDeadlines(FService& Service, double Now)
 {
 	using namespace VaRest::WebSocket::Lws::VaRestLwsConnPrivate;
-	if (bKillIssued && !bDestroyed && Wsi)
+	if (bKillIssued && !bDestroyed && Wsi && Now - KillArmedAt >= KillRearmSeconds)
 	{
-		// Review conc I-1 (Task 7): armed again after every lws_service return, LWS's stage timers overwrite it
+		// Review conc I-1, re-review N-1 (Task 7): a kill that has not landed one timeout walk after it was armed is armed
+		// again -- LWS's stage timers can overwrite it -- but never on every pass, which would postpone it under a busy
+		// service thread (each lws_set_timeout restarts the timeout at the current second)
 		lws_set_timeout(Wsi, PENDING_TIMEOUT_USER_REASON_BASE, LWS_TO_KILL_ASYNC);
+		KillArmedAt = Now;
 	}
 	if (bDestroyed || State == EConnState::Ended)
 	{
@@ -7131,7 +7215,7 @@ double VaRest::WebSocket::Lws::FConn::NextDeadline() const
 Run: `Tools/run_tests.sh VaRest.Integration.WebSocket.Transport.Close` then `Tools/run_tests.sh VaRest.Integration.WebSocket.Transport.Timeout`
 Expected: `run_tests: 7 passed, 0 failed` (PeerCodes, PeerOdd, PeerBadUtf8Reason, Drop, Ours, CancelSendsNothing, ShutdownWritesQueuedClose); `run_tests: 2 passed, 0 failed` (Close, CloseLongerThanAck).
 
-- [ ] **Step 7: Restore-the-bug** — (a) spec §16.5 item 5: in `ParsePeerClose` (`VaRestSocketTypes.cpp`), make the empty payload report `Out.Code = 0;` (what reading two bytes of nothing gives): `Close.PeerOdd` FAILS at "an empty close is 1005"; restore; PASSES. (b) `OnPeerClose` returns 1: `Close.PeerCodes` FAILS at "the client answered with a close" [close.return_1_echo]; restore; PASSES. (c) `FConn::Close` never arms the deadline (`CloseDeadline = TNumericLimits<double>::Max();`): `Timeout.Close` FAILS ("cut by CloseTimeout after 5.5 s"); restore; PASSES. (d) Review conc I-5: in `OnEnded` make `bAckTimedOut` always false: `Timeout.CloseLongerThanAck` FAILS at "not clean"; restore; PASSES. (e) Review conc I-1: in `FConn::OnAppendHeaders` (Task 7) delete the `if (State == EConnState::Ended)` block: `Close.CancelSendsNothing` FAILS at "the server never saw the request" on both legs (1: the loopback connect and the TLS handshake beat the kill's timeout walk; no certificate rule exists before Task 10); restore; PASSES. (f) Review conc M-3: in `FConn::Close` (`VaRestLwsConnSend.cpp`) delete `bCloseCounted = true;` and the `UnsentCloses.fetch_add(1)` line: `Close.ShutdownWritesQueuedClose` FAILS at "the server got the 1001" (-1: the thread stopped with the fragments still going out); restore; PASSES. (g) Review conc M-6: in `FHandle::Send` delete `|| Link->bCloseRequested.load()`: `Close.Ours` FAILS at "a send after Close is refused"; restore; PASSES.
+- [ ] **Step 7: Restore-the-bug** — (a) spec §16.5 item 5: in `ParsePeerClose` (`VaRestSocketTypes.cpp`), make the empty payload report `Out.Code = 0;` (what reading two bytes of nothing gives): `Close.PeerOdd` FAILS at "an empty close is 1005"; restore; PASSES. (b) `OnPeerClose` returns 1: `Close.PeerCodes` FAILS at "the client answered with a close" [close.return_1_echo]; restore; PASSES. (c) `FConn::Close` never arms the deadline (`CloseDeadline = TNumericLimits<double>::Max();`): `Timeout.Close` FAILS ("cut by CloseTimeout after 5.5 s"); restore; PASSES. (d) Review conc I-5: in `OnEnded` make `bAckTimedOut` always false: `Timeout.CloseLongerThanAck` FAILS at "not clean"; restore; PASSES. (e) Review conc I-1: in `FConn::OnAppendHeaders` (Task 7) delete the `if (State == EConnState::Ended)` block: `Close.CancelSendsNothing` FAILS at "the server never saw the request" on both legs (1: the loopback connect and the TLS handshake beat the kill's timeout walk; no certificate rule exists before Task 10); restore; PASSES. (f) Review conc M-3: in `FConn::Close` (`VaRestLwsConnSend.cpp`) delete `bCloseCounted = true;` and the `UnsentCloses.fetch_add(1)` line: `Close.ShutdownWritesQueuedClose` FAILS at "the server got the 1001" (-1: the thread stopped with about 128 fragments still to go out); restore; PASSES. (g) Review conc M-6: in `FHandle::Send` delete `|| Link->bCloseRequested.load()`: `Close.Ours` FAILS at "a send after Close is refused"; restore; PASSES.
 
 - [ ] **Step 8: Commit**
 
@@ -7540,12 +7624,85 @@ bool FVaRestWsTimeoutKillLatencyTest::RunTest(const FString& Parameters)
 	TestTrue(FString::Printf(TEXT("with VaRest's 100 ms cap a kill lands within 1.6 s (%.1f ms)"), Longest[0] * 1000.0), Longest[0] >= 0.0 && Longest[0] < 1.6);
 	return true;
 }
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestWsTimeoutKillLatencyBusyTest, "VaRest.Integration.WebSocket.Transport.Timeout.KillLatencyBusy", VAREST_WS_TEST_FLAGS)
+
+bool FVaRestWsTimeoutKillLatencyBusyTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::WsTest;
+	ExpectLwsLines(*this);
+	FSite Site;
+	if (!FindSite(*this, Site, false))
+	{
+		return false;
+	}
+	// Re-review N-1: kills beside a busy neighbour on the same service. The neighbour's send to /ws/sink keeps the service
+	// thread in WRITEABLE callbacks (each masks and writes 64 KiB) while four attempts time out one after another. A kill
+	// re-armed on every pass is stamped with the new second whenever a second boundary falls inside a callback, so the walk of
+	// that second keeps the wsi and the kill moves on: past decision 12's 1.6 s. The game thread tops the send up while it
+	// waits, so the neighbour stays busy for every kill (32 MiB alone would drain in tens of milliseconds)
+	VaRest::WebSocket::Testing::FLwsTransportOptions Options;
+	Options.TcpAddressOverride = Site.Host;
+	const TSharedRef<VaRest::WebSocket::Testing::ILwsTestTransport, ESPMode::ThreadSafe> Busy = VaRest::WebSocket::Testing::MakeLwsTransport(MoveTemp(Options));
+	ON_SCOPE_EXIT
+	{
+		Busy->Shutdown();
+	};
+	FVaRestSocketConnectRequest SinkRequest;
+	SinkRequest.Url = FString::Printf(TEXT("ws://%s:%d/ws/sink?key=%s"), *Site.Host, Site.Port, *NewKey());
+	FEvents Sink(Busy->Connect(MoveTemp(SinkRequest)));
+	if (!TestTrue(TEXT("the busy neighbour opened"), Sink.WaitType(EVaRestSocketEventType::Open)))
+	{
+		Sink.WaitEnd();
+		return false;
+	}
+	TArray<uint8> Megabyte;
+	Megabyte.SetNumZeroed(1024 * 1024);
+	const TSharedRef<IVaRestSocketConnection, ESPMode::ThreadSafe> Neighbour = Sink.Connection;
+	int64 SentBytes = 0;
+	// Game thread, from the waits below: keeps at least 4 MiB queued, in 1 MiB frames
+	const auto TopUp = [&Neighbour, &Megabyte, &SentBytes]
+	{
+		while (Neighbour->GetBufferedAmount() < 4 * 1024 * 1024 && Neighbour->Send(FVaRestSocketFrame::Binary(Megabyte)))
+		{
+			SentBytes += Megabyte.Num();
+		}
+	};
+	TopUp();
+	int32 TimedOut = 0;
+	for (int32 Index = 0; Index < 4; ++Index)
+	{
+		FVaRestSocketConnectRequest Req;
+		Req.Url = FString::Printf(TEXT("ws://%s:%d/ws/hang?ms=20000&key=%s"), *Site.Host, Site.Port, *NewKey());
+		Req.ConnectTimeout = 0.5;
+		FEvents Events(Busy->Connect(MoveTemp(Req)));
+		Events.WaitFor([&TopUp](const TArray<FVaRestSocketEvent>& All)
+		{
+			TopUp();
+			return All.ContainsByPredicate([](const FVaRestSocketEvent& Each) { return Each.IsTerminal(); });
+		}, 5.0);
+		TimedOut += IsError(Events, EVaRestSocketFailure::ConnectTimeout) ? 1 : 0;
+		// Until LWS destroyed the killed one; the neighbour stays
+		VaRest::Http::Testing::PumpUntil([&TopUp, &Busy] { TopUp(); return Busy->GetCounters().LiveConnections == 1; }, 5.0, true);
+	}
+	const VaRest::WebSocket::Testing::FLwsCounters Counters = Busy->GetCounters();
+	AddInfo(FString::Printf(TEXT("beside a busy send (%lld MiB queued in all): longest kill to WSI_DESTROY %.1f ms over %d kills"),
+		SentBytes / (1024 * 1024), Counters.MaxKillToDestroySeconds * 1000.0, Counters.KillsLanded));
+	TestEqual(TEXT("four attempts timed out"), TimedOut, 4);
+	TestEqual(TEXT("every kill landed"), Counters.KillsLanded, 4);
+	TestTrue(FString::Printf(TEXT("beside a busy neighbour a kill still lands within 1.6 s (%.1f ms)"), Counters.MaxKillToDestroySeconds * 1000.0),
+		Counters.MaxKillToDestroySeconds >= 0.0 && Counters.MaxKillToDestroySeconds < 1.6);
+	TestTrue(TEXT("the neighbour was still sending at the end"), Neighbour->GetBufferedAmount() > 0 && !Neighbour->HasEnded());
+	Neighbour->Close(1000, TEXT("done"));
+	Sink.WaitEnd(30.0);
+	return true;
+}
 ```
 
 - [ ] **Step 2: Run them to see them fail**
 
 Run: `Tools/run_tests.sh VaRest.Integration.WebSocket.Transport.Timeout`
-Expected: `Timeout.Connect` FAILS ("ended within 5 s": only the context's 60 s backstop applies); `Timeout.Clamp` FAILS (the two Warnings never come); `Timeout.KillLatency` FAILS (no kill is issued: the attempts end after 60 s, past the test's waits); `Timeout.Close` passes.
+Expected: `Timeout.Connect` FAILS ("ended within 5 s": only the context's 60 s backstop applies); `Timeout.Clamp` FAILS (the two Warnings never come); `Timeout.KillLatency` and `Timeout.KillLatencyBusy` FAIL (no kill is issued: the attempts end after 60 s, past the test's waits); `Timeout.Close` and `Timeout.CloseLongerThanAck` (Task 9) pass (re-review N-9).
 
 - [ ] **Step 3: The member** — in `Source/VaRestWebSocket/Private/VaRestLwsConn.h`, after `double StartedAt = 0.0;` add:
 
@@ -7601,9 +7758,9 @@ In `FConn::NextDeadline`, before `return Next;` add:
 - [ ] **Step 5: Run them**
 
 Run: `Tools/run_tests.sh VaRest.Integration.WebSocket.Transport.Timeout`
-Expected: `run_tests: 5 passed, 0 failed` (Close, CloseLongerThanAck, Connect, Clamp, KillLatency). Put both `KillLatency` AddInfo lines and `Timeout.Connect`'s in the task report: Task 14 records them on VaRest-wcv.
+Expected: `run_tests: 6 passed, 0 failed` (Close, CloseLongerThanAck, Connect, Clamp, KillLatency, KillLatencyBusy). Put both `KillLatency` AddInfo lines and `Timeout.Connect`'s in the task report: Task 14 records them on VaRest-wcv.
 
-- [ ] **Step 6: Restore-the-bug** — (a) in `Start`, `ConnectDeadline = TNumericLimits<double>::Max();`: `Timeout.Connect` FAILS ("ended within 5 s"); restore; PASSES. (b) In `CheckDeadlines`, delete the `EndPreOpen(...)` line of the connect branch (keep `Kill`): the attempt then reports when LWS's kill lands, from its `""` string [timeout.kill_pending_sequence] — `Timeout.Connect` FAILS at "VaRest's own" (and, a kill landing up to about 1 s later, at "reported at the deadline"); restore; PASSES.
+- [ ] **Step 6: Restore-the-bug** — (a) in `Start`, `ConnectDeadline = TNumericLimits<double>::Max();`: `Timeout.Connect` FAILS ("ended within 5 s"); restore; PASSES. (b) In `CheckDeadlines`, delete the `EndPreOpen(...)` line of the connect branch (keep `Kill`): the attempt then reports when LWS's kill lands, from its `""` string [timeout.kill_pending_sequence] — `Timeout.Connect` FAILS at "VaRest's own" (and, a kill landing up to about 1 s later, at "reported at the deadline"); restore; PASSES. (c) Re-review N-1: in `FConn::CheckDeadlines` drop `&& Now - KillArmedAt >= KillRearmSeconds` from the re-arm (re-arm on every pass): `Timeout.KillLatencyBusy` FAILS at "beside a busy neighbour a kill still lands within 1.6 s" -- the restore is statistical (a postponement needs a second boundary inside a callback), hence 4 kills; if a run of it passes, run it twice more and report the longest kill each time; restore; PASSES.
 
 - [ ] **Step 7: Commit**
 
@@ -8997,8 +9154,9 @@ with
 
 ```
   kill can land up to about 2 s late; W0 measured only the 10 s and 100 ms waits. W1 (VaRest-wcv):
-  the wait is capped at 100 ms while a kill is in flight, and the kill is armed again after every
-  return, because LWS's own stage timers replace a pending timeout. Where multithreading is
+  the wait is capped at 100 ms while a kill is in flight, and a kill that has not landed after one
+  timeout walk is armed again, because LWS's own stage timers can replace a pending timeout (never on
+  every return: each `lws_set_timeout` restarts the timeout at the current second). Where multithreading is
   unavailable the forkable thread is ticked through `FSingleThreadRunnable` instead (`Fork.h:86-102`,
   as `:341-358`). At shutdown the running thread first writes the close frames already asked for, at
   most 0.25 s: the hub's 1001 "shutdown" (§1.4) is queued by the game instances' shutdown just
@@ -9202,7 +9360,7 @@ Expected: a few hundred actions at most, all under `Plugins/VaRest`. (More than 
   - `FVaRestFakeSocketAttempt` — functions `Open`, `Message`, `Text`, `Pong`, `ServerClose`, `Drop`, `Fail`, `End`, `Flush`, `GetSent`, `GetCloseCode`, `GetCloseReason`, `GetConsumed`, `IsOpen`, `HasEnded`, `Push`, `OnSend`, `OnClose`, `OnConsumed`, `OnReleased`; data `Index`, `Request`, `Link`, `ConsumerDepth`, `bOpen`, `bCloseRequested`, `CloseCode`, `CloseReason`, `bReleased`, `ConsumedBytes`, `Sent`, `bEchoClose`.
   - `FSocketLink` — functions `Push`, `Notify`, `PopAll`, `NoteBuffered`, `ReleaseBuffered`; data `Queue`, `OnEvents`, `BufferedBytes`, `PendingInboundBytes`, `bEnded`, `bReleased`, `bCloseRequested`, `bTerminalQueued`, `bHighWaterReached`.
   - `FService` — functions `Start`, `Shutdown`, `IsRunning`, `IsShuttingDown`, `Enqueue`, `GetContext`, `GetOptions`, `GetCertificates`, `GetCounters`, `Adopt`, `Find`, `ComputeWaitMs`, `Callback`, `Run`, `Stop`, `Tick`, `ServiceOnce`, `FlushCloses`, `DrainCommands`, `CheckDeadlines`, `EraseDestroyed`, `Handle`, `FindForCallback`, `LoadClientCertificates`, `AddExtraTrusted`, `ReleaseSsl`; data `Options`, `Context`, `Protocols`, `Thread`, `bStopping`, `bAccepting`, `bShuttingDown`, `bStartFailed`, `EnqueueLock`, `Commands`, `Connections`, `Live`, `Certificates`, `SslManager`, `ProvidedSslCtx`, `bSslInitialized`, `ProxyUtf8`, `Counters`.
-  - `FConn` — functions `Prepare`, `GetLabel`, `GetId`, `Start`, `OnCallback`, `CheckDeadlines`, `NextDeadline`, `WantsShortWait`, `IsDestroyed`, `EndForShutdown`, `Send`, `Close`, `Release`, `Find`, `OnAppendHeaders`, `OnFilterPreEstablish`, `OnEstablished`, `OnWriteable`, `OnPeerClose`, `OnVerifyServerCertificate`, `OnReceive`, `OnConnectionError`, `OnEnded`, `OnDestroyed`, `Kill`, `Fail`, `ReleaseHeld`, `DropOutbox`, `EndPreOpen`, `EndOpen`, `UncountTls`, `UncountClose`; data `Id`, `Link`, `Request`, `Target`, `Label`, `PendingFailure`, `PendingDetail`, the `*Utf8` arrays, `Wsi`, `Owner`, `State`, `bDestroyed`, `bTlsCounted`, `StartedAt`, `AppendCalls`, `SelectedProtocol`, `bKillIssued`, `KillAt`, `Outbox`, `HeldBytes`, `NextFragment`, `bCloseQueued`, `bCloseSent`, `bCloseCounted`, `CloseSentAt`, `CloseCode`, `CloseReason`, `CloseBy`, `CloseFailure`, `CloseDeadline`, `ConnectDeadline`, `bPeerClosed`, `Peer`, `Assembly`, `AssemblyKind`, `bAssembling`. (Task 8's `FragmentStart`/`FragmentSize` were `Start`/`Size`: the case this list exists for.)
+  - `FConn` — functions `~FConn`, `Prepare`, `GetLabel`, `NeedsTlsCount`, `MarkTlsCounted`, `GetId`, `Start`, `OnCallback`, `CheckDeadlines`, `NextDeadline`, `WantsShortWait`, `IsDestroyed`, `EndForShutdown`, `Send`, `Close`, `Release`, `Find`, `OnAppendHeaders`, `OnFilterPreEstablish`, `OnEstablished`, `OnWriteable`, `OnPeerClose`, `OnVerifyServerCertificate`, `OnReceive`, `OnConnectionError`, `OnEnded`, `OnDestroyed`, `Kill`, `Fail`, `ReleaseHeld`, `DropOutbox`, `EndPreOpen`, `EndOpen`, `UncountTls`, `UncountClose`; data `Id`, `Link`, `Request`, `Target`, `Label`, `PendingFailure`, `PendingDetail`, the `*Utf8` arrays, `Wsi`, `Owner`, `State`, `bDestroyed`, `bTlsCounted`, `StartedAt`, `AppendCalls`, `SelectedProtocol`, `bKillIssued`, `KillAt`, `KillArmedAt`, `Outbox`, `HeldBytes`, `NextFragment`, `bCloseQueued`, `bCloseSent`, `bCloseCounted`, `CloseSentAt`, `CloseCode`, `CloseReason`, `CloseBy`, `CloseFailure`, `CloseDeadline`, `ConnectDeadline`, `bPeerClosed`, `Peer`, `Assembly`, `AssemblyKind`, `bAssembling`. (Task 8's `FragmentStart`/`FragmentSize` were `Start`/`Size`: the case this list exists for.)
   - `FTransport` — functions `Connect`, `EnsureStarted`, `Shutdown`, `ResetAfterFork`, `GetCounters`; data `Options`, `Service`, `bShutDown`, `NextId`. The handle — functions `PopEvents`, `Send`, `Close`, `Consumed`, `GetBufferedAmount`, `GetPendingInboundBytes`, `HasEnded`, `Post`; data `Service`, `Id`, `Link`, `Label`.
   - `FEvents` — functions `WaitFor`, `WaitType`, `WaitEnd`, `WaitMessages`, `Pull`, `Find`, `GetEnd`, `GetMessages`, `Count`, `GetAll`, `Describe`; data `Seen`, `Connection`, `bAcknowledge`. And the free functions of `VaRest::WsTest` against locals in that namespace (C4459: `Request`, `Visit`, `Utf8`; review spec M-10).
 
@@ -9212,7 +9370,7 @@ Expected: a few hundred actions at most, all under `Plugins/VaRest`. (More than 
 
 ```bash
 bd close VaRest-sjj --reason "W1a task 13 (<hash>): ruling Q3 -- VaRest clears X509 error 62 only for an IP-literal wss host, at depth 0, when X509_check_ip_asc finds the IP in the leaf's SAN; every other error stands; refusals are EVaRestSocketFailure::TlsVerification with the X509 error, terminal; both legs green: VaRest.WebSocket.Lws.TlsIpCheck (OpenSSL's verification on in-memory leaves: right IP, wrong IP, DNS-only SAN, untrusted) and Tls.IpLiteral/Tls.WrongIp/Tls.Refused through the verify callback; spec 2.2 and 3.4 amended in task 14"
-bd close VaRest-wcv --reason "W1a task 11 (<hash>): kills report at VaRest's deadline; the wait is capped at 100 ms while a kill is in flight; the kill is re-armed after every lws_service return (LWS's stage timers overwrite it; review conc I-1); an ended attempt vetoes APPEND_HANDSHAKE_HEADER and its certificate check (Close.CancelSendsNothing); kill to WSI_DESTROY longest <ms> ms with the 100 ms cap, <ms> ms with 1 s (Timeout.KillLatency)"
+bd close VaRest-wcv --reason "W1a task 11 (<hash>): kills report at VaRest's deadline; the wait is capped at 100 ms while a kill is in flight; a kill not landed 1.25 s after it was armed is re-armed (LWS's stage timers can overwrite it; review conc I-1), never every pass (re-review N-1: Timeout.KillLatencyBusy, longest <ms> ms beside a 32 MiB send); an ended attempt vetoes APPEND_HANDSHAKE_HEADER and its certificate check (Close.CancelSendsNothing); kill to WSI_DESTROY longest <ms> ms with the 100 ms cap, <ms> ms with 1 s (Timeout.KillLatency)"
 bd close VaRest-ek2 --reason "W1a task 14 (<hash>): spec 1.2's OpenSSL bullet rewritten (SSL-module context in monolithic/merged builds, LWS's own elsewhere; OpenSSL binds globally in the Linux editor)"
 bd close VaRest-8zj --reason "W1a task 14 (<hash>): D21, 18, 22.2 A2, 1.2, 2.4 (buffered amount within one fragment), D24, 16.3, 15 (ConnectTimeout max, CloseTimeout), 2.1's cross-reference to 2.4"
 bd update VaRest-2rt --notes "W1a task 10 (<hash>): refused at the second APPEND_HANDSHAKE_HEADER (no second request), at a certificate check after the attempt's first APPEND (wss redirects re-handshake first), and in FILTER_PRE_ESTABLISH; Failure Redirect, HttpStatus 0; spec 2.2/3.4 amended. Probe.VaRest.Lws.Handshake.RedirectReplay: <outcome line>. Left for W1b: count APPEND_HANDSHAKE_HEADER under a configured proxy (M-7)."
@@ -9243,7 +9401,7 @@ Co-Authored-By: Claude <Model> <noreply@anthropic.com>"
 
 What W1b and the socket layer take from here, so their plans start from code that exists:
 
-- **W1b** (`docs/superpowers/plans/2026-10-22-varest2-ws-w1b-service-policies.md`) adds to `FVaRestSocketConnectRequest` (`PingInterval`/`PingTimeout`, `MaxPendingInboundBytes`, `AutoReplies`), to `FConn` (a ping deadline and a `Pong` producer in `CheckDeadlines` and `OnCallback`'s `CLIENT_RECEIVE_PONG`; a pause in `OnReceive` above `MaxPendingInboundBytes` and a resume behind `IVaRestSocketConnection::Consumed`, posted as a command; an idle deadline; a reply lane checked in `OnWriteable` when `NextFragment == 0`; `SO_SNDBUF` in `OnEstablished`), to `IVaRestSocketConnection` (`SetIdleDeadline`, one virtual), to `FVaRestSocketEnd` (`bWhileReadPaused`), to `FVaRestSocketEvent` (`bAutoReplied`) and to the test server (a CONNECT proxy). B9 (VaRest-gi0) resolves the host on `UE::Tasks` and passes the address, with the next address tried after a failure (ruling Q5, review conc I-4). `EVaRestSocketFailure::HeartbeatTimeout`/`IdleTimeout` and `EVaRestSocketCloseBy::Heartbeat` exist already, as do the kill re-arm (a heartbeat kill uses it) and `TlsHandshakesInFlight()` (every new context checks it).
+- **W1b** (`docs/superpowers/plans/2026-10-22-varest2-ws-w1b-service-policies.md`) adds to `FVaRestSocketConnectRequest` (`PingInterval`/`PingTimeout`, `MaxPendingInboundBytes`, `AutoReplies`), to `FConn` (a ping deadline and a `Pong` producer in `CheckDeadlines` and `OnCallback`'s `CLIENT_RECEIVE_PONG`; a pause in `OnReceive` above `MaxPendingInboundBytes` and a resume behind `IVaRestSocketConnection::Consumed`, posted as a command; an idle deadline; a reply lane checked in `OnWriteable` when `NextFragment == 0`; `SO_SNDBUF` in `OnEstablished`), to `IVaRestSocketConnection` (`SetIdleDeadline`, one virtual), to `FVaRestSocketEnd` (`bWhileReadPaused`), to `FVaRestSocketEvent` (`bAutoReplied`) and to the test server (a CONNECT proxy). B9 (VaRest-gi0) resolves the host on `UE::Tasks` and passes the address, with the next address tried after a failure (ruling Q5, review conc I-4). `EVaRestSocketFailure::HeartbeatTimeout`/`IdleTimeout` and `EVaRestSocketCloseBy::Heartbeat` exist already, as do the throttled kill re-arm (a heartbeat kill uses it; never re-arm every pass, re-review N-1) and `TlsHandshakesInFlight()` (every new context checks it).
 - **W2** builds `FVaRestSocket` on `IVaRestSocketTransport` and tests on `FVaRestFakeSocketTransport`: one attempt per `Connect`, the generation guard over each attempt's events, classification on (`End.By`, `End.Code`, `End.Failure`, `End.HttpStatus`) — spec §3.4 as Task 14 amended it (`TlsVerification` terminal, captive portals included -- ruling Q3; `Redirect` with status 0; LWS 3.0's 1002 rewrite, VaRest-diy; an empty `CONNECTION_ERROR` before 19.5 s is `Unknown`, reconnect). `Close()` takes effect at the call (spec §3.1): the transport's `Closed` for an app close arrives later and is W2's to ignore.
 - **W3**'s pipe consumes `PopEvents` on a `UE::Tasks::FPipe` woken by `OnEvents` and acknowledges with `Consumed` after delivery; W3's off-thread sends hand `FVaRestSocketFrame`s (moved, never shared) to the game-thread flush.
 - **W5** parents the `VaRest_WebSocket` LLM tag under M4a's `VaRest`, maps `FVaRestSocketEnd` onto `FVaRestSocketClose` and the trace's `FVaRestTraceSocketClose`, and fills the request from `UVaRestSocketSettings` (`bAllowSelfSignedTls`, timeouts, limits).
