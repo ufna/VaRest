@@ -223,6 +223,7 @@ namespace VaRest::Http::AuthTestPrivate
 		{
 			++Refreshes;
 			LastRefreshId = Context.GetRefreshId();
+			LastRefreshToken = Context.GetSession().RefreshToken;
 			Pending = MoveTemp(Done);
 		}
 
@@ -246,6 +247,8 @@ namespace VaRest::Http::AuthTestPrivate
 
 		int32 Refreshes = 0;
 		uint64 LastRefreshId = 0;
+		/** The refresh token the last refresh started from (its context's session) */
+		FString LastRefreshToken;
 		/** Task 16 review M-1: an auth that refreshes from no token at all (a platform ticket): CanRefresh is always true */
 		bool bFromNothing = false;
 
@@ -3013,6 +3016,73 @@ bool FVaRestHttpAuthSameTokenWriteTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("... the parked request replays with the refresh's token, and succeeds"), Parked.Wait(Waiting) && Waiting->SuccessCalls.load() == 1
 		&& Waiting->Response.Attempts == 2);
 	Parked.Drain();
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthRefreshTokenOnlyTest, "VaRest.Http.Auth.RefreshTokenOnlyParksAgain",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthRefreshTokenOnlyTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// M4a final review B4 (review B m-2): while a refresh runs, the game restores a refresh token only (SetSession("", R2),
+	// the case NeedsRefresh's no-access-token rule exists for). That ends the refresh -- it is the old token's -- and its
+	// parked requests park again behind a refresh from R2 instead of going out with no credentials (NoCredentials,
+	// Kind=Auth): A's replay and B's first attempt, each still the same attempt (A3's numbering), each wait measured from
+	// its first park. The same refresh token with only the access token dropped keeps the refresh running.
+	FTestRig Rig;
+	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = HandRig(Rig);
+	FScopedTraceRecorder Scoped(EVaRestTraceDetail::Metadata);
+	auto Replay = MakeOutcome<FVaRestJson>();
+	const FVaRestRequestHandle ReplayHandle = Observe(Rig.Client.Get(TEXT("/a")), Replay).Send();
+	if (!TestTrue(TEXT("A's 401 parks it behind a refresh"), PumpUntil([Auth] { return Auth->IsPending(); }) && Rig.Fake->NumCalls() == 1))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	auto First = MakeOutcome<FVaRestJson>();
+	const FVaRestRequestHandle FirstHandle = Observe(Rig.Client.Get(TEXT("/b")), First).Send();
+	Rig.Clock->Advance(0.25);
+	Rig.Client.SetSession(TEXT(""), TEXT("game-refresh-123456"));
+	if (!TestTrue(TEXT("the game's refresh token ends that refresh; both park behind a new one from it"), PumpUntil([Auth] { return Auth->Refreshes == 2; })
+		&& Auth->IsPending() && Auth->LastRefreshToken.Equals(TEXT("game-refresh-123456"), ESearchCase::CaseSensitive)))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	TestTrue(TEXT("... nothing went out with no credentials"), !Replay->IsDone() && !First->IsDone() && Rig.Fake->NumCalls() == 1);
+	const uint64 SecondRefresh = Auth->LastRefreshId;
+	Rig.Clock->Advance(0.25);
+	Auth->Answer(FVaRestAuthRefreshResult::Refreshed(TEXT("new-access-123456")));
+	TestTrue(TEXT("A replays with the new token and succeeds (2 attempts)"), Rig.Wait(Replay) && Replay->SuccessCalls.load() == 1 && Replay->Response.Attempts == 2);
+	TestTrue(TEXT("B goes out with it and succeeds (1 attempt)"), Rig.Wait(First) && First->SuccessCalls.load() == 1 && First->Response.Attempts == 1);
+	Rig.Drain();
+	const TArray<FVaRestTraceAttemptDispatched> Replayed = DispatchesOf(*Scoped.Recorder, ReplayHandle.GetId());
+	TestTrue(TEXT("IN-2: A's replay is attempt 2, its Gap the whole 0.5 s, naming the second refresh"), Replayed.Num() == 2 && Replayed[1].Attempt == 2
+		&& Replayed[1].GapKind == EVaRestTraceGap::SessionRefresh && FMath::IsNearlyEqual(Replayed[1].GapSeconds, 0.5) && Replayed[1].AuthRefreshId == SecondRefresh);
+	const TArray<FVaRestTraceAttemptDispatched> Sent = DispatchesOf(*Scoped.Recorder, FirstHandle.GetId());
+	TestTrue(TEXT("IN-2: B's is attempt 1, its AuthWait the whole 0.5 s, naming the second refresh"), Sent.Num() == 1 && Sent[0].Attempt == 1
+		&& FMath::IsNearlyEqual(Sent[0].AuthWait, 0.5) && Sent[0].AuthRefreshId == SecondRefresh);
+	FString Why;
+	TestTrue(TEXT("PhasesHold for both"), PhasesHold(*Scoped.Recorder, ReplayHandle.GetId(), Why) && PhasesHold(*Scoped.Recorder, FirstHandle.GetId(), Why));
+
+	// The same refresh token, the access token dropped: the refresh in flight is already one from that token, and goes on
+	FTestRig Kept;
+	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Hand = HandRig(Kept);
+	auto Waiting = MakeOutcome<FVaRestJson>();
+	Observe(Kept.Client.Get(TEXT("/c")), Waiting).Send();
+	if (!TestTrue(TEXT("C's 401 parks it behind a refresh"), PumpUntil([Hand] { return Hand->IsPending(); })))
+	{
+		Abandon(Kept);
+		return false;
+	}
+	Kept.Client.SetSession(TEXT(""), TEXT("old-refresh-123456"));
+	Kept.Drain();
+	TestTrue(TEXT("the access token dropped, the refresh token the same: still the one refresh"), Hand->Refreshes == 1 && Hand->IsPending() && !Waiting->IsDone());
+	Hand->Answer(FVaRestAuthRefreshResult::Refreshed(TEXT("new-access-123456")));
+	TestTrue(TEXT("... C replays with its token and succeeds"), Kept.Wait(Waiting) && Waiting->SuccessCalls.load() == 1 && Hand->Refreshes == 1);
+	Kept.Drain();
 	return true;
 }
 

@@ -225,15 +225,26 @@ void VaRest::Http::FClientState::AnnounceSession(EVaRestSessionChange Change, ui
 void VaRest::Http::FClientState::SetTokensByGame(const FString& AccessToken, const FString* RefreshToken, double ExpiresInSeconds, double LifetimeSeconds, bool bSameIdentity)
 {
 	const uint32 CredentialsBefore = Session.Data.CredentialGeneration;
+	const bool bNewRefreshToken = RefreshToken && !Session.Data.RefreshToken.Equals(*RefreshToken, ESearchCase::CaseSensitive);
 	if (UpdateTokens(AccessToken, RefreshToken, ExpiresInSeconds, LifetimeSeconds))
 	{
-		if (Session.Data.CredentialGeneration != CredentialsBefore)
+		if (!AccessToken.IsEmpty() && Session.Data.CredentialGeneration != CredentialsBefore)
 		{
 			// Plan decision 3: the game's credentials end a refresh in flight -- its waiters go on with them (Ready), and the
 			// refresh's own late answer is ignored (FinishRefresh). M4a final review B3 (review B m-1): only a new access
 			// token is new credentials; a write that keeps it leaves the refresh to finish, so its waiters do not replay the
 			// token that was just refused.
 			EndRefresh(ERefreshEnd::Ready, TEXT("the game set new credentials"));
+		}
+		else if (AccessToken.IsEmpty() && bNewRefreshToken)
+		{
+			// M4a final review B4 (review B m-2): a refresh token only, and another one (a restore of a saved refresh token):
+			// the refresh in flight is the old token's, so it ends -- its late answer is ignored -- and its waiters find no
+			// access token: a parked request parks again behind a refresh from the new token (the auth gate's waiter), rather
+			// than going out with no credentials. The same refresh token with the access token dropped keeps the refresh: it
+			// is already one from that token, and a second refresh request on one refresh token is what a rotating server's
+			// reuse detection revokes the whole session for.
+			EndRefresh(ERefreshEnd::Ready, TEXT("the game set a refresh token only"));
 		}
 		AnnounceSession(bSameIdentity ? EVaRestSessionChange::Refreshed : EVaRestSessionChange::Replaced, 0, TEXT("set by the game"));
 	}

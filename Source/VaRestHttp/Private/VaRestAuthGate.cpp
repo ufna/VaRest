@@ -145,14 +145,20 @@ namespace VaRest::Http::AuthGatePrivate
 
 	void Dispatch(const FRunRef& Run);
 
-	/** Holds Run behind the client's refresh (plan decision 7); bReplay: this follows a refused attempt (IN-2 GapBefore) */
-	void Park(const FRunRef& Run, bool bReplay)
+	/**
+	 * Holds Run behind the client's refresh (plan decision 7); bReplay: this follows a refused attempt (IN-2 GapBefore).
+	 * FirstParkedAt >= 0: this goes on with a park that already started then (M4a final review B4) -- the same attempt or the
+	 * same replay, so nothing is numbered again and the wait is measured from that start.
+	 */
+	void Park(const FRunRef& Run, bool bReplay, double FirstParkedAt = -1.0)
 	{
 		FExchangeState& Ex = Internals(*Run->Exchange);
 		FClientState& Client = *Ex.State;
 		const uint64 WaiterId = Client.NewWaiterId();
-		const double ParkedAt = Ex.Config->Clock->Now();
-		if (!bReplay)
+		const double Now = Ex.Config->Clock->Now();
+		const bool bContinued = FirstParkedAt >= 0.0;
+		const double ParkedAt = bContinued ? FirstParkedAt : Now;
+		if (!bReplay && !bContinued)
 		{
 			// Spec review I-1 (Inspector 3.3): a park before an attempt starts is inside that attempt (its Auth phase), so the
 			// attempt starts here; the boundary takes this time. A replay's park is the Gap before its attempt, outside both.
@@ -186,7 +192,7 @@ namespace VaRest::Http::AuthGatePrivate
 		};
 		if (Ex.DeadlineAt > 0.0)
 		{
-			ArmParkDeadline(*Run, WaiterId, FMath::Max(0.0, Ex.DeadlineAt - ParkedAt));
+			ArmParkDeadline(*Run, WaiterId, FMath::Max(0.0, Ex.DeadlineAt - Now));
 		}
 		// The waiter runs from the refresh's one game-thread task (concurrency review I-1), never inside this call. It holds
 		// the run, so the exchange (and through it the client, as any request in flight does, spec 3.2) until the refresh
@@ -224,6 +230,16 @@ namespace VaRest::Http::AuthGatePrivate
 				// No attempt follows this park: a retry after it (a Failed refresh is retryable) starts its own attempt
 				Back.PendingAttemptStart = -1.0;
 				Run->Answer(MoveTemp(Ended));
+				return;
+			}
+			const FVaRestSessionData& Live = Back.State->GetSessionData();
+			if (!Live.HasAccessToken() && CanRefreshNow(*Run->Auth, Live))
+			{
+				// M4a final review B4 (review B m-2): the game left a refresh token only while this waited (SetSession("", R),
+				// an import of one), which ended the refresh (VaRestSession.cpp SetTokensByGame). Going on now would send no
+				// credentials (AuthApply: NoCredentials, Kind=Auth) for a session that can refresh: park again, behind a refresh
+				// from that token -- the one in flight, or the one this starts -- as the same attempt or replay.
+				Park(Run, bReplay, ParkedAt);
 				return;
 			}
 			const double Seconds = Back.Config->Clock->Now() - ParkedAt;
