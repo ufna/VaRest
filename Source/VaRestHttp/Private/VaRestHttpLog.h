@@ -16,4 +16,11 @@ namespace VaRest::Http
 	 * terminator, OutputDeviceHelper.cpp:117-138) nor pass for an escape. Apply it after redaction: it never touches '*'.
 	 */
 	FString EscapeForLog(FStringView Text);
+
+	/**
+	 * EscapeForLog without the backslash rule (bead VaRest-3dj): for text that may already hold EscapeForLog's escapes, such
+	 * as a Config error message (Resolve escapes the verb into it, because a game may log FVaRestError::Message as it is).
+	 * A control character is still escaped, so the line cannot be broken; a literal backslash shows once.
+	 */
+	FString EscapeControlsForLog(FStringView Text);
 }

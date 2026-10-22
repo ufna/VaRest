@@ -26,6 +26,12 @@ namespace VaRestTestsSurfaceShapePrivate
 	template <typename T>
 	concept CReachesClientState = requires(const T& Client) { Client.GetStateInternal(); };
 
+	template <typename T>
+	concept CReachesSpecFields = requires(T& Spec) { Spec.Verb; };
+
+	template <typename T>
+	concept CMakesSpec = requires { new T(TSharedPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe>(), FStringView(), FStringView()); };
+
 	// Clang only: MSVC's access checking inside requires-expressions is unverified on this project, and a false positive here
 	// would break the Windows editor build (wave A concern 1); clang 20 is proven both ways by restore-the-bug (fix-wave-a-report)
 #if defined(__clang__)
@@ -38,5 +44,8 @@ namespace VaRestTestsSurfaceShapePrivate
 	static_assert(std::is_move_constructible_v<TVaRestRequest<FVaRestJson>> && std::is_move_assignable_v<TVaRestRequest<FVaRestJson>>,
 		"TVaRestRequest: the builder still moves");
 	static_assert(!CReachesClientState<FVaRestClient>, "FVaRestClient: its state is private (VaRest::Http::FClientAccess only)");
+	// Bead VaRest-uq3 (plan decision 18): a module cannot hand-build a spec and skip the builder's checks
+	static_assert(!CReachesSpecFields<VaRest::Http::FRequestSpec>, "FRequestSpec: its fields are the builder's (bead VaRest-uq3)");
+	static_assert(!CMakesSpec<VaRest::Http::FRequestSpec>, "FRequestSpec: only FVaRestClient makes one (bead VaRest-uq3)");
 #endif
 }

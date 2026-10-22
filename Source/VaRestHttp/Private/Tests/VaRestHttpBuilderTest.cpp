@@ -304,6 +304,9 @@ bool FVaRestHttpBuilderEmptyClientTest::RunTest(const FString& Parameters)
 	auto Silent = MakeOutcome<FVaRestJson>();
 	Observe(Empty.Get(TEXT("/o")).Owner(Gone), Silent).Send();
 	PumpUntil([] { return true; });
+	// Bead VaRest-3dj (2): the delivery task ran and dropped the callbacks, and with them their three captures of Silent.
+	// Without this, the check below would pass with the task still queued.
+	TestEqual(TEXT("owner gone: the delivery task ran and released the callbacks"), Silent.GetSharedReferenceCount(), 1);
 	TestEqual(TEXT("owner gone: no callbacks"), Silent->CompleteCalls.load() + Silent->ErrorCalls.load(), 0);
 
 	// Decision 4: OnHttpThread() callbacks run on a worker

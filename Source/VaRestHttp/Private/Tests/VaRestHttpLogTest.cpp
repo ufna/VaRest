@@ -568,4 +568,47 @@ bool FVaRestHttpLogExpiryClockTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpLogConfigEscapedOnceTest, "VaRest.Http.Log.ConfigErrorEscapedOnce",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpLogConfigEscapedOnceTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::LogTestPrivate;
+	// Bead VaRest-3dj (6): Resolve escapes the verb into Error.Message (a game may log the message as it is); the Basic line
+	// escaped it again, so "\r" showed as "\\r". A message with a raw CR LF (a missing file's name) must still be escaped.
+	FLevelIsolation Isolation;
+	FTestRig Rig;
+	Rig.Client.WithLogLevel(EVaRestLogLevel::Basic);
+	FLogCapture Capture;
+	AddExpectedMessagePlain(TEXT("-> Config error: the verb"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
+	AddExpectedMessagePlain(TEXT("-> Config error: upload file not found"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
+	auto Verb = MakeOutcome<FVaRestJson>();
+	auto File = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Request(TEXT("GET\r\nX"), TEXT("/v")), Verb).Send();
+	Observe(Rig.Client.Put(TEXT("/f")).BodyFile(TEXT("/no/such/dir\r\nfile.bin")), File).Send();
+	if (!TestTrue(TEXT("both complete"), PumpUntil([Verb, File] { return Verb->IsDone() && File->IsDone(); })))
+	{
+		return false;
+	}
+	FString VerbLine;
+	FString FileLine;
+	for (const FString& Line : Capture.GetLines())
+	{
+		if (Line.Contains(TEXT("Config error: the verb")))
+		{
+			VerbLine = Line;
+		}
+		else if (Line.Contains(TEXT("Config error: upload file not found")))
+		{
+			FileLine = Line;
+		}
+	}
+	TestTrue(TEXT("the verb is escaped once: one backslash before r"), VerbLine.Contains(TEXT("\"GET\\r\\nX\"")) && !VerbLine.Contains(TEXT("\\\\r")));
+	TestTrue(TEXT("a raw CR LF in a Config message is still escaped in its line"), FileLine.Contains(TEXT("dir\\r\\nfile.bin"))
+		&& !FileLine.Contains(TEXT("\r")) && !FileLine.Contains(TEXT("\n")));
+	TestTrue(TEXT("Error.Message keeps its single escape for games that log it"), Verb->Error.Message.Contains(TEXT("\"GET\\r\\nX\"")));
+	return true;
+}
+
 #endif

@@ -17,18 +17,35 @@
 
 class FVaRestClient;
 class FVaRestRequestHandle;
+/** Declared here for FRequestSpec's friendship; the definition below carries [[nodiscard]] (allowed on a later declaration) */
+template <typename T>
+class TVaRestRequest;
 
 namespace VaRest::Http
 {
 	struct FClientAccess;
+	struct FRequestSpecAccess;
 
-	/** What a TVaRestRequest collects; Send moves it into an exchange */
-	struct VARESTHTTP_API FRequestSpec
+	/**
+	 * What a TVaRestRequest collects; Send moves it into an exchange. Private by shape (bead VaRest-uq3, plan decision 18):
+	 * only the builder, FVaRestClient (which makes one) and VaRestHttp's own code (FRequestSpecAccess, defined in a Private
+	 * header) reach its fields, so no module can hand-build a spec that skips the builder's checks. Resolve's checks run
+	 * for every request anyway, and the transport stage checks the final headers again (M3 review I3).
+	 */
+	class VARESTHTTP_API FRequestSpec
 	{
-		FRequestSpec(TSharedPtr<FClientState, ESPMode::ThreadSafe> InState, FStringView InVerb, FStringView InPath);
+	public:
 		~FRequestSpec();
 		FRequestSpec(const FRequestSpec&) = delete;
 		FRequestSpec& operator=(const FRequestSpec&) = delete;
+
+	private:
+		template <typename>
+		friend class ::TVaRestRequest;
+		friend class ::FVaRestClient;
+		friend struct FRequestSpecAccess;
+
+		FRequestSpec(TSharedPtr<FClientState, ESPMode::ThreadSafe> InState, FStringView InVerb, FStringView InPath);
 
 		/** Records the first misuse met while building; Send then fails with Kind=Config (decisions 10, 11) */
 		void Fail(FString Problem);
@@ -62,6 +79,7 @@ namespace VaRest::Http
 		bool bSent = false;
 	};
 
+	/** The inline builder's Send() calls this from the caller's module, so it is exported; it forwards to FRequestSpecAccess::Send */
 	VARESTHTTP_API FVaRestRequestHandle SendRequest(TUniquePtr<FRequestSpec>&& Spec, const char* SourceFile, uint32 SourceLine);
 }
 
@@ -581,6 +599,8 @@ public:
 	 * with Kind=Config and nothing is sent (final review I3). T defaults to FVaRestJson (spec 3.2). An empty client gives
 	 * a builder whose Send() logs an error, sends nothing and delivers Kind=Config to OnError and OnComplete from a later
 	 * game-thread tick (final review M7; decision 3).
+	 * The handle that Send() returns is empty: IsActive() is false and
+	 * Cancel() does nothing, also while that delivery is still queued (bead VaRest-3dj).
 	 *
 	 * A body is sent only with POST, PUT, PATCH and DELETE on the engine's curl transport (Linux, Windows, Android): only
 	 * those attach curl's read function (CurlHttp.cpp:941-968, :979-988, :995-1001). GET drops its body with a Warning
@@ -592,7 +612,7 @@ public:
 	template <typename T = FVaRestJson>
 	TVaRestRequest<T> Request(FStringView Verb, FStringView Path) const
 	{
-		TUniquePtr<VaRest::Http::FRequestSpec> NewSpec = MakeUnique<VaRest::Http::FRequestSpec>(State, Verb, Path);
+		TUniquePtr<VaRest::Http::FRequestSpec> NewSpec(new VaRest::Http::FRequestSpec(State, Verb, Path));
 		NewSpec->Handler = MakeUnique<VaRest::Http::TResultHandler<T>>();
 		return TVaRestRequest<T>(MoveTemp(NewSpec));
 	}

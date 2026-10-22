@@ -82,6 +82,9 @@ What M3 knows but could not run, in the order the release pass should check it.
    (`AppleHttp.cpp:161-168`), reported when the HTTP thread ticks the request (`:954-962`). `UploadDoneAt` is stamped
    from that progress only when the request has a body (`ShouldStampUploadFromProgress`; a bodyless request leaves it at
    -1, task 7 review I-1). Check `VaRest.Integration.Http.UploadProgress` and the trace's upload phase.
+   That test's last check, that the final `OnProgress` shows `BytesSent == UploadTotal`, is a curl property: curl's finish
+   reports progress once more (`CurlHttp.cpp:1274`), Apple's `FinishRequest` does not (`AppleHttp.cpp:777`), so on Apple the
+   last call may show less, and the test skips that check there (bead VaRest-3dj).
 5. **Stream bodies cannot be resent.** A multipart or `BodyFile` body goes to the engine as a stream
    (`SetContentFromStream`), which NSURLSession sends as `HTTPBodyStream` (`AppleHttp.cpp:627-634`, `:751-753`); the
    engine implements no `needNewBodyStream`, so a 307/308 or an auth challenge that must resend it fails. Check one

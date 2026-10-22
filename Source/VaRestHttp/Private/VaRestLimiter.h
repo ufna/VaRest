@@ -33,7 +33,11 @@ namespace VaRest::Http
 		 * queue. A value outside EVaRestPriority queues as Low.
 		 */
 		void Acquire(uint64 RequestId, EVaRestPriority Priority, FGrant&& OnGrant, FAbort&& OnAbort);
-		/** A granted attempt ended: exactly once per grant. A Release without one is an ensureAlways, every time (review Minor 1, P12.1). */
+		/**
+		 * A granted attempt ended: exactly once per grant. A Release without one is an ensureAlways, every time (review Minor
+		 * 1, P12.1) -- every time under the engine's defaults, core.EnsureAlwaysEnabled on and [Core.System]
+		 * HandleEnsurePercent 100 (AssertionMacros.cpp:136-140, :948; GenericPlatformMisc.cpp:2058-2094).
+		 */
 		void Release();
 		/** Takes a queued attempt out and runs its OnAbort; false when it is not queued */
 		bool Abort(uint64 RequestId);

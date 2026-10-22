@@ -2,7 +2,11 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
+#include "HAL/IConsoleManager.h"
 #include "Misc/AutomationTest.h"
+#include "Misc/CommandLine.h"
+#include "Misc/ConfigCacheIni.h"
+#include "Misc/Parse.h"
 #include "Misc/ScopeExit.h"
 #include "UObject/Package.h"
 #include "VaRestClient.h"
@@ -607,6 +611,22 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpLimiterDoubleReleaseTest, "VaRest.Ht
 bool FVaRestHttpLimiterDoubleReleaseTest::RunTest(const FString& Parameters)
 {
 #if DO_ENSURE
+	// Bead VaRest-3dj (4): ensureAlways reports every time only while core.EnsureAlwaysEnabled is on (AssertionMacros.cpp:136-140,
+	// :948) and every ensure is handled: [Core.System] HandleEnsurePercent, else -handleensurepercent=, at 100
+	// (GenericPlatformMisc.cpp:2058-2068, :2070-2094). Under other settings the count is chance: say so instead of failing.
+	{
+		IConsoleVariable* Always = IConsoleManager::Get().FindConsoleVariable(TEXT("core.EnsureAlwaysEnabled"));
+		float Percent = 100.f;
+		if (!GConfig || !GConfig->GetFloat(TEXT("Core.System"), TEXT("HandleEnsurePercent"), Percent, GEngineIni))
+		{
+			FParse::Value(FCommandLine::Get(), TEXT("handleensurepercent="), Percent);
+		}
+		if (!Always || !Always->GetBool() || Percent < 100.f)
+		{
+			AddInfo(TEXT("core.EnsureAlwaysEnabled is off or HandleEnsurePercent is below 100: ensureAlways does not report every failure here; nothing to check"));
+			return true;
+		}
+	}
 	// Task 12 review minor 1 (P12.1): every double release reports, not only the first of the session (ensureMsgf's rule,
 	// AssertionMacros.cpp:970-975). The thread's ensure handler (AssertionMacros.h:55-61) takes this one ensure, so the run
 	// is deterministic and leaves no callstack or crash report; FDebug::EnsureFailed asks it first (AssertionMacros.cpp:499).

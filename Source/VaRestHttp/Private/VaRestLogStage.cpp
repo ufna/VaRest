@@ -257,50 +257,63 @@ namespace VaRest::Http::LogStagePrivate
 	};
 }
 
+namespace VaRest::Http::LogStagePrivate
+{
+	FString Escape(FStringView Text, bool bBackslash)
+	{
+		const auto Needs = [bBackslash](TCHAR Char) { return NeedsEscape(Char) && (bBackslash || Char != TEXT('\\')); };
+		int32 First = 0;
+		while (First < Text.Len() && !Needs(Text[First]))
+		{
+			++First;
+		}
+		if (First == Text.Len())
+		{
+			return FString(Text);
+		}
+		FString Out;
+		Out.Reserve(Text.Len() + 16);
+		Out.Append(Text.GetData(), First);
+		for (int32 i = First; i < Text.Len(); ++i)
+		{
+			const TCHAR Char = Text[i];
+			if (!Needs(Char))
+			{
+				Out.AppendChar(Char);
+			}
+			else if (Char == TEXT('\\'))
+			{
+				Out += TEXT("\\\\");
+			}
+			else if (Char == TEXT('\r'))
+			{
+				Out += TEXT("\\r");
+			}
+			else if (Char == TEXT('\n'))
+			{
+				Out += TEXT("\\n");
+			}
+			else if (static_cast<uint32>(Char) <= 0xFF)
+			{
+				Out.Appendf(TEXT("\\x%02X"), static_cast<uint32>(Char));
+			}
+			else
+			{
+				Out.Appendf(TEXT("\\u%04X"), static_cast<uint32>(Char));
+			}
+		}
+		return Out;
+	}
+}
+
 FString VaRest::Http::EscapeForLog(FStringView Text)
 {
-	using namespace LogStagePrivate;
-	int32 First = 0;
-	while (First < Text.Len() && !NeedsEscape(Text[First]))
-	{
-		++First;
-	}
-	if (First == Text.Len())
-	{
-		return FString(Text);
-	}
-	FString Out;
-	Out.Reserve(Text.Len() + 16);
-	Out.Append(Text.GetData(), First);
-	for (int32 i = First; i < Text.Len(); ++i)
-	{
-		const TCHAR Char = Text[i];
-		if (!NeedsEscape(Char))
-		{
-			Out.AppendChar(Char);
-		}
-		else if (Char == TEXT('\\'))
-		{
-			Out += TEXT("\\\\");
-		}
-		else if (Char == TEXT('\r'))
-		{
-			Out += TEXT("\\r");
-		}
-		else if (Char == TEXT('\n'))
-		{
-			Out += TEXT("\\n");
-		}
-		else if (static_cast<uint32>(Char) <= 0xFF)
-		{
-			Out.Appendf(TEXT("\\x%02X"), static_cast<uint32>(Char));
-		}
-		else
-		{
-			Out.Appendf(TEXT("\\u%04X"), static_cast<uint32>(Char));
-		}
-	}
-	return Out;
+	return LogStagePrivate::Escape(Text, /*bBackslash*/ true);
+}
+
+FString VaRest::Http::EscapeControlsForLog(FStringView Text)
+{
+	return LogStagePrivate::Escape(Text, /*bBackslash*/ false);
 }
 
 void VaRest::Http::LogConfigError(const FExchangeState& Ex, FStringView Message)
@@ -313,7 +326,7 @@ void VaRest::Http::LogConfigError(const FExchangeState& Ex, FStringView Message)
 		return;
 	}
 	const FString Url = LogStagePrivate::ShownUrl(Cfg.Redactor.ToSharedRef(), Ex.Url.IsEmpty() ? JoinUrl(Cfg.BaseUrl, Ex.RawPath) : Ex.Url);
-	UE_LOG(LogVaRestHttp, Warning, TEXT("#%llu %s %s -> Config error: %s"), Ex.RequestId, *EscapeForLog(Ex.Verb), *Url, *EscapeForLog(Message));
+	UE_LOG(LogVaRestHttp, Warning, TEXT("#%llu %s %s -> Config error: %s"), Ex.RequestId, *EscapeForLog(Ex.Verb), *Url, *EscapeControlsForLog(Message));
 }
 
 FVaRestStageRef VaRest::Http::MakeLogStage()

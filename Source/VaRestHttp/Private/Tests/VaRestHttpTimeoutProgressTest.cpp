@@ -49,7 +49,12 @@ bool FVaRestHttpTimeoutAppliedTest::RunTest(const FString& Parameters)
 	FTestRig Clamped;
 	Clamped.Client.WithTimeout(-5.f, -1.f);
 	Clamped.Client.Get(TEXT("/f")).Send();
-	TestTrue(TEXT("all reach the transport"), PumpUntil([&] { return Plain.Fake->NumCalls() == 1 && Rig.Fake->NumCalls() == 5 && Clamped.Fake->NumCalls() == 1; }));
+	if (!TestTrue(TEXT("all reach the transport"), PumpUntil([&] { return Plain.Fake->NumCalls() == 1 && Rig.Fake->NumCalls() == 5 && Clamped.Fake->NumCalls() == 1; })))
+	{
+		// Bead VaRest-3dj (1): the checks below index calls; one that never arrived must not be read
+		PumpUntil([&] { return Plain.Client.GetInFlightCount() == 0 && Rig.Client.GetInFlightCount() == 0 && Clamped.Client.GetInFlightCount() == 0; });
+		return false;
+	}
 	auto Of = [&Rig](int32 i) -> const FVaRestTransportRequest& { return Rig.Fake->GetCall(i).Request; };
 	TestTrue(TEXT("no setting: 0, the engine's default (HttpModule.cpp:96-98)"), Plain.Fake->GetCall(0).Request.Timeout == 0.f && Plain.Fake->GetCall(0).Request.ActivityTimeout == 0.f);
 	TestTrue(TEXT("the client's timeouts (spec 3.1)"), Of(0).Timeout == 10.f && Of(0).ActivityTimeout == 3.f);

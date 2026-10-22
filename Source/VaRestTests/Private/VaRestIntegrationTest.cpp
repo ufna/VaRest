@@ -442,7 +442,12 @@ bool FVaRestIntegrationUploadProgressTest::RunTest(const FString& Parameters)
 	}
 	TestTrue(TEXT("upload progress arrives while the body goes up, not only at the end"),
 		Progress->Seen.ContainsByPredicate([](const FVaRestProgress& Seen) { return Seen.BytesSent > 0 && Seen.BytesSent < Size; }));
+#if PLATFORM_APPLE
+	// Bead VaRest-3dj (5): curl's finish reports progress once more (CurlHttp.cpp:1274); Apple's FinishRequest does not (AppleHttp.cpp:777)
+	AddInfo(TEXT("Apple: the last OnProgress may show less than the whole body (no final progress call); not checked"));
+#else
 	TestTrue(TEXT("... ending at the whole body"), Progress->Seen.Num() > 0 && Progress->Seen.Last().BytesSent == Size && Progress->Seen.Last().UploadTotal == Size);
+#endif
 	// The numbers, for the record (Task 7 I-2: a loopback socket buffer large enough to swallow the body would leave none in between)
 	FString Samples;
 	int32 InBetween = 0;
