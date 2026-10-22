@@ -761,4 +761,52 @@ bool FVaRestHttpLogOwnSecretAfterLogoutTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpLogSessionTokenAfterClearTest, "VaRest.Http.Log.SessionTokenAfterClearSession",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpLogSessionTokenAfterClearTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::LogTestPrivate;
+	// Review I-1 (plan decision 17) for the session's slots (M4a Task 12): ClearSession forgets the session's values at once
+	// (Inspector 12) while a request that carries the token is out. Its outcome line and its error's URL still scrub it,
+	// because its Send() snapshot knew it (RedactorFor). The query key is no redaction key: only layer 3 hides the value.
+	FLevelIsolation Isolation;
+	FTestRig Rig;
+	Rig.Client.WithLogLevel(EVaRestLogLevel::Basic); // the rig's is None (FTestRig)
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest&) { return FVaRestFakeResponse::Manual(); });
+	FLogCapture Capture;
+	AddExpectedMessagePlain(TEXT("GET https://api.test/s?q=*** -> 404"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
+	const FString Token = TEXT("zz-session-token-7654321");
+	Rig.Client.SetSession(Token, TEXT("zz-session-refresh-7654321"));
+	auto Failed = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/s")).Query(TEXT("q"), Token), Failed).Send();
+	if (!TestTrue(TEXT("dispatched"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 1; })))
+	{
+		Rig.Client.CancelAll();
+		PumpUntil([Failed] { return Failed->IsDone(); });
+		return false;
+	}
+	const int32 Mark = Capture.GetLines().Num();
+	Rig.Client.ClearSession();
+	TestEqualSensitive(TEXT("the client itself forgot the token"), VaRest::Http::FClientAccess::State(Rig.Client)->GetRedactor()->ScrubText(Token), Token);
+	Rig.Fake->Complete(0, FVaRestFakeResponse::Json(404, FUtf8StringView(UTF8TEXT("{}"))));
+	if (!TestTrue(TEXT("it completes"), PumpUntil([Failed] { return Failed->IsDone(); })))
+	{
+		return false;
+	}
+	const TArray<FString> Lines = Capture.GetLines();
+	bool bLeaked = false;
+	bool bOutcomeLine = false;
+	for (int32 Index = Mark; Index < Lines.Num(); ++Index)
+	{
+		bLeaked |= Lines[Index].Contains(Token);
+		bOutcomeLine |= Lines[Index].Contains(TEXT("GET https://api.test/s?q=*** -> 404"));
+	}
+	TestFalse(TEXT("no line written after ClearSession holds the request's session token"), bLeaked);
+	TestTrue(TEXT("... the outcome line shows ***"), bOutcomeLine);
+	TestFalse(TEXT("the error's URL still scrubs it"), Failed->Error.Url.Contains(Token));
+	return true;
+}
+
 #endif

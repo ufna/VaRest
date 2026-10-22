@@ -268,7 +268,7 @@ void FVaRestSecretSet::Set(FName Slot, const FString& Value, double Now)
 		{
 			return;
 		}
-		Previous.Add({ *Old, Now + PreviousLifetime });
+		Previous.Add({ *Old, Now + PreviousLifetime, Slot });
 		while (Previous.Num() > MaxPrevious)
 		{
 			Previous.RemoveAt(0);
@@ -288,6 +288,18 @@ void FVaRestSecretSet::ClearAll()
 {
 	Current.Reset();
 	Previous.Reset();
+}
+
+void FVaRestSecretSet::ClearSlots(TFunctionRef<bool(FName Slot)> Matches)
+{
+	for (auto It = Current.CreateIterator(); It; ++It)
+	{
+		if (Matches(It.Key()))
+		{
+			It.RemoveCurrent();
+		}
+	}
+	Previous.RemoveAll([&Matches](const FPrevious& Old) { return Matches(Old.Slot); });
 }
 
 TArray<FString> FVaRestSecretSet::GetActive(double Now) const

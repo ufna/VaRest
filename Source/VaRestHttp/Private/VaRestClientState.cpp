@@ -93,10 +93,11 @@ VaRest::Http::FClientState::~FClientState()
 #if !UE_BUILD_SHIPPING
 		++Testing::Counters().ClientStatesDestroyedOffGameThread;
 #endif
-		// Review I-1 backstop: the configuration (custom stages, transport, clock) dies on the game thread. Moved, not
-		// copied (review N-3), so this thread keeps no reference; the task body dies on the game thread right after it
-		// runs (TaskPrivate.h:871-877).
-		UE::Tasks::Launch(TEXT("VaRest.ReleaseConfig"), [Doomed = MoveTemp(Config)] {}, UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
+		// Review I-1 backstop: the configuration (custom stages, transport, clock) and the session (its listeners, its
+		// refresh waiters: game code and its captures, concurrency review M-9) die on the game thread. Moved, not copied
+		// (review N-3), so this thread keeps no reference; the task body dies on the game thread right after it runs
+		// (TaskPrivate.h:871-877).
+		UE::Tasks::Launch(TEXT("VaRest.ReleaseConfig"), [Doomed = MoveTemp(Config), DoomedSession = MoveTemp(Session)] {}, UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
 	}
 	ClientStatePrivate::FLiveRegistry& Registry = ClientStatePrivate::Live();
 	FScopeLock Lock(&Registry.Lock);
@@ -256,6 +257,19 @@ void VaRest::Http::FClientState::SetSecret(FName Slot, const FString& Value)
 	const double Now = GetConfig()->Clock->Now();
 	Secrets.Prune(Now); // review C1: expired values never count toward the next expiry
 	Secrets.Set(Slot, Value, Now);
+	EditConfig([](FClientConfig&) {});
+	ScheduleSecretExpiry();
+}
+
+void VaRest::Http::FClientState::SetSecrets(TConstArrayView<TPair<FName, FString>> Values)
+{
+	check(IsInGameThread());
+	const double Now = GetConfig()->Clock->Now();
+	Secrets.Prune(Now);
+	for (const TPair<FName, FString>& Value : Values)
+	{
+		Secrets.Set(Value.Key, Value.Value, Now);
+	}
 	EditConfig([](FClientConfig&) {});
 	ScheduleSecretExpiry();
 }

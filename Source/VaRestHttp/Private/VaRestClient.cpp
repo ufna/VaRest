@@ -35,25 +35,26 @@ namespace VaRest::Http::ClientPrivate
 		FVaRestRedactRules::Normalize(FUtf8StringView(reinterpret_cast<const UTF8CHAR*>(BUtf8.Get()), BUtf8.Length()), BNormal);
 		return ANormal == BNormal;
 	}
+}
 
-	/**
-	 * Task 14 review M4: a key is checked and de-duplicated once, where it enters. Publish adds every stored key to new rules
-	 * on each edit (a header, a log level, each SetSecretValue), so a refused key stored there would warn every time.
-	 */
-	void AppendRedactKeys(TArray<FString>& Into, TConstArrayView<FString> Keys)
+/**
+ * Task 14 review M4: a key is checked and de-duplicated once, where it enters. Publish adds every stored key to new rules
+ * on each edit (a header, a log level, each SetSecretValue), so a refused key stored there would warn every time. Out of
+ * ClientPrivate: a session header's name enters here too (VaRestSession.cpp).
+ */
+void VaRest::Http::AppendRedactKeys(TArray<FString>& Into, TConstArrayView<FString> Keys)
+{
+	for (const FString& Key : Keys)
 	{
-		for (const FString& Key : Keys)
+		if (!FVaRestRedactRules::IsAcceptableKey(Key))
 		{
-			if (!FVaRestRedactRules::IsAcceptableKey(Key))
-			{
-				UE_LOG(LogVaRestHttp, Warning, TEXT("VaRest: the redaction key \"%s\" holds '?', ';', '#', '=' or '&', on which URL and form redaction split keys; it is ignored"),
-					*EscapeForLog(Key));
-				continue;
-			}
-			if (!Into.ContainsByPredicate([&Key](const FString& Known) { return SameRedactKey(Known, Key); }))
-			{
-				Into.Add(Key);
-			}
+			UE_LOG(LogVaRestHttp, Warning, TEXT("VaRest: the redaction key \"%s\" holds '?', ';', '#', '=' or '&', on which URL and form redaction split keys; it is ignored"),
+				*EscapeForLog(Key));
+			continue;
+		}
+		if (!Into.ContainsByPredicate([&Key](const FString& Known) { return ClientPrivate::SameRedactKey(Known, Key); }))
+		{
+			Into.Add(Key);
 		}
 	}
 }
@@ -262,7 +263,7 @@ FVaRestClient FVaRestClient::Make(FStringView BaseUrl)
 	Initial.Timeout = FMath::Max(0.f, Settings->Timeout);
 	Initial.ActivityTimeout = FMath::Max(0.f, Settings->ActivityTimeout);
 	Initial.MaxJsonBytes = FMath::Max<int64>(0, Settings->MaxJsonBytes);
-	VaRest::Http::ClientPrivate::AppendRedactKeys(Initial.RedactedKeys, Settings->RedactedKeys);
+	VaRest::Http::AppendRedactKeys(Initial.RedactedKeys, Settings->RedactedKeys);
 	Initial.Transport = VaRest::Http::GetDefaultTransport();
 	Initial.Clock = FVaRestRealClock::Get();
 	VaRest::Http::ClientPrivate::WarnIfFragment(Initial.BaseUrl);
@@ -448,7 +449,7 @@ FVaRestClient& FVaRestClient::WithRedactedKeys(TConstArrayView<FString> Keys)
 {
 	if (State.IsValid())
 	{
-		State->EditConfig([Keys](VaRest::Http::FClientConfig& Edited) { VaRest::Http::ClientPrivate::AppendRedactKeys(Edited.RedactedKeys, Keys); });
+		State->EditConfig([Keys](VaRest::Http::FClientConfig& Edited) { VaRest::Http::AppendRedactKeys(Edited.RedactedKeys, Keys); });
 	}
 	return *this;
 }
@@ -467,6 +468,126 @@ void FVaRestClient::ClearSecretValues()
 	{
 		State->ClearSecrets();
 	}
+}
+
+void FVaRestClient::SetBearerToken(FStringView AccessToken, bool bSameIdentity)
+{
+	check(IsInGameThread());
+	if (!State.IsValid())
+	{
+		return;
+	}
+	if (AccessToken.IsEmpty())
+	{
+		ClearSession();
+		return;
+	}
+	if (!VaRest::Http::IsValidHeaderValue(AccessToken))
+	{
+		// The token is not in the line: it is a secret, and the reason is enough
+		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: SetBearerToken: the token holds CR, LF, NUL or another control character; not set"));
+		return;
+	}
+	// Concurrency review C-1: every session change goes through RunSessionChange, which keeps the state alive past a
+	// listener that drops this client; nothing below touches this object after it returns
+	const FString Token(AccessToken);
+	State->RunSessionChange([&Token, bSameIdentity](VaRest::Http::FClientState& Target) { Target.SetTokensByGame(Token, nullptr, 0.0, 0.0, bSameIdentity); });
+}
+
+void FVaRestClient::SetSession(FStringView AccessToken, FStringView RefreshToken, double ExpiresInSeconds, bool bSameIdentity)
+{
+	check(IsInGameThread());
+	if (!State.IsValid())
+	{
+		return;
+	}
+	if (!VaRest::Http::IsValidHeaderValue(AccessToken) || !VaRest::Http::IsValidHeaderValue(RefreshToken))
+	{
+		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: SetSession: a token holds CR, LF, NUL or another control character; not set"));
+		return;
+	}
+	const FString Access(AccessToken);
+	const FString Refresh(RefreshToken);
+	State->RunSessionChange([&Access, &Refresh, ExpiresInSeconds, bSameIdentity](VaRest::Http::FClientState& Target)
+	{
+		// A login response's expires_in: the token's whole lifetime (re-review N-10)
+		Target.SetTokensByGame(Access, &Refresh, ExpiresInSeconds, ExpiresInSeconds, bSameIdentity);
+	});
+}
+
+void FVaRestClient::SetSessionHeader(FStringView Name, FStringView Value)
+{
+	check(IsInGameThread());
+	if (!VaRest::Http::IsValidHeaderName(Name))
+	{
+		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: SetSessionHeader: the name is not a token (\"%s\"); not set"), *VaRest::Http::EscapeForLog(Name));
+		return;
+	}
+	if (!VaRest::Http::IsValidHeaderValue(Value))
+	{
+		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: SetSessionHeader: the value of \"%s\" holds a control character; not set"), *VaRest::Http::EscapeForLog(Name));
+		return;
+	}
+	if (State.IsValid())
+	{
+		State->RunSessionChange([Name, Value](VaRest::Http::FClientState& Target) { Target.SetSessionHeader(Name, Value); });
+	}
+}
+
+void FVaRestClient::RemoveSessionHeader(FStringView Name)
+{
+	check(IsInGameThread());
+	if (State.IsValid())
+	{
+		State->RunSessionChange([Name](VaRest::Http::FClientState& Target) { Target.RemoveSessionHeader(Name); });
+	}
+}
+
+void FVaRestClient::ClearSession()
+{
+	check(IsInGameThread());
+	if (State.IsValid())
+	{
+		State->RunSessionChange([](VaRest::Http::FClientState& Target) { Target.ClearSession(); });
+	}
+}
+
+FVaRestSessionData FVaRestClient::GetSession() const
+{
+	check(IsInGameThread());
+	return State.IsValid() ? State->GetSessionData() : FVaRestSessionData();
+}
+
+void FVaRestClient::NotifySessionExpired()
+{
+	check(IsInGameThread());
+	if (State.IsValid())
+	{
+		State->RunSessionChange([](VaRest::Http::FClientState& Target) { Target.ExpireSession(0, TEXT("NotifySessionExpired")); });
+	}
+}
+
+FVaRestSessionChangedEvent& FVaRestClient::OnSessionChanged()
+{
+	check(IsInGameThread());
+	if (!State.IsValid())
+	{
+		// Leaked, like every singleton here (review I-4)
+		static FVaRestSessionChangedEvent* const Never = new FVaRestSessionChangedEvent();
+		return *Never;
+	}
+	return State->OnSessionChanged();
+}
+
+FVaRestSessionExpiredEvent& FVaRestClient::OnSessionExpired()
+{
+	check(IsInGameThread());
+	if (!State.IsValid())
+	{
+		static FVaRestSessionExpiredEvent* const Never = new FVaRestSessionExpiredEvent();
+		return *Never;
+	}
+	return State->OnSessionExpired();
 }
 
 FVaRestClient& FVaRestClient::Use(FVaRestStageRef Stage, EVaRestStageSlot Slot)

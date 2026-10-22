@@ -6,6 +6,7 @@
 #include "Misc/Paths.h"
 #include "Misc/SourceLocation.h"
 #include "UObject/WeakObjectPtr.h"
+#include "VaRestAuthTypes.h"
 #include "VaRestBody.h"
 #include "VaRestEnvelope.h"
 #include "VaRestHttpTypes.h"
@@ -651,6 +652,32 @@ public:
 	void ClearSecretValues();
 	/** A custom stage (spec 4): Outer sees each logical request once; PerAttempt every attempt, after the limiter's grant, with its final headers */
 	FVaRestClient& Use(FVaRestStageRef Stage, EVaRestStageSlot Slot);
+
+	// ---- session (spec 4.2; game thread). Live state: every attempt uses the session as it is when it starts (plan decision 6).
+	// A listener of OnSessionChanged or OnSessionExpired may change the session again or drop this client: the events of one
+	// change reach every listener in order, after the change is done (concurrency review C-1, I-2).
+	/**
+	 * The access token (a login, a token from elsewhere). Replaced, or Refreshed with bSameIdentity (plan decision 5); the
+	 * refresh token stays, the expiry becomes unknown. An empty token is ClearSession(). A token holding a control character
+	 * is refused with an Error log (it would go into a header line).
+	 */
+	void SetBearerToken(FStringView AccessToken, bool bSameIdentity = false);
+	/**
+	 * A login's result: both tokens and the access token's lifetime in seconds (0 = unknown), taken as the token's whole
+	 * lifetime. A game restoring a session it saved itself uses ImportSession, which records the lifetime as unknown.
+	 */
+	void SetSession(FStringView AccessToken, FStringView RefreshToken, double ExpiresInSeconds = 0.0, bool bSameIdentity = false);
+	/** dawg's X-Session-ID pattern: sent with every request whose auth mode is not None; its value is a secret, its name a key */
+	void SetSessionHeader(FStringView Name, FStringView Value);
+	void RemoveSessionHeader(FStringView Name);
+	/** Logout: tokens, session headers and their secret values; OnSessionChanged(Cleared) */
+	void ClearSession();
+	FVaRestSessionData GetSession() const;
+	/** WebSocket spec 19 item 2: a socket's terminal auth failure. The tokens go; OnSessionExpired fires, once per expiry. */
+	void NotifySessionExpired();
+	/** Game thread. An empty client returns a delegate that never fires. */
+	FVaRestSessionChangedEvent& OnSessionChanged();
+	FVaRestSessionExpiredEvent& OnSessionExpired();
 
 	// ---- requests (any thread)
 	template <typename T = FVaRestJson>

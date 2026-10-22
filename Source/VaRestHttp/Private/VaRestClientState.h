@@ -11,6 +11,7 @@
 #include "VaRestLimiter.h"
 #include "VaRestRedactor.h"
 #include "VaRestRetry.h"
+#include "VaRestSession.h"
 #include "VaRestStage.h"
 
 namespace VaRest::Http
@@ -87,9 +88,42 @@ namespace VaRest::Http
 
 		/** Game thread: layer 3's known values (Inspector 2.2); publishes a new redactor */
 		void SetSecret(FName Slot, const FString& Value);
+		/** Game thread: several secret slots, one republish (each SetSecret republishes) */
+		void SetSecrets(TConstArrayView<TPair<FName, FString>> Values);
 		void ClearSecrets();
 		/** Game thread: WithClock. Pending secret expiries move to the new clock's time, and their timer with them (review M6). */
 		void SetClock(const TSharedRef<IVaRestClock, ESPMode::ThreadSafe>& NewClock);
+
+		// ---- Session (spec 4.2, plan decisions 5 and 6; VaRestSession.cpp). Game thread.
+		const FVaRestSessionData& GetSessionData() const { return Session.Data; }
+		FVaRestSessionChangedEvent& OnSessionChanged() { return Session.Changed; }
+		FVaRestSessionExpiredEvent& OnSessionExpired() { return Session.Expired; }
+		/**
+		 * Concurrency review C-1, I-2: the one way into a session change. Keeps this state alive while Change and the events
+		 * it queued run -- a listener may drop the last FVaRestClient -- then delivers the queued events in order, each to
+		 * every listener before the next. Inside a listener it only queues; the outer call delivers. The functions below
+		 * check that they run inside one.
+		 */
+		void RunSessionChange(TFunctionRef<void(FClientState&)> Change);
+		/**
+		 * Data and secrets only, no event; RefreshToken null keeps the current one; ExpiresInSeconds 0 = unknown.
+		 * LifetimeSeconds: the token's whole lifetime when the caller knows it (a login or refresh response), else 0 -- an
+		 * imported session's time left is not its lifetime (re-review N-10). True when anything changed.
+		 */
+		bool UpdateTokens(const FString& AccessToken, const FString* RefreshToken, double ExpiresInSeconds, double LifetimeSeconds);
+		/** Queues an IN-9 marker and OnSessionChanged(Change) for RunSessionChange to deliver */
+		void AnnounceSession(EVaRestSessionChange Change, uint64 CauseRequestId, const TCHAR* Text);
+		/** SetBearerToken, SetSession, ImportSession: Replaced, or Refreshed with bSameIdentity (plan decision 5); no event when nothing changed */
+		void SetTokensByGame(const FString& AccessToken, const FString* RefreshToken, double ExpiresInSeconds, double LifetimeSeconds, bool bSameIdentity);
+		void SetSessionHeader(FStringView Name, FStringView Value);
+		void RemoveSessionHeader(FStringView Name);
+		/** Logout: tokens, headers and the session's secret slots; OnSessionChanged(Cleared). Nothing happens to an empty session. */
+		void ClearSession();
+		/**
+		 * A rejected refresh (Task 16) or NotifySessionExpired: the tokens go, the headers stay; OnSessionExpired queued.
+		 * Once: a session with no token left queues nothing (concurrency review I-2).
+		 */
+		void ExpireSession(uint64 CauseRequestId, FStringView Why);
 
 		/** Every live client (game thread): the trace snapshot, engine shutdown */
 		static void ForEachLive(TFunctionRef<void(FClientState&)> Visit);
@@ -137,6 +171,10 @@ namespace VaRest::Http
 		void Publish(const TSharedRef<FClientConfig, ESPMode::ThreadSafe>& Next);
 		/** Publishes again when the next rotated-out value expires */
 		void ScheduleSecretExpiry();
+		/** IN-13 layer 3: the session's tokens and header values as its secret slots, one republish (VaRestSession.cpp) */
+		void PublishSessionSecrets();
+		/** Every session function but the getters runs inside RunSessionChange, on the game thread (concurrency review C-1) */
+		void CheckInSessionChange() const;
 
 		const uint64 ClientId;
 		mutable FRWLock ConfigLock;
@@ -154,6 +192,11 @@ namespace VaRest::Http
 		/** Game thread; Publish copies its active values into each redactor */
 		FVaRestSecretSet Secrets;
 		FVaRestTimerHandle SecretExpiryTimer;
+		/**
+		 * Spec 4.2: the live session (plan decision 6). Game thread. Its listeners and (Task 16) refresh waiters are game code,
+		 * so ~FClientState off the game thread sends it there with the configuration (concurrency review M-9).
+		 */
+		FSessionState Session;
 	};
 
 	/**
@@ -184,6 +227,8 @@ namespace VaRest::Http
 	FVaRestStageRef MakeLogStage();
 	/** The Basic line (a Warning) of a request refused before the chain, with Kind=Config: a builder error or Resolve's */
 	void LogConfigError(const FExchangeState& Ex, FStringView Message);
+	/** Checks and de-duplicates redaction keys where they enter (task 14 review M4); VaRestClient.cpp */
+	void AppendRedactKeys(TArray<FString>& Into, TConstArrayView<FString> Keys);
 	/** The Basic line of an attempt that ended in the limiter's queue (ruling I-3: it never reaches the log stage) */
 	void LogEndedInQueue(const FExchangeState& Ex, const FVaRestAttemptOutcome& Outcome);
 	/** The cvar VaRest.LogLevel when it is 0..3, else the client's level */
