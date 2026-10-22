@@ -57,16 +57,22 @@ namespace VaRest::Http::LimiterTestPrivate
 	}
 
 	/**
-	 * A PerAttempt stage, so the last one before the limiter. A request to .../bad gets a header value with CR LF, which
-	 * the transport stage refuses (review I3). Every exchange is kept, weakly, for the test to read or flag.
+	 * Records every exchange it sees, weakly, for the test to read or flag. As an Outer stage it sees a request before the
+	 * limiter (ruling I-3: the limiter opens the attempt), so a queued request is found too. As a PerAttempt stage it runs
+	 * after the grant and gives a request to .../bad a header value with CR LF, which the transport stage refuses (review I3).
 	 */
 	class FProbeStage final : public IVaRestStage
 	{
 	public:
-		virtual FName GetStageName() const override { return TEXT("Probe"); }
+		explicit FProbeStage(EVaRestStageSlot InSlot)
+			: Slot(InSlot)
+		{
+		}
+
+		virtual FName GetStageName() const override { return Slot == EVaRestStageSlot::Outer ? TEXT("Probe") : TEXT("ProbeAttempt"); }
 		virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) override
 		{
-			if (Exchange->GetUrl().EndsWith(TEXT("/bad")))
+			if (Slot == EVaRestStageSlot::PerAttempt && Exchange->GetUrl().EndsWith(TEXT("/bad")))
 			{
 				Exchange->GetAttemptHeaders().Set(TEXT("X-Limiter-Bad"), TEXT("a\r\nb"));
 			}
@@ -89,6 +95,23 @@ namespace VaRest::Http::LimiterTestPrivate
 		}
 
 		TArray<TWeakPtr<FVaRestExchange, ESPMode::ThreadSafe>> Seen;
+		const EVaRestStageSlot Slot;
+	};
+
+	/** A PerAttempt stage that reports its outcome twice (a buggy stage, review C-3) */
+	class FTwiceStage final : public IVaRestStage
+	{
+	public:
+		virtual FName GetStageName() const override { return TEXT("Twice"); }
+		virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) override
+		{
+			Next.Proceed(Exchange, [Done = MoveTemp(OnOutcome)](FVaRestAttemptOutcome&& Outcome) mutable
+			{
+				FVaRestAttemptOutcome Again = Outcome;
+				Done(MoveTemp(Outcome));
+				Done(MoveTemp(Again));
+			});
+		}
 	};
 
 	/** A limiter under test and what its grants saw */
@@ -344,8 +367,10 @@ bool FVaRestHttpLimiterExitsTest::RunTest(const FString& Parameters)
 	// One slot: the request queued behind each way an attempt ends is dispatched only if that way gave the slot back
 	FTestRig Rig;
 	Rig.Client.WithMaxConcurrent(1);
-	TSharedRef<FProbeStage, ESPMode::ThreadSafe> Probe = MakeShared<FProbeStage, ESPMode::ThreadSafe>();
-	Rig.Client.Use(Probe, EVaRestStageSlot::PerAttempt);
+	// Ruling I-3: the probe that finds a queued exchange is an Outer stage; the one that sets the bad header runs after the grant
+	TSharedRef<FProbeStage, ESPMode::ThreadSafe> Probe = MakeShared<FProbeStage, ESPMode::ThreadSafe>(EVaRestStageSlot::Outer);
+	Rig.Client.Use(Probe, EVaRestStageSlot::Outer);
+	Rig.Client.Use(MakeShared<FProbeStage, ESPMode::ThreadSafe>(EVaRestStageSlot::PerAttempt), EVaRestStageSlot::PerAttempt);
 	// Completions post their game-thread task inside Complete(), Cancel() and Advance(), so the order below is fixed
 	Rig.Fake->bCompleteOnWorker = false;
 	Rig.Fake->SetResponder([](const FVaRestTransportRequest&) { return FVaRestFakeResponse::Manual(); });
@@ -412,7 +437,7 @@ bool FVaRestHttpLimiterExitsTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("refused: the holder and the next one finish"), Rig.Wait(Holder) && Rig.Wait(AfterRefused));
 
 	// Flagged while queued, with no game-thread Cancel() behind it -- the state a worker's Cancel() leaves until its hop
-	// runs (VaRestClient.cpp:239). Only the grant can see it: Proceed answers Canceled there, and no Abort can, since
+	// runs (VaRestClient.cpp:245-246). Only the grant can see it: Proceed answers Canceled there, and no Abort can, since
 	// only FClientState::Cancel calls one. Nothing here depends on the order of game-thread tasks (review Minor 6).
 	auto Holder2 = MakeOutcome<FVaRestJson>();
 	Observe(Rig.Client.Get(TEXT("/hold-2")), Holder2).Send();
@@ -504,8 +529,9 @@ bool FVaRestHttpLimiterWaitTest::RunTest(const FString& Parameters)
 	// exchange's Release grants it and whatever clock the client holds by then
 	FTestRig Rig;
 	Rig.Client.WithMaxConcurrent(1);
-	TSharedRef<FProbeStage, ESPMode::ThreadSafe> Probe = MakeShared<FProbeStage, ESPMode::ThreadSafe>();
-	Rig.Client.Use(Probe, EVaRestStageSlot::PerAttempt);
+	// Ruling I-3: an Outer stage, so it holds B while B waits in the queue
+	TSharedRef<FProbeStage, ESPMode::ThreadSafe> Probe = MakeShared<FProbeStage, ESPMode::ThreadSafe>(EVaRestStageSlot::Outer);
+	Rig.Client.Use(Probe, EVaRestStageSlot::Outer);
 	Rig.Fake->SetResponder([](const FVaRestTransportRequest&) { return FVaRestFakeResponse::Manual(); });
 	auto A = MakeOutcome<FVaRestJson>();
 	Observe(Rig.Client.Get(TEXT("/a")), A).Send(); // on the rig's clock, granted at once
@@ -650,6 +676,154 @@ bool FVaRestHttpLimiterDoubleReleaseTest::RunTest(const FString& Parameters)
 #else
 	AddInfo(TEXT("ensures are compiled out (DO_ENSURE 0): nothing to check"));
 #endif
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpLimiterFirstTest, "VaRest.Http.Limiter.FirstInTheAttempt",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpLimiterFirstTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::LimiterTestPrivate;
+	// Ruling I-3 (spec 4 and 4.6 as amended): the limiter opens every attempt, so what comes after it -- a PerAttempt stage
+	// (a signer; M4a's AuthApply) and the log stage -- meets a queued request only when it leaves the queue
+	TGuardConsoleVariable<int32> Level(TEXT("VaRest.LogLevel"), -1);
+	FTestRig Rig;
+	Rig.Client.WithMaxConcurrent(1).WithLogLevel(EVaRestLogLevel::Headers);
+	const TSharedRef<FProbeStage, ESPMode::ThreadSafe> Signer = MakeShared<FProbeStage, ESPMode::ThreadSafe>(EVaRestStageSlot::PerAttempt);
+	Rig.Client.Use(Signer, EVaRestStageSlot::PerAttempt);
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest&) { return FVaRestFakeResponse::Manual(); });
+	const VaRest::Http::FLimiter& Slots = VaRest::Http::FClientAccess::State(Rig.Client)->GetLimiter();
+	FLogCapture Capture;
+	auto First = MakeOutcome<FVaRestJson>();
+	auto Second = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/first")), First).Send();
+	const FVaRestRequestHandle SecondHandle = Observe(Rig.Client.Get(TEXT("/second")), Second).Send();
+	if (!TestTrue(TEXT("the first holds the slot, the second queues"), PumpUntil([&Rig, &Slots] { return Rig.Fake->NumCalls() == 1 && Slots.NumQueued() == 1; })))
+	{
+		Rig.Client.CancelAll();
+		PumpUntil([&Rig] { return Rig.Client.GetInFlightCount() == 0; });
+		return false;
+	}
+	const FString SecondLine = FString::Printf(TEXT("#%llu > GET https://api.test/second (attempt 1)"), SecondHandle.GetId());
+	TestFalse(TEXT("a PerAttempt stage has not met the queued request"), Signer->Find(TEXT("/second")).IsValid());
+	TestFalse(TEXT("... nor has the log stage written its request line"), Capture.Contains(SecondLine));
+	CompleteOldest(Rig);
+	if (!TestTrue(TEXT("the second is granted"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 2; })))
+	{
+		// Re-review N-8: drained before the early return
+		Rig.Client.CancelAll();
+		PumpUntil([&Rig] { return Rig.Client.GetInFlightCount() == 0; });
+		return false;
+	}
+	TestTrue(TEXT("... and only now meets the PerAttempt stage"), Signer->Find(TEXT("/second")).IsValid());
+	TestTrue(TEXT("... and the log stage"), Capture.Contains(SecondLine));
+	CompleteOldest(Rig);
+	TestTrue(TEXT("both finish"), Rig.Wait(First) && Rig.Wait(Second));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpLimiterCanceledAtGrantTest, "VaRest.Http.Limiter.CanceledAtGrantLogged",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpLimiterCanceledAtGrantTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::LimiterTestPrivate;
+	// Ruling I-3: a request flagged as canceled while it waits, with no game-thread Cancel() behind it (a worker's Cancel()
+	// until its hop runs, VaRestClient.cpp:245-246), is answered Canceled at its grant, so it never reaches the log stage,
+	// which is after the limiter now. Its Basic line is written at the grant, as for one aborted in the queue: 0 ms of its
+	// own, the wait apart.
+	TGuardConsoleVariable<int32> Level(TEXT("VaRest.LogLevel"), -1);
+	FTestRig Rig;
+	Rig.Client.WithMaxConcurrent(1).WithLogLevel(EVaRestLogLevel::Basic);
+	const TSharedRef<FProbeStage, ESPMode::ThreadSafe> Probe = MakeShared<FProbeStage, ESPMode::ThreadSafe>(EVaRestStageSlot::Outer);
+	Rig.Client.Use(Probe, EVaRestStageSlot::Outer);
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest&) { return FVaRestFakeResponse::Manual(); });
+	const VaRest::Http::FLimiter& Slots = VaRest::Http::FClientAccess::State(Rig.Client)->GetLimiter();
+	FLogCapture Capture;
+	auto Holder = MakeOutcome<FVaRestJson>();
+	auto Flagged = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/holder")), Holder).Send();
+	const FVaRestRequestHandle FlaggedHandle = Observe(Rig.Client.Get(TEXT("/flagged")), Flagged).Send();
+	const bool bQueued = TestTrue(TEXT("the holder has the slot, the other queues"), PumpUntil([&Rig, &Slots] { return Rig.Fake->NumCalls() == 1 && Slots.NumQueued() == 1; }));
+	const TSharedPtr<FVaRestExchange, ESPMode::ThreadSafe> FlaggedExchange = Probe->Find(TEXT("/flagged"));
+	if (!bQueued || !TestTrue(TEXT("the probe holds the queued one"), FlaggedExchange.IsValid()))
+	{
+		Rig.Client.CancelAll();
+		PumpUntil([&Rig] { return Rig.Client.GetInFlightCount() == 0; });
+		return false;
+	}
+	VaRest::Http::Internals(*FlaggedExchange).bCancelRequested = true;
+	Rig.Clock->Advance(1.0);
+	CompleteOldest(Rig); // the holder's Release grants the flagged one, and Proceed answers it Canceled
+	TestTrue(TEXT("the flagged one finishes as Canceled"), Rig.Wait(Flagged) && Flagged->Error.Kind == EVaRestErrorKind::Canceled);
+	TestTrue(TEXT("the holder finishes"), Rig.Wait(Holder));
+	TestTrue(TEXT("drained"), Rig.Drain());
+	TestEqual(TEXT("the flagged one was never dispatched"), Rig.Fake->NumCalls(), 1);
+	const FString Line = FString::Printf(TEXT("#%llu GET https://api.test/flagged -> canceled (0 ms, 1000 ms queued)"), FlaggedHandle.GetId());
+	TestEqual(TEXT("its Basic line, once: 0 ms of its own, the 1000 ms queued apart"), Capture.Count(Line), 1);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpLimiterReportsTwiceTest, "VaRest.Http.Limiter.PerAttemptReportsTwice",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpLimiterReportsTwiceTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::LimiterTestPrivate;
+	// Ruling I-3: a custom PerAttempt stage now runs inside the grant, so the limiter's release is in the callback it is
+	// handed, no longer only in the transport stage's exactly-once completion. A buggy stage that reports twice (review
+	// C-3: the second report is ignored) must release once: a second release frees another attempt's slot, and the client
+	// runs more than MaxConcurrent at once. A double release is also an ensureAlways (FLimiter::Release), counted here.
+	TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> Ensured = MakeShared<std::atomic<int32>, ESPMode::ThreadSafe>(0);
+	const TFunction<bool(const FEnsureHandlerArgs&)> Previous = GetEnsureHandler();
+	SetEnsureHandler([Ensured, Previous](const FEnsureHandlerArgs& Args)
+	{
+		if (Args.Message && FCString::Strstr(Args.Message, TEXT("FLimiter: Release() without a matching grant")))
+		{
+			++*Ensured;
+			return true;
+		}
+		return Previous ? Previous(Args) : false;
+	});
+	ON_SCOPE_EXIT { SetEnsureHandler(Previous); };
+	FTestRig Rig;
+	Rig.Client.WithMaxConcurrent(1);
+	Rig.Client.Use(MakeShared<FTwiceStage, ESPMode::ThreadSafe>(), EVaRestStageSlot::PerAttempt);
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest&) { return FVaRestFakeResponse::Manual(); });
+	const VaRest::Http::FLimiter& Slots = VaRest::Http::FClientAccess::State(Rig.Client)->GetLimiter();
+	auto A = MakeOutcome<FVaRestJson>();
+	auto B = MakeOutcome<FVaRestJson>();
+	auto C = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/a")), A).Send();
+	Observe(Rig.Client.Get(TEXT("/b")), B).Send();
+	Observe(Rig.Client.Get(TEXT("/c")), C).Send();
+	if (!TestTrue(TEXT("one slot: A holds it, B and C queue"), PumpUntil([&Rig, &Slots] { return Rig.Fake->NumCalls() == 1 && Slots.NumQueued() == 2; })))
+	{
+		Rig.Client.CancelAll();
+		PumpUntil([&Rig] { return Rig.Client.GetInFlightCount() == 0; });
+		return false;
+	}
+	CompleteOldest(Rig); // A's one answer reaches the limiter's callback twice
+	TestTrue(TEXT("A finishes"), Rig.Wait(A));
+	TestTrue(TEXT("drained"), Rig.Drain());
+	TestEqual(TEXT("one release for two reports: B alone is granted"), Rig.Fake->NumCalls(), 2);
+	TestTrue(TEXT("... C still waits behind the one slot B holds"), Slots.NumQueued() == 1 && Slots.NumActive() == 1);
+	TestEqual(TEXT("... and A's callbacks ran once"), A->CompleteCalls.load(), 1);
+	CompleteOldest(Rig);
+	TestTrue(TEXT("B finishes"), Rig.Wait(B));
+	if (TestTrue(TEXT("C is granted"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 3; })))
+	{
+		CompleteOldest(Rig);
+		TestTrue(TEXT("C finishes"), Rig.Wait(C));
+	}
+	Rig.Client.CancelAll(); // only on the failure path is anything left
+	TestTrue(TEXT("nothing is left in flight"), PumpUntil([&Rig] { return Rig.Client.GetInFlightCount() == 0; }));
+	TestTrue(TEXT("every slot came back"), Slots.NumActive() == 0 && Slots.NumQueued() == 0);
+	TestEqual(TEXT("no release without a grant"), Ensured->load(), 0);
 	return true;
 }
 

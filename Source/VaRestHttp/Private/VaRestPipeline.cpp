@@ -265,7 +265,7 @@ namespace VaRest::Http::PipelinePrivate
 		}
 	};
 
-	/** Spec 4.6: per attempt, right before the transport */
+	/** Spec 4.6 as amended (ruling I-3): the first stage of every attempt, right after the attempt boundary */
 	class FLimiterStage final : public IVaRestStage
 	{
 	public:
@@ -286,10 +286,25 @@ namespace VaRest::Http::PipelinePrivate
 					FExchangeState& Granted = Internals(*Exchange);
 					Granted.bInLimiterQueue = false;
 					Granted.LimiterWait = Granted.Config->Clock->Now() - EnqueuedAt;
-					Next.Proceed(Exchange, [Exchange, Outcome](FVaRestAttemptOutcome&& Result)
+					if (!Granted.bFinished && Exchange->IsCancelRequested())
 					{
-						// The slot is freed before the outcome goes further up: a stage that re-issues queues again
-						Internals(*Exchange).State->GetLimiter().Release();
+						// Ruling I-3: flagged while it waited with no Abort behind it (a worker's Cancel() until its hop runs,
+						// VaRestClient.cpp:245-246). Proceed answers it Canceled below, before the log stage, so its Basic
+						// line is written here, as for an abort. The flag is never cleared, so Proceed's own read agrees.
+						LogEndedInQueue(Granted, FVaRestAttemptOutcome::Canceled());
+					}
+					Next.Proceed(Exchange, [Exchange, Outcome, bReleased = false](FVaRestAttemptOutcome&& Result) mutable
+					{
+						// The slot is freed before the outcome goes further up: an Outer stage that re-issues (Retry, the auth
+						// gate) queues again; a PerAttempt stage that proceeds twice re-issues inside this one grant (ruling
+						// I-3, re-review N-12). Once: this callback goes to a custom PerAttempt stage now, not only to the
+						// transport stage's exactly-once completion, and a stage that reports twice (review C-3: the second
+						// report is ignored) must not free another attempt's slot.
+						if (!bReleased)
+						{
+							bReleased = true;
+							Internals(*Exchange).State->GetLimiter().Release();
+						}
 						(*Outcome)(MoveTemp(Result));
 					});
 				},
@@ -300,7 +315,10 @@ namespace VaRest::Http::PipelinePrivate
 					// Task 14 re-review N2 (P14.2): the time spent queued is the queue's, as for a grant, so the log line
 					// shows "canceled (0 ms, N ms queued)" and not the wait as the attempt's own milliseconds
 					Aborted.LimiterWait = Aborted.Config->Clock->Now() - EnqueuedAt;
-					(*Outcome)(FVaRestAttemptOutcome::Canceled());
+					FVaRestAttemptOutcome Ended = FVaRestAttemptOutcome::Canceled();
+					// Ruling I-3: nothing after the limiter ran, the log stage included
+					LogEndedInQueue(Aborted, Ended);
+					(*Outcome)(MoveTemp(Ended));
 				});
 		}
 	};

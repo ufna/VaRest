@@ -76,7 +76,7 @@ enum class EVaRestStageSlot : uint8
 {
 	/** Sees each logical request once, before the attempt boundary */
 	Outer,
-	/** Sees every attempt and its final headers (request signing) */
+	/** Sees every attempt and its final headers (request signing), when the attempt leaves the limiter's queue */
 	PerAttempt
 };
 

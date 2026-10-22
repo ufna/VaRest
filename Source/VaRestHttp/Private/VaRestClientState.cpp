@@ -158,8 +158,9 @@ void VaRest::Http::FClientState::EditConfig(TFunctionRef<void(FClientConfig&)> E
 void VaRest::Http::FClientState::Publish(const TSharedRef<FClientConfig, ESPMode::ThreadSafe>& Next)
 {
 	// Spec 4's chain. Custom Outer stages first: they see every logical request once (decision 13); M4's built-in Outer
-	// stages (offline queue, cache, retry) go between them and the attempt boundary. Custom PerAttempt stages see the
-	// final headers; the built-ins next to the transport (log stage, Task 14; limiter, Task 12) come last.
+	// stages (offline queue, cache, retry, the auth gate) go between them and the attempt boundary. The limiter opens each
+	// attempt (ruling I-3), so what follows it runs when the request leaves the queue; custom PerAttempt stages see the
+	// final headers; the log stage sits next to the transport.
 	TSharedRef<FVaRestStageChain, ESPMode::ThreadSafe> NewChain = MakeShared<FVaRestStageChain, ESPMode::ThreadSafe>();
 	bool bReissue = false;
 	for (const TPair<FVaRestStageRef, EVaRestStageSlot>& Entry : Next->CustomStages)
@@ -171,6 +172,10 @@ void VaRest::Http::FClientState::Publish(const TSharedRef<FClientConfig, ESPMode
 		}
 	}
 	NewChain->Add(MakeAttemptBoundaryStage());
+	// Ruling I-3 (spec 4.6 as amended): the first stage of every attempt. Credentials (Task 14), a custom PerAttempt stage's
+	// signature and the log lines are written when the request leaves the queue, so none of them goes stale while it
+	// waits; a queued retry still waits its turn.
+	NewChain->Add(MakeLimiterStage());
 	for (const TPair<FVaRestStageRef, EVaRestStageSlot>& Entry : Next->CustomStages)
 	{
 		if (Entry.Value == EVaRestStageSlot::PerAttempt)
@@ -180,7 +185,6 @@ void VaRest::Http::FClientState::Publish(const TSharedRef<FClientConfig, ESPMode
 		}
 	}
 	NewChain->Add(MakeLogStage()); // after custom PerAttempt stages: it logs the final headers
-	NewChain->Add(MakeLimiterStage()); // spec 4.6: "next to the transport, so queued retries wait their turn too"
 	NewChain->Add(MakeTransportStage());
 	Next->Chain = NewChain;
 	Next->bMayReissue = bReissue;

@@ -139,10 +139,11 @@ namespace VaRest::Http::LogStagePrivate
 		// Plan decision 17, review I-1: read when the outcome is back -- a secret set while the attempt ran (an auth refresh)
 		// is known, and one the client forgot meanwhile (a logout) still is, from the Send() snapshot
 		const FRedactorRef Redactor = RedactorFor(Ex);
-		// Review M5: the attempt's own time, from the limiter's grant; a wait in the queue (IN-2's LimiterWait, measured on
-		// this exchange's clock) is shown apart, and only when it rounds to a millisecond or more
+		// Review M5: the attempt's own time. StartedAt is taken after the limiter's grant (ruling I-3: the limiter opens the
+		// attempt), so the wait in the queue (IN-2's LimiterWait, on this exchange's clock) is not in it; it is shown apart,
+		// only when it rounds to a millisecond or more
 		const double QueuedMs = Ex.LimiterWait * 1000.0;
-		const double Ms = FMath::Max(0.0, (Ex.Config->Clock->Now() - StartedAt) * 1000.0 - QueuedMs);
+		const double Ms = FMath::Max(0.0, (Ex.Config->Clock->Now() - StartedAt) * 1000.0);
 		const FString Queued = QueuedMs >= 0.5 ? FString::Printf(TEXT(", %.0f ms queued"), QueuedMs) : FString();
 		const bool bCanceled = Outcome.Failure == EVaRestTransportFailure::Canceled;
 		const bool bWarning = Outcome.IsTransportFailure() ? !bCanceled : Outcome.Status >= 400;
@@ -195,7 +196,7 @@ namespace VaRest::Http::LogStagePrivate
 #endif
 	}
 
-	/** Spec 4.5, per attempt: after the custom PerAttempt stages, before the limiter */
+	/** Spec 4.5, per attempt: after the custom PerAttempt stages, right before the transport */
 	class FLogStage final : public IVaRestStage
 	{
 	public:
@@ -315,6 +316,17 @@ void VaRest::Http::LogConfigError(const FExchangeState& Ex, FStringView Message)
 	}
 	const FString Url = LogStagePrivate::ShownUrl(RedactorFor(Ex), Ex.Url.IsEmpty() ? JoinUrl(Cfg.BaseUrl, Ex.RawPath) : Ex.Url);
 	UE_LOG(LogVaRestHttp, Warning, TEXT("#%llu %s %s -> Config error: %s"), Ex.RequestId, *EscapeForLog(Ex.Verb), *Url, *EscapeControlsForLog(Message));
+}
+
+void VaRest::Http::LogEndedInQueue(const FExchangeState& Ex, const FVaRestAttemptOutcome& Outcome)
+{
+	// Ruling I-3: an attempt the limiter ends (a cancel, engine exit, the retry deadline) never reaches the log stage. Its
+	// Basic line is written as that stage would have: the attempt's own 0 ms, the wait apart. The same gate as FLogStage.
+	if (Ex.LogLevel == EVaRestLogLevel::None || !UE_LOG_ACTIVE(LogVaRestHttp, Warning))
+	{
+		return;
+	}
+	LogStagePrivate::LogOutcome(Ex, Ex.LogLevel, Ex.Config->Clock->Now(), Outcome);
 }
 
 FVaRestStageRef VaRest::Http::MakeLogStage()

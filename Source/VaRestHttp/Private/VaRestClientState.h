@@ -157,6 +157,8 @@ namespace VaRest::Http
 	FVaRestStageRef MakeLogStage();
 	/** The Basic line (a Warning) of a request refused before the chain, with Kind=Config: a builder error or Resolve's */
 	void LogConfigError(const FExchangeState& Ex, FStringView Message);
+	/** The Basic line of an attempt that ended in the limiter's queue (ruling I-3: it never reaches the log stage) */
+	void LogEndedInQueue(const FExchangeState& Ex, const FVaRestAttemptOutcome& Outcome);
 	/** The cvar VaRest.LogLevel when it is 0..3, else the client's level */
 	EVaRestLogLevel EffectiveLogLevel(EVaRestLogLevel ClientLevel);
 	/** Spec 4.5: "Logged bodies are truncated to 4 KiB" */
