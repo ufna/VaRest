@@ -10,6 +10,7 @@
 #include "Misc/Paths.h"
 #include "Misc/ScopeExit.h"
 #include "UObject/Package.h"
+#include "VaRestAuth.h"
 #include "VaRestClient.h"
 #include "VaRestClientState.h"
 #include "VaRestExchangeState.h"
@@ -152,6 +153,20 @@ namespace VaRest::Http::RetryTestPrivate
 		TWeakPtr<FVaRestExchange, ESPMode::ThreadSafe> Kept;
 		/** What reached this stage from behind it after it had answered */
 		TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> LateAnswers = MakeShared<std::atomic<int32>, ESPMode::ThreadSafe>(0);
+	};
+
+	/** Carry C1: a custom auth that signs each attempt into the query (try=1, try=2, ...), as a nonce or timestamp would */
+	class FAttemptQueryAuth final : public IVaRestAuth
+	{
+	public:
+		virtual FName GetAuthName() const override { return TEXT("AttemptQuery"); }
+		virtual bool Apply(FVaRestAuthTarget& Target) const override
+		{
+			Target.Query.Emplace(TEXT("try"), FString::FromInt(++Applied));
+			return true;
+		}
+
+		mutable int32 Applied = 0;
 	};
 
 	/** A PerAttempt stage that answers its first attempt itself, inside Process, with Code; later attempts go through */
@@ -2234,6 +2249,67 @@ bool FVaRestHttpRetryOuterAnswerFreesSlotTest::RunTest(const FString& Parameters
 	TestTrue(TEXT("the orphan's Canceled end reached only the stage that answered"), PumpUntil([Late] { return Late->load() == 1; }));
 	Rig.Drain();
 	TestTrue(TEXT("every slot came back"), Slots.NumActive() == 0 && Slots.NumQueued() == 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpLogStaleEndLineTest, "VaRest.Http.Log.StaleEndLineIsItsOwn",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpLogStaleEndLineTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::RetryTestPrivate;
+	// M4a final review carry C1 (wave A concern 1, review A I-1's log bullet): a stale transport end -- attempt 1's call,
+	// which a PerAttempt stage answered for and the boundary canceled (A1), ending while attempt 2 runs -- writes a Basic
+	// line about its own dispatch: its URL (a custom auth signs each attempt into the query) and its own wait in the queue,
+	// not the live attempt's. Attempt 1 queues 250 ms behind a blocker; attempt 2 queues for none.
+	TGuardConsoleVariable<int32> Level(TEXT("VaRest.LogLevel"), -1);
+	FTestRig Rig;
+	Rig.Fake->bCompleteOnWorker = false;
+	const TSharedRef<FHoldingOuter, ESPMode::ThreadSafe> Early = MakeShared<FHoldingOuter, ESPMode::ThreadSafe>(true);
+	Early->HoldPasses = 1;
+	Early->OnlyTag = TEXT("Stale");
+	Rig.Client.WithAuth(MakeShared<FAttemptQueryAuth, ESPMode::ThreadSafe>()).Use(Early, EVaRestStageSlot::PerAttempt).WithRetry(Exact(3))
+		.WithMaxConcurrent(1).WithLogLevel(EVaRestLogLevel::Basic);
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest&) { return FVaRestFakeResponse::Manual(); });
+	FLogCapture Capture;
+	auto Blocker = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/blocker")).NoAuth(), Blocker).Send();
+	auto Outcome = MakeOutcome<FVaRestJson>();
+	const FVaRestRequestHandle Handle = Observe(Rig.Client.Get(TEXT("/stale")).Tag(TEXT("Stale")), Outcome).Send();
+	Rig.Clock->Advance(0.25);
+	Rig.Fake->Complete(0, Json(200));
+	if (!TestTrue(TEXT("attempt 1 leaves the queue after 250 ms, and is on the wire"), Rig.Wait(Blocker) && PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 2; })))
+	{
+		Early->Held.Reset();
+		Abandon(Rig);
+		return false;
+	}
+	Early->AnswerNow(503);
+	Rig.Clock->Advance(0.5);
+	const TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> Late = Early->LateAnswers;
+	if (!TestTrue(TEXT("attempt 2 is on the wire when attempt 1's end arrives"), Rig.Fake->NumCalls() == 3 && PumpUntil([Late] { return Late->load() == 1; })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Fake->Complete(2, Json(200));
+	TestTrue(TEXT("attempt 2 succeeds"), Rig.Wait(Outcome) && Outcome->SuccessCalls.load() == 1 && Outcome->Response.Attempts == 2);
+	Rig.Drain();
+	const FString Id = FString::Printf(TEXT("#%llu "), Handle.GetId());
+	const auto Count = [&Capture, &Id](const TCHAR* Text)
+	{
+		int32 Found = 0;
+		for (const FString& Line : Capture.GetLines())
+		{
+			Found += Line.Contains(Id) && Line.Contains(Text) ? 1 : 0;
+		}
+		return Found;
+	};
+	TestEqual(TEXT("attempt 1's stale end: its own URL, its 500 ms, its 250 ms in the queue"),
+		Count(TEXT("GET https://api.test/stale?try=1 -> canceled (500 ms, 250 ms queued)")), 1);
+	TestEqual(TEXT("... no canceled line shows attempt 2's URL"), Count(TEXT("try=2 -> canceled")), 0);
+	TestEqual(TEXT("attempt 2's own line: its URL, no queue wait"), Count(TEXT("GET https://api.test/stale?try=2 -> 200 (0 ms, ")), 1);
 	return true;
 }
 

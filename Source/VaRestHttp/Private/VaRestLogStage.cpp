@@ -118,7 +118,12 @@ namespace VaRest::Http::LogStagePrivate
 	}
 #endif
 
-	void LogOutcome(const FExchangeState& Ex, EVaRestLogLevel Level, double StartedAt, const FVaRestAttemptOutcome& Outcome)
+	/**
+	 * AttemptUrl and LimiterWait are the dispatch's own, as it passed the log stage (M4a final review carry C1): a stale
+	 * transport end -- a call a PerAttempt stage answered for, which ends while a later dispatch runs (A1) -- must not show
+	 * the live attempt's URL (a per-attempt query a custom auth signs) or its wait in the queue
+	 */
+	void LogOutcome(const FExchangeState& Ex, EVaRestLogLevel Level, double StartedAt, FStringView AttemptUrl, double LimiterWait, const FVaRestAttemptOutcome& Outcome)
 	{
 		// Plan decision 17, review I-1: read when the outcome is back -- a secret set while the attempt ran (an auth refresh)
 		// is known, and one the client forgot meanwhile (a logout) still is, from the Send() snapshot
@@ -126,7 +131,7 @@ namespace VaRest::Http::LogStagePrivate
 		// Review M5: the attempt's own time. StartedAt is taken after the limiter's grant (ruling I-3: the limiter opens the
 		// attempt), so the wait in the queue (IN-2's LimiterWait, on this exchange's clock) is not in it; it is shown apart,
 		// only when it rounds to a millisecond or more
-		const double QueuedMs = Ex.LimiterWait * 1000.0;
+		const double QueuedMs = LimiterWait * 1000.0;
 		const double Ms = FMath::Max(0.0, (Ex.Config->Clock->Now() - StartedAt) * 1000.0);
 		const FString Queued = QueuedMs >= 0.5 ? FString::Printf(TEXT(", %.0f ms queued"), QueuedMs) : FString();
 		const bool bCanceled = Outcome.Failure == EVaRestTransportFailure::Canceled;
@@ -136,7 +141,7 @@ namespace VaRest::Http::LogStagePrivate
 		{
 			// Built here, only for a line that is written, with this redactor: not the request line's
 			// The URL the attempt went to: an auth's query pair is redacted by its key (plan decision 19)
-			const FString Url = ShownUrl(Redactor, Ex.AttemptUrl);
+			const FString Url = ShownUrl(Redactor, AttemptUrl);
 			const FString ShownVerb = EscapeForLog(Ex.Verb);
 			if (bCanceled)
 			{
@@ -221,9 +226,13 @@ namespace VaRest::Http::LogStagePrivate
 			}
 #endif
 			const double StartedAt = Ex.Config->Clock->Now();
-			Next.Proceed(Exchange, [Exchange, Level, StartedAt, Done = MoveTemp(OnOutcome)](FVaRestAttemptOutcome&& Outcome) mutable
+			// Carry C1: each pass through here is one transport dispatch (this stage is the transport's neighbour), and this
+			// continuation hears only that dispatch's end -- so it keeps what its line shows, a copy of the URL per logged
+			// attempt, rather than reading the exchange's single slots, which a later dispatch has overwritten by then
+			Next.Proceed(Exchange, [Exchange, Level, StartedAt, SentTo = Ex.AttemptUrl, QueueWait = Ex.LimiterWait, Done = MoveTemp(OnOutcome)]
+				(FVaRestAttemptOutcome&& Outcome) mutable
 			{
-				LogOutcome(Internals(*Exchange), Level, StartedAt, Outcome);
+				LogOutcome(Internals(*Exchange), Level, StartedAt, SentTo, QueueWait, Outcome);
 				Done(MoveTemp(Outcome));
 			});
 #endif
@@ -311,7 +320,8 @@ void VaRest::Http::LogEndedInQueue(const FExchangeState& Ex, const FVaRestAttemp
 	{
 		return;
 	}
-	LogStagePrivate::LogOutcome(Ex, Ex.LogLevel, Ex.Config->Clock->Now(), Outcome);
+	// The attempt the queue ends is the live one: the exchange's own slots are its
+	LogStagePrivate::LogOutcome(Ex, Ex.LogLevel, Ex.Config->Clock->Now(), Ex.AttemptUrl, Ex.LimiterWait, Outcome);
 }
 
 void VaRest::Http::LogEndedInPark(const FExchangeState& Ex, const FVaRestAttemptOutcome& Outcome)
