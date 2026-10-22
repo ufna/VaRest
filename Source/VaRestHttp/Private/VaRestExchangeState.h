@@ -148,6 +148,12 @@ namespace VaRest::Http
 		double PendingAttemptStart = -1.0;
 
 		/**
+		 * IN-14, game thread: the attempt whose 2xx response the decode task excerpts (0 = none). AttemptEnded sets it when it
+		 * announces that excerpt; OnChainDone hands it to the decode task only for the outcome of that same attempt.
+		 */
+		int32 ExcerptOnDecodeAttempt = 0;
+
+		/**
 		 * Plan decision 7. Game thread. Set by a stage while it holds this exchange waiting (a backoff, a park behind a
 		 * refresh); FClientState::Cancel takes it and calls it, and the stage answers Canceled through the chain. When
 		 * something else answered the request while it waited, FClientState::EndWaits calls it too, so the wait's timer or

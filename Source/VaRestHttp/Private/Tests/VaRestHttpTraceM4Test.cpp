@@ -89,7 +89,8 @@ bool FVaRestHttpTraceM4PayloadsTest::RunTest(const FString& Parameters)
 		virtual FVaRestTraceDetailSettings GetDetail() const override
 		{
 			FVaRestTraceDetailSettings Settings;
-			Settings.Flags = EVaRestTraceDetail::Metadata;
+			// Task 21: only a sink that receives excerpts (Bodies) has a say in the admission budget
+			Settings.Flags = EVaRestTraceDetail::Metadata | EVaRestTraceDetail::Bodies;
 			Settings.MaxPendingExcerptBytes = 1234;
 			return Settings;
 		}

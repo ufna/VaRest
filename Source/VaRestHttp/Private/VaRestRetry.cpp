@@ -218,6 +218,14 @@ namespace VaRest::Http::RetryPrivate
 				Run->Answer(FVaRestAttemptOutcome::Canceled());
 				return;
 			}
+			if (Waited.IsCancelRequested())
+			{
+				// Task 20 review M-1: a Cancel() from another thread sets the flag at once and reaches this wait's hook only
+				// from a later game-thread task (FVaRestRequestHandle::Cancel, VaRestClient.cpp:260-264); a backoff that
+				// fires in between re-issues nothing and counts no retry
+				Run->Answer(FVaRestAttemptOutcome::Canceled());
+				return;
+			}
 			// Spec 4.8: a retry is a re-issue, counted as it goes -- not where it is scheduled (RetriesDone, the policy's
 			// budget): a backoff that a cancel, an owner gone or an accepted answer ends (the interrupt hook) re-issues nothing.
 			// The auth gate's replay is not one (plan decision 2): it never comes through here.

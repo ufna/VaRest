@@ -458,6 +458,53 @@ bool FVaRestHttpStatsRetriesTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpStatsCancelFlagTest, "VaRest.Http.Stats.CancelFlagStopsTheRetry",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpStatsCancelFlagTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::StatsTestPrivate;
+	// Task 20 review M-1: a Cancel() on another thread sets the cancel flag at once; its game-thread half, which ends the
+	// backoff through the wait's hook, comes in a later task. A backoff timer that fires in between answers Canceled: it
+	// re-issues nothing and counts no retry.
+	FTestRig Rig;
+	Rig.Fake->Enqueue(Json(503));
+	const VaRest::Http::FHttpCounters& Mine = CountersOf(Rig);
+	auto Outcome = MakeOutcome<FVaRestJson>();
+	const FVaRestRequestHandle Handle = Observe(Rig.Client.Get(TEXT("/busy/flag")).Retry(ExactRetry(1)), Outcome).Send();
+	if (!TestTrue(TEXT("backing off after a 503"), PumpUntil([&Rig] { return Rig.Clock->NumPendingTimers() == 1; })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	const TSharedRef<std::atomic<bool>, ESPMode::ThreadSafe> bFlagged = MakeShared<std::atomic<bool>, ESPMode::ThreadSafe>(false);
+	UE::Tasks::Launch(TEXT("VaRestTests.CancelOffGameThread"), [Handle, bFlagged]
+	{
+		Handle.Cancel();
+		*bFlagged = true;
+	});
+	// Not FTask::Wait, which may run the task here, on the game thread; and no game-thread task runs meanwhile, so the
+	// cancel's game-thread half is still queued when the backoff fires below
+	const double Until = FPlatformTime::Seconds() + 5.0;
+	while (!bFlagged->load() && FPlatformTime::Seconds() < Until)
+	{
+		FPlatformProcess::Sleep(0.001f);
+	}
+	if (!TestTrue(TEXT("canceled on a worker"), bFlagged->load()))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Clock->Advance(5.0);
+	TestEqual(TEXT("the backoff fired with the flag set: no retry counted"), Mine.Retries.load(), static_cast<int64>(0));
+	TestEqual(TEXT("... and no second attempt"), Rig.Fake->NumCalls(), 1);
+	TestTrue(TEXT("it ends Canceled"), Rig.Wait(Outcome) && Outcome->Error.Kind == EVaRestErrorKind::Canceled);
+	Rig.Drain();
+	TestEqual(TEXT("... and is counted out"), Mine.InFlight.load(), static_cast<int64>(0));
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpStatsRefreshTest, "VaRest.Http.Stats.RefreshIsARequest",
 	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
 

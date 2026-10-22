@@ -24,8 +24,11 @@ namespace VaRest::Http
 		void Started(FExchangeState& Ex);
 		/** IN-2, immediately before the transport starts */
 		void AttemptDispatched(const FExchangeState& Ex);
-		/** IN-3, when the transport's result is back on the game thread */
-		void AttemptEnded(const FExchangeState& Ex, const FVaRestTransportResult& Result);
+		/**
+		 * IN-3, when the transport's result is back on the game thread. Non-const: it records which attempt's response the
+		 * decode task excerpts (FExchangeState::ExcerptOnDecodeAttempt, IN-14).
+		 */
+		void AttemptEnded(FExchangeState& Ex, const FVaRestTransportResult& Result);
 		/** IN-5, before any callback */
 		void Completed(const FExchangeState& Ex, const FFinish& Finish);
 		/** IN-8. Any thread; the event is emitted on the game thread. */

@@ -13,13 +13,26 @@
 
 namespace VaRest::Http
 {
-	/** One set of counters; any thread (relaxed atomics) */
+	/**
+	 * One set of counters; any thread (relaxed atomics). The byte counts are approximate (Task 20 review M-2): they add up
+	 * what each attempt's FVaRestTransportResult reports, no wire bytes.
+	 */
 	struct FHttpCounters
 	{
 		/** Logical requests that entered a pipeline */
 		std::atomic<int64> Requests{ 0 };
 		std::atomic<int64> InFlight{ 0 };
+		/**
+		 * Request bodies, per attempt. On the default path -- no progress delegate, no counting archive -- the engine
+		 * transport reports the body's size for every attempt it handed to the engine, even one that failed before a byte
+		 * went out, a refused connection say (BytesUp = UploadTotal, VaRestHttpTransport.cpp:165, :429); with one bound, what
+		 * it saw sent; 0 for a request it refused before connecting (FailBeforeConnect, :116-125). No headers.
+		 */
 		std::atomic<int64> BytesUp{ 0 };
+		/**
+		 * Response bodies as the sink received them (VaRestHttpTransport.cpp:430): decompressed when the server compressed
+		 * them (curl's CURLOPT_ACCEPT_ENCODING "", CurlHttp.cpp:1013-1020), no headers
+		 */
 		std::atomic<int64> BytesDown{ 0 };
 		/** Re-issues by the retry stage (a session replay is not one, plan decision 2) */
 		std::atomic<int64> Retries{ 0 };

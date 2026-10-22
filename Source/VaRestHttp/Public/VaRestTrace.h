@@ -69,8 +69,13 @@ struct FVaRestTraceDetailSettings
 	int32 BinaryCap = 0;
 	/** Socket frame excerpt cap */
 	int32 FrameCap = 0;
-	/** IN-14: bytes of raw body copies that may wait for redaction at once; 0 = 16 MiB. Past it an excerpt is Skipped: Backlog. */
+	/**
+	 * IN-14: bytes of raw body copies that may wait for redaction at once; 0 = DefaultMaxPendingExcerptBytes. Past it an
+	 * excerpt is Skipped: Backlog. GetDetailSettings() holds the largest any Bodies sink asked for, each 0 counted as the default.
+	 */
 	int64 MaxPendingExcerptBytes = 0;
+
+	static constexpr int64 DefaultMaxPendingExcerptBytes = 16 * 1024 * 1024;
 };
 
 /** IN-6 */

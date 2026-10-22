@@ -274,6 +274,8 @@ namespace VaRest::Http::HttpTransportPrivate
 		// DelegateBinds does not count it.
 		Http->OnHeaderReceived().BindLambda([Completion](FHttpRequestPtr, const FString& HeaderName, const FString& HeaderValue)
 		{
+			// Spec 4.8 (Task 20 review M-3): the header list grows here, on the HTTP thread, outside any scope VaRest set
+			LLM_SCOPE_BYTAG(VaRest);
 			if (!HeaderValue.IsEmpty() && HeaderName.Equals(TEXT("Content-Encoding"), ESearchCase::IgnoreCase))
 			{
 				Completion->bEncodedBody = true;
@@ -342,6 +344,8 @@ namespace VaRest::Http::HttpTransportPrivate
 		{
 			// The HTTP thread (the game thread under the spec 9 fallback). Read what the engine holds, take the body from our
 			// sink, hand the result on: no parsing here.
+			// Spec 4.8 (Task 20 review M-3): the result's headers, URL and type are copied here, outside any VaRest scope
+			LLM_SCOPE_BYTAG(VaRest);
 			FVaRestTransportComplete Callback = Completion->Claim();
 			if (!Callback)
 			{

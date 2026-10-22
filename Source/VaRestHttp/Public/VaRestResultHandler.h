@@ -8,6 +8,7 @@
 #include "VaRestHttpTypes.h"
 #include "VaRestJson.h"
 #include "VaRestJsonConvert.h"
+#include "VaRestRedactor.h"
 #include "VaRestTrace.h"
 
 #include <type_traits>
@@ -47,6 +48,13 @@ namespace VaRest::Http
 		FVaRestJson EnvelopeBody;
 		/** The request's effective log level: the decode task's one line (a void predicate it could not check, spec review M-13) */
 		EVaRestLogLevel LogLevel = EVaRestLogLevel::None;
+		/**
+		 * IN-14: the decode task excerpts the body before parsing it -- the attempt (0 = no), the redactor (the request's,
+		 * taken on the game thread: immutable, any thread may use it) and the cap
+		 */
+		int32 ExcerptAttempt = 0;
+		TSharedPtr<const FVaRestRedactor, ESPMode::ThreadSafe> ExcerptRedactor;
+		int32 ExcerptCap = 0;
 	};
 
 	/** The typed half of a request: one result type's decode and callbacks (TResultHandler<T>) */

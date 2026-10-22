@@ -8,6 +8,7 @@
 #include "UObject/Stack.h"
 #include "VaRestClientState.h"
 #include "VaRestHttpStats.h"
+#include "VaRestTraceExcerpts.h"
 #include "VaRestTransport.h"
 #include "VaRestUrl.h"
 
@@ -161,7 +162,14 @@ void VaRest::Http::TracePoints::Started(FExchangeState& Ex)
 	{
 		Payload.Headers = Redactor.RedactHeaders(Ex.RequestHeaders);
 	}
+	// IN-14: the copy is made now, before the transport stage can move the bytes (Task 8); the redaction is launched after
+	// Started is emitted, so the excerpt's Seq always follows the event that announces it (bExcerptPending). Launched first,
+	// a pipe worker could emit the excerpt before this thread emits Started, and a sink would meet an excerpt of a request
+	// it has not seen start.
+	Excerpts::FJob Job = Excerpts::PrepareRequest(Ex);
+	Payload.bExcerptPending = Job.IsSet();
 	FVaRestTrace::Emit(EVaRestTraceKind::Started, Ex.StartedAt, FVaRestTracePayload(TInPlaceType<FVaRestTraceStarted>(), MoveTemp(Payload)));
+	Job.Launch();
 }
 
 void VaRest::Http::TracePoints::AttemptDispatched(const FExchangeState& Ex)
@@ -189,7 +197,7 @@ void VaRest::Http::TracePoints::AttemptDispatched(const FExchangeState& Ex)
 	FVaRestTrace::Emit(EVaRestTraceKind::AttemptDispatched, Ex.Config->Clock->Now(), FVaRestTracePayload(TInPlaceType<FVaRestTraceAttemptDispatched>(), MoveTemp(Payload)));
 }
 
-void VaRest::Http::TracePoints::AttemptEnded(const FExchangeState& Ex, const FVaRestTransportResult& Result)
+void VaRest::Http::TracePoints::AttemptEnded(FExchangeState& Ex, const FVaRestTransportResult& Result)
 {
 	if (FVaRestTrace::Detail() == EVaRestTraceDetail::None)
 	{
@@ -221,7 +229,21 @@ void VaRest::Http::TracePoints::AttemptEnded(const FExchangeState& Ex, const FVa
 		Payload.StatusAt = Ex.Probe->StatusAt.load();
 	}
 	Payload.TransportDoneAt = Result.TransportDoneAt;
+	// IN-14: a 2xx a decoder parses is excerpted on the decode task from the body itself, before the in-situ parse (zero
+	// copies); any other response has its prefix copied here and redacted on the pipe, launched after the event as in Started
+	Excerpts::FJob Job;
+	if (Excerpts::WillExcerptOnDecode(Ex, Result))
+	{
+		Ex.ExcerptOnDecodeAttempt = Ex.Attempt;
+		Payload.bExcerptPending = true;
+	}
+	else
+	{
+		Job = Excerpts::PrepareResponse(Ex, Result);
+		Payload.bExcerptPending = Job.IsSet();
+	}
 	FVaRestTrace::Emit(EVaRestTraceKind::AttemptEnded, Ex.Config->Clock->Now(), FVaRestTracePayload(TInPlaceType<FVaRestTraceAttemptEnded>(), MoveTemp(Payload)));
+	Job.Launch();
 }
 
 void VaRest::Http::TracePoints::Completed(const FExchangeState& Ex, const FFinish& Finish)

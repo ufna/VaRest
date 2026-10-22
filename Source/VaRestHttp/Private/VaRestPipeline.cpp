@@ -13,6 +13,7 @@
 #include "VaRestHttpStatsInternal.h"
 #include "VaRestHttpTesting.h"
 #include "VaRestRetryInternal.h"
+#include "VaRestTraceExcerpts.h"
 #include "VaRestTracePoints.h"
 #include "VaRestUrl.h"
 
@@ -204,6 +205,9 @@ namespace VaRest::Http::PipelinePrivate
 			++Testing::Counters().DecodesOffGameThread;
 		}
 #endif
+		// IN-14: first, before anything reads or rewrites the body -- Decode's ParseOwned unescapes it in place
+		// (VaRestDecode.cpp:114) and a JSON result moves it into the document; a canceled response was announced too
+		Excerpts::EmitOnDecode(Finish);
 		const bool bCanceled = Ex.IsCancelRequested();
 		if (Finish.bTimeDecode)
 		{
@@ -947,6 +951,15 @@ void VaRest::Http::FClientState::OnChainDone(const FVaRestExchangeRef& Exchange,
 		return;
 	}
 
+	if (Ex.ExcerptOnDecodeAttempt > 0 && Ex.ExcerptOnDecodeAttempt == Ex.Attempt && !Finish.Error.IsError())
+	{
+		// IN-14: this response goes to the decoder; the task excerpts it from the body itself. The redactor is taken here, on
+		// the game thread (RedactorFor checks it): the Send() snapshot's secrets, what AuthApply joined in for the attempts
+		// (Task 12 review M-7) and the current ones -- a refresh response's token keys among them (Task 18).
+		Finish.ExcerptAttempt = Ex.Attempt;
+		Finish.ExcerptRedactor = RedactorFor(Ex);
+		Finish.ExcerptCap = FVaRestTrace::GetDetailSettings().BodyCap;
+	}
 	Finish.bTimeDecode = FVaRestTrace::Detail() != EVaRestTraceDetail::None;
 	// Re-review N-6: a stage that waits (a backoff, a park) is ended here, as Complete ends it -- the decode task runs for
 	// a while before Complete, and a timer or a refresh's end in that window would start a network attempt for a request
@@ -964,9 +977,11 @@ void VaRest::Http::FClientState::OnChainDone(const FVaRestExchangeRef& Exchange,
 #endif
 	UE::Tasks::Launch(TEXT("VaRest.Decode"), [Held = TSharedPtr<FVaRestExchange, ESPMode::ThreadSafe>(Exchange), Decoder = MoveTemp(Handler), Pending = MoveTemp(Finish)]() mutable
 	{
-		// Spec 4.8: the decode's DOM and values are VaRest's until the callbacks take them. A launch from OnAttemptDone or
-		// Enter inherits this tag from their scope (TaskPrivate.h:192, :521); one from elsewhere -- a custom stage answering
-		// from its own timer -- would not.
+		// Spec 4.8: the decode's DOM and values are allocated here, so they are VaRest's. LLM charges memory where it is
+		// allocated, to the thread's active tags (LLM.cpp:5237-5239), stores that group with the pointer (:5245-5252) and
+		// credits the same group back at the free (:5285, :5292): a decoded value the game keeps after its callback stays
+		// under VaRest until it is freed, whoever holds it. A launch from OnAttemptDone or Enter inherits this tag from their
+		// scope (TaskPrivate.h:192, :521); one from elsewhere -- a custom stage answering from its own timer -- would not.
 		LLM_SCOPE_BYTAG(VaRest);
 		// Spec 1: "Parsing, decoding, cache disk IO ... run on UE::Tasks background tasks"
 		RunDecode(*Decoder, Pending, Internals(*Held));
