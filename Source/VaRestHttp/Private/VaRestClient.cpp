@@ -700,7 +700,8 @@ bool FVaRestClient::NeedsAuthRefresh() const
 	// Held for the call: CanRefresh and NeedsRefresh are game code, and the configuration may be replaced under them
 	const TSharedRef<const VaRest::Http::FClientConfig, ESPMode::ThreadSafe> Current = State->GetConfig();
 	const FVaRestSessionData& Data = State->GetSessionData();
-	return Current->Auth.IsValid() && Current->Auth->CanRefresh(Data) && Current->Auth->NeedsRefresh(Data, Current->Clock->Now());
+	// M4a final review B5: a misconfigured auth's session is never due (CanRefreshNow)
+	return Current->Auth.IsValid() && VaRest::Http::CanRefreshNow(*Current->Auth, Data) && Current->Auth->NeedsRefresh(Data, Current->Clock->Now());
 }
 
 void FVaRestClient::RefreshAuth(TUniqueFunction<void(EVaRestAuthRefreshOutcome Outcome, EVaRestErrorKind FailedKind)>&& OnDone)
@@ -738,7 +739,7 @@ void FVaRestClient::RefreshAuth(TUniqueFunction<void(EVaRestAuthRefreshOutcome O
 		Pinned->JoinRefreshInFlight(Pinned->NewWaiterId(), MoveTemp(Waiter));
 		return;
 	}
-	if (!Auth.IsValid() || !Auth->CanRefresh(Pinned->GetSessionData()))
+	if (!Auth.IsValid() || !VaRest::Http::CanRefreshNow(*Auth, Pinned->GetSessionData()))
 	{
 		// Spec review I-5: nothing to refresh with, and no refresh to wait for, is the configuration's answer -- (Failed,
 		// Config) through the same waiter, and still from a later task (decision 3)

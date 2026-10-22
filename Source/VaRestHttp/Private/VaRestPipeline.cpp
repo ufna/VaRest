@@ -6,6 +6,7 @@
 #include "HAL/FileManager.h"
 #include "Tasks/Task.h"
 #include "UObject/StrongObjectPtr.h"
+#include "VaRestAuthInternal.h"
 #include "VaRestClassify.h"
 #include "VaRestDecode.h"
 #include "VaRestExchangeState.h"
@@ -808,9 +809,10 @@ bool VaRest::Http::FClientState::Resolve(FExchangeState& Exchange, FString& OutE
 	Exchange.RetryPolicy = Exchange.RetryOverride.IsSet() ? Exchange.RetryOverride.GetValue() : Cfg.Retry;
 	Exchange.bRetryEligible = Exchange.RetryPolicy.IsEnabled() && (Exchange.bIdempotent || IsIdempotentVerb(Exchange.Verb));
 	// Plan decision 8: the body is copied only when something may send it again -- a custom stage, a retry, or a session
-	// replay (the auth gate, spec 4.2): an auth that can refresh this session may replay any verb after a 401
+	// replay (the auth gate, spec 4.2): an auth that can refresh this session may replay any verb after a 401 (the gate's
+	// own rule, CanRefreshNow: M4a final review B5)
 	const bool bAuthMayReplay = Cfg.Auth.IsValid() && Exchange.AuthMode != EVaRestAuthMode::None && !Exchange.bIsAuthRefresh
-		&& Cfg.Auth->CanRefresh(GetSessionData());
+		&& CanRefreshNow(*Cfg.Auth, GetSessionData());
 	Exchange.bMayReissue = Cfg.bMayReissue || Exchange.bRetryEligible || bAuthMayReplay;
 	// Plan decision 10: an absolute time on the request's clock; Enter stamped StartedAt before Resolve
 	const float Deadline = Exchange.RetryPolicy.Deadline;

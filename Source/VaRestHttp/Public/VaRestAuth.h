@@ -148,12 +148,14 @@ public:
 
 	/**
 	 * Ruling Q7: non-empty when this auth's configuration cannot work (a programmer error). Every request whose auth mode is
-	 * Required or IfAvailable then fails Kind=Config, detail AuthInvalid, and nothing is sent. The built-ins set it; a
-	 * Custom auth keeps the default and reports missing credentials by returning false from Apply (Kind=Auth).
+	 * Required or IfAvailable then fails Kind=Config, detail AuthInvalid, and nothing is sent; such a request neither parks
+	 * nor starts a refresh, and nothing refreshes the session for this auth, whatever CanRefresh says (M4a final review
+	 * B5). The built-ins set it; a Custom auth keeps the default and reports missing credentials by returning false from
+	 * Apply (Kind=Auth).
 	 */
 	virtual FString GetConfigError() const { return FString(); }
 
-	/** Refresh() can get new credentials for this session (a refresh token is there) */
+	/** Refresh() can get new credentials for this session (a refresh token is there). Asked only while GetConfigError() is empty. */
 	virtual bool CanRefresh(const FVaRestSessionData& Session) const { return false; }
 
 	/** Refresh before the next attempt: no access token yet, or a known expiry within the lead time (spec 4.2: 30 s) */

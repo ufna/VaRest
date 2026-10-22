@@ -553,6 +553,27 @@ namespace VaRest::Http::AuthTestPrivate
 		TOptional<FVaRestStageNext> HeldNext;
 		FVaRestOutcomeCallback HeldDone;
 	};
+
+	/**
+	 * M4a final review B5 (review B m-3): a custom auth with a configuration error whose CanRefresh and NeedsRefresh still
+	 * say yes. Its Refresh, should anything call it, answers Failed(Connection) at once, so nothing is left waiting.
+	 */
+	class FMisconfiguredRefresher final : public IVaRestAuth
+	{
+	public:
+		virtual FName GetAuthName() const override { return TEXT("MisconfiguredRefresher"); }
+		virtual FString GetConfigError() const override { return TEXT("the signing key is missing"); }
+		virtual bool Apply(FVaRestAuthTarget& Target) const override { return Target.Session.HasAccessToken(); }
+		virtual bool CanRefresh(const FVaRestSessionData&) const override { return true; }
+		virtual bool NeedsRefresh(const FVaRestSessionData&, double) const override { return true; }
+		virtual void Refresh(const FVaRestAuthRefreshContext&, TUniqueFunction<void(FVaRestAuthRefreshResult&&)>&& Done) override
+		{
+			++Refreshes;
+			Done(FVaRestAuthRefreshResult::Failed(EVaRestErrorKind::Connection, TEXT("refreshed despite the config error")));
+		}
+
+		int32 Refreshes = 0;
+	};
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthBearerTest, "VaRest.Http.Auth.Bearer",
@@ -3307,7 +3328,7 @@ bool FVaRestHttpAuthBearerGateTest::RunTest(const FString& Parameters)
 	using namespace VaRest::Http::AuthTestPrivate;
 	// Task 17 review M-7 (a): with two requests parked behind a 401-triggered refresh and both slots held, the real refresh
 	// request passes the gate (parked there, it would wait for its own refresh: the bIsAuthRefresh pass-through,
-	// VaRestAuthGate.cpp:340) and the full limiter (ruling M-8, VaRestPipeline.cpp:367-376) to the transport. The parked
+	// VaRestAuthGate.cpp:344-345) and the full limiter (ruling M-8, VaRestPipeline.cpp:367-376) to the transport. The parked
 	// requests then replay with the new token. Task 18 review M-5: a Send() on the game thread enters at once
 	// (VaRestClient.cpp:210-214) and the chain runs synchronously from there (VaRestPipeline.cpp:917), so the refresh
 	// request the first park sends would reach the transport before a second 401 could park; a PerAttempt stage below the
@@ -3743,9 +3764,9 @@ bool FVaRestHttpAuthBearerConfigNoRefreshTest::RunTest(const FString& Parameters
 {
 	using namespace VaRest::Http::Testing;
 	using namespace VaRest::Http::AuthTestPrivate;
-	// Task 18 review I-1: the gate refreshes before AuthApply checks the configuration (VaRestAuthGate.cpp:315), and
-	// RefreshAuth asks CanRefresh only (VaRestClient.cpp:733). With an unusable configuration CanRefresh is false, so a
-	// session that is due -- expired, or with a refresh token only -- sends no refresh, which would be Rejected and expire it
+	// Task 18 review I-1: with an unusable configuration a session that is due -- expired, or with a refresh token only --
+	// sends no refresh, which would be Rejected and expire it. Every refresh door asks CanRefreshNow (M4a final review B5,
+	// VaRestAuth.cpp:256-260), and BearerRefresh's own CanRefresh is false then too (VaRestBearerRefresh.cpp:164-171)
 	AddExpectedErrorPlain(TEXT("FVaRestAuth::BearerRefresh: AccessTokenPath is empty"), EAutomationExpectedErrorFlags::Contains, 3);
 	FVaRestBearerRefreshConfig Config;
 	Config.AccessTokenPath.Reset();
@@ -3788,6 +3809,58 @@ bool FVaRestHttpAuthBearerConfigNoRefreshTest::RunTest(const FString& Parameters
 		&& (*Answers)[0] == FRefreshAnswer(EVaRestAuthRefreshOutcome::Failed, EVaRestErrorKind::Config));
 	TestEqual(TEXT("RefreshAuth: nothing sent"), Rig.Fake->NumCalls(), 0);
 	TestTrue(TEXT("RefreshAuth: the session kept"), Rig.Client.GetSession().RefreshToken == TEXT("old-refresh-123456"));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthConfigErrorNoRefreshTest, "VaRest.Http.Auth.ConfigErrorRefreshesNothing",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthConfigErrorNoRefreshTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// M4a final review B5 (review B m-3): one rule, CanRefreshNow, decides whether a refresh may start. A custom auth whose
+	// GetConfigError is set while its CanRefresh and NeedsRefresh say yes sends no refresh -- not proactively from the gate,
+	// not through RefreshAuth -- and NeedsAuthRefresh says none is due. Its requests fail Kind=Config at once, also while
+	// another auth's refresh is in flight, which they do not wait out (the gate passes them straight on to AuthApply).
+	FTestRig Rig;
+	const TSharedRef<FMisconfiguredRefresher, ESPMode::ThreadSafe> Broken = MakeShared<FMisconfiguredRefresher, ESPMode::ThreadSafe>();
+	Rig.Client.WithAuth(Broken);
+	Rig.Client.SetSession(TEXT("old-access-123456"), TEXT("old-refresh-123456"));
+	auto Proactive = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/p")), Proactive).Send();
+	if (!TestTrue(TEXT("a request of the misconfigured auth completes"), Rig.Wait(Proactive) && Rig.Drain()))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	TestTrue(TEXT("... Kind Config (AuthInvalid), nothing sent"), Proactive->Error.Kind == EVaRestErrorKind::Config
+		&& Proactive->Error.Message.Contains(TEXT("AuthInvalid")) && Rig.Fake->NumCalls() == 0);
+	TestEqual(TEXT("... and no proactive refresh"), Broken->Refreshes, 0);
+	TestFalse(TEXT("NeedsAuthRefresh: no refresh is due"), Rig.Client.NeedsAuthRefresh());
+	const FRefreshAnswers Answers = MakeAnswers();
+	Rig.Client.RefreshAuth(Record(Answers));
+	TestTrue(TEXT("RefreshAuth: (Failed, Config)"), PumpUntil([Answers] { return Answers->Num() == 1; })
+		&& (*Answers)[0] == FRefreshAnswer(EVaRestAuthRefreshOutcome::Failed, EVaRestErrorKind::Config));
+	TestEqual(TEXT("... and no refresh"), Broken->Refreshes, 0);
+	Rig.Drain();
+
+	// Another auth's refresh is in flight (WithAuth does not end it, Task 16 review M-5): the misconfigured auth's request
+	// is refused before it ends
+	FTestRig Busy;
+	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Hand = HandRig(Busy);
+	const FRefreshAnswers Running = MakeAnswers();
+	Busy.Client.RefreshAuth(Record(Running));
+	const TSharedRef<FMisconfiguredRefresher, ESPMode::ThreadSafe> Second = MakeShared<FMisconfiguredRefresher, ESPMode::ThreadSafe>();
+	Busy.Client.WithAuth(Second);
+	auto Refused = MakeOutcome<FVaRestJson>();
+	Observe(Busy.Client.Get(TEXT("/q")), Refused).Send();
+	const bool bRefused = Busy.Wait(Refused, 1.0);
+	TestTrue(TEXT("with another auth's refresh in flight: refused before that refresh ends, Kind Config"), bRefused && Hand->IsPending()
+		&& Refused->Error.Kind == EVaRestErrorKind::Config);
+	TestEqual(TEXT("... and the misconfigured auth refreshed nothing"), Second->Refreshes, 0);
+	Hand->Answer(FVaRestAuthRefreshResult::Failed(EVaRestErrorKind::Connection, TEXT("no route to the refresh endpoint")));
+	TestTrue(TEXT("the other refresh ends"), PumpUntil([Running] { return Running->Num() == 1; }) && Busy.Wait(Refused) && Busy.Drain());
 	return true;
 }
 

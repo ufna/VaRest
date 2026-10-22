@@ -269,7 +269,8 @@ namespace VaRest::Http::AuthGatePrivate
 		const bool bCanResend = Ex.bMayReissue || Ex.Body.IsEmpty() || !Ex.Body.FilePath.IsEmpty();
 		// Concurrency review M-6: the credentials' own generation -- a session header changed since does not count
 		const bool bNewerCredentials = Session.CredentialGeneration != Ex.AppliedCredentialGeneration;
-		if (!bCanResend || (!bNewerCredentials && !Ex.State->IsRefreshing() && !Run->Auth->CanRefresh(Session)))
+		// M4a final review B5: CanRefreshNow, the rule every refresh door asks
+		if (!bCanResend || (!bNewerCredentials && !Ex.State->IsRefreshing() && !CanRefreshNow(*Run->Auth, Session)))
 		{
 			// Nothing would change: the refusal is the answer
 			Run->Answer(MoveTemp(Outcome));
@@ -311,8 +312,9 @@ namespace VaRest::Http::AuthGatePrivate
 		FExchangeState& Ex = Internals(*Run->Exchange);
 		FClientState& Client = *Ex.State;
 		const FVaRestSessionData& Session = Client.GetSessionData();
-		// Spec 4.2: a refresh in flight parks every request that starts meanwhile; a due expiry refreshes first ("proactively")
-		if (Client.IsRefreshing() || (Run->Auth->CanRefresh(Session) && Run->Auth->NeedsRefresh(Session, Ex.Config->Clock->Now())))
+		// Spec 4.2: a refresh in flight parks every request that starts meanwhile; a due expiry refreshes first ("proactively"),
+		// when a refresh can start at all (CanRefreshNow, M4a final review B5)
+		if (Client.IsRefreshing() || (CanRefreshNow(*Run->Auth, Session) && Run->Auth->NeedsRefresh(Session, Ex.Config->Clock->Now())))
 		{
 			Park(Run, /*bReplay*/ false);
 			return;
@@ -336,8 +338,11 @@ namespace VaRest::Http::AuthGatePrivate
 		{
 			FExchangeState& Ex = Internals(*Exchange);
 			// The refresh request itself (plan decision 23) and NoAuth() requests bypass the auth stages (spec 4.2), and a
-			// client with no auth has nothing to refresh
-			if (Ex.AuthMode == EVaRestAuthMode::None || Ex.bIsAuthRefresh || !Ex.Config->Auth.IsValid())
+			// client with no auth has nothing to refresh. M4a final review B5 (review B m-3), by shape: neither has a
+			// misconfigured auth (ruling Q7) -- AuthApply refuses its request Kind=Config, so here it neither starts a refresh
+			// nor waits out one another auth started; it goes straight on to that refusal.
+			if (Ex.AuthMode == EVaRestAuthMode::None || Ex.bIsAuthRefresh || !Ex.Config->Auth.IsValid()
+				|| !Ex.Config->Auth->GetConfigError().IsEmpty())
 			{
 				Next.Proceed(Exchange, MoveTemp(OnOutcome));
 				return;

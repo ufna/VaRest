@@ -253,6 +253,12 @@ bool VaRest::Http::ApplyCredentials(const IVaRestAuth* Auth, FVaRestAuthTarget& 
 	return !Auth || Auth->Apply(Target);
 }
 
+bool VaRest::Http::CanRefreshNow(const IVaRestAuth& Auth, const FVaRestSessionData& Session)
+{
+	// The configuration first: a custom auth's CanRefresh need not know about its own config error (review B m-3)
+	return Auth.GetConfigError().IsEmpty() && Auth.CanRefresh(Session);
+}
+
 FVaRestStageRef VaRest::Http::MakeAuthApplyStage()
 {
 	return MakeShared<AuthPrivate::FAuthApplyStage, ESPMode::ThreadSafe>();

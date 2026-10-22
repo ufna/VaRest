@@ -163,9 +163,10 @@ namespace VaRest::Http::BearerRefreshPrivate
 
 		virtual bool CanRefresh(const FVaRestSessionData& Session) const override
 		{
-			// Task 18 review I-1 (ruling Q7): never with a configuration that cannot work. AuthApply refuses every request then,
-			// but the gate's proactive refresh runs before it (VaRestAuthGate.cpp:315), as does RefreshAuth (VaRestClient.cpp:733):
-			// a refresh sent with it would be Rejected and expire the session.
+			// Task 18 review I-1 (ruling Q7): never with a configuration that cannot work -- a refresh sent with it would be
+			// Rejected and expire the session. Defence in depth since M4a final review B5: every refresh door asks
+			// CanRefreshNow (VaRestAuth.cpp:256-260), which refuses a config error before it asks this, and the gate sends a
+			// misconfigured auth's request straight on to AuthApply's refusal (VaRestAuthGate.cpp:344-345).
 			return ConfigError.IsEmpty() && Session.HasRefreshToken();
 		}
 
