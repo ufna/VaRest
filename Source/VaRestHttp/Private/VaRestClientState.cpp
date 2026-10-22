@@ -36,11 +36,11 @@ namespace VaRest::Http::ClientStatePrivate
 	}
 
 	/**
-	 * Review I-1: Now's redactor with what Known knew and Now's does not -- its known values, and its keys (KnownKeys:
+	 * Review I-1: Now's redactor with what Known knew and Now's does not -- its known values, and its keys (InKnownKeys:
 	 * FVaRestRedactRules does not list its own), which only grow today (WithRedactedKeys appends) but are joined all the
 	 * same. Now's own redactor when Known adds nothing. OutKeys, when given, gets the union's keys.
 	 */
-	TSharedRef<const FVaRestRedactor, ESPMode::ThreadSafe> MakeUnionRedactor(const FVaRestRedactor& Known, TConstArrayView<FString> KnownKeys,
+	TSharedRef<const FVaRestRedactor, ESPMode::ThreadSafe> MakeUnionRedactor(const FVaRestRedactor& Known, TConstArrayView<FString> InKnownKeys,
 		const FClientConfig& Now, TArray<FString>* OutKeys = nullptr)
 	{
 		const TSharedRef<const FVaRestRedactor, ESPMode::ThreadSafe> Current = Now.Redactor.ToSharedRef();
@@ -59,7 +59,7 @@ namespace VaRest::Http::ClientStatePrivate
 				bWider = true;
 			}
 		}
-		for (const FString& Key : KnownKeys)
+		for (const FString& Key : InKnownKeys)
 		{
 			if (!ContainsExactly(Now.RedactedKeys, Key))
 			{
@@ -357,6 +357,10 @@ void VaRest::Http::FClientState::SetAuth(const TSharedPtr<IVaRestAuth, ESPMode::
 		// Task 14 carry: a custom auth names its slots freely; stored under the auth's prefix, "VaRest.Session.AccessToken"
 		// from one is not the session's token slot, so it cannot rotate the live token out or be forgotten by ClearSession
 		const FName Slot = AuthSecretSlot(Value.Key);
+		// Review M-3: two values under one slot are Set in turn, so the first is retired (forgotten after 10 minutes) while the
+		// auth may still send it. Reported, not refused: the last value stays current, as IVaRestAuth::GetSecretValues says.
+		ensureMsgf(!NewSlots.Contains(Slot), TEXT("VaRest: the auth %s returns the secret slot %s twice; only the last value stays current"),
+			*InAuth->GetAuthName().ToString(), *Slot.ToString());
 		Values.Emplace(Slot, Value.Value);
 		NewSlots.AddUnique(Slot);
 	}

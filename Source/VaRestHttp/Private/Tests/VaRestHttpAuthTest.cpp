@@ -4,6 +4,7 @@
 
 #include "HAL/IConsoleManager.h"
 #include "Misc/AutomationTest.h"
+#include "Misc/ScopeExit.h"
 #include "UObject/Package.h"
 #include "VaRestAuth.h"
 #include "VaRestClient.h"
@@ -91,6 +92,40 @@ namespace VaRest::Http::AuthTestPrivate
 			OutValues.Emplace(TEXT("VaRest.Game.Slot"), TEXT("custom-game-value-1234"));
 		}
 	};
+
+	/** Review M-1: a custom auth whose configuration error quotes one of its own declared secrets */
+	class FLeakyConfigAuth final : public IVaRestAuth
+	{
+	public:
+		virtual FName GetAuthName() const override { return TEXT("LeakyConfig"); }
+		virtual bool Apply(FVaRestAuthTarget&) const override { return true; }
+		virtual FString GetConfigError() const override { return TEXT("the signing key signing-secret-1234 is malformed"); }
+		virtual void GetSecretValues(TArray<TPair<FName, FString>>& OutValues) const override
+		{
+			OutValues.Emplace(TEXT("Signing"), TEXT("signing-secret-1234"));
+		}
+	};
+
+	/** Review M-3: a custom auth that returns two values under one slot name */
+	class FDuplicateSlotAuth final : public IVaRestAuth
+	{
+	public:
+		virtual FName GetAuthName() const override { return TEXT("DuplicateSlot"); }
+		virtual bool Apply(FVaRestAuthTarget&) const override { return true; }
+		virtual void GetSecretValues(TArray<TPair<FName, FString>>& OutValues) const override
+		{
+			OutValues.Emplace(TEXT("Signing"), TEXT("first-value-123456"));
+			OutValues.Emplace(TEXT("Signing"), TEXT("second-value-123456"));
+		}
+	};
+
+	/** Spec 4.1's policy with InMaxRetries retries and no jitter: each delay exact */
+	FVaRestRetryPolicy ExactRetry(int32 InMaxRetries)
+	{
+		FVaRestRetryPolicy Policy = FVaRestRetryPolicy::Exponential(InMaxRetries);
+		Policy.Backoff.Jitter = EVaRestJitter::None;
+		return Policy;
+	}
 
 	/** Every string a request's trace events and snapshot entries hold: URLs, header values, messages (Task 12 review M-7) */
 	TArray<FString> TraceStrings(const VaRest::Http::Testing::FTraceRecorder& Recorder, uint64 RequestId)
@@ -308,14 +343,19 @@ bool FVaRestHttpAuthInvalidBuiltinTest::RunTest(const FString& Parameters)
 	AddExpectedErrorPlain(TEXT("VaRest: FVaRestAuth::ApiKey: the header name"), EAutomationExpectedErrorFlags::Contains, 1);
 	AddExpectedErrorPlain(TEXT("VaRest: FVaRestAuth::ApiKey: the query key is empty"), EAutomationExpectedErrorFlags::Contains, 1);
 	AddExpectedErrorPlain(TEXT("VaRest: FVaRestAuth::Basic: the user holds ':'"), EAutomationExpectedErrorFlags::Contains, 1);
+	// Review M-2 ruling: an empty key is configuration too -- one missing from the ini must not send the player to a login
+	AddExpectedErrorPlain(TEXT("VaRest: FVaRestAuth::ApiKey: the key is empty"), EAutomationExpectedErrorFlags::Contains, 1);
 	FTestRig BadHeader;
 	BadHeader.Client.WithAuth(FVaRestAuth::ApiKey(EVaRestApiKeyPlacement::Header, TEXT("Bad Name"), TEXT("key-value-123456")));
 	FTestRig EmptyQuery;
 	EmptyQuery.Client.WithAuth(FVaRestAuth::ApiKey(EVaRestApiKeyPlacement::Query, TEXT(""), TEXT("key-value-123456")));
 	FTestRig BadUser;
 	BadUser.Client.WithAuth(FVaRestAuth::Basic(TEXT("a:b"), TEXT("password-123456")));
-	FTestRig* const Rigs[] = { &BadHeader, &EmptyQuery, &BadUser };
-	const TCHAR* const Names[] = { TEXT("ApiKey header \"Bad Name\""), TEXT("ApiKey query \"\""), TEXT("Basic user \"a:b\"") };
+	FTestRig EmptyKey;
+	EmptyKey.Client.WithAuth(FVaRestAuth::ApiKey(EVaRestApiKeyPlacement::Header, TEXT("X-Api-Key"), TEXT("")));
+	FTestRig* const Rigs[] = { &BadHeader, &EmptyQuery, &BadUser, &EmptyKey };
+	const TCHAR* const Names[] = { TEXT("ApiKey header \"Bad Name\""), TEXT("ApiKey query \"\""), TEXT("Basic user \"a:b\""), TEXT("ApiKey key \"\"") };
+	const TCHAR* const Reasons[] = { TEXT("header name is not an RFC 9110 token"), TEXT("query key is empty"), TEXT("holds ':'"), TEXT("the API key is empty") };
 	for (int32 Index = 0; Index < UE_ARRAY_COUNT(Rigs); ++Index)
 	{
 		FTestRig& Rig = *Rigs[Index];
@@ -333,6 +373,7 @@ bool FVaRestHttpAuthInvalidBuiltinTest::RunTest(const FString& Parameters)
 		{
 			TestTrue(FString::Printf(TEXT("%s: Kind Config, not retryable, AuthInvalid"), Names[Index]), Outcome->Error.Kind == EVaRestErrorKind::Config
 				&& !Outcome->Error.bRetryable && Outcome->Error.Message.Contains(TEXT("AuthInvalid")));
+			TestTrue(FString::Printf(TEXT("%s: the message says why"), Names[Index]), Outcome->Error.Message.Contains(Reasons[Index]));
 		}
 		TestEqual(FString::Printf(TEXT("%s: nothing sent"), Names[Index]), Rig.Fake->NumCalls(), 0);
 	}
@@ -593,6 +634,154 @@ bool FVaRestHttpAuthCustomSlotsTest::RunTest(const FString& Parameters)
 	Rig.Client.ClearSession();
 	TestEqualSensitive(TEXT("ClearSession forgets the session's token"), Scrub(Rig.Client, Token), Token);
 	TestEqualSensitive(TEXT("... not the auth's value named like the token's slot"), Scrub(Rig.Client, AuthValue), FString(TEXT("***")));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthConfigErrorScrubbedTest, "VaRest.Http.Auth.ConfigErrorScrubbed",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthConfigErrorScrubbedTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// Review M-1: a custom auth's GetConfigError is third-party text that the core puts into FVaRestError::Message (and a
+	// socket's reason, through ApplyAuth): a declared secret in it is scrubbed there, as everywhere else
+	const FString Secret = TEXT("signing-secret-1234");
+	FTestRig Rig;
+	Rig.Client.WithAuth(MakeShared<FLeakyConfigAuth, ESPMode::ThreadSafe>());
+	auto Refused = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/x")), Refused).Send();
+	if (!TestTrue(TEXT("completes"), Rig.Wait(Refused)))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Drain();
+	TestTrue(TEXT("Kind Config, AuthInvalid, nothing sent"), Refused->Error.Kind == EVaRestErrorKind::Config
+		&& Refused->Error.Message.Contains(TEXT("AuthInvalid")) && Rig.Fake->NumCalls() == 0);
+	TestFalse(TEXT("Error.Message holds no declared secret"), Refused->Error.Message.Contains(Secret));
+	TestTrue(TEXT("... it shows the auth's text with ***"), Refused->Error.Message.Contains(TEXT("the signing key *** is malformed")));
+	FVaRestHeaders Headers;
+	TArray<TPair<FString, FString>> Query;
+	FString Reason;
+	TestFalse(TEXT("ApplyAuth: false for the misconfigured auth"), Rig.Client.ApplyAuth(Headers, Query, &Reason));
+	TestTrue(TEXT("... its reason scrubbed the same way"), !Reason.Contains(Secret) && Reason.Contains(TEXT("the signing key *** is malformed")));
+	// Review M-5: a reused string never reads stale
+	FTestRig Plain;
+	FString Stale = TEXT("a reason from an earlier call");
+	FVaRestHeaders Nothing;
+	TestTrue(TEXT("a healthy client: true, and OutConfigError emptied"), Plain.Client.ApplyAuth(Nothing, Query, &Stale) && Stale.IsEmpty());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthDuplicateSlotTest, "VaRest.Http.Auth.DuplicateSlotLastWins",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthDuplicateSlotTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// Review M-3: two values under one slot name -- SetAuth sets them in turn, so the last stays current and the first is
+	// retired (known for 10 minutes, then forgotten), as IVaRestAuth::GetSecretValues says. SetAuth reports it with an
+	// ensureMsgf, which fires once per session (AssertionMacros.cpp:970-975); the thread's ensure handler takes it here, as in
+	// VaRest.Http.Limiter.DoubleReleaseEnsuresEachTime, so it leaves no callstack (FDebug::EnsureFailed asks it first,
+	// AssertionMacros.cpp:499).
+#if DO_ENSURE
+	const TFunction<bool(const FEnsureHandlerArgs&)> Outer = GetEnsureHandler();
+	SetEnsureHandler([Outer](const FEnsureHandlerArgs& Args)
+	{
+		if (Args.Message && FCString::Strstr(Args.Message, TEXT("returns the secret slot")))
+		{
+			return true;
+		}
+		return Outer ? Outer(Args) : false;
+	});
+	ON_SCOPE_EXIT { SetEnsureHandler(Outer); };
+#endif
+	FTestRig Rig;
+	Rig.Client.WithAuth(MakeShared<FDuplicateSlotAuth, ESPMode::ThreadSafe>());
+	TestTrue(TEXT("both values known at once"), Scrub(Rig.Client, TEXT("first-value-123456")) == TEXT("***") && Scrub(Rig.Client, TEXT("second-value-123456")) == TEXT("***"));
+	Rig.Clock->Advance(FVaRestSecretSet::PreviousLifetime + 1.0);
+	TestEqualSensitive(TEXT("the last value stays current"), Scrub(Rig.Client, TEXT("second-value-123456")), FString(TEXT("***")));
+	TestEqualSensitive(TEXT("the first was retired: forgotten after the window"), Scrub(Rig.Client, TEXT("first-value-123456")), FString(TEXT("first-value-123456")));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthRetryTest, "VaRest.Http.Auth.RetryAppliesAndRedactsPerAttempt",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthRetryTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// Review M-7, the two halves no single attempt reaches:
+	// - The attempt URL is per attempt: the boundary resets it, so a retry carries the query key once, not once per attempt.
+	// - The applied join accumulates. The first token is set while the request queues, so attempt 1 applies it. A logout
+	//   and a second token come between the attempts, so attempt 2 applies under a redactor that never knew the first. A
+	//   logout before the final outcome leaves the client knowing neither. The request's query carries the first token
+	//   (its key no rule names) and the final response echoes the second.
+	TGuardConsoleVariable<int32> Level(TEXT("VaRest.LogLevel"), -1);
+	const FString Key = TEXT("api-key-value-1234");
+	const FString First = TEXT("tok-first-123456");
+	const FString Second = TEXT("tok-second-123456");
+	FTestRig Rig;
+	Rig.Client.WithMaxConcurrent(1).WithAuth(FVaRestAuth::ApiKey(EVaRestApiKeyPlacement::Query, TEXT("app_ref"), Key)).WithRetry(ExactRetry(1))
+		.WithLogLevel(EVaRestLogLevel::Headers);
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest&) { return FVaRestFakeResponse::Manual(); });
+	const VaRest::Http::FLimiter& Slots = VaRest::Http::FClientAccess::State(Rig.Client)->GetLimiter();
+	FLogCapture Capture;
+	AddExpectedMessagePlain(TEXT("/r?q=***&app_ref=*** -> 503"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
+	AddExpectedMessagePlain(TEXT("/r?q=***&app_ref=*** -> 404"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
+	auto Holder = MakeOutcome<FVaRestJson>();
+	auto Retried = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/hold")).NoAuth(), Holder).Send();
+	Observe(Rig.Client.Get(TEXT("/r")).Query(TEXT("q"), First), Retried).Send();
+	if (!TestTrue(TEXT("the holder has the slot, the request waits"), PumpUntil([&Rig, &Slots] { return Rig.Fake->NumCalls() == 1 && Slots.NumQueued() == 1; })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Client.SetBearerToken(First);
+	Rig.Fake->Complete(0, Json(200));
+	if (!TestTrue(TEXT("attempt 1 sent"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 2; })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Fake->Complete(1, Json(503));
+	if (!TestTrue(TEXT("a 503: the backoff is armed"), PumpUntil([&Rig] { return Rig.Clock->NumPendingTimers() == 1; })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Client.ClearSession();
+	Rig.Client.SetBearerToken(Second);
+	Rig.Clock->Advance(1.0);
+	if (!TestTrue(TEXT("attempt 2 sent"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 3; })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Client.ClearSession();
+	TestTrue(TEXT("the client knows neither token now"), Scrub(Rig.Client, First) == First && Scrub(Rig.Client, Second) == Second);
+	FVaRestFakeResponse Echo = Json(404);
+	Echo.Headers.Set(TEXT("X-Echo"), Second);
+	Rig.Fake->Complete(2, MoveTemp(Echo));
+	if (!TestTrue(TEXT("both complete"), PumpUntil([Holder, Retried] { return Holder->IsDone() && Retried->IsDone(); })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Drain();
+	FlushRedactionPipe();
+	TestEqualSensitive(TEXT("the retry's call carries the key once, after the request's own pairs"), Rig.Fake->GetCall(2).Request.Url,
+		FString(TEXT("https://api.test/r?q=tok-first-123456&app_ref=api-key-value-1234")));
+	TestTrue(TEXT("two attempts, the last a 404"), Retried->Error.Kind == EVaRestErrorKind::Http && Retried->Error.HttpStatus == 404 && Retried->Error.Attempts == 2);
+	const TArray<FString> Lines = Capture.GetLines();
+	TestFalse(TEXT("no log line holds either token"),
+		Lines.ContainsByPredicate([&First, &Second](const FString& Line) { return Line.Contains(First) || Line.Contains(Second); }));
+	TestTrue(TEXT("... the echoed second token shows as ***"), Capture.Contains(TEXT("<   X-Echo: ***")));
+	TestFalse(TEXT("Error.Url holds neither"), Retried->Error.Url.Contains(First) || Retried->Error.Url.Contains(Second));
 	return true;
 }
 

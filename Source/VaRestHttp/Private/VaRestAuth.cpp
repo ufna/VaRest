@@ -44,7 +44,8 @@ namespace VaRest::Http::AuthPrivate
 
 		virtual bool Apply(FVaRestAuthTarget& Target) const override
 		{
-			if (!ConfigError.IsEmpty() || Key.IsEmpty())
+			// An empty key is a configuration error since the review's M-2 ruling: the factory set ConfigError for it
+			if (!ConfigError.IsEmpty())
 			{
 				return false;
 			}
@@ -145,17 +146,21 @@ namespace VaRest::Http::AuthPrivate
 				{
 					// Ruling Q7: a programmer error, for Required and IfAvailable alike -- sending without the key would hide it.
 					// Escaped: a custom auth names itself, and the message is text a game may log as it is (as Resolve's).
+					const TSharedRef<const FVaRestRedactor, ESPMode::ThreadSafe> Redactor = RedactorFor(Ex);
 					const FString AuthName = EscapeForLog(Auth->GetAuthName().ToString());
 					if (Ex.LogLevel != EVaRestLogLevel::None && UE_LOG_ACTIVE(LogVaRestHttp, Warning))
 					{
 						// Task 3: the request's own redactor, as every line about it
 						UE_LOG(LogVaRestHttp, Warning, TEXT("#%llu VaRest: %s %s -> misconfigured auth (%s); not sent"), Ex.RequestId, *EscapeForLog(Ex.Verb),
-							*EscapeForLog(RedactorFor(Ex)->RedactUrl(Ex.Url)), *AuthName);
+							*EscapeForLog(Redactor->RedactUrl(Ex.Url)), *AuthName);
 					}
 					FVaRestAttemptOutcome Refused;
 					Refused.Failure = EVaRestTransportFailure::Other;
 					Refused.FailureDetail = TEXT("AuthInvalid");
-					Refused.FailureMessage = FString::Printf(TEXT("the client's auth (%s) is misconfigured: %s"), *AuthName, *EscapeControlsForLog(Invalid));
+					// Review M-1: a custom auth's text is third-party, and FVaRestError::Message must hold no credential (the
+					// trace scrubs its own copy; the game's is this one): scrubbed, then escaped
+					Refused.FailureMessage = FString::Printf(TEXT("the client's auth (%s) is misconfigured: %s"), *AuthName,
+						*EscapeControlsForLog(Redactor->ScrubText(Invalid)));
 					OnOutcome(MoveTemp(Refused));
 					return;
 				}
@@ -228,6 +233,13 @@ FVaRestAuth::FRef FVaRestAuth::ApiKey(EVaRestApiKeyPlacement InPlacement, FStrin
 	{
 		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: FVaRestAuth::ApiKey: the query key is empty; requests fail with Kind=Config"));
 		ConfigError = TEXT("the API key's query key is empty");
+	}
+	else if (InKey.IsEmpty())
+	{
+		// Review M-2 ruling: the key is configuration, not a session -- a key missing from the ini is a typo to fix, and
+		// Kind=Auth would send the player to the login screen for it
+		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: FVaRestAuth::ApiKey: the key is empty; requests fail with Kind=Config"));
+		ConfigError = TEXT("the API key is empty");
 	}
 	else if (!VaRest::Http::IsValidHeaderValue(InKey))
 	{

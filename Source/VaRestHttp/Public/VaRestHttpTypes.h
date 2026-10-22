@@ -245,6 +245,7 @@ struct FVaRestResponse
 	int32 Status = 0;
 	/** One entry per response header line (see FVaRestHeaders; Apple folds repeats) */
 	FVaRestHeaders Headers;
+	/** The URL the transport ended at, as it reports it: not redacted, so it holds a query-placed API key (FVaRestAuth::ApiKey) */
 	FString EffectiveUrl;
 	FString ContentType;
 	/** Seconds from entering the pipeline to the result */

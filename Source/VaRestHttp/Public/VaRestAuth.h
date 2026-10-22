@@ -63,6 +63,10 @@ public:
 	 * core's. Read once, by WithAuth. Each slot is stored as "VaRest.Auth.<Slot>" (a name that already starts with
 	 * "VaRest.Auth." is kept), so an auth never replaces the session's or the game's values; a later WithAuth or
 	 * WithoutAuth retires the slots it does not set again, still scrubbed for 10 minutes (Inspector D21).
+	 * Two limits. Retired and rotated values share one first-in-first-out list of FVaRestSecretSet::MaxPrevious (4) for the
+	 * whole client -- the game's, the session's and the auth's together -- so a retire beyond it forgets the oldest of them
+	 * at once rather than after 10 minutes. And slot names must be distinct: of two values under one name only the last
+	 * stays current, the other is retired (an ensure reports it).
 	 */
 	virtual void GetSecretValues(TArray<TPair<FName, FString>>& OutValues) const {}
 };
@@ -76,8 +80,13 @@ public:
 	/** Authorization: Bearer <the session's access token> (SetBearerToken, SetSession); WithBearer is the short form */
 	static FRef Bearer();
 	/**
-	 * The key in a header or in the query. A header name that is not an RFC 9110 token, an empty query key, or a key with a
-	 * control character logs an Error here, and every request of the client fails Kind=Config (ruling Q7)
+	 * The key in a header or in the query. A header name that is not an RFC 9110 token, an empty query key, an empty key (one
+	 * missing from the configuration is not a logout), or a key with a control character logs an Error here, and every
+	 * request of the client fails Kind=Config (ruling Q7).
+	 * Prefer Header placement. VaRest redacts a query key in its own logs and traces, but two places it does not control see
+	 * the URL as sent: FVaRestResponse::EffectiveUrl, which the game gets as the transport reports it, and the engine's own
+	 * timeout lines, which print the whole URL (HttpRequestCommon.cpp:580 at Warning for the total timeout, :489 at Log for
+	 * the activity timeout).
 	 */
 	static FRef ApiKey(EVaRestApiKeyPlacement InPlacement, FStringView InName, FStringView InKey);
 	/** Authorization: Basic base64(user:password), UTF-8. A user holding ':' (RFC 7617 2) logs an Error and fails each request Kind=Config (ruling Q7). */

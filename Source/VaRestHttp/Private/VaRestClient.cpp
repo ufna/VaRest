@@ -650,6 +650,11 @@ FVaRestClient& FVaRestClient::WithBearer(FStringView InToken)
 bool FVaRestClient::ApplyAuth(FVaRestHeaders& OutHeaders, TArray<TPair<FString, FString>>& OutQuery, FString* OutConfigError) const
 {
 	check(IsInGameThread());
+	if (OutConfigError)
+	{
+		// Review M-5: a reused string never reads stale on the paths that leave it alone
+		OutConfigError->Reset();
+	}
 	if (!State.IsValid())
 	{
 		return true;
@@ -665,7 +670,8 @@ bool FVaRestClient::ApplyAuth(FVaRestHeaders& OutHeaders, TArray<TPair<FString, 
 		{
 			if (OutConfigError)
 			{
-				*OutConfigError = Invalid;
+				// Review M-1: a custom auth's text may hold a secret; the socket shows it to the game (W5's Kind=Config)
+				*OutConfigError = Current->Redactor->ScrubText(Invalid);
 			}
 			return false;
 		}

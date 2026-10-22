@@ -178,7 +178,8 @@ public:
 	 * has three levels (final review I2): this request's Header() wins over the body's own type (Body(), BodyFile()), which
 	 * wins over a client default, so a multipart body always names its boundary unless this request overrides it. A name
 	 * that is not an RFC 9110 token, or a value holding a control character other than HTAB (CR, LF, NUL among them), fails
-	 * the request with Kind=Config and nothing is sent (decision 11: header injection).
+	 * the request with Kind=Config and nothing is sent (decision 11: header injection). A session header of the same name
+	 * (FVaRestClient::SetSessionHeader) replaces it on each attempt, and the client's auth replaces both; NoAuth() keeps it.
 	 */
 	TVaRestRequest Header(FStringView Name, FStringView Value) &&
 	{
@@ -603,7 +604,8 @@ public:
 	FVaRestClient& WithBaseUrl(FStringView BaseUrl);
 	/**
 	 * A default header for every request; a request's Header() of the same name wins. A default Content-Type never relabels
-	 * a body: the body's own type wins over it, and a request's Header("Content-Type", ...) over both (final review I2).
+	 * a body: the body's own type wins over it, and a request's Header("Content-Type", ...) over both (final review I2). A
+	 * session header of the same name (SetSessionHeader) replaces both on each attempt, and the auth replaces all three.
 	 */
 	FVaRestClient& WithHeader(FStringView Name, FStringView Value);
 	FVaRestClient& WithoutHeader(FStringView Name);
@@ -691,7 +693,11 @@ public:
 	 * Error log.
 	 */
 	void SetSession(FStringView AccessToken, FStringView RefreshToken, double ExpiresInSeconds = 0.0, bool bSameIdentity = false);
-	/** dawg's X-Session-ID pattern: sent with every request whose auth mode is not None; its value is a secret, its name a key */
+	/**
+	 * dawg's X-Session-ID pattern: sent with every request whose auth mode is not None; its value is a secret, its name a
+	 * key. It replaces a request's own header of the same name (Header(), WithHeader()) on each attempt, and the client's
+	 * auth replaces both (an auth's Authorization over a session header named Authorization).
+	 */
 	void SetSessionHeader(FStringView Name, FStringView Value);
 	void RemoveSessionHeader(FStringView Name);
 	/** Logout: tokens, session headers and their secret values; OnSessionChanged(Cleared) */
@@ -736,8 +742,11 @@ public:
 	/**
 	 * WebSocket spec 19 item 2: the session headers, then this client's auth, into OutHeaders and OutQuery (a socket
 	 * handshake). False when the client has an auth and it has no credentials (a socket's Kind=Auth), or when the auth is
-	 * misconfigured (ruling Q7): then OutConfigError, when given, says why, and the socket fails Kind=Config. True with no
-	 * auth at all.
+	 * misconfigured (ruling Q7): then OutConfigError, when given, says why (scrubbed of this client's known secrets), and the
+	 * socket fails Kind=Config. True with no auth at all. OutConfigError is emptied first.
+	 * Every value this writes is a secret and every name a redaction key (credentials and session-header values): the core
+	 * records nothing for the caller, so the caller (the socket, W5) keeps them redacted in its own lines and traces.
+	 * A false for missing credentials may leave the session headers in OutHeaders already.
 	 */
 	bool ApplyAuth(FVaRestHeaders& OutHeaders, TArray<TPair<FString, FString>>& OutQuery, FString* OutConfigError = nullptr) const;
 
