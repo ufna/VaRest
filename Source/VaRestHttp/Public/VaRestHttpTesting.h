@@ -7,6 +7,7 @@
 #include "Templates/Function.h"
 #include "VaRestClient.h"
 #include "VaRestFakeTransport.h"
+#include "VaRestTrace.h"
 
 #include <atomic>
 
@@ -186,6 +187,54 @@ namespace VaRest::Http::Testing
 		 * request sent from another thread whose Enter task is not queued yet. False after TimeoutSeconds.
 		 */
 		bool Drain(double TimeoutSeconds = 5.0) const;
+	};
+
+	/** The request an event belongs to (0 for client-level kinds, a socket frame's excerpt, and kinds it does not know) */
+	VARESTHTTP_API uint64 RequestIdOf(const FVaRestTraceEvent& Event);
+
+	/**
+	 * A trace sink for tests, VaRest's and other modules': records every event and snapshot. OnEvent may run on any thread
+	 * (excerpts come from tasks); the getters lock.
+	 */
+	class VARESTHTTP_API FTraceRecorder final : public IVaRestTraceSink
+	{
+	public:
+		explicit FTraceRecorder(EVaRestTraceDetail InFlags = EVaRestTraceDetail::Metadata);
+
+		virtual FVaRestTraceDetailSettings GetDetail() const override { return Detail; }
+		virtual void OnAttached(const FVaRestTraceSnapshot& Snapshot) override;
+		virtual void OnEvent(const FVaRestTraceEvent& Event) override;
+
+		/** One request's events, excerpts included, in arrival order */
+		TArray<FVaRestTraceEvent> For(uint64 RequestId) const;
+		/** "Started,Dispatched,Ended,Note,Completed" for one request, excerpts left out: they arrive from other threads, in no fixed place */
+		FString KindsOf(uint64 RequestId) const;
+		TArray<FVaRestTraceExcerptEvent> ExcerptsOf(uint64 RequestId) const;
+		TArray<FVaRestTraceMarker> MarkersOf(uint64 ClientId) const;
+		TArray<FVaRestTraceSnapshot> GetSnapshots() const;
+		/** Inspector 9: every kind but Excerpt arrived on the game thread */
+		bool OnlyExcerptsOffGameThread() const { return !bNonExcerptOffGameThread.load(); }
+
+		/** Set before AddSink, or call FVaRestTrace::RefreshDetail after a change */
+		FVaRestTraceDetailSettings Detail;
+
+	private:
+		mutable FCriticalSection Mutex;
+		TArray<FVaRestTraceEvent> Events;
+		TArray<FVaRestTraceSnapshot> Snapshots;
+		std::atomic<bool> bNonExcerptOffGameThread{ false };
+	};
+
+	/** An FVaRestScopedSinkIsolation with one FTraceRecorder added inside it, removed when this goes. Game thread. */
+	struct VARESTHTTP_API FScopedTraceRecorder
+	{
+		explicit FScopedTraceRecorder(EVaRestTraceDetail Flags = EVaRestTraceDetail::Metadata, int32 BodyCap = 0);
+		~FScopedTraceRecorder();
+		FScopedTraceRecorder(const FScopedTraceRecorder&) = delete;
+		FScopedTraceRecorder& operator=(const FScopedTraceRecorder&) = delete;
+
+		FVaRestScopedSinkIsolation Isolation;
+		TSharedRef<FTraceRecorder, ESPMode::ThreadSafe> Recorder;
 	};
 }
 #endif // WITH_DEV_AUTOMATION_TESTS

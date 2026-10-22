@@ -35,7 +35,7 @@ namespace VaRest::Http::TracePrivate
 	std::atomic<uint64> NextRequest{ 0 };
 	std::atomic<uint64> NextClient{ 0 };
 
-	/** Kinds without a payload type yet (Note, Excerpt, Marker, the socket kinds) are not checked */
+	/** Only the socket kinds (W5) have no payload type yet and are not checked */
 	bool PayloadMatchesKind(EVaRestTraceKind Kind, const FVaRestTracePayload& Payload)
 	{
 		switch (Kind)
@@ -43,9 +43,12 @@ namespace VaRest::Http::TracePrivate
 		case EVaRestTraceKind::Started: return Payload.IsType<FVaRestTraceStarted>();
 		case EVaRestTraceKind::AttemptDispatched: return Payload.IsType<FVaRestTraceAttemptDispatched>();
 		case EVaRestTraceKind::AttemptEnded: return Payload.IsType<FVaRestTraceAttemptEnded>();
+		case EVaRestTraceKind::Note: return Payload.IsType<FVaRestTraceNote>();
 		case EVaRestTraceKind::Completed: return Payload.IsType<FVaRestTraceCompleted>();
+		case EVaRestTraceKind::Excerpt: return Payload.IsType<FVaRestTraceExcerptEvent>();
 		case EVaRestTraceKind::Scope: return Payload.IsType<FVaRestTraceScope>();
 		case EVaRestTraceKind::Client: return Payload.IsType<FVaRestTraceClient>();
+		case EVaRestTraceKind::Marker: return Payload.IsType<FVaRestTraceMarker>();
 		default: return true;
 		}
 	}
@@ -63,6 +66,7 @@ namespace VaRest::Http::TracePrivate
 				Merged.BodyCap = FMath::Max(Merged.BodyCap, One.BodyCap);
 				Merged.BinaryCap = FMath::Max(Merged.BinaryCap, One.BinaryCap);
 				Merged.FrameCap = FMath::Max(Merged.FrameCap, One.FrameCap);
+				Merged.MaxPendingExcerptBytes = FMath::Max(Merged.MaxPendingExcerptBytes, One.MaxPendingExcerptBytes);
 			}
 		}
 		return Merged;
@@ -184,7 +188,7 @@ void FVaRestTrace::Emit(EVaRestTraceKind Kind, double Time, FVaRestTracePayload&
 	// Spec 9: nothing is emitted from the HTTP thread; every kind but Excerpt (a background task) is game-thread only.
 	checkSlow(IsInGameThread() || Kind == EVaRestTraceKind::Excerpt);
 	// A mismatch would otherwise surface as a TVariant::Get failure inside some sink. Kinds without a payload type yet
-	// (Note, Excerpt, Marker, the socket kinds) are not checked.
+	// (the socket kinds) are not checked.
 	checkSlow(VaRest::Http::TracePrivate::PayloadMatchesKind(Kind, Payload));
 	const TSharedPtr<const FSinkList, ESPMode::ThreadSafe> List = GetSinks();
 	if (!List.IsValid() || List->Num() == 0)

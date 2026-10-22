@@ -12,6 +12,7 @@ namespace VaRest::Http
 	struct FClientConfig;
 	struct FExchangeState;
 	struct FFinish;
+	class FClientState;
 
 	/**
 	 * Inspector 9.1's trace points. Game thread. Each starts with the one relaxed load of the mask and builds nothing
@@ -29,6 +30,10 @@ namespace VaRest::Http
 		void Completed(const FExchangeState& Ex, const FFinish& Finish);
 		/** IN-8. Any thread; the event is emitted on the game thread. */
 		void Client(uint64 ClientId, const FClientConfig& Config, bool bCreated);
+		/** IN-4, game thread: stamps the exchange's request id, attempt and clock */
+		void Note(const FExchangeState& Ex, FVaRestTraceNote&& Payload);
+		/** IN-9, game thread: Text is value-scrubbed with the client's current redactor */
+		void Marker(const FClientState& Client, EVaRestTraceMarkerKind Kind, uint64 CauseRequestId, FStringView Text);
 		/** IN-12: every live client and in-flight request; the module registers it with FVaRestTrace::OnBuildSnapshot */
 		void ContributeSnapshot(FVaRestTraceSnapshot& Snapshot);
 	}

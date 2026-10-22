@@ -291,3 +291,32 @@ void VaRest::Http::TracePoints::ContributeSnapshot(FVaRestTraceSnapshot& Snapsho
 		});
 	});
 }
+
+void VaRest::Http::TracePoints::Note(const FExchangeState& Ex, FVaRestTraceNote&& Payload)
+{
+	if (FVaRestTrace::Detail() == EVaRestTraceDetail::None)
+	{
+		return;
+	}
+	FVaRestTrace::FScopedCycles Cycles;
+	Payload.RequestId = Ex.RequestId;
+	Payload.Attempt = Ex.Attempt;
+	FVaRestTrace::Emit(EVaRestTraceKind::Note, Ex.Config->Clock->Now(), FVaRestTracePayload(TInPlaceType<FVaRestTraceNote>(), MoveTemp(Payload)));
+}
+
+void VaRest::Http::TracePoints::Marker(const FClientState& Client, EVaRestTraceMarkerKind Kind, uint64 CauseRequestId, FStringView Text)
+{
+	if (FVaRestTrace::Detail() == EVaRestTraceDetail::None)
+	{
+		return;
+	}
+	FVaRestTrace::FScopedCycles Cycles;
+	const TSharedRef<const FClientConfig, ESPMode::ThreadSafe> Current = Client.GetConfig();
+	FVaRestTraceMarker Payload;
+	Payload.Kind = Kind;
+	Payload.ScopeId = FVaRestTrace::ProcessScopeId;
+	Payload.ClientId = Client.GetClientId();
+	Payload.CauseRequestId = CauseRequestId;
+	Payload.Text = Client.GetRedactor()->ScrubText(Text);
+	FVaRestTrace::Emit(EVaRestTraceKind::Marker, Current->Clock->Now(), FVaRestTracePayload(TInPlaceType<FVaRestTraceMarker>(), MoveTemp(Payload)));
+}

@@ -151,4 +151,113 @@ bool VaRest::Http::Testing::FTestRig::Drain(double TimeoutSeconds) const
 		}
 	}
 }
+
+uint64 VaRest::Http::Testing::RequestIdOf(const FVaRestTraceEvent& Event)
+{
+	switch (Event.Kind)
+	{
+	case EVaRestTraceKind::Started: return Event.Payload.Get<FVaRestTraceStarted>().RequestId;
+	case EVaRestTraceKind::AttemptDispatched: return Event.Payload.Get<FVaRestTraceAttemptDispatched>().RequestId;
+	case EVaRestTraceKind::AttemptEnded: return Event.Payload.Get<FVaRestTraceAttemptEnded>().RequestId;
+	case EVaRestTraceKind::Note: return Event.Payload.Get<FVaRestTraceNote>().RequestId;
+	case EVaRestTraceKind::Completed: return Event.Payload.Get<FVaRestTraceCompleted>().RequestId;
+	case EVaRestTraceKind::Excerpt:
+	{
+		const FVaRestTraceExcerptEvent& Excerpt = Event.Payload.Get<FVaRestTraceExcerptEvent>();
+		return Excerpt.Owner == EVaRestTraceExcerptOwner::Frame ? 0 : Excerpt.RequestId;
+	}
+	default: return 0;
+	}
+}
+
+VaRest::Http::Testing::FTraceRecorder::FTraceRecorder(EVaRestTraceDetail InFlags)
+{
+	Detail.Flags = InFlags;
+}
+
+void VaRest::Http::Testing::FTraceRecorder::OnAttached(const FVaRestTraceSnapshot& Snapshot)
+{
+	FScopeLock Lock(&Mutex);
+	Snapshots.Add(Snapshot);
+}
+
+void VaRest::Http::Testing::FTraceRecorder::OnEvent(const FVaRestTraceEvent& Event)
+{
+	if (Event.Kind != EVaRestTraceKind::Excerpt && !IsInGameThread())
+	{
+		bNonExcerptOffGameThread = true;
+	}
+	FScopeLock Lock(&Mutex);
+	Events.Add(Event);
+}
+
+TArray<FVaRestTraceEvent> VaRest::Http::Testing::FTraceRecorder::For(uint64 RequestId) const
+{
+	FScopeLock Lock(&Mutex);
+	return Events.FilterByPredicate([RequestId](const FVaRestTraceEvent& Event) { return RequestIdOf(Event) == RequestId; });
+}
+
+FString VaRest::Http::Testing::FTraceRecorder::KindsOf(uint64 RequestId) const
+{
+	TArray<FString> Names;
+	for (const FVaRestTraceEvent& Event : For(RequestId))
+	{
+		switch (Event.Kind)
+		{
+		case EVaRestTraceKind::Started: Names.Add(TEXT("Started")); break;
+		case EVaRestTraceKind::AttemptDispatched: Names.Add(TEXT("Dispatched")); break;
+		case EVaRestTraceKind::AttemptEnded: Names.Add(TEXT("Ended")); break;
+		case EVaRestTraceKind::Note: Names.Add(TEXT("Note")); break;
+		case EVaRestTraceKind::Completed: Names.Add(TEXT("Completed")); break;
+		default: break;
+		}
+	}
+	return FString::Join(Names, TEXT(","));
+}
+
+TArray<FVaRestTraceExcerptEvent> VaRest::Http::Testing::FTraceRecorder::ExcerptsOf(uint64 RequestId) const
+{
+	TArray<FVaRestTraceExcerptEvent> Out;
+	for (const FVaRestTraceEvent& Event : For(RequestId))
+	{
+		if (Event.Kind == EVaRestTraceKind::Excerpt)
+		{
+			Out.Add(Event.Payload.Get<FVaRestTraceExcerptEvent>());
+		}
+	}
+	return Out;
+}
+
+TArray<FVaRestTraceMarker> VaRest::Http::Testing::FTraceRecorder::MarkersOf(uint64 ClientId) const
+{
+	FScopeLock Lock(&Mutex);
+	TArray<FVaRestTraceMarker> Out;
+	for (const FVaRestTraceEvent& Event : Events)
+	{
+		if (Event.Kind == EVaRestTraceKind::Marker && Event.Payload.Get<FVaRestTraceMarker>().ClientId == ClientId)
+		{
+			Out.Add(Event.Payload.Get<FVaRestTraceMarker>());
+		}
+	}
+	return Out;
+}
+
+TArray<FVaRestTraceSnapshot> VaRest::Http::Testing::FTraceRecorder::GetSnapshots() const
+{
+	FScopeLock Lock(&Mutex);
+	return Snapshots;
+}
+
+VaRest::Http::Testing::FScopedTraceRecorder::FScopedTraceRecorder(EVaRestTraceDetail Flags, int32 BodyCap)
+	: Recorder(MakeShared<FTraceRecorder, ESPMode::ThreadSafe>(Flags))
+{
+	Recorder->Detail.BodyCap = BodyCap;
+	FVaRestTrace::AddSink(Recorder);
+}
+
+VaRest::Http::Testing::FScopedTraceRecorder::~FScopedTraceRecorder()
+{
+	// Before Isolation's destructor restores the outer list (members die in reverse order)
+	FVaRestTrace::RemoveSink(Recorder);
+}
 #endif // WITH_DEV_AUTOMATION_TESTS

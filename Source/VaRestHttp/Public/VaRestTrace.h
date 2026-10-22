@@ -14,6 +14,15 @@
 #include <atomic>
 
 /**
+ * Inspector 1.2 / IN-14: body excerpts in the trace. Default on in every build but Shipping; a target may set it in
+ * GlobalDefinitions (a Shipping test build that wants capture sets 1). With 0 no body byte is copied for a sink, and
+ * Started/AttemptEnded never say an excerpt is pending.
+ */
+#ifndef VAREST_WITH_TRACE_EXCERPTS
+#define VAREST_WITH_TRACE_EXCERPTS !UE_BUILD_SHIPPING
+#endif
+
+/**
  * Inspector spec 9: thirteen kinds in all, in its order. M3 emits Started, AttemptDispatched, AttemptEnded, Completed and
  * Client, and provides scope 0 through the snapshot; Note, Excerpt and Marker arrive with M4, the socket kinds with W5.
  */
@@ -60,6 +69,8 @@ struct FVaRestTraceDetailSettings
 	int32 BinaryCap = 0;
 	/** Socket frame excerpt cap */
 	int32 FrameCap = 0;
+	/** IN-14: bytes of raw body copies that may wait for redaction at once; 0 = 16 MiB. Past it an excerpt is Skipped: Backlog. */
+	int64 MaxPendingExcerptBytes = 0;
 };
 
 /** IN-6 */
@@ -308,7 +319,85 @@ struct FVaRestTraceClient
 	FString DisplayName;
 };
 
-using FVaRestTracePayload = TVariant<FVaRestTraceStarted, FVaRestTraceAttemptDispatched, FVaRestTraceAttemptEnded, FVaRestTraceCompleted, FVaRestTraceScope, FVaRestTraceClient>;
+/** IN-4 */
+enum class EVaRestTraceNoteKind : uint8
+{
+	CacheRevalidated,
+	CacheStored,
+	CacheServedStale,
+	RetryScheduled,
+	Queued,
+	QueueExpired
+};
+
+/** IN-4: something a stage did to a request, on the game thread. The fields a kind does not use keep their defaults. */
+struct FVaRestTraceNote
+{
+	uint64 RequestId = 0;
+	int32 Attempt = 0;
+	EVaRestTraceNoteKind Kind = EVaRestTraceNoteKind::RetryScheduled;
+	/** RetryScheduled: why ("Status503", "Connection", "Timeout"); Queued (M4b): why it was queued */
+	FName Reason;
+	/** RetryScheduled: seconds until the next attempt starts */
+	double Delay = 0.0;
+	/** RetryScheduled: the seconds a Retry-After header asked for; -1 without one */
+	double RetryAfter = -1.0;
+	/** CacheStored (M4b) */
+	int64 Bytes = 0;
+	/** Queued, QueueExpired (M4b) */
+	FString QueueId;
+};
+
+/** IN-6 Owner */
+enum class EVaRestTraceExcerptOwner : uint8
+{
+	Request,
+	Response,
+	/** A socket frame (W5): SocketId and FrameId are set */
+	Frame
+};
+
+/** IN-6: a redacted excerpt, from a decode task or the redaction pipe (never the HTTP thread) */
+struct FVaRestTraceExcerptEvent
+{
+	EVaRestTraceExcerptOwner Owner = EVaRestTraceExcerptOwner::Request;
+	uint64 RequestId = 0;
+	/** The attempt whose response it is; 0 for a request body, taken before the first attempt */
+	int32 Attempt = 0;
+	/** W5 */
+	uint64 SocketId = 0;
+	/** W5 */
+	uint64 FrameId = 0;
+	FVaRestTraceExcerpt Excerpt;
+};
+
+/** IN-9 */
+enum class EVaRestTraceMarkerKind : uint8
+{
+	Online,
+	Offline,
+	SessionRefreshed,
+	SessionReplaced,
+	SessionCleared,
+	SessionExpired,
+	/** M5 */
+	EnvironmentChanged
+};
+
+/** IN-9: a client-level event, on the game thread */
+struct FVaRestTraceMarker
+{
+	EVaRestTraceMarkerKind Kind = EVaRestTraceMarkerKind::SessionRefreshed;
+	uint64 ScopeId = 0;
+	uint64 ClientId = 0;
+	/** The request that caused it (the 401 that started a refresh); 0 when none */
+	uint64 CauseRequestId = 0;
+	/** Value-scrubbed */
+	FString Text;
+};
+
+using FVaRestTracePayload = TVariant<FVaRestTraceStarted, FVaRestTraceAttemptDispatched, FVaRestTraceAttemptEnded, FVaRestTraceNote, FVaRestTraceCompleted,
+	FVaRestTraceExcerptEvent, FVaRestTraceScope, FVaRestTraceClient, FVaRestTraceMarker>;
 
 struct FVaRestTraceEvent
 {
@@ -350,6 +439,10 @@ public:
 	 * (Inspector 9). Return quickly. Emit iterates the list it took when it started, so a sink can still be called once
 	 * after RemoveSink returns (IN-12): from a background emitter, and on the game thread for the event in progress when
 	 * another sink's OnEvent removed it. A sink added meanwhile gets the next event, not the one in progress.
+	 * Switch on Event.Kind and ignore kinds you do not know: W5 adds the socket kinds and a later version may add more
+	 * (WebSocket spec 19 item 4). An Excerpt event arrives on a worker, maybe after RemoveSink returned, and the worker's
+	 * list may hold the sink's last reference, so the sink can be destroyed there. Never wait for the game thread in
+	 * OnEvent: the game thread may itself be waiting for the redaction pipe that emits it (StopRedactionPipe at module shutdown).
 	 */
 	virtual void OnEvent(const FVaRestTraceEvent& Event) = 0;
 };
