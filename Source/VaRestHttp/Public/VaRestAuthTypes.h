@@ -34,7 +34,11 @@ enum class EVaRestRefreshStyle : uint8
 {
 	/** application/json: { <RefreshBodyField>: "<refresh token>" } */
 	Json,
-	/** application/x-www-form-urlencoded, RFC 6749 6: grant_type=refresh_token&refresh_token=...[&client_id=...] */
+	/**
+	 * application/x-www-form-urlencoded, RFC 6749 6: grant_type=refresh_token&refresh_token=...[&client_id=...]. A token
+	 * path that finds nothing in the response is read again at RFC 6749 5.1's name (access_token, refresh_token, expires_in;
+	 * M4a final review B2), so the camelCase path defaults work against an OAuth 2 token endpoint.
+	 */
 	OAuth2Form
 };
 
@@ -64,6 +68,7 @@ struct VARESTHTTP_API FVaRestBearerRefreshConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VaRest|Http")
 	FString RefreshPath = TEXT("/auth/refresh");
 
+	/** How the refresh token is sent. OAuth2Form also reads RFC 6749 5.1's names where a path below finds nothing (B2). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VaRest|Http")
 	EVaRestRefreshStyle Style = EVaRestRefreshStyle::Json;
 

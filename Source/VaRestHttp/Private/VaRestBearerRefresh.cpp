@@ -90,6 +90,32 @@ namespace VaRest::Http::BearerRefreshPrivate
 		return 0.0;
 	}
 
+	/** RFC 6749 5.1's names in a token response, OAuth2Form's fallback (M4a final review B2) */
+	const TCHAR* const RfcAccessToken = TEXT("access_token");
+	const TCHAR* const RfcRefreshToken = TEXT("refresh_token");
+	const TCHAR* const RfcExpiresIn = TEXT("expires_in");
+
+	/**
+	 * The value a token path names; nothing for an empty path. M4a final review B2 (review B I-2): for OAuth2Form only, a
+	 * configured path that finds nothing (missing, or null) is read again at RFC 6749 5.1's name for that field. The path
+	 * defaults are camelCase (accessToken, VaRestAuthTypes.h), while an OAuth 2 token endpoint answers access_token: without
+	 * this every refresh of a code-first OAuth2Form client would be Rejected and log the player out at the first one. A path
+	 * that finds a value wins, so a camelCase server still works.
+	 */
+	FVaRestJson ReadPath(const FVaRestBearerRefreshConfig& Config, const FVaRestJson& Body, const FString& Path, const TCHAR* RfcName)
+	{
+		if (Path.IsEmpty())
+		{
+			return FVaRestJson();
+		}
+		const FVaRestJson Found = Body.Path(Path);
+		if ((Found.IsValid() && !Found.IsNull()) || Config.Style != EVaRestRefreshStyle::OAuth2Form)
+		{
+			return Found;
+		}
+		return Body[RfcName];
+	}
+
 	/**
 	 * Game thread: the response was decoded as JSON on a task (spec 1, VaRestPipeline.cpp:1101); only the path reads run
 	 * here. RefreshHost: the host the refresh request was sent to (GetUrlHost), empty when unknown.
@@ -99,13 +125,15 @@ namespace VaRest::Http::BearerRefreshPrivate
 		if (Result.IsSuccess())
 		{
 			const FVaRestJson Body = Result.Value.IsSet() ? Result.Value.GetValue() : FVaRestJson();
-			const FString Access = Body.Path(Config.AccessTokenPath).AsString();
+			const FString Access = ReadPath(Config, Body, Config.AccessTokenPath, RfcAccessToken).AsString();
 			if (Access.IsEmpty())
 			{
-				return FVaRestAuthRefreshResult::Rejected(FString::Printf(TEXT("the refresh response has no access token at \"%s\""), *Config.AccessTokenPath));
+				const bool bRfcToo = Config.Style == EVaRestRefreshStyle::OAuth2Form && !Config.AccessTokenPath.Equals(RfcAccessToken, ESearchCase::CaseSensitive);
+				return FVaRestAuthRefreshResult::Rejected(FString::Printf(TEXT("the refresh response has no access token at \"%s\"%s"), *Config.AccessTokenPath,
+					bRfcToo ? TEXT(" nor at \"access_token\"") : TEXT("")));
 			}
-			const FString Refresh = Config.RefreshTokenPath.IsEmpty() ? FString() : Body.Path(Config.RefreshTokenPath).AsString();
-			const double ExpiresIn = Config.ExpiresInPath.IsEmpty() ? 0.0 : ReadSeconds(Body.Path(Config.ExpiresInPath));
+			const FString Refresh = ReadPath(Config, Body, Config.RefreshTokenPath, RfcRefreshToken).AsString();
+			const double ExpiresIn = ReadSeconds(ReadPath(Config, Body, Config.ExpiresInPath, RfcExpiresIn));
 			return FVaRestAuthRefreshResult::Refreshed(Access, Refresh, FMath::IsFinite(ExpiresIn) ? FMath::Max(0.0, ExpiresIn) : 0.0);
 		}
 		const FVaRestError& Error = Result.Error;
@@ -234,6 +262,14 @@ namespace VaRest::Http::BearerRefreshPrivate
 			if (!Config.RefreshBodyField.IsEmpty())
 			{
 				OutKeys.Add(Config.RefreshBodyField);
+			}
+			if (Config.Style == EVaRestRefreshStyle::OAuth2Form)
+			{
+				// M4a final review B2: the fallback's token names are this auth's keys too (ReadPath reads the tokens there).
+				// Layer 1's "token" rule masks them already (VaRestJsonRedact.cpp:17-19); as the auth's own keys the response
+				// it reads is masked whatever the built-in list becomes. expires_in is no secret, as ExpiresInPath is not.
+				OutKeys.Add(RfcAccessToken);
+				OutKeys.Add(RfcRefreshToken);
 			}
 		}
 

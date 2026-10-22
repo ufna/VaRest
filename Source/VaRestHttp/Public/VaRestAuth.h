@@ -227,8 +227,10 @@ public:
 	/**
 	 * Spec 4.2 BearerRefresh: the access token as Bearer; on a refresh status (401) or a known expiry within the lead time,
 	 * one refresh shared by every request (Task 16): a POST of the refresh token to Config.RefreshPath, with Accept:
-	 * application/json, the new tokens read from the raw response at Config's paths. The endpoint's own "no" -- a 4xx other
-	 * than 408 and 429, or a success that is not JSON or has no access token -- expires the session; anything else keeps it
+	 * application/json, the new tokens read from the raw response at Config's paths (OAuth2Form: at RFC 6749 5.1's
+	 * access_token, refresh_token and expires_in where a path finds nothing, M4a final review B2; the two token names are
+	 * redaction keys too). The endpoint's own "no" -- a 4xx other than 408 and 429, or a success that is not JSON or has no
+	 * access token -- expires the session; anything else keeps it
 	 * (no answer, a timeout, 408, 429, 5xx, a refusal by the configuration such as HTTP disabled), and the parked requests
 	 * fail with Connection, Timeout or Config (plan decision 3, ruling I-7) -- but after a proactive refresh, a request
 	 * parked before its attempt whose token has not expired yet is sent with it (M4a final review B6). A success that is

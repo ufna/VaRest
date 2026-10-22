@@ -3427,6 +3427,86 @@ bool FVaRestHttpAuthOAuthFormTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthOAuthRfcNamesTest, "VaRest.Http.Auth.OAuth2FormReadsRfcNames",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthOAuthRfcNamesTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// M4a final review B2 (review B I-2): the path defaults are camelCase, but an OAuth 2 token endpoint answers RFC 6749
+	// 5.1's access_token, refresh_token and expires_in. For OAuth2Form, a path that finds nothing is read again at the RFC
+	// name, so a code-first OAuth2Form client with the defaults refreshes instead of logging the player out at its first
+	// refresh; a camelCase server still works, a configured path that finds a value wins, the Json style reads only its
+	// paths, and the two token names are the auth's redaction keys.
+	struct FCase
+	{
+		const TCHAR* Name;
+		EVaRestRefreshStyle Style;
+		const char* Response;
+		bool bRefreshed;
+		const TCHAR* RefreshToken;
+		double ExpiresAt;
+	};
+	const FCase Cases[] = {
+		{ TEXT("OAuth2Form, default paths, an RFC response"), EVaRestRefreshStyle::OAuth2Form,
+			R"({"access_token":"new-access-123456","token_type":"Bearer","refresh_token":"new-refresh-123456","expires_in":60})", true, TEXT("new-refresh-123456"), 60.0 },
+		{ TEXT("OAuth2Form, default paths, a camelCase response"), EVaRestRefreshStyle::OAuth2Form,
+			R"({"accessToken":"new-access-123456","refreshToken":"new-refresh-123456","expiresIn":60})", true, TEXT("new-refresh-123456"), 60.0 },
+		{ TEXT("OAuth2Form: a path that finds a value wins over the RFC name"), EVaRestRefreshStyle::OAuth2Form,
+			R"({"accessToken":"new-access-123456","access_token":"rfc-access-123456","expires_in":30})", true, TEXT("old-refresh-123456"), 30.0 },
+		{ TEXT("Json style, an RFC response: no fallback, Rejected"), EVaRestRefreshStyle::Json,
+			R"({"access_token":"new-access-123456","refresh_token":"new-refresh-123456"})", false, TEXT(""), 0.0 },
+	};
+	for (const FCase& Case : Cases)
+	{
+		FVaRestBearerRefreshConfig Config;
+		Config.Style = Case.Style;
+		FTestRig Rig;
+		Rig.Client.WithAuth(FVaRestAuth::BearerRefresh(Config));
+		Rig.Client.SetSession(TEXT("old-access-123456"), TEXT("old-refresh-123456"));
+		TSharedRef<int32, ESPMode::ThreadSafe> Expired = MakeShared<int32, ESPMode::ThreadSafe>(0);
+		Rig.Client.OnSessionExpired().AddLambda([Expired] { ++*Expired; });
+		RefreshServer(Rig, Json(200, Case.Response));
+		auto Outcome = MakeOutcome<FVaRestJson>();
+		Observe(Rig.Client.Get(TEXT("/p")), Outcome).Send();
+		if (!TestTrue(FString::Printf(TEXT("%s: completes"), Case.Name), Rig.Wait(Outcome) && Rig.Drain()))
+		{
+			Abandon(Rig);
+			return false;
+		}
+		const FVaRestSessionData Data = Rig.Client.GetSession();
+		if (Case.bRefreshed)
+		{
+			TestTrue(FString::Printf(TEXT("%s: Refreshed, the replay succeeds"), Case.Name), Outcome->SuccessCalls.load() == 1 && *Expired == 0);
+			TestTrue(FString::Printf(TEXT("%s: the session holds the response's tokens and expiry"), Case.Name),
+				Data.AccessToken.Equals(TEXT("new-access-123456"), ESearchCase::CaseSensitive) && Data.RefreshToken.Equals(Case.RefreshToken, ESearchCase::CaseSensitive)
+				&& FMath::IsNearlyEqual(Data.ExpiresAt, Case.ExpiresAt));
+		}
+		else
+		{
+			TestTrue(FString::Printf(TEXT("%s: Kind Auth, the session expired"), Case.Name), Outcome->Error.Kind == EVaRestErrorKind::Auth && *Expired == 1
+				&& !Data.HasAccessToken() && !Data.HasRefreshToken());
+		}
+	}
+
+	FVaRestBearerRefreshConfig Form;
+	Form.Style = EVaRestRefreshStyle::OAuth2Form;
+	TArray<FString> FormKeys;
+	FVaRestAuth::BearerRefresh(Form)->GetRedactedKeys(FormKeys);
+	TestTrue(TEXT("OAuth2Form: access_token and refresh_token are the auth's redaction keys"), FormKeys.Contains(TEXT("access_token")) && FormKeys.Contains(TEXT("refresh_token")));
+	TestFalse(TEXT("... expires_in is no secret"), FormKeys.Contains(TEXT("expires_in")));
+	TArray<FString> JsonKeys;
+	FVaRestAuth::BearerRefresh(FVaRestBearerRefreshConfig())->GetRedactedKeys(JsonKeys);
+	TestFalse(TEXT("the Json style reads no RFC name, so adds no key for one"), JsonKeys.Contains(TEXT("access_token")));
+	FTestRig Keyed;
+	Keyed.Client.WithAuth(FVaRestAuth::BearerRefresh(Form));
+	const TSharedRef<const FVaRestRedactor, ESPMode::ThreadSafe> Redactor = Keyed.Client.GetRedactor();
+	TestTrue(TEXT("... and the client redacts both in a JSON body"), Redactor->GetRules().ShouldRedact(FStringView(TEXT("access_token")), EVaRestRedactKeyKind::Json)
+		&& Redactor->GetRules().ShouldRedact(FStringView(TEXT("refresh_token")), EVaRestRedactKeyKind::Json));
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthRefreshOutcomesTest, "VaRest.Http.Auth.RefreshOutcomes",
 	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
 
