@@ -75,7 +75,14 @@ bool FVaRestHttpBackoffJitterTest::RunTest(const FString& Parameters)
 		Max = FMath::Max(Max, Delay);
 	}
 	TestTrue(TEXT("ratio jitter: within d * (1 +/- r)"), Min >= 1.0 && Max <= 3.0 && Max > 2.0 && Min < 2.0);
-	TestTrue(TEXT("ratio jitter never passes the cap"), Ratio.GetDelay(20, Random) <= 30.0);
+	// Carry 1: one draw can land under the cap by luck; many make removing the clamp fail deterministically (d = 30 here,
+	// so the unclamped upper half of d * (1 +/- 0.5) would pass 30 in about half the draws)
+	bool bUnderCap = true;
+	for (int32 Index = 0; Index < 1000; ++Index)
+	{
+		bUnderCap &= Ratio.GetDelay(20, Random) <= 30.0;
+	}
+	TestTrue(TEXT("ratio jitter never passes the cap (1,000 draws)"), bUnderCap);
 
 	FVaRestBackoff Exact;
 	Exact.Jitter = EVaRestJitter::None;
@@ -115,6 +122,25 @@ bool FVaRestHttpBackoffRetryAfterTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("nor nothing"), Seconds(TEXT("")).IsSet());
 	TestTrue(TEXT("an HTTP-date 30 s ahead"), Seconds(TEXT("Wed, 21 Oct 2026 12:00:30 GMT")) == TOptional<double>(30.0));
 	TestTrue(TEXT("an HTTP-date in the past is 0"), Seconds(TEXT("Wed, 21 Oct 2026 11:00:00 GMT")) == TOptional<double>(0.0));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpBackoffHttpDateQuirksTest, "VaRest.Http.Backoff.HttpDateQuirks",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpBackoffHttpDateQuirksTest::RunTest(const FString& Parameters)
+{
+	using VaRest::Http::ParseRetryAfter;
+	const FDateTime Now(2026, 10, 21, 12, 0, 0);
+	// Misc/DateTime.cpp:611-612: an RFC 850 date's two-digit year gets "Year += 1900" ("Horrible assumption"), so 26 is
+	// 1926: parsed, in the past, so "retry now"
+	const TOptional<double> Rfc850 = ParseRetryAfter(TEXT("Wednesday, 21-Oct-26 12:00:30 GMT"), Now);
+	TestTrue(TEXT("RFC 850, two-digit year: parsed into the 1900s, so 0"), Rfc850 == TOptional<double>(0.0));
+	// Misc/DateTime.cpp:663 and :676 drop ParseTime's result, so a time part that does not parse (here two fields, not
+	// three; ParseTime returns false before it writes anything, :430-440) leaves Hour/Minute/Second at 0: midnight. A
+	// strict parser would reject this; the engine's reads 22 Oct 00:00, 12 hours ahead
+	const TOptional<double> NoSeconds = ParseRetryAfter(TEXT("Thu, 22 Oct 2026 12:00 GMT"), Now);
+	TestTrue(TEXT("a malformed time part is ignored: midnight, 12 h ahead"), NoSeconds == TOptional<double>(43200.0));
 	return true;
 }
 

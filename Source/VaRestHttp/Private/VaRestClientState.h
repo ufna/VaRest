@@ -63,7 +63,12 @@ namespace VaRest::Http
 		 * Game thread: the stream retry jitter draws from (plan decision 26). Seeded from the client id and the CPU cycle
 		 * counter, so clients made in the same frame differ; WithRandomSeed makes a test exact.
 		 */
-		FRandomStream& GetRandom() { return Random; }
+		FRandomStream& GetRandom()
+		{
+			// GetFraction mutates the stream's seed, and nothing else guards it: WithRandomSeed asserts the same
+			check(IsInGameThread());
+			return Random;
+		}
 
 		/** Game thread: a sent exchange enters the pipeline */
 		void Enter(const FVaRestExchangeRef& Exchange);

@@ -66,6 +66,10 @@ namespace VaRest::Http
 	 * (FDateTime::ParseHttpDate, DateTime.h:695-713), as seconds from NowUtc; a date in the past is 0, and seconds stop
 	 * growing at 1e9. Unset for anything else: a negative number, a fraction, text. Not capped: the retry policy is
 	 * (spec 4.1: 60 s).
+	 *
+	 * ParseHttpDate is lenient (Misc/DateTime.cpp:612, :663, :676) and its leniency means "retry now": an RFC 850 date's
+	 * two-digit year lands in the 1900s, a past date, so 0; a date whose time part does not parse is read as midnight, so 0
+	 * once that midnight has passed. The wait is then the policy's bounded one, never longer than the header asked.
 	 */
 	VARESTHTTP_API TOptional<double> ParseRetryAfter(FStringView Value, const FDateTime& NowUtc);
 }
