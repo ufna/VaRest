@@ -45,7 +45,14 @@ enum class EVaRestAuthRefreshOutcome : uint8
 	 * Anything else -- no connection, a timeout, 408, 429, 5xx, a canceled or locally refused refresh request (HTTP
 	 * disabled, a domain not allowed): the session stays; parked requests fail with FailedKind
 	 */
-	Failed
+	Failed,
+	/**
+	 * FVaRestClient::RefreshAuth only (M4a final review B-I-1): this session cannot be refreshed and no refresh was in
+	 * flight -- the client has no auth, or its auth cannot refresh it (CanRefresh false: no refresh token; Bearer, ApiKey
+	 * and Basic never refresh). Nothing was sent and the session stays. Not Failed(Config), which ruling Q7 keeps for a
+	 * misconfigured auth: a refused token is not a typo. An IVaRestAuth::Refresh that reports it is taken as Failed.
+	 */
+	Unavailable
 };
 
 /** What IVaRestAuth::Refresh reports */

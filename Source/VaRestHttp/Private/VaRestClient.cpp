@@ -711,48 +711,56 @@ void FVaRestClient::RefreshAuth(TUniqueFunction<void(EVaRestAuthRefreshOutcome O
 	// this client
 	const TSharedPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> Pinned = State;
 	const TSharedPtr<IVaRestAuth, ESPMode::ThreadSafe> Auth = Pinned.IsValid() ? Pinned->GetConfig()->Auth : nullptr;
-	VaRest::Http::FRefreshWaiter Waiter = [Done = MoveTemp(OnDone)](const VaRest::Http::FRefreshEnded& End) mutable
+	const auto Wait = [](TUniqueFunction<void(EVaRestAuthRefreshOutcome, EVaRestErrorKind)>&& Into) -> VaRest::Http::FRefreshWaiter
 	{
-		if (!Done)
+		return [Done = MoveTemp(Into)](const VaRest::Http::FRefreshEnded& End) mutable
 		{
-			return;
-		}
-		switch (End.End)
-		{
-		case VaRest::Http::ERefreshEnd::Ready:
-			Done(EVaRestAuthRefreshOutcome::Refreshed, EVaRestErrorKind::None);
-			break;
-		case VaRest::Http::ERefreshEnd::Failed:
-			Done(EVaRestAuthRefreshOutcome::Failed, End.Kind);
-			break;
-		default:
-			// Rejected, or the game cleared or expired the session meanwhile: it is gone either way
-			Done(EVaRestAuthRefreshOutcome::Rejected, EVaRestErrorKind::None);
-			break;
-		}
+			if (!Done)
+			{
+				return;
+			}
+			switch (End.End)
+			{
+			case VaRest::Http::ERefreshEnd::Ready:
+				Done(EVaRestAuthRefreshOutcome::Refreshed, EVaRestErrorKind::None);
+				break;
+			case VaRest::Http::ERefreshEnd::Failed:
+				Done(EVaRestAuthRefreshOutcome::Failed, End.Kind);
+				break;
+			default:
+				// Rejected, or the game cleared or expired the session meanwhile: it is gone either way
+				Done(EVaRestAuthRefreshOutcome::Rejected, EVaRestErrorKind::None);
+				break;
+			}
+		};
 	};
 	if (Pinned.IsValid() && Pinned->IsRefreshing())
 	{
 		// Task 17 review M-8 (ruled): a refresh in flight is waited for whatever the current auth is -- one replaced since by
 		// an auth that cannot refresh, or none (WithAuth does not end a refresh, Task 16 review M-5): the refresh exists and
 		// its end applies to the session, as the parked requests' does (the auth gate parks every request while one runs)
-		Pinned->JoinRefreshInFlight(Pinned->NewWaiterId(), MoveTemp(Waiter));
+		Pinned->JoinRefreshInFlight(Pinned->NewWaiterId(), Wait(MoveTemp(OnDone)));
 		return;
 	}
 	if (!Auth.IsValid() || !VaRest::Http::CanRefreshNow(*Auth, Pinned->GetSessionData()))
 	{
-		// Spec review I-5: nothing to refresh with, and no refresh to wait for, is the configuration's answer -- (Failed,
-		// Config) through the same waiter, and still from a later task (decision 3)
-		UE::Tasks::Launch(TEXT("VaRest.RefreshAuth"), [Refuse = MoveTemp(Waiter)]() mutable
+		// No refresh to wait for and none can start, said from a later task (decision 3). M4a final review B-I-1 (ruling):
+		// two answers that ruling Q7 keeps apart. A misconfigured auth is the configuration's (Failed, Config). No auth, or one
+		// that cannot refresh this session (no refresh token, a Bearer), is Unavailable: the 401 that asked is the answer, as
+		// the auth gate answers an HTTP 401 it cannot refresh (VaRestAuthGate.cpp:273-278) -- not Config, which would show a
+		// refused token as a typo (WebSocket spec 3.3).
+		const bool bMisconfigured = Auth.IsValid() && !Auth->GetConfigError().IsEmpty();
+		UE::Tasks::Launch(TEXT("VaRest.RefreshAuth"), [Answer = MoveTemp(OnDone), bMisconfigured]() mutable
 		{
-			VaRest::Http::FRefreshEnded Refused;
-			Refused.End = VaRest::Http::ERefreshEnd::Failed;
-			Refused.Kind = EVaRestErrorKind::Config;
-			Refuse(Refused);
+			if (Answer)
+			{
+				Answer(bMisconfigured ? EVaRestAuthRefreshOutcome::Failed : EVaRestAuthRefreshOutcome::Unavailable,
+					bMisconfigured ? EVaRestErrorKind::Config : EVaRestErrorKind::None);
+			}
 		}, UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
 		return;
 	}
-	Pinned->JoinRefresh(Pinned->NewWaiterId(), Auth.ToSharedRef(), 0, MoveTemp(Waiter));
+	Pinned->JoinRefresh(Pinned->NewWaiterId(), Auth.ToSharedRef(), 0, Wait(MoveTemp(OnDone)));
 }
 
 FVaRestClient& FVaRestClient::Use(FVaRestStageRef Stage, EVaRestStageSlot Slot)

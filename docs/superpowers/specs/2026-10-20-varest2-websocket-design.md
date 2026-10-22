@@ -535,8 +535,13 @@ A socket shares an HTTP client's session with `WithApi(GameApi)` (resolved throu
   not call `NotifySessionExpired()`. A 401 again after a refresh → terminal `Auth`; the socket raises
   the client's `OnSessionExpired` with `NotifySessionExpired()` (§19 item 2). A refresh `Failed` keeps
   the session: with `Connection` or `Timeout` the socket backs off and reconnects as after a drop
-  (a Wi-Fi blip is no logout); with `Config` it fails `Config`. *(Amended 2026-10-21: M4a plan rulings
-  Q1, Q6, I-5.)*
+  (a Wi-Fi blip is no logout); with `Config` (a misconfigured auth) it fails `Config`. *(Amended 2026-10-21:
+  M4a plan rulings Q1, Q6, I-5.)* A refresh `Unavailable` (nothing can refresh this session: no auth, or an
+  auth that cannot refresh it — a plain `Bearer`, a session with no refresh token) → the upgrade's own 401
+  is the answer, as HTTP's auth gate answers a 401 it cannot refresh: terminal with that 401's kind (§3.4's
+  upgrade-401 row, `Auth`), not `Config` — a refused token is not a misconfiguration — and no
+  `NotifySessionExpired()`, as the gate leaves the session to the game. *(Amended 2026-10-23: M4a final
+  review B-I-1.)*
 * **Logout** (`OnSessionChanged(Cleared)`, §19 item 2): close 1000 "logout", no reconnect. A token
   refresh (`OnSessionChanged(Refreshed)`) does nothing to an open socket.
 * **Session replaced** (rev 2, §22 A1: `OnSessionChanged(Replaced)` — another identity's token via
@@ -1279,13 +1284,16 @@ For the core plans (one list; nothing else in core changes):
    single-flight refresh `FVaRestClient::RefreshAuth(OnDone(EVaRestAuthRefreshOutcome Outcome,
    EVaRestErrorKind FailedKind))`, shared with HTTP — `Refreshed`; `Rejected` (the session is gone:
    the client has already expired it and fired `OnSessionExpired`); `Failed` (the session stays;
-   `FailedKind` `Connection` or `Timeout`: try later; `Config`: not) — and `NeedsAuthRefresh()`; a
+   `FailedKind` `Connection` or `Timeout`: try later; `Config`, a misconfigured auth or a refresh request
+   the configuration refuses: not); `Unavailable` (nothing can refresh this session — no auth, or an auth
+   that cannot refresh it — and none was in flight: the session stays, and the caller's own 401 is the
+   answer, §3.3) — and `NeedsAuthRefresh()`; a
    callable `NotifySessionExpired()` (one `OnSessionExpired` per expiry). One session event,
    `OnSessionChanged(EVaRestSessionChange)` (rev 2, §22 A1): `Refreshed` (same identity, new token),
    `Replaced` (another identity: `SetBearerToken`/`ImportSession` with a different subject, or a login
    while logged in) and `Cleared` (logout); the events of one change reach every listener in order,
    after the change. *(Amended 2026-10-21: M4a plan rulings Q6 and I-5 name `RefreshAuth` and drop the
-   separate `OnSessionCleared`.)*
+   separate `OnSessionCleared`. Amended 2026-10-23: M4a final review B-I-1 adds `Unavailable`.)*
 3. **Redactor (M3):** public URL, header and JSON-excerpt redaction.
 4. **Trace (M4):** `FVaRestTraceEvent` carries `Source` (`Http`, `Socket`) and connection/attempt ids;
    sinks ignore types they do not know.

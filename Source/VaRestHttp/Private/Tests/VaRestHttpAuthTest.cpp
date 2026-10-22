@@ -1441,6 +1441,17 @@ bool FVaRestHttpAuthRefreshPublicTest::RunTest(const FString& Parameters)
 		&& (*Dropped)[0] == FRefreshAnswer(EVaRestAuthRefreshOutcome::Failed, EVaRestErrorKind::Connection));
 	TestTrue(TEXT("... the session kept, no refresh left running"), Rig.Client.GetSession().HasRefreshToken() && !State->IsRefreshing() && *Expired == 0);
 
+	// M4a final review B-I-1: Unavailable is RefreshAuth's answer, not an auth's. One that reports it keeps the session, as
+	// a Failed does (Task 15 review M-5's rule): never a logout
+	const FRefreshAnswers Misused = MakeAnswers();
+	Rig.Client.RefreshAuth(Record(Misused));
+	FVaRestAuthRefreshResult Unavailable;
+	Unavailable.Outcome = EVaRestAuthRefreshOutcome::Unavailable;
+	Auth->Answer(MoveTemp(Unavailable));
+	TestTrue(TEXT("an auth answering Unavailable: (Failed, Connection)"), PumpUntil([Misused] { return Misused->Num() == 1; })
+		&& (*Misused)[0] == FRefreshAnswer(EVaRestAuthRefreshOutcome::Failed, EVaRestErrorKind::Connection));
+	TestTrue(TEXT("... the session kept, nothing expired"), Rig.Client.GetSession().HasRefreshToken() && *Expired == 0);
+
 	// Rejected: the session goes, OnSessionExpired once -- also when the socket calls NotifySessionExpired anyway (I-2)
 	const FRefreshAnswers Rejected = MakeAnswers();
 	Rig.Client.RefreshAuth([Rejected, Notifier = Rig.Client](EVaRestAuthRefreshOutcome Outcome, EVaRestErrorKind FailedKind) mutable
@@ -1454,13 +1465,45 @@ bool FVaRestHttpAuthRefreshPublicTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("... the session expired"), !Rig.Client.GetSession().HasAccessToken() && !Rig.Client.GetSession().HasRefreshToken());
 	TestEqual(TEXT("... OnSessionExpired once, the socket's NotifySessionExpired notwithstanding"), *Expired, 1);
 
-	// No auth (or nothing to refresh with): (Failed, Config), and still not inside the call
+	// M4a final review B-I-1: no refresh in flight and none can start. No auth, a Bearer, and a BearerRefresh session with
+	// no refresh token are Unavailable -- the session stays, nothing is sent, and the caller's own 401 is the answer -- while
+	// a misconfigured auth stays the configuration's (Failed, Config) (ruling Q7). Still never inside the call (decision 3).
 	FTestRig Plain;
 	const FRefreshAnswers None = MakeAnswers();
 	Plain.Client.RefreshAuth(Record(None));
 	TestEqual(TEXT("decision 3: nothing inside the call"), None->Num(), 0);
-	TestTrue(TEXT("no auth: (Failed, Config)"), PumpUntil([None] { return None->Num() == 1; })
-		&& (*None)[0] == FRefreshAnswer(EVaRestAuthRefreshOutcome::Failed, EVaRestErrorKind::Config));
+	TestTrue(TEXT("no auth: (Unavailable, None)"), PumpUntil([None] { return None->Num() == 1; })
+		&& (*None)[0] == FRefreshAnswer(EVaRestAuthRefreshOutcome::Unavailable, EVaRestErrorKind::None));
+
+	FTestRig Bearer;
+	Bearer.Client.WithBearer(TEXT("bearer-token-123456"));
+	const FRefreshAnswers Plainly = MakeAnswers();
+	Bearer.Client.RefreshAuth(Record(Plainly));
+	TestTrue(TEXT("Bearer: (Unavailable, None)"), PumpUntil([Plainly] { return Plainly->Num() == 1; })
+		&& (*Plainly)[0] == FRefreshAnswer(EVaRestAuthRefreshOutcome::Unavailable, EVaRestErrorKind::None));
+	TestTrue(TEXT("... the token kept"), Bearer.Client.GetSession().AccessToken.Equals(TEXT("bearer-token-123456"), ESearchCase::CaseSensitive));
+
+	FTestRig NoRefreshToken;
+	NoRefreshToken.Client.WithAuth(FVaRestAuth::BearerRefresh(FVaRestBearerRefreshConfig()));
+	NoRefreshToken.Client.SetBearerToken(TEXT("access-only-123456"));
+	const FRefreshAnswers AccessOnly = MakeAnswers();
+	NoRefreshToken.Client.RefreshAuth(Record(AccessOnly));
+	TestTrue(TEXT("BearerRefresh with no refresh token: (Unavailable, None)"), PumpUntil([AccessOnly] { return AccessOnly->Num() == 1; })
+		&& (*AccessOnly)[0] == FRefreshAnswer(EVaRestAuthRefreshOutcome::Unavailable, EVaRestErrorKind::None));
+	TestTrue(TEXT("... nothing sent, the token kept"), NoRefreshToken.Fake->NumCalls() == 0
+		&& NoRefreshToken.Client.GetSession().AccessToken.Equals(TEXT("access-only-123456"), ESearchCase::CaseSensitive));
+
+	AddExpectedErrorPlain(TEXT("FVaRestAuth::BearerRefresh: AccessTokenPath is empty"), EAutomationExpectedErrorFlags::Contains, 1);
+	FVaRestBearerRefreshConfig Broken;
+	Broken.AccessTokenPath.Reset();
+	FTestRig Misconfigured;
+	Misconfigured.Client.WithAuth(FVaRestAuth::BearerRefresh(Broken));
+	Misconfigured.Client.SetSession(TEXT("old-access-123456"), TEXT("old-refresh-123456"));
+	const FRefreshAnswers Typo = MakeAnswers();
+	Misconfigured.Client.RefreshAuth(Record(Typo));
+	TestTrue(TEXT("a misconfigured BearerRefresh: (Failed, Config)"), PumpUntil([Typo] { return Typo->Num() == 1; })
+		&& (*Typo)[0] == FRefreshAnswer(EVaRestAuthRefreshOutcome::Failed, EVaRestErrorKind::Config));
+	TestEqual(TEXT("... nothing sent"), Misconfigured.Fake->NumCalls(), 0);
 	return true;
 }
 
@@ -2934,7 +2977,8 @@ bool FVaRestHttpAuthRefreshJoinsTest::RunTest(const FString& Parameters)
 	using namespace VaRest::Http::AuthTestPrivate;
 	// Task 17 review M-8 (ruled): RefreshAuth waits for a refresh in flight even when the current auth cannot refresh --
 	// none at all, or one that cannot (an auth change does not end the refresh, Task 16 review M-5): the refresh exists,
-	// and its end applies to the session. With no refresh in flight it answers (Failed, Config), as before.
+	// and its end applies to the session. With no refresh in flight it answers Unavailable (M4a final review B-I-1; it was
+	// (Failed, Config) before that ruling).
 	FTestRig Rig;
 	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = HandRig(Rig);
 	const TSharedPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> State = VaRest::Http::FClientAccess::State(Rig.Client);
@@ -2958,8 +3002,8 @@ bool FVaRestHttpAuthRefreshJoinsTest::RunTest(const FString& Parameters)
 	TestEqualSensitive(TEXT("... and the refresh applied to the session"), Rig.Client.GetSession().AccessToken, FString(TEXT("new-access-123456")));
 	const FRefreshAnswers Refused = MakeAnswers();
 	Rig.Client.RefreshAuth(Record(Refused));
-	TestTrue(TEXT("nothing in flight, an auth that cannot refresh: (Failed, Config)"), PumpUntil([Refused] { return Refused->Num() == 1; })
-		&& (*Refused)[0] == FRefreshAnswer(EVaRestAuthRefreshOutcome::Failed, EVaRestErrorKind::Config));
+	TestTrue(TEXT("nothing in flight, an auth that cannot refresh: (Unavailable, None)"), PumpUntil([Refused] { return Refused->Num() == 1; })
+		&& (*Refused)[0] == FRefreshAnswer(EVaRestAuthRefreshOutcome::Unavailable, EVaRestErrorKind::None));
 	return true;
 }
 

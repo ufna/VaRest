@@ -841,8 +841,12 @@ public:
 	 * - Refreshed: the session has new credentials (FailedKind None).
 	 * - Rejected: the session is gone -- the refresh endpoint rejected it (the client has already expired the session and
 	 *   fired OnSessionExpired), or the game cleared or expired it meanwhile. Do not call NotifySessionExpired: it is done.
-	 * - Failed: the session stays; FailedKind says why -- Connection or Timeout (try again later), Config (no refresh in
-	 *   flight and no auth or nothing to refresh with, or a refresh the configuration refuses).
+	 * - Failed: the session stays; FailedKind says why -- Connection or Timeout (try again later), Config (the auth is
+	 *   misconfigured, ruling Q7, or the configuration refused the refresh request: HTTP disabled, a domain not allowed).
+	 * - Unavailable: nothing can refresh this session and no refresh was in flight -- the client has no auth, or its auth
+	 *   cannot refresh it (no refresh token; Bearer, ApiKey and Basic never refresh). Nothing was sent, the session stays
+	 *   (FailedKind None). The 401 that asked is the answer: a socket fails with its 401's kind (WebSocket spec 3.3), as an
+	 *   HTTP request whose 401 cannot be refreshed gets that 401 (M4a final review B-I-1).
 	 * Spec review I-5: a socket must not treat a Wi-Fi blip as a logout (ruling Q1).
 	 * Lifetime (Task 16 review M-4): OnDone waits for as long as the auth holds its Done; no watchdog ends that wait (ruling
 	 * I-4: a re-login screen may hold it), so a caller that needs a bound keeps its own timer and ignores a late answer. The
