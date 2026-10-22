@@ -2235,4 +2235,47 @@ bool FVaRestHttpRetryOuterAnswerFreesSlotTest::RunTest(const FString& Parameters
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpRetryInertOverrideTest, "VaRest.Http.Retry.InertOverrideLogged",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpRetryInertOverrideTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::RetryTestPrivate;
+	// M4a final review A4 (review A M-3): a request's own Retry() on a POST without Idempotent() is never retried (spec
+	// 4.1), so one Log line says so. A client-wide WithRetry() writes none for every POST, nor does an Idempotent() POST, a
+	// GET, or a request whose override is NoRetry().
+	TGuardConsoleVariable<int32> Level(TEXT("VaRest.LogLevel"), -1);
+	FLogCapture Capture;
+	FTestRig Rig;
+	Rig.Client.WithLogLevel(EVaRestLogLevel::Basic).WithRetry(Exact(3));
+	auto Inert = MakeOutcome<FVaRestJson>();
+	auto ClientWide = MakeOutcome<FVaRestJson>();
+	auto Marked = MakeOutcome<FVaRestJson>();
+	auto Fetched = MakeOutcome<FVaRestJson>();
+	auto Opted = MakeOutcome<FVaRestJson>();
+	const uint64 InertId = Observe(Rig.Client.Post(TEXT("/inert")).Body(TEXT("o")).Retry(Exact(3)), Inert).Send().GetId();
+	const uint64 ClientWideId = Observe(Rig.Client.Post(TEXT("/client-wide")).Body(TEXT("o")), ClientWide).Send().GetId();
+	const uint64 MarkedId = Observe(Rig.Client.Post(TEXT("/marked")).Body(TEXT("o")).Idempotent().Retry(Exact(3)), Marked).Send().GetId();
+	const uint64 FetchedId = Observe(Rig.Client.Get(TEXT("/fetched")).Retry(Exact(3)), Fetched).Send().GetId();
+	const uint64 OptedId = Observe(Rig.Client.Patch(TEXT("/opted")).Body(TEXT("o")).NoRetry(), Opted).Send().GetId();
+	if (!TestTrue(TEXT("all complete"), PumpUntil([&] { return Inert->IsDone() && ClientWide->IsDone() && Marked->IsDone() && Fetched->IsDone() && Opted->IsDone(); })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Drain();
+	const auto Line = [](uint64 Id, const TCHAR* Verb)
+	{
+		return FString::Printf(TEXT("#%llu VaRest: %s is not retried without Idempotent() (spec 4.1)"), Id, Verb);
+	};
+	TestEqual(TEXT("the POST's own Retry(): one line"), Capture.Count(Line(InertId, TEXT("POST"))), 1);
+	TestEqual(TEXT("a client-wide WithRetry(): none"), Capture.Count(Line(ClientWideId, TEXT("POST"))), 0);
+	TestEqual(TEXT("an Idempotent() POST: none"), Capture.Count(Line(MarkedId, TEXT("POST"))), 0);
+	TestEqual(TEXT("a GET: none"), Capture.Count(Line(FetchedId, TEXT("GET"))), 0);
+	TestEqual(TEXT("NoRetry(): none"), Capture.Count(Line(OptedId, TEXT("PATCH"))), 0);
+	TestEqual(TEXT("... and no other request wrote it"), Capture.Count(TEXT("is not retried without Idempotent()")), 1);
+	return true;
+}
+
 #endif

@@ -835,6 +835,15 @@ bool VaRest::Http::FClientState::Resolve(FExchangeState& Exchange, FString& OutE
 	Exchange.DecodeOptions.Naming = Exchange.Naming;
 	Exchange.DecodeOptions.bStrict = Exchange.bStrictDecode;
 	Exchange.LogLevel = EffectiveLogLevel(Cfg.LogLevel);
+	if (Exchange.RetryOverride.IsSet() && Exchange.RetryPolicy.IsEnabled() && !Exchange.bRetryEligible && Exchange.LogLevel != EVaRestLogLevel::None
+		&& UE_LOG_ACTIVE(LogVaRestHttp, Log))
+	{
+		// M4a final review A4 (review A M-3): this request asked for a retry policy itself, and spec 4.1's safety rule makes
+		// it inert -- a POST or PATCH is retried only when marked Idempotent() -- which compiles and is silent otherwise.
+		// The request's own Retry() only: a client-wide WithRetry() is the rule working as meant for every POST. The verb is
+		// a token here (checked above), so it is shown as it is.
+		UE_LOG(LogVaRestHttp, Log, TEXT("#%llu VaRest: %s is not retried without Idempotent() (spec 4.1)"), Exchange.RequestId, *Exchange.Verb);
+	}
 	return true;
 }
 
