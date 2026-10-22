@@ -387,6 +387,7 @@ namespace VaRest::Http::PipelinePrivate
 				return;
 			}
 			double AttemptTimeout = Ex.Timeout;
+			double AttemptActivity = Ex.ActivityTimeout;
 			if (Ex.DeadlineAt > 0.0)
 			{
 				// Plan decision 10 (spec 4.7, "plus the retry Deadline across attempts"): the time left bounds this attempt,
@@ -397,6 +398,13 @@ namespace VaRest::Http::PipelinePrivate
 					OnOutcome(MakeDeadlineOutcome());
 					return;
 				}
+				// The controller's Task 9 ruling: the deadline only shortens. The total is the request's own cut to the time
+				// left, or the time left when it set none. The activity timeout is what applies without a deadline -- the
+				// request's own, else its own total (M3 decision 30), never the time left -- cut to the time left; with
+				// neither, the engine's idle default stays, so a stalled attempt still fails at it and is retried (the
+				// total, at most the time left now, ends the attempt by the deadline whatever that default is).
+				const double OwnActivity = Ex.ActivityTimeout > 0.f ? Ex.ActivityTimeout : FMath::Max(Ex.Timeout, 0.f);
+				AttemptActivity = OwnActivity > 0.0 ? FMath::Min(OwnActivity, Left) : FVaRestTransportRequest::ActivityEngineDefault;
 				AttemptTimeout = AttemptTimeout > 0.0 ? FMath::Min(AttemptTimeout, Left) : Left;
 			}
 			if (!Ex.SaveTo.IsEmpty())
@@ -434,7 +442,7 @@ namespace VaRest::Http::PipelinePrivate
 				Request.Body = MoveTemp(Ex.Body.Bytes);
 			}
 			Request.Timeout = static_cast<float>(AttemptTimeout);
-			Request.ActivityTimeout = Ex.ActivityTimeout;
+			Request.ActivityTimeout = static_cast<float>(AttemptActivity);
 			Request.Priority = Ex.Priority;
 			Request.ResponseFile = Ex.TempFile;
 			// Reviews M-6, M13: the transport stops a JSON body past its cap instead of receiving all of it first

@@ -53,6 +53,14 @@ public:
 	/** true (default): completions come from a UE::Tasks task, as the HTTP thread's do; false: inline, inside Start, Complete or Advance */
 	bool bCompleteOnWorker = true;
 
+	/**
+	 * Seconds; 0 (default) = none. The engine's [HTTP] HttpActivityTimeout (30 s, HttpModule.cpp:98), applied as the
+	 * engine applies it: to a call for which the HTTP transport sets no activity timeout (EffectiveActivityTimeout is 0),
+	 * ending its silence as Connection, detail ActivityTimeout. A call with only a Timeout keeps no activity timer here:
+	 * its total fires first or with it.
+	 */
+	float EngineActivityTimeout = 0.f;
+
 	/** false (default): like the HTTP transport, a body only with POST, PUT, PATCH and DELETE (plan decision 13); true: any verb */
 	bool bSendsBodyForAnyVerb = false;
 
@@ -103,6 +111,8 @@ private:
 		FVaRestTimerHandle TimeoutTimer;
 		FVaRestTimerHandle ActivityTimer;
 		double LastActivityAt = 0.0;
+		/** The activity timeout this call runs with: its own, or EngineActivityTimeout when the transport would set none */
+		float Activity = 0.f;
 	};
 
 	void Finish(int32 Index, FVaRestFakeResponse&& Response);

@@ -19,7 +19,9 @@ namespace VaRest::Http
 	 * Decision 30 (review I-5): the activity timeout the transport sets. With a total timeout and no activity timeout the
 	 * engine would still apply its own default (GetActivityTimeoutOrDefault -> [HTTP] HttpActivityTimeout = 30,
 	 * HttpRequestCommon.cpp:733-736, HttpModule.cpp:98), so .Timeout(60) against a server silent for 40 s would fail at 30 s
-	 * as a connection error. Spec 4.7: the request's total timeout governs. 0 = set none.
+	 * as a connection error. Spec 4.7: the request's total timeout governs. 0 = set none. A negative ActivitySeconds
+	 * (FVaRestTransportRequest::ActivityEngineDefault) is 0 whatever the total: the transport stage passes it when the
+	 * total is only the retry deadline's time left, which must not replace the engine's idle default (plan decision 10).
 	 *
 	 * Apple caps it (task 7 review M-9): NSURLSession's timeoutInterval is [HTTP] HttpConnectionTimeout (30 s,
 	 * BaseEngine.ini:40; AppleHttp.cpp:736-738), so silence there still ends at 30 s, and an activity timeout above it

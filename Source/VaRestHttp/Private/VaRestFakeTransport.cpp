@@ -7,6 +7,7 @@
 #include "Misc/FileHelper.h"
 #include "Tasks/Pipe.h"
 #include "Tasks/Task.h"
+#include "VaRestHttpTransportInternal.h"
 #include "VaRestTrace.h"
 
 class FVaRestFakeTransport::FCallHandle final : public IVaRestTransportCall
@@ -182,7 +183,9 @@ TSharedRef<IVaRestTransportCall, ESPMode::ThreadSafe> FVaRestFakeTransport::Star
 			}
 		});
 	}
-	if (Req.ActivityTimeout > 0.f && (bWaits || Response.Delay > Req.ActivityTimeout))
+	Entry->Activity = Req.ActivityTimeout > 0.f ? Req.ActivityTimeout
+		: VaRest::Http::EffectiveActivityTimeout(Req.Timeout, Req.ActivityTimeout) <= 0.f ? EngineActivityTimeout : 0.f;
+	if (Entry->Activity > 0.f && (bWaits || Response.Delay > Entry->Activity))
 	{
 		ArmActivity(Index);
 	}
@@ -218,7 +221,7 @@ void FVaRestFakeTransport::ReportProgress(int32 Index, int64 BytesSent, int64 By
 	Entry.Call.Request.Probe->BytesReceived = BytesReceived;
 	Entry.Call.Request.Probe->DownloadTotal = DownloadTotal;
 	Entry.LastActivityAt = Clock->Now();
-	if (Entry.Call.Request.ActivityTimeout > 0.f && !Entry.Call.bCompleted)
+	if (Entry.Activity > 0.f && !Entry.Call.bCompleted)
 	{
 		ArmActivity(Index);
 	}
@@ -243,7 +246,7 @@ void FVaRestFakeTransport::ArmActivity(int32 Index)
 {
 	FEntry& Entry = *Entries[Index];
 	Clock->ClearTimer(Entry.ActivityTimer);
-	const double Due = Entry.LastActivityAt + Entry.Call.Request.ActivityTimeout - Clock->Now();
+	const double Due = Entry.LastActivityAt + Entry.Activity - Clock->Now();
 	TWeakPtr<FVaRestFakeTransport, ESPMode::ThreadSafe> Weak = AsShared();
 	Entry.ActivityTimer = Clock->SetTimer(Due, [Weak, Index]
 	{

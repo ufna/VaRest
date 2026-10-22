@@ -48,9 +48,15 @@ struct FVaRestTransportRequest
 	/**
 	 * Seconds; 0 = VaRest sets none (spec 4.7). With Timeout > 0 and ActivityTimeout 0 the HTTP transport also sets the
 	 * engine's activity timeout to Timeout, so the engine's 30 s idle default never fires first (review I-5).
+	 * ActivityTimeout ActivityEngineDefault (negative): VaRest sets none even with a Timeout, so the engine's idle default
+	 * applies -- a Timeout that is only the retry deadline's time left (plan decision 10) must not replace it.
 	 */
 	float Timeout = 0.f;
 	float ActivityTimeout = 0.f;
+
+	/** ActivityTimeout: the engine's own idle default, whatever Timeout is (the controller's Task 9 ruling) */
+	static constexpr float ActivityEngineDefault = -1.f;
+
 	EVaRestPriority Priority = EVaRestPriority::Normal;
 	/** Non-empty: stream the response body into this file (SaveTo's temp file) instead of memory */
 	FString ResponseFile;

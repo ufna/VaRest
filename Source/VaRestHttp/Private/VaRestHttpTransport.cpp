@@ -433,7 +433,13 @@ namespace VaRest::Http::HttpTransportPrivate
 
 float VaRest::Http::EffectiveActivityTimeout(float TotalSeconds, float ActivitySeconds)
 {
-	return ActivitySeconds > 0.f ? ActivitySeconds : FMath::Max(TotalSeconds, 0.f);
+	if (ActivitySeconds > 0.f)
+	{
+		return ActivitySeconds;
+	}
+	// FVaRestTransportRequest::ActivityEngineDefault: the total is the retry deadline's time left, not a timeout the
+	// request set, so the engine's idle default stays (the controller's Task 9 ruling)
+	return ActivitySeconds < 0.f ? 0.f : FMath::Max(TotalSeconds, 0.f);
 }
 
 bool VaRest::Http::ShouldCountUpload(int64 UploadTotal, bool bProgressCallback, bool bReportProgress, bool bCurlMayRewind)

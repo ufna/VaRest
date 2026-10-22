@@ -16,6 +16,7 @@
 #include "VaRestExchangeState.h"
 #include "VaRestHttpSettings.h"
 #include "VaRestHttpTesting.h"
+#include "VaRestHttpTransportInternal.h"
 #include "VaRestRetry.h"
 #include "VaRestRetryInternal.h"
 #include "VaRestTrace.h"
@@ -1831,6 +1832,126 @@ bool FVaRestHttpRetryReportsTwiceTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("the stage ran for the first attempt only"), Twice->Calls->load(), 1);
 	TestEqual(TEXT("the Outer stage got one outcome"), Probe->Total(Handle.GetId()), 1);
 	TestEqual(TEXT("nothing reached the network"), Rig.Fake->NumCalls(), 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpRetryDeadlineIdleTest, "VaRest.Http.Retry.DeadlineKeepsIdleDefault",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpRetryDeadlineIdleTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::RetryTestPrivate;
+	// The controller's Task 9 ruling: the deadline only shortens timeouts. No timeout set and Deadline 300: the time left
+	// caps the total, but the activity timeout stays the engine's idle default (30 s, HttpModule.cpp:98), not 300 -- so a
+	// stalled first attempt fails at that default, as a connection error, and is retried within the deadline.
+	FTestRig Rig;
+	Rig.Fake->EngineActivityTimeout = 30.f;
+	Rig.Client.WithRetry(Exact(3).WithDeadline(300.f));
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest& Request) { return Request.Attempt == 1 ? FVaRestFakeResponse::Manual() : Json(200); });
+	auto Outcome = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/stall")), Outcome).Send();
+	if (!TestTrue(TEXT("the first attempt is on the wire"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 1; })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	const float FirstTotal = Rig.Fake->GetCall(0).Request.Timeout;
+	// IHttpRequest has no activity getter (IHttpRequest.h:341-347): the applied value is the function the transport calls
+	const float FirstActivity = VaRest::Http::EffectiveActivityTimeout(FirstTotal, Rig.Fake->GetCall(0).Request.ActivityTimeout);
+	TestTrue(TEXT("no timeout set: the time left is the total cap, 300 s"), FMath::IsNearlyEqual(FirstTotal, 300.f, 1e-3f));
+	TestEqual(TEXT("... and the activity timeout applied is the engine's default (VaRest sets none), not 300 s"), FirstActivity, 0.f);
+	Rig.Clock->Advance(30.0);
+	if (!TestTrue(TEXT("the stall ends at the idle default; a retry is armed"), PumpUntil([&Rig]
+		{
+			return Rig.Fake->NumInFlight() == 0 && Rig.Clock->NumPendingTimers() == 1;
+		})))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Clock->Advance(0.5);
+	if (!TestTrue(TEXT("completes"), Rig.Wait(Outcome)) || !TestEqual(TEXT("two attempts"), Rig.Fake->NumCalls(), 2))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	TestTrue(TEXT("retried: the second attempt succeeds"), Outcome->SuccessCalls.load() == 1 && Outcome->Response.Attempts == 2);
+	TestTrue(TEXT("... its total cut to the time left, 300 - 30.5 s"), FMath::IsNearlyEqual(Rig.Fake->GetCall(1).Request.Timeout, 269.5f, 1e-3f));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpRetryDeadlineActivityTest, "VaRest.Http.Retry.DeadlineCutsActivity",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpRetryDeadlineActivityTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::RetryTestPrivate;
+	// The controller's Task 9 ruling: a set activity timeout is never longer than the time left, and one that is shorter is
+	// kept. Deadline 20 s with only an activity timeout of 50 s: both timeouts are 20 s. With 15 s: attempt 1 keeps 15 s
+	// (its silence ends it at 15 s), attempt 2 starts at 15.5 s and gets 4.5 s for both.
+	FTestRig Rig;
+	Rig.Client.WithRetry(Exact(3).WithDeadline(20.f));
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest&) { return FVaRestFakeResponse::Manual(); });
+	auto Long = MakeOutcome<FVaRestJson>();
+	auto OwnTotal = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/long")).Timeout(0.f, 50.f), Long).Send();
+	Observe(Rig.Client.Get(TEXT("/total")).Timeout(100.f), OwnTotal).Send();
+	if (!TestTrue(TEXT("both are on the wire"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 2; })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	const FVaRestTransportRequest& LongRequest = Rig.Fake->GetCall(0).Request;
+	TestTrue(TEXT("activity 50 s, no total: both are the time left, 20 s"), FMath::IsNearlyEqual(LongRequest.Timeout, 20.f, 1e-4f)
+		&& FMath::IsNearlyEqual(LongRequest.ActivityTimeout, 20.f, 1e-4f));
+	const FVaRestTransportRequest& TotalRequest = Rig.Fake->GetCall(1).Request;
+	TestTrue(TEXT("a total of 100 s and no activity: the total cut to 20 s, and the activity from the request's own total (decision 30), cut to 20 s"),
+		FMath::IsNearlyEqual(TotalRequest.Timeout, 20.f, 1e-4f) && FMath::IsNearlyEqual(TotalRequest.ActivityTimeout, 20.f, 1e-4f));
+	Rig.Client.CancelAll();
+	if (!TestTrue(TEXT("both end"), PumpUntil([&Rig] { return Rig.Client.GetInFlightCount() == 0; })))
+	{
+		return false;
+	}
+
+	FTestRig Short;
+	Short.Client.WithRetry(Exact(3).WithDeadline(20.f)).WithTimeout(0.f, 15.f);
+	Short.Fake->SetResponder([](const FVaRestTransportRequest&) { return FVaRestFakeResponse::Manual(); });
+	auto Silent = MakeOutcome<FVaRestJson>();
+	Observe(Short.Client.Get(TEXT("/silent")), Silent).Send();
+	if (!TestTrue(TEXT("attempt 1 is on the wire"), PumpUntil([&Short] { return Short.Fake->NumCalls() == 1; })))
+	{
+		Abandon(Short);
+		return false;
+	}
+	TestTrue(TEXT("attempt 1: the shorter activity timeout is kept, 15 s; the total is the time left, 20 s"),
+		FMath::IsNearlyEqual(Short.Fake->GetCall(0).Request.ActivityTimeout, 15.f, 1e-4f) && FMath::IsNearlyEqual(Short.Fake->GetCall(0).Request.Timeout, 20.f, 1e-4f));
+	Short.Clock->Advance(15.0);
+	if (!TestTrue(TEXT("its silence ends it at 15 s; a retry is armed"), PumpUntil([&Short]
+		{
+			return Short.Fake->NumInFlight() == 0 && Short.Clock->NumPendingTimers() == 1;
+		})))
+	{
+		Abandon(Short);
+		return false;
+	}
+	Short.Clock->Advance(0.5);
+	if (!TestTrue(TEXT("attempt 2 is on the wire"), PumpUntil([&Short] { return Short.Fake->NumCalls() == 2; })))
+	{
+		Abandon(Short);
+		return false;
+	}
+	TestTrue(TEXT("attempt 2 at 15.5 s: the 15 s activity timeout is cut to the 4.5 s left, and so is the total"),
+		FMath::IsNearlyEqual(Short.Fake->GetCall(1).Request.ActivityTimeout, 4.5f, 1e-4f) && FMath::IsNearlyEqual(Short.Fake->GetCall(1).Request.Timeout, 4.5f, 1e-4f));
+	Short.Clock->Advance(4.5);
+	if (!TestTrue(TEXT("it ends at the deadline"), Short.Wait(Silent)))
+	{
+		Abandon(Short);
+		return false;
+	}
+	TestTrue(TEXT("... after two attempts: a third would start past it"), Silent->ErrorCalls.load() == 1 && Silent->Error.Attempts == 2
+		&& Short.Fake->NumCalls() == 2);
 	return true;
 }
 

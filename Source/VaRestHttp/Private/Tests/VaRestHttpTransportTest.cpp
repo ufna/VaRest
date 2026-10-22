@@ -380,6 +380,8 @@ bool FVaRestHttpTransportTimeoutsTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("a total timeout alone also bounds silence, so the engine's 30 s default cannot fire first"), EffectiveActivityTimeout(60.f, 0.f), 60.f);
 	TestEqual(TEXT("an explicit activity timeout wins"), EffectiveActivityTimeout(60.f, 5.f), 5.f);
 	TestEqual(TEXT("neither: VaRest sets none (the engine's defaults apply)"), EffectiveActivityTimeout(0.f, 0.f), 0.f);
+	TestEqual(TEXT("ActivityEngineDefault: none even with a total -- one that is only the deadline's time left (Task 9 ruling)"),
+		EffectiveActivityTimeout(60.f, FVaRestTransportRequest::ActivityEngineDefault), 0.f);
 	return true;
 }
 
