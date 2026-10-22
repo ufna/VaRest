@@ -328,6 +328,8 @@ namespace VaRest::Http::PipelinePrivate
 	{
 		Ex.QueueDeadline = Ex.Config->Clock->SetTimer(Delay, [Weak = TWeakPtr<FVaRestExchange, ESPMode::ThreadSafe>(Exchange)]
 		{
+			// M4a final review A5 (review A M-4, spec 4.8): a game-thread re-entry from the clock's ticker
+			LLM_SCOPE_BYTAG(VaRest);
 			const TSharedPtr<FVaRestExchange, ESPMode::ThreadSafe> Pinned = Weak.Pin();
 			if (!Pinned.IsValid())
 			{
@@ -1250,6 +1252,10 @@ void VaRest::Http::FClientState::Cancel(const FVaRestExchangeRef& Exchange, EVaR
 {
 	using namespace PipelinePrivate;
 	check(IsInGameThread());
+	// M4a final review A5 (review A M-4, spec 4.8): the game's call (or the progress timer's owner check): what a cancel
+	// runs -- a wait's answer up the chain, the log line, the FFinish -- is VaRest's; the callbacks still switch to the
+	// sender's tags (Complete)
+	LLM_SCOPE_BYTAG(VaRest);
 	FExchangeState& Ex = Internals(*Exchange);
 	if (Ex.bFinished)
 	{

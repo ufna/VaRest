@@ -270,6 +270,9 @@ void VaRest::Http::FClientState::Publish(const TSharedRef<FClientConfig, ESPMode
 		Limiter.SetCapacity(Wanted);
 		UE::Tasks::Launch(TEXT("VaRest.LimiterPump"), [Weak = TWeakPtr<FClientState, ESPMode::ThreadSafe>(AsShared())]
 		{
+			// M4a final review A5 (review A M-4, spec 4.8): the task took the tags of the game's WithMaxConcurrent() call
+			// (TaskPrivate.h:192), and the attempts its grants run are VaRest's
+			LLM_SCOPE_BYTAG(VaRest);
 			if (const TSharedPtr<FClientState, ESPMode::ThreadSafe> Pinned = Weak.Pin())
 			{
 				Pinned->Limiter.Pump();

@@ -207,6 +207,10 @@ namespace VaRest::Http::RetryPrivate
 		};
 		Run->Timer = Ex.Config->Clock->SetTimer(Decision.Delay, [Run]
 		{
+			// M4a final review A5 (review A M-4, spec 4.8): a game-thread re-entry from the clock's ticker (or a test's
+			// Advance), so the re-issued attempt -- its header copy, AuthApply's writes, its log lines -- is VaRest's, not
+			// charged to the tags of whatever ticks the clock
+			LLM_SCOPE_BYTAG(VaRest);
 			FExchangeState& Waited = Internals(*Run->Exchange);
 			// Unconditionally: one stage waits at a time, so the hook is still this wait's own. A stage behind Retry (Task
 			// 17's park) waits only inside an attempt, while Retry is not waiting; one that could wait alongside it would

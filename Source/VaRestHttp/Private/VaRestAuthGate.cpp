@@ -112,6 +112,8 @@ namespace VaRest::Http::AuthGatePrivate
 	{
 		Run.DeadlineTimer = Internals(*Run.Exchange).Config->Clock->SetTimer(Delay, [Weak = TWeakPtr<FRun, ESPMode::ThreadSafe>(Run.AsShared()), WaiterId]
 		{
+			// M4a final review A5 (review A M-4, spec 4.8): a game-thread re-entry from the clock's ticker
+			LLM_SCOPE_BYTAG(VaRest);
 			const TSharedPtr<FRun, ESPMode::ThreadSafe> Pinned = Weak.Pin();
 			if (!Pinned.IsValid())
 			{
@@ -193,6 +195,10 @@ namespace VaRest::Http::AuthGatePrivate
 		// completed from a later task (FClientState::Complete defers inside Cancel, decision 3)
 		Ex.ParkRefreshId = Client.JoinRefresh(WaiterId, Run->Auth, Ex.RequestId, [Run, ParkedAt, bReplay](const FRefreshEnded& End)
 		{
+			// M4a final review A5 (review A M-4, spec 4.8): the refresh's end runs this from a game-thread task that took the
+			// tags of whoever answered the refresh (an auth's Done, the game's SetSession; TaskPrivate.h:192), and the attempt
+			// it dispatches is VaRest's
+			LLM_SCOPE_BYTAG(VaRest);
 			if (Run->IsAnswered())
 			{
 				// Canceled, past its deadline, or its answer accepted while the end was on its way: answered once already

@@ -151,6 +151,55 @@ namespace VaRest::Http::StatsTestPrivate
 		FTagLogRef Log;
 	};
 
+	/** The last segment of an exchange's URL: "retry" for https://api.test/retry */
+	FString PathTail(const FVaRestExchange& Exchange)
+	{
+		const FString& Url = Exchange.GetUrl();
+		int32 Slash = INDEX_NONE;
+		return Url.FindLastChar(TEXT('/'), Slash) ? Url.Mid(Slash + 1) : Url;
+	}
+
+	/** M4a final review A5: a PerAttempt stage noting the tag each attempt runs under, as "<path>><attempt>" */
+	class FTagAttempts final : public IVaRestStage
+	{
+	public:
+		explicit FTagAttempts(FTagLogRef InLog)
+			: Log(MoveTemp(InLog))
+		{
+		}
+		virtual FName GetStageName() const override { return TEXT("TagAttempts"); }
+		virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) override
+		{
+			Log->Note(*FString::Printf(TEXT("%s>%d"), *PathTail(*Exchange), Exchange->GetAttempt()));
+			Next.Proceed(Exchange, MoveTemp(OnOutcome));
+		}
+
+	private:
+		FTagLogRef Log;
+	};
+
+	/** M4a final review A5: an Outer stage noting the tag a request's outcome comes back up under, as "up:<path>" */
+	class FTagOutcomes final : public IVaRestStage
+	{
+	public:
+		explicit FTagOutcomes(FTagLogRef InLog)
+			: Log(MoveTemp(InLog))
+		{
+		}
+		virtual FName GetStageName() const override { return TEXT("TagOutcomes"); }
+		virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) override
+		{
+			Next.Proceed(Exchange, [Into = Log, Where = FString::Printf(TEXT("up:%s"), *PathTail(*Exchange)), Done = MoveTemp(OnOutcome)](FVaRestAttemptOutcome&& Outcome) mutable
+			{
+				Into->Note(*Where);
+				Done(MoveTemp(Outcome));
+			});
+		}
+
+	private:
+		FTagLogRef Log;
+	};
+
 	/** Notes the tag a Started event is emitted under: the trace's */
 	class FTagSink final : public IVaRestTraceSink
 	{
@@ -771,6 +820,134 @@ bool FVaRestHttpStatsLlmTagsTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("an OnHttpThread() callback under the sender's tag"), Log->Get(TEXT("worker")), Sender);
 	TestEqual(TEXT("OnProgress under the sender's tag"), Log->Get(TEXT("progress")), Sender);
 	TestEqual(TEXT("an empty client's callback under the sender's tag"), Log->Get(TEXT("empty")), Sender);
+#else
+	AddInfo(TEXT("LLM is compiled out: nothing to check"));
+#endif
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpStatsLlmReentryTest, "VaRest.Http.Stats.LlmTagsAtReentry",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpStatsLlmReentryTest::RunTest(const FString& Parameters)
+{
+#if ENABLE_LOW_LEVEL_MEM_TRACKER
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::StatsTestPrivate;
+	if (!FLowLevelMemTracker::IsEnabled())
+	{
+		AddInfo(TEXT("LLM is off in this run (start with -llm): nothing to check"));
+		return true;
+	}
+	// M4a final review A5 (review A M-4, spec 4.8): the pipeline re-entered on the game thread from outside VaRest -- Retry's
+	// backoff timer, Cancel(), the limiter queue's deadline timer, the limiter's pump task, the auth gate's park deadline and
+	// its waiter -- runs under VaRest. Each is triggered inside the test's own sender tag, which a re-entry without its own
+	// scope would be charged to (a timer fires inside Advance(); a task takes its launcher's tags, TaskPrivate.h:192).
+	const FName VaRestTag = LLM_TAG_NAME(VaRest);
+	const FTagLogRef Log = MakeShared<FTagLog, ESPMode::ThreadSafe>();
+	FTestRig Rig;
+	Rig.Client.Use(MakeShared<FTagOutcomes, ESPMode::ThreadSafe>(Log), EVaRestStageSlot::Outer)
+		.Use(MakeShared<FTagAttempts, ESPMode::ThreadSafe>(Log), EVaRestStageSlot::PerAttempt)
+		.WithRetry(ExactRetry(1))
+		.WithMaxConcurrent(1);
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest& Request)
+	{
+		if (Request.Url.EndsWith(TEXT("/hold")))
+		{
+			return FVaRestFakeResponse::Manual();
+		}
+		return Request.Url.EndsWith(TEXT("/cancel")) || (Request.Url.EndsWith(TEXT("/retry")) && Request.Attempt == 1) ? Json(503) : Json(200);
+	});
+
+	auto Retried = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/retry")), Retried).Send();
+	if (!TestTrue(TEXT("/retry backs off"), PumpUntil([&Rig] { return Rig.Clock->NumPendingTimers() == 1; })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	{
+		LLM_SCOPE_BYTAG(VaRestTests_Sender);
+		Rig.Clock->Advance(0.5);
+	}
+	TestTrue(TEXT("/retry succeeds on attempt 2"), Rig.Wait(Retried) && Retried->SuccessCalls.load() == 1);
+	TestEqual(TEXT("Retry's backoff timer: the re-issued attempt runs under VaRest"), Log->Get(TEXT("retry>2")), VaRestTag);
+
+	auto Canceled = MakeOutcome<FVaRestJson>();
+	const FVaRestRequestHandle Handle = Observe(Rig.Client.Get(TEXT("/cancel")), Canceled).Send();
+	if (!TestTrue(TEXT("/cancel backs off"), PumpUntil([&Rig] { return Rig.Clock->NumPendingTimers() == 1; })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	{
+		LLM_SCOPE_BYTAG(VaRestTests_Sender);
+		Handle.Cancel();
+	}
+	TestTrue(TEXT("/cancel ends Canceled"), Rig.Wait(Canceled) && Canceled->Error.Kind == EVaRestErrorKind::Canceled);
+	TestEqual(TEXT("Cancel(): the wait's answer goes up under VaRest"), Log->Get(TEXT("up:cancel")), VaRestTag);
+
+	auto Hold = MakeOutcome<FVaRestJson>();
+	auto Queued = MakeOutcome<FVaRestJson>();
+	auto Pumped = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/hold")).NoRetry(), Hold).Send();
+	Observe(Rig.Client.Get(TEXT("/queued")).Retry(ExactRetry(1).WithDeadline(1.f)), Queued).Send();
+	Observe(Rig.Client.Get(TEXT("/pumped")).NoRetry(), Pumped).Send();
+	if (!TestTrue(TEXT("/hold holds the one slot"), PumpUntil([&Rig] { return Rig.Fake->NumInFlight() == 1; }) && Rig.Drain()))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	{
+		LLM_SCOPE_BYTAG(VaRestTests_Sender);
+		Rig.Clock->Advance(1.5);
+	}
+	TestTrue(TEXT("/queued ends at its deadline in the queue"), Rig.Wait(Queued) && Queued->Error.Kind == EVaRestErrorKind::Timeout);
+	TestEqual(TEXT("the queue deadline's timer: the abort goes up under VaRest"), Log->Get(TEXT("up:queued")), VaRestTag);
+	{
+		LLM_SCOPE_BYTAG(VaRestTests_Sender);
+		Rig.Client.WithMaxConcurrent(2);
+	}
+	TestTrue(TEXT("/pumped is granted by the pump task"), Rig.Wait(Pumped) && Pumped->SuccessCalls.load() == 1);
+	TestEqual(TEXT("the limiter's pump task: the granted attempt runs under VaRest"), Log->Get(TEXT("pumped>1")), VaRestTag);
+	for (int32 Index = 0; Index < Rig.Fake->NumCalls(); ++Index)
+	{
+		if (!Rig.Fake->GetCall(Index).bCompleted)
+		{
+			Rig.Fake->Complete(Index, Json(200));
+		}
+	}
+	TestTrue(TEXT("/hold completes"), Rig.Wait(Hold));
+
+	FTestRig Gate;
+	const TSharedRef<FHeldRefreshAuth, ESPMode::ThreadSafe> Auth = MakeShared<FHeldRefreshAuth, ESPMode::ThreadSafe>();
+	Gate.Client.WithAuth(Auth)
+		.Use(MakeShared<FTagOutcomes, ESPMode::ThreadSafe>(Log), EVaRestStageSlot::Outer)
+		.Use(MakeShared<FTagAttempts, ESPMode::ThreadSafe>(Log), EVaRestStageSlot::PerAttempt);
+	auto Parked = MakeOutcome<FVaRestJson>();
+	auto Late = MakeOutcome<FVaRestJson>();
+	Observe(Gate.Client.Get(TEXT("/parked")), Parked).Send();
+	Observe(Gate.Client.Get(TEXT("/late")).Retry(FVaRestRetryPolicy::Disabled().WithDeadline(1.f)), Late).Send();
+	if (!TestTrue(TEXT("both park behind one refresh"), Gate.Drain() && Auth->IsPending() && Gate.Fake->NumCalls() == 0))
+	{
+		Auth->Answer(FVaRestAuthRefreshResult::Failed(EVaRestErrorKind::Connection, TEXT("test stopped")));
+		Abandon(Gate);
+		return false;
+	}
+	{
+		LLM_SCOPE_BYTAG(VaRestTests_Sender);
+		Gate.Clock->Advance(1.5);
+	}
+	TestTrue(TEXT("/late ends at its deadline in the park"), Gate.Wait(Late) && Late->Error.Kind == EVaRestErrorKind::Timeout);
+	TestEqual(TEXT("the park's deadline timer: its answer goes up under VaRest"), Log->Get(TEXT("up:late")), VaRestTag);
+	{
+		LLM_SCOPE_BYTAG(VaRestTests_Sender);
+		Auth->Answer(FVaRestAuthRefreshResult::Refreshed(TEXT("new-access-123456")));
+	}
+	TestTrue(TEXT("/parked is sent after the refresh"), Gate.Wait(Parked) && Parked->SuccessCalls.load() == 1);
+	TestEqual(TEXT("the park's waiter: the attempt it dispatches runs under VaRest"), Log->Get(TEXT("parked>1")), VaRestTag);
+	Rig.Drain();
+	Gate.Drain();
 #else
 	AddInfo(TEXT("LLM is compiled out: nothing to check"));
 #endif
