@@ -71,7 +71,9 @@ bool FVaRestHttpTraceM4PayloadsTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("only excerpts came from another thread"), Recorder.OnlyExcerptsOffGameThread());
 	TestEqualSensitive(TEXT("KindsOf leaves excerpts out (they race the game thread)"), Recorder.KindsOf(Id), FString(TEXT("Started,Dispatched,Ended,Completed")));
 
-	// IN-4 on the game thread through TracePoints::Note, which stamps the request and attempt
+	// IN-4's payload emitted on the game thread straight through FVaRestTrace::Emit, so nothing stamps it: the recorder files
+	// it under request 0. TracePoints::Note's stamping of the request, the attempt and the clock is pinned by
+	// VaRest.Http.Retry.NoteStamped and VaRest.Http.Retry.SeededJitter (M4a final review A9, review C M-7).
 	FVaRestTraceNote Note;
 	Note.Kind = EVaRestTraceNoteKind::RetryScheduled;
 	Note.Reason = TEXT("Status503");

@@ -443,10 +443,12 @@ public:
 	}
 
 	/**
-	 * Spec 4.1: this request's retry policy, replacing the client's (WithRetry). A request is retried only when it is
-	 * idempotent: GET, HEAD, OPTIONS, PUT or DELETE, or marked Idempotent(). A retry is a new attempt through the limiter,
-	 * behind whoever waits there (spec 4.6), on the request's clock; Cancel() and the owner's destruction stop it while it
-	 * waits.
+	 * Spec 4.1: this request's retry policy, replacing the client's (WithRetry) whole -- its Deadline included: the client
+	 * policy's Deadline does not bound a request that sets its own policy (plan decision 10). A request is retried only
+	 * when it is idempotent: GET, HEAD, OPTIONS, PUT or DELETE, or marked Idempotent(); otherwise the policy is inert and
+	 * one Log line says so. A retry is a new attempt through the limiter, behind whoever waits there (spec 4.6), on the
+	 * request's clock. Cancel() ends the wait before it at once; an owner destroyed meanwhile is noticed when the wait
+	 * ends (Owner()). A deadline with no retries: Retry(FVaRestRetryPolicy::Disabled().WithDeadline(Seconds)).
 	 */
 	TVaRestRequest Retry(const FVaRestRetryPolicy& InPolicy) &&
 	{
@@ -463,7 +465,11 @@ public:
 		return MoveTemp(*this);
 	}
 
-	/** No retry for this request, whatever the client's policy */
+	/**
+	 * No retry for this request, whatever the client's policy -- and none of that policy's Deadline either, so its queue
+	 * wait and a park behind a session refresh are not bounded by it. To keep a deadline without retries:
+	 * Retry(FVaRestRetryPolicy::Disabled().WithDeadline(Seconds)).
+	 */
 	TVaRestRequest NoRetry() &&
 	{
 		Spec->Retry = FVaRestRetryPolicy::Disabled();
@@ -705,8 +711,9 @@ public:
 	FVaRestClient& WithMaxConcurrent(int32 MaxConcurrent);
 	/**
 	 * Spec 3.1 / 4.7: seconds per attempt; 0 = the engine's default ([HTTP] HttpTotalTimeout, HttpActivityTimeout). An
-	 * activity of 0 with a total above 0 bounds silence by the total (decision 30). Under a retry policy's Deadline both are
-	 * cut to the time left, and a total of 0 is the time left (plan decision 10).
+	 * activity of 0 with a total above 0 bounds silence by the total (decision 30). Under a retry policy's Deadline each
+	 * timeout that is set is cut to the time left, and a total of 0 becomes the time left; with neither set the activity
+	 * timeout stays the engine's idle default (FVaRestRetryPolicy::Deadline; plan decision 10).
 	 */
 	FVaRestClient& WithTimeout(float Total, float Activity = 0.f);
 	/** Spec 4.5; the cvar VaRest.LogLevel (>= 0) overrides every client's */

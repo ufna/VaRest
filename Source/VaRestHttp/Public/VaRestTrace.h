@@ -94,6 +94,10 @@ enum class EVaRestExcerptSkip : uint8
 {
 	None,
 	Backlog,
+	/**
+	 * Reserved (W5): core never emits it. An announced excerpt that no sink wants any more lapses without an event
+	 * (Inspector 2.3, Task 22 review; M4a final review C-M-7).
+	 */
 	Disabled,
 	/**
 	 * Task 21 review M-1: AttemptEnded announced the excerpt for the decode task, and that attempt's response never reached

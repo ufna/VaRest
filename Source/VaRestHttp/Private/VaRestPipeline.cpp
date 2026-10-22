@@ -232,7 +232,7 @@ namespace VaRest::Http::PipelinePrivate
 		}
 #endif
 		// IN-14: first, before anything reads or rewrites the body -- Decode's ParseOwned unescapes it in place
-		// (VaRestDecode.cpp:114) and a JSON result moves it into the document; a canceled response was announced too
+		// (VaRestDecode.cpp:115) and a JSON result moves it into the document; a canceled response was announced too
 		Excerpts::EmitOnDecode(Finish);
 		const bool bCanceled = Ex.IsCancelRequested();
 		if (Finish.bTimeDecode)
@@ -392,7 +392,7 @@ namespace VaRest::Http::PipelinePrivate
 					if (!Granted.bFinished && Exchange->IsCancelRequested())
 					{
 						// Ruling I-3: flagged while it waited with no Abort behind it (a worker's Cancel() until its hop runs,
-						// VaRestClient.cpp:254-255). Proceed answers it Canceled below, before the log stage, so its Basic
+						// VaRestClient.cpp:262-263). Proceed answers it Canceled below, before the log stage, so its Basic
 						// line is written here, as for an abort. The flag is never cleared, so Proceed's own read agrees.
 						LogEndedInQueue(Granted, FVaRestAttemptOutcome::Canceled());
 					}
@@ -786,7 +786,7 @@ bool VaRest::Http::FClientState::Resolve(FExchangeState& Exchange, FString& OutE
 	if (!Exchange.Body.IsEmpty() && Cfg.Transport.IsValid() && !Cfg.Transport->SendsBodyFor(Exchange.Verb))
 	{
 		// Plan decision 13 (final review M1): sent without its body it would be another request, and BytesUp would count bytes
-		// that never left (VaRestHttpTransport.cpp:417). The verb is a token here (checked above), so it is shown as it is.
+		// that never left (VaRestHttpTransport.cpp:165). The verb is a token here (checked above), so it is shown as it is.
 		OutError = FString::Printf(TEXT("the client's transport sends no request body with %s (the engine's HTTP transport sends one only with POST, PUT, PATCH and DELETE)"),
 			*Exchange.Verb);
 		return false;

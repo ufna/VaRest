@@ -91,7 +91,7 @@ namespace VaRest::Http::BearerRefreshPrivate
 	}
 
 	/**
-	 * Game thread: the response was decoded as JSON on a task (spec 1, VaRestPipeline.cpp:949-952); only the path reads run
+	 * Game thread: the response was decoded as JSON on a task (spec 1, VaRestPipeline.cpp:1101); only the path reads run
 	 * here. RefreshHost: the host the refresh request was sent to (GetUrlHost), empty when unknown.
 	 */
 	FVaRestAuthRefreshResult ReadRefresh(const FVaRestBearerRefreshConfig& Config, const FString& RefreshHost, const TVaRestResult<FVaRestJson>& Result)
@@ -164,7 +164,7 @@ namespace VaRest::Http::BearerRefreshPrivate
 		virtual bool CanRefresh(const FVaRestSessionData& Session) const override
 		{
 			// Task 18 review I-1 (ruling Q7): never with a configuration that cannot work. AuthApply refuses every request then,
-			// but the gate's proactive refresh runs before it (VaRestAuthGate.cpp:303), as does RefreshAuth (VaRestClient.cpp:733):
+			// but the gate's proactive refresh runs before it (VaRestAuthGate.cpp:315), as does RefreshAuth (VaRestClient.cpp:733):
 			// a refresh sent with it would be Rejected and expire the session.
 			return ConfigError.IsEmpty() && Session.HasRefreshToken();
 		}

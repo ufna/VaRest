@@ -100,8 +100,8 @@ What M3 knows but could not run, in the order the release pass should check it.
 
 1. **`SaveTo` replace is not atomic.** `MoveFileW` without flags does not replace an existing file
    (`WindowsPlatformFile.cpp:1216-1219`), so on Windows only `MoveIntoPlace` moves the old file aside to a unique
-   `.bak`, moves the new one in, then deletes the `.bak` (`VaRestDecode.cpp:175-202`, `PLATFORM_WINDOWS` at `:256`;
-   documented on `SaveTo`, `VaRestClient.h:333-336`). A crash between the two moves leaves the old file only as that
+   `.bak`, moves the new one in, then deletes the `.bak` (`VaRestDecode.cpp:327-354`, `PLATFORM_WINDOWS` at `:408`;
+   documented on `SaveTo`, `VaRestClient.h:347-358`). A crash between the two moves leaves the old file only as that
    `.bak`. Every other platform makes one `rename()`, which replaces atomically. Check `VaRest.Integration.Http.SaveTo`
    and `VaRest.Http.Decode.SaveTo*` on Win64, onto an existing destination.
 2. curl as on Linux; the checklist below covers the rest.
@@ -158,8 +158,8 @@ switch. Under the fallback the engine also moves the header, status-code and pro
 receiving thread. So a response's first chunk can come before VaRest learns of a `Content-Encoding` (review M-16): the
 sink then reserves by the compressed `Content-Length` (harmless, it grows) and progress reports that compressed length as
 the download total; trace times are those of the game-thread tick. Under the fallback a `SaveTo` download's
-`CloseFile()` (the temp file's flush and close, `VaRestHttpTransport.cpp:374-382`), and the file write of an engine mock
-response (`:357-363`), run in that completion on the game thread: a small disk IO there, in fallback mode only. A request
+`CloseFile()` (the temp file's flush and close, `VaRestHttpTransport.cpp:386-393`), and the file write of an engine mock
+response (`:369-375`), run in that completion on the game thread: a small disk IO there, in fallback mode only. A request
 the engine refuses before it starts is then finished synchronously inside `ProcessRequest` on the game thread
 (`FinishRequestNotInHttpManager`, `HttpRequestCommon.cpp:226-231`), not on the HTTP thread; the pipeline's completion
 already hops to a game-thread task, so nothing is delivered inside `Send()`. File a bead with the failing test and the

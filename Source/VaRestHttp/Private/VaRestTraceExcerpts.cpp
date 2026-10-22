@@ -248,7 +248,7 @@ VaRest::Http::Excerpts::FJob VaRest::Http::Excerpts::PrepareResponse(const FExch
 	Job.Attempt = Attempt;
 	Job.TotalBytes = Result.bBodyInFile ? Result.BytesDown : Result.Body.Num();
 	Job.Time = Ex.Config->Clock->Now();
-	// Read as the result is back, like the log stage's (VaRestLogStage.cpp:141): with what AuthApply joined in for this
+	// Read as the result is back, like the log stage's (VaRestLogStage.cpp:125): with what AuthApply joined in for this
 	// attempt (Task 12 review M-7) and a refresh request's token-path keys, which the client's redactor holds (Task 18)
 	Job.Redactor = RedactorFor(Ex);
 	if (Result.bBodyInFile)
@@ -272,7 +272,7 @@ void VaRest::Http::Excerpts::EmitOnDecode(const FFinish& Finish)
 		return;
 	}
 	LLM_SCOPE_BYTAG(VaRest_Trace);
-	// The body itself, before ParseOwned unescapes it in place (VaRestDecode.cpp:114) and the envelope reads the result:
+	// The body itself, before ParseOwned unescapes it in place (VaRestDecode.cpp:115) and the envelope reads the result:
 	// IN-14's zero copies. The redactor's output is the excerpt's own.
 	const int32 Take = FMath::Min(Finish.Body.Num(), FMath::Max(0, Finish.ExcerptCap));
 	FVaRestTraceExcerpt Excerpt = Finish.ExcerptRedactor->RedactBody(Finish.Response.ContentType, TConstArrayView<uint8>(Finish.Body.GetData(), Take), Finish.Body.Num(),

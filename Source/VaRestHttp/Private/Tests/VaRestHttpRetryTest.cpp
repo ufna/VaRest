@@ -291,9 +291,11 @@ bool FVaRestHttpRetryDecideTest::RunTest(const FString& Parameters)
 	NoTimeout.bRetryTimeouts = false;
 	TestFalse(TEXT("... unless the policy says no"), Decide(NoTimeout, Failed(EVaRestTransportFailure::Timeout, TEXT("TimedOut"))).bRetry);
 	// Rulings Q7 and I-7: AuthInvalid (a misconfigured built-in auth, Task 14) and AuthRefreshConfig (a refresh the
-	// configuration refused, Task 17) are Kind=Config and never retried
+	// configuration refused, Task 17) are Kind=Config and never retried. M4a final review A9 (review A M-5): every other
+	// Config and Auth detail ClassifyAttempt knows (VaRestClassify.cpp:27-28, :38) is listed too.
 	const TCHAR* Never[] = { TEXT("Cancelled"), TEXT("InvalidHeader"), TEXT("TransportDropped"), TEXT("AuthRejected"), TEXT("HttpDisabled"), TEXT("ResponseTooLarge"),
-		TEXT("AuthInvalid"), TEXT("AuthRefreshConfig") };
+		TEXT("AuthInvalid"), TEXT("AuthRefreshConfig"), TEXT("DomainNotAllowed"), TEXT("BodyFileMissing"), TEXT("UploadReadFailed"), TEXT("BodyRejected"),
+		TEXT("NoCredentials"), TEXT("SessionCleared") };
 	for (const TCHAR* Detail : Never)
 	{
 		const EVaRestTransportFailure Failure = FCString::Strcmp(Detail, TEXT("Cancelled")) == 0 ? EVaRestTransportFailure::Canceled : EVaRestTransportFailure::Other;
