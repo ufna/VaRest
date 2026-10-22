@@ -86,10 +86,18 @@ namespace VaRest::Http
 		/** Game thread */
 		FLimiter& GetLimiter() { return Limiter; }
 
-		/** Game thread: layer 3's known values (Inspector 2.2); publishes a new redactor */
+		/**
+		 * Game thread: the game's layer-3 values (SetSecretValue; Inspector 2.2), each stored as GameSecretSlot(Slot) (review
+		 * M-1); publishes a new redactor
+		 */
 		void SetSecret(FName Slot, const FString& Value);
-		/** Game thread: several secret slots, one republish (each SetSecret republishes) */
+		/**
+		 * Game thread: VaRest's own slots (the session's, an auth's), taken as named; several, one republish (each SetSecret
+		 * republishes). AlsoEdit joins that republish: a session header's name becomes a key in the same one.
+		 */
 		void SetSecrets(TConstArrayView<TPair<FName, FString>> Values);
+		void SetSecrets(TConstArrayView<TPair<FName, FString>> Values, TFunctionRef<void(FClientConfig&)> AlsoEdit);
+		/** Game thread, ClearSecretValues: forgets the game's slots only, the rotated ones too (review I-1) */
 		void ClearSecrets();
 		/** Game thread: WithClock. Pending secret expiries move to the new clock's time, and their timer with them (review M6). */
 		void SetClock(const TSharedRef<IVaRestClock, ESPMode::ThreadSafe>& NewClock);
@@ -173,6 +181,8 @@ namespace VaRest::Http
 		void ScheduleSecretExpiry();
 		/** IN-13 layer 3: the session's tokens and header values as its secret slots, one republish (VaRestSession.cpp) */
 		void PublishSessionSecrets();
+		/** The same, with AlsoEdit in that republish */
+		void PublishSessionSecrets(TFunctionRef<void(FClientConfig&)> AlsoEdit);
 		/** Every session function but the getters runs inside RunSessionChange, on the game thread (concurrency review C-1) */
 		void CheckInSessionChange() const;
 

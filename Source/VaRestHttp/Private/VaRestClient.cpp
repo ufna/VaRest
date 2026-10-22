@@ -506,6 +506,13 @@ void FVaRestClient::SetSession(FStringView AccessToken, FStringView RefreshToken
 		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: SetSession: a token holds CR, LF, NUL or another control character; not set"));
 		return;
 	}
+	if (AccessToken.IsEmpty() && RefreshToken.IsEmpty())
+	{
+		// Review M-4: as SetBearerToken(""). A session with no token is a logout, not another identity's login: W5's socket
+		// manager would restart its sockets on Replaced with nothing to send.
+		ClearSession();
+		return;
+	}
 	const FString Access(AccessToken);
 	const FString Refresh(RefreshToken);
 	State->RunSessionChange([&Access, &Refresh, ExpiresInSeconds, bSameIdentity](VaRest::Http::FClientState& Target)

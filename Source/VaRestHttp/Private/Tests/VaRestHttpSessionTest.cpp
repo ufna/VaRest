@@ -2,6 +2,7 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
+#include "HAL/IConsoleManager.h"
 #include "HAL/PlatformProcess.h"
 #include "Misc/AutomationTest.h"
 #include "Tasks/Task.h"
@@ -100,10 +101,148 @@ bool FVaRestHttpSessionSecretsTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("layer 2: the header's name is a key"), VaRest::Http::FClientAccess::State(Rig.Client)->GetRedactor()->GetRules().ShouldRedact(FStringView(TEXT("X-Game-Ticket")), EVaRestRedactKeyKind::Header));
 	Rig.Client.SetBearerToken(TEXT("access-rotated-1234"), true);
 	TestEqualSensitive(TEXT("a rotated token stays known (Inspector D21)"), Scrub(Rig.Client, TEXT("access-secret-123456 access-rotated-1234")), FString(TEXT("*** ***")));
+	// Review M-2: a game value rotated too, so the clear has a previous value of each owner to judge
+	Rig.Client.SetSecretValue(TEXT("Mine"), TEXT("game-own-rotated-12"));
 	Rig.Client.ClearSession();
-	TestEqualSensitive(TEXT("logout forgets the session's values (Inspector 12)"), Scrub(Rig.Client, TEXT("access-rotated-1234 ticket-value-123456")),
-		FString(TEXT("access-rotated-1234 ticket-value-123456")));
-	TestEqualSensitive(TEXT("... and keeps the game's own"), Scrub(Rig.Client, TEXT("game-own-secret-123")), FString(TEXT("***")));
+	TestEqualSensitive(TEXT("logout forgets the session's values, the rotated one too (Inspector 12)"),
+		Scrub(Rig.Client, TEXT("access-secret-123456 access-rotated-1234 refresh-secret-123456 ticket-value-123456")),
+		FString(TEXT("access-secret-123456 access-rotated-1234 refresh-secret-123456 ticket-value-123456")));
+	TestEqualSensitive(TEXT("... and keeps the game's own, its rotated one too"), Scrub(Rig.Client, TEXT("game-own-secret-123 game-own-rotated-12")), FString(TEXT("*** ***")));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpSessionClearSecretValuesTest, "VaRest.Http.Session.ClearSecretValuesKeepsSession",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpSessionClearSecretValuesTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::SessionTestPrivate;
+	// Review I-1: ClearSecretValues forgets what SetSecretValue set, not the live session's values. A request sent after it
+	// still has the token scrubbed, and the session's rotated token keeps its 10 minutes (Inspector D21), then expires.
+	TGuardConsoleVariable<int32> LevelGuard(TEXT("VaRest.LogLevel"), -1); // the client's level, whatever the cvar says
+	FTestRig Rig;
+	Rig.Client.WithLogLevel(EVaRestLogLevel::Basic); // the rig's is None
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest&) { return FVaRestFakeResponse::Json(200, FUtf8StringView(UTF8TEXT("{}"))); });
+	Rig.Client.SetSecretValue(TEXT("Mine"), TEXT("game-own-secret-123"));
+	Rig.Client.SetSession(TEXT("access-first-123456"), TEXT("refresh-kept-123456"));
+	Rig.Client.SetBearerToken(TEXT("access-live-1234567"), /*bSameIdentity*/ true);
+	Rig.Client.ClearSecretValues();
+	TestEqualSensitive(TEXT("the live tokens are still scrubbed"), Scrub(Rig.Client, TEXT("access-live-1234567 refresh-kept-123456")), FString(TEXT("*** ***")));
+	TestEqualSensitive(TEXT("... the session's rotated token keeps its 10 minutes"), Scrub(Rig.Client, TEXT("access-first-123456")), FString(TEXT("***")));
+	TestEqualSensitive(TEXT("... and the game's own value is forgotten"), Scrub(Rig.Client, TEXT("game-own-secret-123")), FString(TEXT("game-own-secret-123")));
+	{
+		FLogCapture Capture;
+		auto Done = MakeOutcome<FVaRestJson>();
+		Observe(Rig.Client.Get(TEXT("/s")).Query(TEXT("q"), TEXT("access-live-1234567")), Done).Send();
+		if (!TestTrue(TEXT("it completes"), Rig.Wait(Done)))
+		{
+			return false;
+		}
+		TestTrue(TEXT("a line logged after ClearSecretValues scrubs the token"), Capture.Contains(TEXT("GET https://api.test/s?q=*** -> 200")));
+		TestFalse(TEXT("... and no line holds it"), Capture.Contains(TEXT("access-live-1234567")));
+	}
+	Rig.Clock->Advance(FVaRestSecretSet::PreviousLifetime + 1.0);
+	TestEqualSensitive(TEXT("the rotated token still expires: ClearSecretValues scheduled its expiry again"), Scrub(Rig.Client, TEXT("access-first-123456")),
+		FString(TEXT("access-first-123456")));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpSessionGameSlotsTest, "VaRest.Http.Session.GameSlotsApart",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpSessionGameSlotsTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::SessionTestPrivate;
+	// Review M-1: a game's slots named like the session's own -- one under its prefix, one equal to its access-token slot
+	FTestRig Rig;
+	Rig.Client.SetSecretValue(TEXT("VaRest.Session.Access"), TEXT("game-named-like-1234"));
+	Rig.Client.SetSecretValue(TEXT("VaRest.Session.AccessToken"), TEXT("game-exact-name-1234"));
+	Rig.Client.SetSession(TEXT("access-apart-123456"), TEXT("refresh-apart-123456"));
+	// Had the session's publish replaced the game's value, it would now be a previous value, and gone after its 10 minutes
+	Rig.Clock->Advance(FVaRestSecretSet::PreviousLifetime + 1.0);
+	TestEqualSensitive(TEXT("the session's publish does not clobber the game's slot"), Scrub(Rig.Client, TEXT("game-exact-name-1234 access-apart-123456")),
+		FString(TEXT("*** ***")));
+	Rig.Client.ClearSession();
+	TestEqualSensitive(TEXT("ClearSession keeps both game slots"), Scrub(Rig.Client, TEXT("game-named-like-1234 game-exact-name-1234")), FString(TEXT("*** ***")));
+	TestEqualSensitive(TEXT("... and forgets the session's"), Scrub(Rig.Client, TEXT("access-apart-123456")), FString(TEXT("access-apart-123456")));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpSessionClearAfterExpiryTest, "VaRest.Http.Session.ClearAfterExpiry",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpSessionClearAfterExpiryTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::SessionTestPrivate;
+	// Review M-3: a logout after an expiry. The expiry retired the tokens (still known for 10 minutes, Inspector D21); the
+	// logout forgets them (Inspector 12) without a Cleared for a session that has nothing left.
+	FTestRig Rig;
+	const FChanges Seen = Watch(Rig.Client);
+	TSharedRef<int32, ESPMode::ThreadSafe> Expired = MakeShared<int32, ESPMode::ThreadSafe>(0);
+	Rig.Client.OnSessionExpired().AddLambda([Expired] { ++*Expired; });
+	Rig.Client.SetSession(TEXT("access-expired-12345"), TEXT("refresh-expired-1234"));
+	Rig.Client.NotifySessionExpired();
+	TestEqualSensitive(TEXT("the expiry retires the tokens: still known"), Scrub(Rig.Client, TEXT("access-expired-12345 refresh-expired-1234")), FString(TEXT("*** ***")));
+	const uint32 Generation = Rig.Client.GetSession().Generation;
+	Rig.Client.ClearSession();
+	TestEqualSensitive(TEXT("the logout forgets them"), Scrub(Rig.Client, TEXT("access-expired-12345 refresh-expired-1234")),
+		FString(TEXT("access-expired-12345 refresh-expired-1234")));
+	TestTrue(TEXT("... with no Cleared"), Seen->Num() == 1 && (*Seen)[0] == EVaRestSessionChange::Replaced);
+	TestEqual(TEXT("... no second expiry"), *Expired, 1);
+	TestEqual(TEXT("... and the session data unchanged"), Rig.Client.GetSession().Generation, Generation);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpSessionEmptySetSessionTest, "VaRest.Http.Session.EmptySetSessionClears",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpSessionEmptySetSessionTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::SessionTestPrivate;
+	// Review M-4: SetSession with no token is ClearSession, as SetBearerToken("") is -- not a login of another identity
+	FTestRig Rig;
+	const FChanges Seen = Watch(Rig.Client);
+	Rig.Client.SetSession(TEXT("access-empty-123456"), TEXT("refresh-empty-123456"));
+	Rig.Client.SetSessionHeader(TEXT("X-Session-ID"), TEXT("session-id-123456"));
+	Rig.Client.SetSession(TEXT(""), TEXT(""));
+	TestTrue(TEXT("Replaced, then Cleared"), Seen->Num() == 2 && (*Seen)[0] == EVaRestSessionChange::Replaced && (*Seen)[1] == EVaRestSessionChange::Cleared);
+	const FVaRestSessionData Data = Rig.Client.GetSession();
+	TestTrue(TEXT("... nothing left, the session header included"), !Data.HasAccessToken() && !Data.HasRefreshToken() && Data.Headers.IsEmpty());
+	Rig.Client.SetSession(TEXT(""), TEXT(""));
+	TestEqual(TEXT("again, on an empty session: no event"), Seen->Num(), 2);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpSessionUnchangedHeaderTest, "VaRest.Http.Session.UnchangedHeader",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpSessionUnchangedHeaderTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::SessionTestPrivate;
+	// Review M-5: setting a session header to the value it has changes nothing -- no generation, no new redactor, no event
+	FTestRig Rig;
+	const FChanges Seen = Watch(Rig.Client);
+	const TSharedPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> State = VaRest::Http::FClientAccess::State(Rig.Client);
+	if (!TestTrue(TEXT("a client state"), State.IsValid()))
+	{
+		return false;
+	}
+	Rig.Client.SetSessionHeader(TEXT("X-Session-ID"), TEXT("session-id-123456"));
+	const uint32 Generation = Rig.Client.GetSession().Generation;
+	// Held, so its address cannot be reused by the redactor a publish would make
+	const TSharedRef<const FVaRestRedactor, ESPMode::ThreadSafe> Before = State->GetRedactor();
+	Rig.Client.SetSessionHeader(TEXT("X-Session-ID"), TEXT("session-id-123456"));
+	TestEqual(TEXT("the same value: the generation stays"), Rig.Client.GetSession().Generation, Generation);
+	TestTrue(TEXT("... and nothing is published"), &State->GetRedactor().Get() == &Before.Get());
+	Rig.Client.SetSessionHeader(TEXT("X-Session-ID"), TEXT("session-id-654321"));
+	TestTrue(TEXT("a new value: the generation moves and a redactor is published"), Rig.Client.GetSession().Generation > Generation
+		&& &State->GetRedactor().Get() != &Before.Get());
+	TestEqual(TEXT("no session event for a header"), Seen->Num(), 0);
 	return true;
 }
 

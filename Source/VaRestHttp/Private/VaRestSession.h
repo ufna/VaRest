@@ -37,6 +37,18 @@ namespace VaRest::Http
 		bool bDelivering = false;
 	};
 
+	// ---- Who owns a secret slot. Each door forgets exactly its owner's: ClearSession the session's, ClearSecretValues the
+	// game's (review I-1); an auth's (M4a Task 14, VaRest.Auth.*) stay while it is configured.
 	/** Every secret slot the session takes starts with this, so ClearSession forgets exactly them (plan decision 17) */
 	inline const TCHAR* SessionSecretPrefix() { return TEXT("VaRest.Session."); }
+	/**
+	 * Review M-1, by shape: FClientState::SetSecret (SetSecretValue, the game's one door) stores every game slot under this,
+	 * so no name a game picks -- "VaRest.Session.AccessToken" included -- is the session's or an auth's slot
+	 */
+	inline const TCHAR* GameSecretPrefix() { return TEXT("VaRest.Game."); }
+	/** The slot a game's SetSecretValue(Slot) is stored as */
+	inline FName GameSecretSlot(FName Slot) { return FName(*(FString(GameSecretPrefix()) + Slot.ToString())); }
+	// FName text keeps the casing it was first made with, so the prefixes compare ignoring case
+	inline bool IsSessionSecretSlot(FName Slot) { return Slot.ToString().StartsWith(SessionSecretPrefix(), ESearchCase::IgnoreCase); }
+	inline bool IsGameSecretSlot(FName Slot) { return Slot.ToString().StartsWith(GameSecretPrefix(), ESearchCase::IgnoreCase); }
 }

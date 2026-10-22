@@ -26,8 +26,11 @@ public:
 	void Set(FName Slot, const FString& Value, double Now);
 	/** Logout: forgets every value, the previous ones included (Inspector 12: "cleared on logout") */
 	void ClearAll();
-	/** Forgets the current and the previous values of every slot Matches accepts (a logout forgets the session's, plan decision 17) */
-	void ClearSlots(TFunctionRef<bool(FName Slot)> Matches);
+	/**
+	 * Forgets the current and the previous values of every slot Matches accepts (a logout forgets the session's, plan
+	 * decision 17); returns how many values it forgot
+	 */
+	int32 ClearSlots(TFunctionRef<bool(FName Slot)> Matches);
 	/** The values to scrub at Now: current ones and unexpired previous ones of at least MinBytes UTF-8 bytes, longest first */
 	TArray<FString> GetActive(double Now) const;
 	/**

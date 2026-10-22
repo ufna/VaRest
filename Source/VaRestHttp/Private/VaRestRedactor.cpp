@@ -290,16 +290,19 @@ void FVaRestSecretSet::ClearAll()
 	Previous.Reset();
 }
 
-void FVaRestSecretSet::ClearSlots(TFunctionRef<bool(FName Slot)> Matches)
+int32 FVaRestSecretSet::ClearSlots(TFunctionRef<bool(FName Slot)> Matches)
 {
+	int32 Forgotten = 0;
 	for (auto It = Current.CreateIterator(); It; ++It)
 	{
 		if (Matches(It.Key()))
 		{
 			It.RemoveCurrent();
+			++Forgotten;
 		}
 	}
-	Previous.RemoveAll([&Matches](const FPrevious& Old) { return Matches(Old.Slot); });
+	Forgotten += Previous.RemoveAll([&Matches](const FPrevious& Old) { return Matches(Old.Slot); });
+	return Forgotten;
 }
 
 TArray<FString> FVaRestSecretSet::GetActive(double Now) const

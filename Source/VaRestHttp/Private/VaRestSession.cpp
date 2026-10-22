@@ -58,6 +58,11 @@ void VaRest::Http::FClientState::RunSessionChange(TFunctionRef<void(FClientState
 
 void VaRest::Http::FClientState::PublishSessionSecrets()
 {
+	PublishSessionSecrets([](FClientConfig&) {});
+}
+
+void VaRest::Http::FClientState::PublishSessionSecrets(TFunctionRef<void(FClientConfig&)> AlsoEdit)
+{
 	using namespace SessionPrivate;
 	// IN-13 layer 3: an empty value retires a slot (its old value stays known for 10 minutes, Inspector D21)
 	TArray<TPair<FName, FString>> Values;
@@ -67,7 +72,7 @@ void VaRest::Http::FClientState::PublishSessionSecrets()
 	{
 		Values.Emplace(HeaderSlot(Pair.Key), Pair.Value);
 	}
-	SetSecrets(Values);
+	SetSecrets(Values, AlsoEdit);
 }
 
 bool VaRest::Http::FClientState::UpdateTokens(const FString& AccessToken, const FString* RefreshToken, double ExpiresInSeconds, double LifetimeSeconds)
@@ -119,12 +124,18 @@ void VaRest::Http::FClientState::SetTokensByGame(const FString& AccessToken, con
 void VaRest::Http::FClientState::SetSessionHeader(FStringView Name, FStringView Value)
 {
 	CheckInSessionChange();
+	const FString* Existing = Session.Data.Headers.Find(Name);
+	if (Existing && FStringView(*Existing).Equals(Value, ESearchCase::CaseSensitive))
+	{
+		// Review M-5: nothing changed -- no generation for an attempt to compare, nothing to publish
+		return;
+	}
 	Session.Data.Headers.Set(Name, Value);
 	// Not CredentialGeneration: a header change must not use up a 401's one replay (concurrency review M-6)
 	++Session.Data.Generation;
-	// IN-13 layer 2: the name is a key wherever it appears (a header, a query, a JSON body that echoes it)
-	EditConfig([Name](FClientConfig& Edited) { AppendRedactKeys(Edited.RedactedKeys, TArray<FString>{ FString(Name) }); });
-	PublishSessionSecrets();
+	// IN-13 layer 2 in the same republish as layer 3: the name is a key wherever it appears (a header, a query, a JSON
+	// body that echoes it)
+	PublishSessionSecrets([Name](FClientConfig& Edited) { AppendRedactKeys(Edited.RedactedKeys, TArray<FString>{ FString(Name) }); });
 }
 
 void VaRest::Http::FClientState::RemoveSessionHeader(FStringView Name)
@@ -142,9 +153,17 @@ void VaRest::Http::FClientState::RemoveSessionHeader(FStringView Name)
 void VaRest::Http::FClientState::ClearSession()
 {
 	CheckInSessionChange();
+	// Inspector 12, "cleared on logout": the session's values go now, previous ones included; the game's own slots stay.
+	// Before the empty check (review M-3): an expired session has no token left, but its retired ones are still known.
+	if (Secrets.ClearSlots([](FName Slot) { return IsSessionSecretSlot(Slot); }) > 0)
+	{
+		EditConfig([](FClientConfig&) {});
+		ScheduleSecretExpiry();
+	}
 	FVaRestSessionData& Data = Session.Data;
 	if (!Data.HasAccessToken() && !Data.HasRefreshToken() && Data.Headers.IsEmpty())
 	{
+		// No session to clear: no generation, no Cleared
 		return;
 	}
 	const uint32 Generation = Data.Generation + 1;
@@ -152,12 +171,6 @@ void VaRest::Http::FClientState::ClearSession()
 	Data = FVaRestSessionData();
 	Data.Generation = Generation;
 	Data.CredentialGeneration = CredentialGeneration;
-	// Inspector 12, "cleared on logout": the session's values go now, previous ones included; the game's own slots stay
-	const FString Prefix = SessionSecretPrefix();
-	// FName text keeps the casing it was first made with, so the prefix compares ignoring case
-	Secrets.ClearSlots([&Prefix](FName Slot) { return Slot.ToString().StartsWith(Prefix, ESearchCase::IgnoreCase); });
-	EditConfig([](FClientConfig&) {});
-	ScheduleSecretExpiry();
 	AnnounceSession(EVaRestSessionChange::Cleared, 0, TEXT("ClearSession"));
 }
 

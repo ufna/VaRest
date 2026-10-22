@@ -256,12 +256,19 @@ void VaRest::Http::FClientState::SetSecret(FName Slot, const FString& Value)
 	check(IsInGameThread());
 	const double Now = GetConfig()->Clock->Now();
 	Secrets.Prune(Now); // review C1: expired values never count toward the next expiry
-	Secrets.Set(Slot, Value, Now);
+	// Review M-1: under the game's own prefix, so the game cannot replace a session or auth value, and neither
+	// ClearSession nor an auth can forget the game's
+	Secrets.Set(GameSecretSlot(Slot), Value, Now);
 	EditConfig([](FClientConfig&) {});
 	ScheduleSecretExpiry();
 }
 
 void VaRest::Http::FClientState::SetSecrets(TConstArrayView<TPair<FName, FString>> Values)
+{
+	SetSecrets(Values, [](FClientConfig&) {});
+}
+
+void VaRest::Http::FClientState::SetSecrets(TConstArrayView<TPair<FName, FString>> Values, TFunctionRef<void(FClientConfig&)> AlsoEdit)
 {
 	check(IsInGameThread());
 	const double Now = GetConfig()->Clock->Now();
@@ -270,16 +277,18 @@ void VaRest::Http::FClientState::SetSecrets(TConstArrayView<TPair<FName, FString
 	{
 		Secrets.Set(Value.Key, Value.Value, Now);
 	}
-	EditConfig([](FClientConfig&) {});
+	EditConfig(AlsoEdit);
 	ScheduleSecretExpiry();
 }
 
 void VaRest::Http::FClientState::ClearSecrets()
 {
 	check(IsInGameThread());
-	Secrets.ClearAll();
-	GetConfig()->Clock->ClearTimer(SecretExpiryTimer);
+	// Review I-1: the game's slots only. The session's (and an auth's) values stay known while they are in use, and the
+	// session's rotated ones keep their 10 minutes (Inspector D21): their expiry is scheduled again, not cleared.
+	Secrets.ClearSlots([](FName Slot) { return IsGameSecretSlot(Slot); });
 	EditConfig([](FClientConfig&) {});
+	ScheduleSecretExpiry();
 }
 
 void VaRest::Http::FClientState::SetClock(const TSharedRef<IVaRestClock, ESPMode::ThreadSafe>& NewClock)

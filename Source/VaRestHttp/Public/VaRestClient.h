@@ -645,10 +645,16 @@ public:
 	/**
 	 * Inspector IN-13 layer 3: a secret value (token, API key, session id) replaced by *** wherever it appears in a log
 	 * line or a trace. Setting a slot again keeps the old value known for 10 minutes (Inspector D21). Values under 8 bytes
-	 * are ignored. M4's auth calls this; a game may too. Game thread.
+	 * are ignored. Game thread.
+	 * These are the game's own slots. The session's values and an auth's are VaRest's, in internal slots (VaRest.*) kept
+	 * apart from these: a game slot of any name, "VaRest.Session.AccessToken" included, neither replaces one of them nor
+	 * is forgotten by ClearSession().
 	 */
 	void SetSecretValue(FName Slot, const FString& Value);
-	/** Logout: forgets every secret value, the rotated ones too. Game thread. */
+	/**
+	 * Forgets every value SetSecretValue set, the rotated ones too. Game thread. The session's values (and an auth's) stay
+	 * known while they are in use: a logout is ClearSession().
+	 */
 	void ClearSecretValues();
 	/** A custom stage (spec 4): Outer sees each logical request once; PerAttempt every attempt, after the limiter's grant, with its final headers */
 	FVaRestClient& Use(FVaRestStageRef Stage, EVaRestStageSlot Slot);
@@ -664,7 +670,9 @@ public:
 	void SetBearerToken(FStringView AccessToken, bool bSameIdentity = false);
 	/**
 	 * A login's result: both tokens and the access token's lifetime in seconds (0 = unknown), taken as the token's whole
-	 * lifetime. A game restoring a session it saved itself uses ImportSession, which records the lifetime as unknown.
+	 * lifetime. A game restoring a session it saved itself uses ImportSession, which records the lifetime as unknown. Both
+	 * tokens empty is ClearSession(), as SetBearerToken("") is. Either token holding a control character is refused with an
+	 * Error log.
 	 */
 	void SetSession(FStringView AccessToken, FStringView RefreshToken, double ExpiresInSeconds = 0.0, bool bSameIdentity = false);
 	/** dawg's X-Session-ID pattern: sent with every request whose auth mode is not None; its value is a secret, its name a key */
