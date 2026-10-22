@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Math/RandomStream.h"
 #include "Misc/ScopeRWLock.h"
 #include "VaRestClient.h"
 #include "VaRestExchangeState.h"
@@ -57,6 +58,12 @@ namespace VaRest::Http
 		TSharedRef<const FVaRestRedactor, ESPMode::ThreadSafe> GetRedactor() const { return GetConfig()->Redactor.ToSharedRef(); }
 		/** Game thread: copy, edit, rebuild the chain and the redactor, swap */
 		void EditConfig(TFunctionRef<void(FClientConfig&)> Edit);
+
+		/**
+		 * Game thread: the stream retry jitter draws from (plan decision 26). Seeded from the client id and the CPU cycle
+		 * counter, so clients made in the same frame differ; WithRandomSeed makes a test exact.
+		 */
+		FRandomStream& GetRandom() { return Random; }
 
 		/** Game thread: a sent exchange enters the pipeline */
 		void Enter(const FVaRestExchangeRef& Exchange);
@@ -120,6 +127,7 @@ namespace VaRest::Http
 		 * member's reference to die on the dying thread (review N-3).
 		 */
 		TSharedPtr<const FClientConfig, ESPMode::ThreadSafe> Config;
+		FRandomStream Random;
 		/** Spec 3.2: in-flight exchanges are owned here and keep this state alive (each holds its State) */
 		TMap<uint64, FVaRestExchangeRef> InFlight;
 		/** Spec 4.6 */

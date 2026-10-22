@@ -2,6 +2,7 @@
 
 #include "VaRestClientState.h"
 
+#include "HAL/PlatformTime.h"
 #include "Misc/ScopeLock.h"
 #include "Tasks/Task.h"
 #include "VaRestHttpTesting.h"
@@ -76,6 +77,7 @@ namespace VaRest::Http::ClientStatePrivate
 VaRest::Http::FClientState::FClientState(uint64 InClientId, FClientConfig&& InConfig)
 	: ClientId(InClientId)
 	, Config(MakeShared<FClientConfig, ESPMode::ThreadSafe>(MoveTemp(InConfig)))
+	, Random(static_cast<int32>(static_cast<uint32>(InClientId * 2654435761ull) ^ FPlatformTime::Cycles()))
 {
 }
 

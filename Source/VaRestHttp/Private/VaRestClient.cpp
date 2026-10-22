@@ -362,6 +362,16 @@ FVaRestClient& FVaRestClient::WithClock(TSharedRef<IVaRestClock, ESPMode::Thread
 	return *this;
 }
 
+FVaRestClient& FVaRestClient::WithRandomSeed(int32 Seed)
+{
+	check(IsInGameThread());
+	if (State.IsValid())
+	{
+		State->GetRandom().Initialize(Seed);
+	}
+	return *this;
+}
+
 FVaRestClient& FVaRestClient::WithMaxJsonBytes(int64 Bytes)
 {
 	if (State.IsValid())

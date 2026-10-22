@@ -543,6 +543,8 @@ public:
 	FVaRestClient& WithTransport(TSharedRef<IVaRestTransport, ESPMode::ThreadSafe> Transport);
 	/** Requests already sent keep the clock they started with; a rotated secret value keeps the time it has left (SetSecretValue) */
 	FVaRestClient& WithClock(TSharedRef<IVaRestClock, ESPMode::ThreadSafe> Clock);
+	/** Game thread: seeds the stream retry jitter draws from (plan decision 26), so a test knows each delay */
+	FVaRestClient& WithRandomSeed(int32 Seed);
 	/** The largest response body parsed as JSON (decision 20); 0 = none. Default: UVaRestHttpSettings::MaxJsonBytes (32 MiB). */
 	FVaRestClient& WithMaxJsonBytes(int64 Bytes);
 	/**
