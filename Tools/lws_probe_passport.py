@@ -70,7 +70,9 @@ EXPECTED = (
 RISKY_CASES = ("Refused", "ConnectRefused", "DnsFailure", "NoUpgrade", "TlsVerifyFailure", "KilledPending")
 LOGS = "/w/Unreal/VaRestHost/Saved/Logs"
 VERDICTS = ("differs", "crashed", "agrees", "recorded", "unverified")
-LINE = re.compile(r"LogVaRestLwsProbe: Display: (FACT|PENDING) (\{.*\})\s*$")
+# No closing brace required: a crash can cut the line short, and that must reach json.loads to be counted as malformed
+LINE = re.compile(r"LogVaRestLwsProbe: Display: (FACT|PENDING) (\{.*)$")
+NO_RETURN = "(the call did not return)"
 SECTIONS = (
     ("env", "Environment"),
     ("release", "Not run here: release-pass items"),
@@ -113,22 +115,36 @@ METHOD = (
 )
 
 
-def read_facts(paths):
-    facts, pending = {}, {}
+def read_facts(paths, notes=None):
+    """notes (optional dict) gets "malformed": [(file, line number)] and "duplicates": [(id, first file, other file)]"""
+    notes = notes if notes is not None else {}
+    notes.setdefault("malformed", [])
+    notes.setdefault("duplicates", [])
+    facts, pending, source = {}, {}, {}
     for path in paths:
         with open(path, encoding="utf-8", errors="replace") as stream:
-            for line in stream:
-                match = LINE.search(line)
+            for number, line in enumerate(stream, 1):
+                match = LINE.search(line.rstrip("\r\n"))
                 if not match:
                     continue
-                record = json.loads(match.group(2))
-                key = record.get("id", "")
+                try:
+                    record = json.loads(match.group(2))
+                except ValueError:
+                    notes["malformed"].append((os.path.basename(path), number))
+                    continue
+                key = record.get("id", "") if isinstance(record, dict) else ""
                 if not key or key.startswith("rig."):
                     continue
-                (facts if match.group(1) == "FACT" else pending)[key] = record
+                if match.group(1) == "PENDING":
+                    pending.setdefault(key, record)
+                elif key in facts:
+                    notes["duplicates"].append((key, source[key], os.path.basename(path)))
+                else:
+                    facts[key] = record
+                    source[key] = os.path.basename(path)
     for key, record in pending.items():
         if key not in facts:
-            facts[key] = {"id": key, "verdict": "crashed", "test": record.get("test", ""), "spec": "", "evidence": "",
+            facts[key] = {"id": key, "verdict": "crashed", "test": record.get("test", ""), "spec": NO_RETURN, "evidence": "",
                           "observed": "the process ended inside the probed call (a PENDING line and no FACT)"}
     return facts
 
@@ -161,7 +177,9 @@ def plugin_commit():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     try:
         result = subprocess.run(["git", "-C", root, "rev-parse", "--short", "HEAD"], capture_output=True, text=True, timeout=10)
-        return result.stdout.strip() or "unknown"
+        sha = result.stdout.strip() or "unknown"
+        status = subprocess.run(["git", "-C", root, "status", "--porcelain"], capture_output=True, text=True, timeout=30)
+        return sha + " + uncommitted changes" if status.stdout.strip() else sha
     except (OSError, subprocess.SubprocessError):
         return "unknown"
 
@@ -172,7 +190,8 @@ def method(facts):
     return [(COMMANDS_BETWEEN if between else COMMANDS_INSIDE) if text is None else text for text in METHOD]
 
 
-def render(facts, logs, machine, today, missing):
+def render(facts, logs, machine, today, missing, notes=None):
+    notes = notes or {}
     def observed(key):
         return facts.get(key, {}).get("observed", "not recorded")
 
@@ -196,8 +215,15 @@ def render(facts, logs, machine, today, missing):
     for record in facts.values():
         counts[record.get("verdict", "recorded")] = counts.get(record.get("verdict", "recorded"), 0) + 1
     lines += ["", "## Summary", "", "| verdict | facts |", "|---|---|"]
-    lines += ["| %s | %d |" % (verdict, counts.get(verdict, 0)) for verdict in VERDICTS]
+    # A verdict outside VERDICTS gets its own row, so the rows always add up to the fact count
+    lines += ["| %s | %d |" % (cell(verdict), counts[verdict]) for verdict in list(VERDICTS) + sorted(set(counts) - set(VERDICTS))]
     lines.append("| expected ids missing | %d |" % len(missing))
+    if notes.get("malformed"):
+        lines += ["", "## Malformed lines", "", "FACT or PENDING lines whose JSON did not parse (a line cut off by a crash), skipped:", ""]
+        lines += ["- `%s` line %d" % entry for entry in notes["malformed"]]
+    if notes.get("duplicates"):
+        lines += ["", "## Duplicate ids", "", "The first record was kept:", ""]
+        lines += ["- `%s`: `%s` and `%s`" % entry for entry in notes["duplicates"]]
     if missing:
         lines += ["", "## Missing facts", ""] + ["- `%s`" % key for key in missing]
 
@@ -207,7 +233,15 @@ def render(facts, logs, machine, today, missing):
         lines += ["- `%s`: %s (spec: %s)" % (key, cell(facts[key].get("observed", "")), cell(facts[key].get("spec", ""))) for key in chosen] or ["none"]
 
     lines += ["", "## Results"]
-    for prefix, title in SECTIONS:
+    known = {prefix for prefix, _ in SECTIONS}
+    other = sorted(key for key in facts if key.split(".", 1)[0] not in known)
+    for prefix, title in SECTIONS + ((None, "Other"),) * bool(other):
+        if prefix is None:
+            lines += ["", "### " + title, "", "| id | verdict | observed | spec | evidence |", "|---|---|---|---|---|"]
+            lines += ["| `%s` | %s | %s | %s | %s |" % (key, facts[key].get("verdict", ""), cell(facts[key].get("observed", "")),
+                                                        cell(facts[key].get("spec", "")), cell(facts[key].get("evidence", "")))
+                      for key in other]
+            continue
         keys = [key for key in EXPECTED if key.split(".", 1)[0] == prefix and key in facts]
         keys += sorted(key for key in facts if key.split(".", 1)[0] == prefix and key not in EXPECTED)
         lines += ["", "### " + title, "", "| id | verdict | observed | spec | evidence |", "|---|---|---|---|---|"]
@@ -238,11 +272,12 @@ def main(argv=None):
         return 0 if unittest.main(module=__name__, argv=[sys.argv[0]], exit=False).result.wasSuccessful() else 1
     if not args.log or not args.out:
         parser.error("--log and --out are required")
-    facts = read_facts(args.log)
+    notes = {}
+    facts = read_facts(args.log, notes)
     missing = [key for key in EXPECTED if key not in facts]
     machine = [("Date", datetime.date.today().isoformat()), ("OS", platform.platform()), ("CPU", cpu_name()),
                ("Engine", engine_version(args.engine)), ("Plugin commit", plugin_commit())]
-    text = render(facts, args.log, machine, datetime.date.today().isoformat(), missing)
+    text = render(facts, args.log, machine, datetime.date.today().isoformat(), missing, notes)
     temporary = args.out + ".tmp"
     with open(temporary, "w", encoding="utf-8") as stream:
         stream.write(text)
@@ -250,6 +285,10 @@ def main(argv=None):
     unknown = sorted(set(facts) - set(EXPECTED))
     if unknown:
         print("facts not in EXPECTED (kept in the passport): " + ", ".join(unknown))
+    for entry in notes["duplicates"]:
+        print("duplicate id %s: %s and %s (kept the first)" % entry, file=sys.stderr)
+    if notes["malformed"]:
+        print("malformed lines skipped: " + ", ".join("%s:%d" % entry for entry in notes["malformed"]), file=sys.stderr)
     if missing:
         print("missing facts: " + ", ".join(missing), file=sys.stderr)
         return 1
@@ -322,6 +361,43 @@ class SelfTest(unittest.TestCase):
         between = render(flipped, [], [], "2026-10-21", [])
         self.assertIn("drained between `lws_service` calls", between)
         self.assertNotIn("run inside `LWS_CALLBACK_EVENT_WAIT_CANCELLED`", between)
+
+    def test_malformed_line_is_noted_not_fatal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log = self.write_log(directory, [
+                "[...]LogVaRestLwsProbe: Display: PENDING " + json.dumps({"id": "hs.status_in_connection_error.refused"}),
+                '[...]LogVaRestLwsProbe: Display: FACT {"id": "hs.status_in_connection_error.refused", "verd',
+                self.fact("hs.raw_origin"),
+            ])
+            notes = {}
+            facts = read_facts([log], notes)
+            text = render(facts, [log], [], "2026-10-21", [], notes)
+        self.assertEqual(notes["malformed"], [("run.log", 2)])
+        self.assertEqual(facts["hs.status_in_connection_error.refused"]["verdict"], "crashed")
+        self.assertEqual(facts["hs.status_in_connection_error.refused"]["spec"], NO_RETURN)
+        self.assertIn("## Malformed lines", text)
+        self.assertIn("`run.log` line 2", text)
+
+    def test_duplicate_ids_keep_the_first_and_are_listed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first = os.path.join(directory, "a.log")
+            second = os.path.join(directory, "b.log")
+            for path, observed in ((first, "one"), (second, "two")):
+                with open(path, "w", encoding="utf-8") as stream:
+                    stream.write(self.fact("hs.raw_origin", "agrees", observed) + "\n")
+            notes = {}
+            facts = read_facts([first, second], notes)
+            text = render(facts, [first, second], [], "2026-10-21", [], notes)
+        self.assertEqual(facts["hs.raw_origin"]["observed"], "one")
+        self.assertEqual(notes["duplicates"], [("hs.raw_origin", "a.log", "b.log")])
+        self.assertIn("- `hs.raw_origin`: `a.log` and `b.log`", text)
+
+    def test_unknown_verdicts_and_prefixes_are_shown(self):
+        facts = {"hs.x": {"verdict": "weird", "observed": "o"}, "zzz.y": {"verdict": "agrees", "observed": "o2"}}
+        text = render(facts, [], [], "2026-10-21", [])
+        self.assertIn("| weird | 1 |", text)
+        self.assertIn("### Other", text)
+        self.assertIn("| `zzz.y` | agrees | o2 |", text)
 
     def test_every_risky_case_has_its_id(self):
         ids = ["hs.status_in_connection_error." + re.sub(r"(?<!^)(?=[A-Z])", "_", case).lower() for case in RISKY_CASES]
