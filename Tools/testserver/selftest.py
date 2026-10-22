@@ -298,6 +298,20 @@ class ServerTest(unittest.TestCase):
         self.assertTrue(self.call_json("GET", "/envelope/ok")[2]["ok"])
         self.assertEqual(self.call_json("GET", "/envelope/err")[2]["code"], "E42")
 
+    def test_expire_keeps_the_refresh_token(self):
+        _, _, tokens = self.call_json("POST", "/login", b'{"user":"neo","password":"trinity"}')
+        bearer = {"Authorization": "Bearer " + tokens["accessToken"]}
+        self.assertEqual(self.call("GET", "/protected", headers=bearer)[0], 200)
+        self.assertEqual(self.call("POST", "/expire")[0], 200)
+        self.assertEqual(self.call("GET", "/protected", headers=bearer)[0], 401)
+        status, _, renewed = self.call_json("POST", "/refresh", json.dumps({"refreshToken": tokens["refreshToken"]}).encode())
+        self.assertEqual(status, 200)
+        self.assertEqual(self.call("GET", "/protected", headers={"Authorization": "Bearer " + renewed["accessToken"]})[0], 200)
+
+    def test_envelope_gone(self):
+        status, _, body = self.call_json("GET", "/envelope/gone")
+        self.assertEqual((status, body["code"], body["message"]), (404, "E404", "not here"))
+
     def test_upgrade_plugin_contract(self):
         # WebSocket spec 16.3: the handler answers 101, takes over the connection and sets close_connection
         def handler(request):

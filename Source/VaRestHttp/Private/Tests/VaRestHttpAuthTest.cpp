@@ -51,6 +51,8 @@ namespace VaRest::Http::AuthTestPrivate
 	{
 		Rig.Client.CancelAll();
 		VaRest::Http::Testing::PumpUntil([&Rig] { return Rig.Client.GetInFlightCount() == 0; });
+		Rig.Drain();
+		VaRest::Http::Testing::FlushRedactionPipe();
 	}
 
 	/** Records the URL each PerAttempt pass sees: the final one, auth query included (plan decision 19) */

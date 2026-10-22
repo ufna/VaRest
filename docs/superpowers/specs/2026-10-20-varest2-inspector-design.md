@@ -265,8 +265,12 @@ text body under no key, or in opt-in binary.
   snapshot, for example) creates a "(started before capture)" record instead of being dropped (restore-the-bug
   R6).
 * **Late data.** `Started` and `AttemptEnded` say whether an excerpt is coming (`bExcerptPending`). The excerpt
-  arrives later, from a background thread. If it has not come 5 s after the record completed (measured on
-  `IVaRestClock`), the record shows "excerpt timed out". An excerpt for an evicted record is dropped.
+  arrives later: from a background thread (the decode task or the redaction pipe), or, for `SkipReason` `Backlog` and
+  `Discarded`, emitted on the game thread. `bExcerptPending` is a promise only to sinks whose detail has Bodies: an
+  announced excerpt lapses without an event when no sink wants Bodies any more, and a sink without Bodies ignores
+  `bExcerptPending` and any `Excerpt` it receives (M4a Task 21 review M-1; Task 22 review). If an excerpt has not come
+  5 s after the record completed (measured on `IVaRestClock`), the record shows "excerpt timed out"; this stays the
+  backstop. An excerpt for an evicted record is dropped.
 * **Sealing.** A record is sealed when it has completed and nothing is pending. Sealed records are immutable.
   Links that appear later live in a game-thread **back-link table** keyed by id, never in the sealed record:
   * a queue replay finishing minutes later;
@@ -789,7 +793,7 @@ and `Time`, which are taken only when the mask is non-zero.
 | IN-3 | `AttemptEnded` | `RequestId`, `Attempt`, `Status` (0 = none), `Headers`*, `EffectiveUrl`*, `ContentType`, `BytesUp`, `BytesDown`, `Failure` {None, Connection, Timeout, Canceled, Other} + `FailureDetail` (FName), `UploadDoneAt`, `StatusAt`, `TransportDoneAt` (plain doubles written into the exchange by the HTTP-thread delegates, which are bound only under IN-11), `bExcerptPending` | GT, when the outcome re-enters the stage chain | M3 |
 | IN-4 | `Note` | `RequestId`, `Attempt`, one of: `CacheRevalidated`, `CacheStored` {Bytes}, `CacheServedStale`, `RetryScheduled` {Reason (FName), Delay, RetryAfter}, `Queued` {QueueId, Reason}, `QueueExpired` {QueueId} | GT | M4 |
 | IN-5 | `Completed` | `RequestId`, `Outcome` {Success, Error, Queued, Canceled}, `CancelReason` {User, OwnerGone, Shutdown}, `Error` {Kind, HttpStatus, Code, Message*} (no body copy), `ResultType` (FName), `DecodeStartAt`, `DecodeEndAt`, `DecodeWarnings` (≤ 32 {Path, Message*}) + total count, `Envelope` {bApplied, DataPath, FailedPredicate {Path, Expected, Actual*}, Code, Message*} | GT, before any callback is dispatched (including `.OnHttpThread()` callbacks) | M3; envelope M4 |
-| IN-6 | `Excerpt` | `Owner` {RequestId, Attempt, Request or Response} or {SocketId, FrameId}, `FVaRestTraceExcerpt` {Bytes (shared, immutable), Kind {Json, Text, Form, Multipart, Binary, Stream, Skipped}, TotalBytes, bTruncated, bRedacted, StopReason, Sha256Prefix, SkipReason {Backlog, Disabled, Discarded}}. `Discarded`: `AttemptEnded` announced the excerpt for the decode task and that attempt's response never reached it (a custom stage replaced the outcome, or a cancel finished the request first); it is emitted on the GT, once, right before the request's next `AttemptEnded` or its `Completed`, so every announced excerpt resolves | decode task or core redaction pipe; `Discarded` on the GT | M4 |
+| IN-6 | `Excerpt` | `Owner` {RequestId, Attempt, Request or Response} or {SocketId, FrameId}, `FVaRestTraceExcerpt` {Bytes (shared, immutable), Kind {Json, Text, Form, Multipart, Binary, Stream, Skipped}, TotalBytes, bTruncated, bRedacted, StopReason, Sha256Prefix, SkipReason {Backlog, Disabled, Discarded}}. `Discarded`: `AttemptEnded` announced the excerpt for the decode task and that attempt's response never reached it (a custom stage replaced the outcome, or a cancel finished the request first); it is emitted on the GT, once, right before the request's next `AttemptEnded` or its `Completed`, so every announced excerpt resolves while a sink wants Bodies (the promise of `bExcerptPending`: see §2.3 "Late data"; M4a Task 21 review M-1; Task 22 review) | decode task or core redaction pipe; `Discarded` on the GT | M4 |
 | IN-7 | `Scope` | `Opened`/`Closed`, `ScopeId`, `PIEInstance`, `bEditorScope`, weak game instance (game thread use only) | GT | M5; M3 provides scope 0 "Process" |
 | IN-8 | `Client` | `Created`/`Destroyed`, `ClientId`, `ScopeId`, `DisplayName` (asset path, `WithName`, or base URL) | GT | M3; asset names M5 |
 | IN-9 | `Marker` | one of: `Online`, `Offline`, `SessionRefreshed`, `SessionReplaced`, `SessionCleared`, `SessionExpired`, `EnvironmentChanged`; `ScopeId`, `ClientId`, `CauseRequestId`, `Text` | GT | M4; environment M5 |

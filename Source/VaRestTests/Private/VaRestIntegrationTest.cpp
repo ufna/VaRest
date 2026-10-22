@@ -12,9 +12,12 @@
 #include "Misc/ScopeExit.h"
 #include "Misc/ScopeLock.h"
 #include "Tasks/Task.h"
+#include "VaRestAuth.h"
 #include "VaRestClient.h"
+#include "VaRestEnvelope.h"
 #include "VaRestHttpTestTypes.h"
 #include "VaRestHttpTesting.h"
+#include "VaRestRetry.h"
 #include "VaRestSha256.h"
 #include "VaRestTrace.h"
 
@@ -884,6 +887,149 @@ bool FVaRestIntegrationDuplicatedProtocolTest::RunTest(const FString& Parameters
 	}
 	TestEqualSensitive(TEXT("the absolute URL in the query went out as written"), Outcome->Value.GetValue()[TEXT("query")][TEXT("next")][0].AsString(),
 		FString(TEXT("https://example.invalid/after")));
+	return true;
+}
+
+namespace VaRestTestsIntegrationPrivate
+{
+	/** Short real-clock delays, no jitter */
+	FVaRestRetryPolicy QuickRetry(int32 MaxRetries)
+	{
+		FVaRestRetryPolicy Policy = FVaRestRetryPolicy::Exponential(MaxRetries);
+		Policy.Backoff.BaseDelay = 0.1f;
+		Policy.Backoff.Jitter = EVaRestJitter::None;
+		return Policy;
+	}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestIntegrationRetryTest, "VaRest.Integration.Http.Retry",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestIntegrationRetryTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRestTestsIntegrationPrivate;
+	FString BaseUrl;
+	if (!ServerUrl(*this, BaseUrl))
+	{
+		return false;
+	}
+	// The flaky route closes the connection without a response: curl warns, and the engine logs the failed request. A
+	// count of -1 because libcurl may resend a dead keep-alive connection on its own, so the number of lines varies.
+	AddExpectedMessagePlain(TEXT("libcurl"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, -1);
+	AddExpectedMessagePlain(TEXT("completed with reason 'ConnectionError'"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, -1);
+	FVaRestClient Client = MakeClient(BaseUrl);
+	Client.WithRetry(QuickRetry(3));
+	// Own keys per run: the server counts calls per key, so no other test or run shares this state
+	const FString Key = FGuid::NewGuid().ToString(EGuidFormats::Digits);
+	auto After = MakeOutcome<FVaRestJson>();
+	auto Flaky = MakeOutcome<FVaRestJson>();
+	const double Start = FPlatformTime::Seconds();
+	Observe(Client.Get(TEXT("/retry-after/2")).Query(TEXT("key"), Key).Query(TEXT("seconds"), TEXT("1")), After).Send();
+	// Plan decision 15: curl reports a connection closed without a response as EHttpFailureReason::Other; it is retried
+	Observe(Client.Get(TEXT("/flaky")).Query(TEXT("n"), TEXT("2")).Query(TEXT("key"), Key), Flaky).Send();
+	if (!TestTrue(TEXT("both complete"), WaitAll(After, Flaky)))
+	{
+		return false;
+	}
+	if (Succeeded(*this, TEXT("Retry-After"), After))
+	{
+		TestEqual(TEXT("... on the third attempt"), After->Value.GetValue()[TEXT("attempt")].AsInt(), 3);
+		TestTrue(TEXT("... after two Retry-After: 1 waits"), FPlatformTime::Seconds() - Start >= 2.0);
+	}
+	if (Succeeded(*this, TEXT("the flaky route"), Flaky))
+	{
+		// The server counts the calls per key, whoever made them: it saw both refusals and then the answer. VaRest's own count
+		// is lower when libcurl resends on its own: measured here, a run alone reports 2 attempts and the same test inside the
+		// whole integration run reports 1 (a reused keep-alive connection that was closed, resent twice inside curl). So the
+		// retry itself is only proven by this route when the connection is fresh; the Retry-After case above is the
+		// deterministic proof.
+		TestEqual(TEXT("... the server's third call"), Flaky->Value.GetValue()[TEXT("attempt")].AsInt(), 3);
+		TestTrue(TEXT("... VaRest attempts: one to three"), Flaky->Response.Attempts >= 1 && Flaky->Response.Attempts <= 3);
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestIntegrationAuthTest, "VaRest.Integration.Http.AuthRefresh",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestIntegrationAuthTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRestTestsIntegrationPrivate;
+	FString BaseUrl;
+	if (!ServerUrl(*this, BaseUrl))
+	{
+		return false;
+	}
+	// The token store is the server's, shared by every test: this one logs in fresh (which replaces both tokens) before it
+	// expires anything, so it does not depend on what ran before it
+	FVaRestBearerRefreshConfig Config;
+	Config.RefreshPath = TEXT("/refresh");
+	FVaRestClient Client = MakeClient(BaseUrl);
+	Client.WithAuth(FVaRestAuth::BearerRefresh(Config));
+	auto Login = MakeOutcome<FVaRestJson>();
+	Observe(Client.Post(TEXT("/login")).NoAuth().Body(FVaRestJson::Object().Set(TEXT("user"), TEXT("neo")).Set(TEXT("password"), TEXT("trinity"))), Login).Send();
+	if (!TestTrue(TEXT("login completes"), Wait(Login)) || !Succeeded(*this, TEXT("the login"), Login))
+	{
+		return false;
+	}
+	const FVaRestJson Tokens = Login->Value.GetValue();
+	const FString FirstAccess = Tokens[TEXT("accessToken")].AsString();
+	Client.SetSession(FirstAccess, Tokens[TEXT("refreshToken")].AsString(), Tokens[TEXT("expiresIn")].AsDouble());
+	auto Expire = MakeOutcome<FVaRestJson>();
+	Observe(Client.Post(TEXT("/expire")).NoAuth(), Expire).Send();
+	if (!TestTrue(TEXT("expire completes"), Wait(Expire)) || !Succeeded(*this, TEXT("the expiry"), Expire))
+	{
+		return false;
+	}
+	auto Protected = MakeOutcome<FVaRestJson>();
+	Observe(Client.Get(TEXT("/protected")), Protected).Send();
+	if (!TestTrue(TEXT("completes"), Wait(Protected)))
+	{
+		return false;
+	}
+	if (Succeeded(*this, TEXT("401, refresh, replay"), Protected))
+	{
+		TestEqual(TEXT("... in two attempts"), Protected->Response.Attempts, 2);
+		TestFalse(TEXT("... with a new access token in the session"), Client.GetSession().AccessToken == FirstAccess);
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestIntegrationEnvelopeTest, "VaRest.Integration.Http.Envelope",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestIntegrationEnvelopeTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRestTestsIntegrationPrivate;
+	FString BaseUrl;
+	if (!ServerUrl(*this, BaseUrl))
+	{
+		return false;
+	}
+	FVaRestClient Client = MakeClient(BaseUrl);
+	Client.WithEnvelope(FVaRestEnvelope::DataAt(TEXT("data")).SuccessWhen(TEXT("ok"), { TEXT("true") }).ErrorCodeAt(TEXT("code")).ErrorMessageAt(TEXT("message"))
+		.ParseErrorBodies());
+	auto Ok = MakeOutcome<FVaRestJson>();
+	auto Err = MakeOutcome<FVaRestJson>();
+	auto Gone = MakeOutcome<FVaRestJson>();
+	Observe(Client.Get(TEXT("/envelope/ok")), Ok).Send();
+	Observe(Client.Get(TEXT("/envelope/err")), Err).Send();
+	Observe(Client.Get(TEXT("/envelope/gone")), Gone).Send();
+	if (!TestTrue(TEXT("all complete"), WaitAll(Ok, Err, Gone)))
+	{
+		return false;
+	}
+	if (Succeeded(*this, TEXT("the ok envelope"), Ok))
+	{
+		TestEqual(TEXT("... unwrapped"), Ok->Value.GetValue()[TEXT("id")].AsInt(), 7);
+	}
+	TestTrue(TEXT("a failed predicate: Kind Server with the envelope's code and message"), Err->Error.Kind == EVaRestErrorKind::Server
+		&& Err->Error.Code == TEXT("E42") && Err->Error.Message == TEXT("the envelope says no"));
+	TestTrue(TEXT("a 404 envelope: Kind Http, its code read (bParseErrorBodies)"), Gone->Error.Kind == EVaRestErrorKind::Http && Gone->Error.HttpStatus == 404
+		&& Gone->Error.Code == TEXT("E404") && Gone->Error.Message == TEXT("not here"));
 	return true;
 }
 

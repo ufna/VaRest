@@ -47,8 +47,10 @@ not an integer or is out of its range 400 ({"error", "name", ...}); each closes 
   POST /login {"user": "neo", "password": "trinity"} -> {"accessToken", "refreshToken", "expiresIn"}
   POST /refresh {"refreshToken"} -> new tokens; the old refresh token is spent
   ANY  /protected           "Authorization: Bearer <current access token>" -> 200, else 401
+  POST /expire              the current access token stops working; the refresh token stays valid
   ANY  /flaky?n=<k>&key=<k> the first k calls per key close the connection without a response; then 200
   GET  /envelope/ok, /envelope/err            {"ok": true, "data": {...}} / {"ok": false, "code", "message"}
+  GET  /envelope/gone       404 {"ok": false, "code": "E404", "message": "not here"}
   GET  /tls/ca.pem          the test CA, for a client that verifies the TLS listener instead of allowing self-signed
 
 Plug-ins (WebSocket spec 16.3): each module named in PLUGINS that sits next to this file is imported at start
@@ -442,6 +444,13 @@ def route_protected(h, match):
         h.send_json(401, {"error": "unauthorized"}, [("WWW-Authenticate", "Bearer")])
 
 
+def route_expire(h, match):
+    """M4: the current access token stops working; the refresh token stays valid (a 401 a session refresh can fix)"""
+    with LOCK:
+        STATE["tokens"]["access"] = None
+    h.send_json(200, {})
+
+
 def route_flaky(h, match):
     failures = query_int(h, "n", 1, MAX_COUNT)
     seen = count_call("flaky", h.query.get("key", ["default"])[0])
@@ -462,6 +471,10 @@ def route_envelope_ok(h, match):
 
 def route_envelope_err(h, match):
     h.send_json(200, {"ok": False, "code": "E42", "message": "the envelope says no"})
+
+
+def route_envelope_gone(h, match):
+    h.send_json(404, {"ok": False, "code": "E404", "message": "not here"})
 
 
 def route_tls_ca(h, match):
@@ -490,9 +503,11 @@ ROUTES = [
     (("POST",), r"/login", route_login),
     (("POST",), r"/refresh", route_refresh),
     (ANY, r"/protected", route_protected),
+    (("POST",), r"/expire", route_expire),
     (ANY, r"/flaky", route_flaky),
     (("GET",), r"/envelope/ok", route_envelope_ok),
     (("GET",), r"/envelope/err", route_envelope_err),
+    (("GET",), r"/envelope/gone", route_envelope_gone),
     (("GET",), r"/tls/ca.pem", route_tls_ca),
 ]
 ROUTES = [(methods, re.compile(pattern), route) for methods, pattern, route in ROUTES]
