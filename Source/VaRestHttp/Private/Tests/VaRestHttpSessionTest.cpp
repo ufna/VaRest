@@ -470,7 +470,7 @@ bool FVaRestHttpSessionImportRedactsTest::RunTest(const FString& Parameters)
 	FTestRig Rig;
 	Rig.Client.SetSessionHeader(TEXT("X-Old-Header"), TEXT("old-header-value-12"));
 	TestTrue(TEXT("imported"), Rig.Client.ImportSession(
-		TEXT(R"({"version":1,"accessToken":"access-import-1234567","unknown":[1],"headers":[{"name":"X-Imported-Id","value":"imported-value-1234"}]})")));
+		TEXT(R"({"version":1,"accessToken":"access-import-1234567","refreshToken":"","unknown":[1],"headers":[{"name":"X-Imported-Id","value":"imported-value-1234"}]})")));
 	const TSharedPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> State = VaRest::Http::FClientAccess::State(Rig.Client);
 	if (!TestTrue(TEXT("a client state"), State.IsValid()))
 	{
@@ -482,6 +482,69 @@ bool FVaRestHttpSessionImportRedactsTest::RunTest(const FString& Parameters)
 		[](const FString& Key) { return Key.Equals(TEXT("X-Imported-Id"), ESearchCase::IgnoreCase); }));
 	TestTrue(TEXT("the replaced header is gone from the session"), !Rig.Client.GetSession().Headers.Find(TEXT("X-Old-Header")));
 	TestEqualSensitive(TEXT("... its value retired, still known"), Scrub(Rig.Client, TEXT("old-header-value-12")), FString(TEXT("***")));
+	// Retired, not kept forever: only a retired slot is scheduled to expire (review M-2; without the retire the stale value stays)
+	Rig.Clock->Advance(FVaRestSecretSet::PreviousLifetime + 1.0);
+	TestEqualSensitive(TEXT("... and forgotten after its 10 minutes"), Scrub(Rig.Client, TEXT("old-header-value-12")), FString(TEXT("old-header-value-12")));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpSessionImportRefusesTest, "VaRest.Http.Session.ImportRefusesMalformed",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpSessionImportRefusesTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::SessionTestPrivate;
+	// Review I-1, M-1, M-2: a refused import changes nothing -- above all it is never a logout
+	FTestRig Rig;
+	Rig.Client.SetSession(TEXT("access-keep-1234567"), TEXT("refresh-keep-123456"), 60.0);
+	Rig.Client.SetSessionHeader(TEXT("X-Session-ID"), TEXT("session-keep-12345"));
+	const FChanges Seen = Watch(Rig.Client);
+	const FVaRestSessionData Before = Rig.Client.GetSession();
+	struct FCase { const TCHAR* Name; const TCHAR* Json; };
+	const FCase Cases[] = {
+		{ TEXT("a token a number"), TEXT(R"({"version":1,"accessToken":5,"refreshToken":""})") },
+		{ TEXT("a token null"), TEXT(R"({"version":1,"accessToken":null,"refreshToken":""})") },
+		{ TEXT("a token key missing"), TEXT(R"({"version":1,"accessToken":""})") },
+		{ TEXT("only the version"), TEXT(R"({"version":1})") },
+		{ TEXT("expiresAt a number"), TEXT(R"({"version":1,"accessToken":"a","refreshToken":"","expiresAt":5})") },
+		{ TEXT("headers an object"), TEXT(R"({"version":1,"accessToken":"a","refreshToken":"","headers":{}})") },
+		{ TEXT("a header entry not an object"), TEXT(R"({"version":1,"accessToken":"a","refreshToken":"","headers":["x"]})") },
+		{ TEXT("a header value a number"), TEXT(R"({"version":1,"accessToken":"a","refreshToken":"","headers":[{"name":"X-A","value":5}]})") },
+		{ TEXT("a header name twice, any case"), TEXT(R"({"version":1,"accessToken":"a","refreshToken":"","headers":[{"name":"X-A","value":"1"},{"name":"x-a","value":"2"}]})") },
+		{ TEXT("a control character in a header value"), TEXT(R"({"version":1,"accessToken":"a","refreshToken":"","headers":[{"name":"X-A","value":"1\r\nX-Evil: 2"}]})") },
+		{ TEXT("a control character in a header name"), TEXT(R"({"version":1,"accessToken":"a","refreshToken":"","headers":[{"name":"X-A\n","value":"1"}]})") },
+	};
+	for (const FCase& Case : Cases)
+	{
+		TestFalse(FString::Printf(TEXT("refused: %s"), Case.Name), Rig.Client.ImportSession(Case.Json));
+		const FVaRestSessionData After = Rig.Client.GetSession();
+		TestTrue(FString::Printf(TEXT("... tokens, headers and generation unchanged: %s"), Case.Name), After.AccessToken == Before.AccessToken
+			&& After.RefreshToken == Before.RefreshToken && After.ExpiresAt == Before.ExpiresAt && After.Generation == Before.Generation
+			&& After.Headers.Num() == 1 && After.Headers.Get(TEXT("X-Session-ID")) == TEXT("session-keep-12345"));
+		TestEqualSensitive(FString::Printf(TEXT("... the old token still scrubbed: %s"), Case.Name), Scrub(Rig.Client, TEXT("access-keep-1234567")), FString(TEXT("***")));
+	}
+	TestEqual(TEXT("no event for any of them"), Seen->Num(), 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpSessionImportBoundTest, "VaRest.Http.Session.ImportBoundary",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpSessionImportBoundTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::SessionTestPrivate;
+	// Review M-2: exactly MaxSessionJsonChars is accepted, one more is refused unparsed
+	FTestRig Rig;
+	const FString Head(TEXT(R"({"version":1,"accessToken":"edge-token-1234567","refreshToken":""})"));
+	const FString AtLimit = Head + FString::ChrN(VaRest::Http::MaxSessionJsonChars - Head.Len(), TEXT(' '));
+	const FString PastLimit = AtLimit + TEXT(" ");
+	TestEqual(TEXT("built to the limit"), AtLimit.Len(), VaRest::Http::MaxSessionJsonChars);
+	TestFalse(TEXT("one past the limit"), Rig.Client.ImportSession(PastLimit));
+	TestFalse(TEXT("... changed nothing"), Rig.Client.GetSession().HasAccessToken());
+	TestTrue(TEXT("exactly the limit"), Rig.Client.ImportSession(AtLimit));
+	TestTrue(TEXT("... imported"), Rig.Client.GetSession().AccessToken == TEXT("edge-token-1234567"));
 	return true;
 }
 

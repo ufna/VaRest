@@ -689,9 +689,14 @@ public:
 	FString ExportSession() const;
 	/**
 	 * False, and nothing changes, when Json is not an ExportSession() result: not JSON, another version, a control character
-	 * in a token or a header, a bad date, or more than 64 Ki characters (parsed on the game thread, so bounded; spec review
-	 * M-12). An import is Replaced, or Refreshed with bSameIdentity. An import whose tokens are both empty is a logout, as
-	 * SetSession("", "") is: ClearSession(), true. Unknown fields are ignored.
+	 * in a token or a header, a bad date, a field of the wrong JSON type (both tokens must be present strings; expiresAt a
+	 * string if present; headers an array of {name, value} string objects if present), a header name twice, or more than 64 Ki
+	 * characters (parsed on the game thread, so bounded; spec review M-12). Unknown fields are ignored.
+	 * An import whose tokens are both explicitly "" is a logout, as SetSession("", "") is: ClearSession(), true.
+	 * Otherwise it is SetSession (the lifetime unknown) plus the headers, and each part announces by its own rule: the
+	 * tokens are Replaced, or Refreshed with bSameIdentity, and no event at all when they and the expiry are unchanged; the
+	 * headers announce nothing, as SetSessionHeader announces nothing (the headers an import drops are retired). So a game
+	 * importing the same tokens with other headers sees the headers change and no OnSessionChanged.
 	 */
 	bool ImportSession(FStringView Json, bool bSameIdentity = false);
 	/** WebSocket spec 19 item 2: a socket's terminal auth failure. The tokens go; OnSessionExpired fires, once per expiry. */

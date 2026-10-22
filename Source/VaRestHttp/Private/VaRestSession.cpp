@@ -243,14 +243,28 @@ bool VaRest::Http::FClientState::ImportSession(FStringView InJson, bool bSameIde
 	{
 		return false;
 	}
-	const FString Access = Root[TEXT("accessToken")].AsString();
-	const FString Refresh = Root[TEXT("refreshToken")].AsString();
+	// Review I-1: strict types, before any mutation. AsString() gives "" for a missing or wrong-typed value, and two empty
+	// tokens are a logout (controller ruling): only an explicit "" pair may log out, never a malformed file.
+	// ExportSession() always writes both tokens, so a missing one is not an export either.
+	const FVaRestJson AccessNode = Root[TEXT("accessToken")];
+	const FVaRestJson RefreshNode = Root[TEXT("refreshToken")];
+	if (!AccessNode.IsString() || !RefreshNode.IsString())
+	{
+		return false;
+	}
+	const FString Access = AccessNode.AsString();
+	const FString Refresh = RefreshNode.AsString();
 	if (!IsValidHeaderValue(Access) || !IsValidHeaderValue(Refresh))
 	{
 		return false;
 	}
 	double ExpiresIn = 0.0;
-	const FString ExpiresText = Root[TEXT("expiresAt")].AsString();
+	const FVaRestJson ExpiresNode = Root[TEXT("expiresAt")];
+	if (ExpiresNode.IsValid() && !ExpiresNode.IsString())
+	{
+		return false;
+	}
+	const FString ExpiresText = ExpiresNode.AsString();
 	if (!ExpiresText.IsEmpty())
 	{
 		FDateTime When;
@@ -262,11 +276,21 @@ bool VaRest::Http::FClientState::ImportSession(FStringView InJson, bool bSameIde
 		ExpiresIn = FMath::Max((When - FDateTime::UtcNow()).GetTotalSeconds(), 1e-3);
 	}
 	FVaRestHeaders Headers;
-	for (const FVaRestJson& Entry : Root[TEXT("headers")].Elements())
+	const FVaRestJson HeadersNode = Root[TEXT("headers")];
+	if (HeadersNode.IsValid() && !HeadersNode.IsArray())
 	{
+		return false;
+	}
+	for (const FVaRestJson& Entry : HeadersNode.Elements())
+	{
+		if (!Entry.IsObject() || !Entry[TEXT("name")].IsString() || !Entry[TEXT("value")].IsString())
+		{
+			return false;
+		}
 		const FString Name = Entry[TEXT("name")].AsString();
 		const FString Value = Entry[TEXT("value")].AsString();
-		if (!IsValidHeaderName(Name) || !IsValidHeaderValue(Value))
+		// Review M-1: a name twice (any case) is not an ExportSession() result -- refused, not last-wins
+		if (!IsValidHeaderName(Name) || !IsValidHeaderValue(Value) || Headers.Find(Name))
 		{
 			return false;
 		}
