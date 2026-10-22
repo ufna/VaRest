@@ -101,7 +101,7 @@ namespace VaRest::Http::AuthGatePrivate
 	 * so an end that answers it without a dispatch writes the attempt's Basic line (LogEndedInPark) -- before
 	 * PendingAttemptStart is reset, as that is when the attempt started. A replay's park (PendingAttemptStart -1) is a Gap
 	 * outside any attempt and stays silent, as a backoff does; so does an end for a request whose answer is accepted or
-	 * that left the chain (EndWaits), as the limiter's abort (VaRestPipeline.cpp:431-434).
+	 * that left the chain (EndWaits), as the limiter's abort (VaRestPipeline.cpp:432-435).
 	 */
 	void LogParkEnd(const FExchangeState& Ex, const FVaRestAttemptOutcome& Outcome)
 	{

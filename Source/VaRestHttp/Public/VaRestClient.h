@@ -762,9 +762,11 @@ public:
 	// ---- session (spec 4.2; game thread). Live state: every attempt uses the session as it is when it starts (plan decision 6).
 	// A listener of OnSessionChanged or OnSessionExpired may change the session again or drop this client: the events of one
 	// change reach every listener in order, after the change is done (concurrency review C-1, I-2). The game's own changes
-	// end a session refresh in flight (plan decision 3): new tokens resume what waits on it, ClearSession and
-	// NotifySessionExpired fail it. Requests parked behind a session refresh that this ends or resumes continue from a later
-	// game-thread task, never inside this call.
+	// end a session refresh in flight (plan decision 3): a new access token resumes what waits on it, ClearSession and
+	// NotifySessionExpired fail it, and a new refresh token with no access token sends what waits on it behind a refresh
+	// from that token. A write that keeps the access token (a new expiry, an import of the live session) lets the refresh
+	// finish (M4a final review B3, B4). Requests parked behind a session refresh that this ends or resumes continue from a
+	// later game-thread task, never inside this call.
 	/**
 	 * The access token (a login, a token from elsewhere). Replaced, or Refreshed with bSameIdentity (plan decision 5); the
 	 * refresh token stays, the expiry becomes unknown. An empty token is ClearSession(). A token holding a control character
@@ -833,8 +835,8 @@ public:
 	 * forgotten (Inspector D21). ClearSession() and ClearSecretValues() leave an auth's values alone.
 	 * A session refresh in flight is not ended by this (Task 16 review M-5, ruled): the refresh belongs to the session, so it
 	 * runs to its end with the auth that started it and its result applies to the session -- a rejection expires it -- and
-	 * requests parked behind it keep their Send()-time auth. The game's own session calls end it: new tokens from
-	 * SetBearerToken(), SetSession() or ImportSession(), ClearSession(), NotifySessionExpired().
+	 * requests parked behind it keep their Send()-time auth. The game's own session calls end it: a new access token (or a
+	 * new refresh token alone) from SetBearerToken(), SetSession() or ImportSession(), ClearSession(), NotifySessionExpired().
 	 */
 	FVaRestClient& WithAuth(TSharedRef<IVaRestAuth, ESPMode::ThreadSafe> InAuth);
 	/**

@@ -755,7 +755,7 @@ void FVaRestClient::RefreshAuth(TUniqueFunction<void(EVaRestAuthRefreshOutcome O
 		// No refresh to wait for and none can start, said from a later task (decision 3). M4a final review B-I-1 (ruling):
 		// two answers that ruling Q7 keeps apart. A misconfigured auth is the configuration's (Failed, Config). No auth, or one
 		// that cannot refresh this session (no refresh token, a Bearer), is Unavailable: the 401 that asked is the answer, as
-		// the auth gate answers an HTTP 401 it cannot refresh (VaRestAuthGate.cpp:273-278) -- not Config, which would show a
+		// the auth gate answers an HTTP 401 it cannot refresh (VaRestAuthGate.cpp:307-312) -- not Config, which would show a
 		// refused token as a typo (WebSocket spec 3.3).
 		if (VaRest::Http::FClientState::IsShuttingDown())
 		{

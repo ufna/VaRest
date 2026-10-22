@@ -248,7 +248,7 @@ VaRest::Http::Excerpts::FJob VaRest::Http::Excerpts::PrepareResponse(const FExch
 	Job.Attempt = Attempt;
 	Job.TotalBytes = Result.bBodyInFile ? Result.BytesDown : Result.Body.Num();
 	Job.Time = Ex.Config->Clock->Now();
-	// Read as the result is back, like the log stage's (VaRestLogStage.cpp:125): with what AuthApply joined in for this
+	// Read as the result is back, like the log stage's (VaRestLogStage.cpp:130): with what AuthApply joined in for this
 	// attempt (Task 12 review M-7) and a refresh request's token-path keys, which the client's redactor holds (Task 18)
 	Job.Redactor = RedactorFor(Ex);
 	if (Result.bBodyInFile)

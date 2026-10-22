@@ -117,7 +117,7 @@ namespace VaRest::Http::BearerRefreshPrivate
 	}
 
 	/**
-	 * Game thread: the response was decoded as JSON on a task (spec 1, VaRestPipeline.cpp:1101); only the path reads run
+	 * Game thread: the response was decoded as JSON on a task (spec 1, VaRestPipeline.cpp:1103); only the path reads run
 	 * here. RefreshHost: the host the refresh request was sent to (GetUrlHost), empty when unknown.
 	 */
 	FVaRestAuthRefreshResult ReadRefresh(const FVaRestBearerRefreshConfig& Config, const FString& RefreshHost, const TVaRestResult<FVaRestJson>& Result)
@@ -194,7 +194,7 @@ namespace VaRest::Http::BearerRefreshPrivate
 			// Task 18 review I-1 (ruling Q7): never with a configuration that cannot work -- a refresh sent with it would be
 			// Rejected and expire the session. Defence in depth since M4a final review B5: every refresh door asks
 			// CanRefreshNow (VaRestAuth.cpp:256-260), which refuses a config error before it asks this, and the gate sends a
-			// misconfigured auth's request straight on to AuthApply's refusal (VaRestAuthGate.cpp:344-345).
+			// misconfigured auth's request straight on to AuthApply's refusal (VaRestAuthGate.cpp:378-379).
 			return ConfigError.IsEmpty() && Session.HasRefreshToken();
 		}
 

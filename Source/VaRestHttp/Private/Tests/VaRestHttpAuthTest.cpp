@@ -3789,9 +3789,9 @@ bool FVaRestHttpAuthBearerGateTest::RunTest(const FString& Parameters)
 	using namespace VaRest::Http::AuthTestPrivate;
 	// Task 17 review M-7 (a): with two requests parked behind a 401-triggered refresh and both slots held, the real refresh
 	// request passes the gate (parked there, it would wait for its own refresh: the bIsAuthRefresh pass-through,
-	// VaRestAuthGate.cpp:344-345) and the full limiter (ruling M-8, VaRestPipeline.cpp:367-376) to the transport. The parked
+	// VaRestAuthGate.cpp:378-379) and the full limiter (ruling M-8, VaRestPipeline.cpp:368-377) to the transport. The parked
 	// requests then replay with the new token. Task 18 review M-5: a Send() on the game thread enters at once
-	// (VaRestClient.cpp:210-214) and the chain runs synchronously from there (VaRestPipeline.cpp:917), so the refresh
+	// (VaRestClient.cpp:210-214) and the chain runs synchronously from there (VaRestPipeline.cpp:919), so the refresh
 	// request the first park sends would reach the transport before a second 401 could park; a PerAttempt stage below the
 	// gate and the limiter holds it until the second has.
 	FTestRig Rig;
@@ -3830,7 +3830,7 @@ bool FVaRestHttpAuthBearerGateTest::RunTest(const FString& Parameters)
 		Stop();
 		return false;
 	}
-	// The 401 frees its slot before the gate sees it (VaRestPipeline.cpp:406-410), and the release grants /poll/0 at once
+	// The 401 frees its slot before the gate sees it (VaRestPipeline.cpp:407-411), and the release grants /poll/0 at once
 	// (VaRestLimiter.cpp:58-61): /p/0 parks and the refresh starts with /p/1 and /poll/0 holding the two slots
 	Rig.Fake->Complete(FindCall(Rig, TEXT("/p/0")), Json(401));
 	if (!TestTrue(TEXT("the refresh request passed the gate and the full limiter: the stage below them holds it"), PumpUntil([&Hold] { return Hold->IsHolding(); }) && Rig.Drain()))
@@ -3977,7 +3977,7 @@ bool FVaRestHttpAuthRefreshResponseRedactedTest::RunTest(const FString& Paramete
 	using namespace VaRest::Http::Testing;
 	using namespace VaRest::Http::AuthTestPrivate;
 	// The refresh response holds the new tokens before FinishRefresh makes them session secrets (layer 3), and the log
-	// stage and the trace read it first: the log stage takes its redactor as the outcome comes back (VaRestLogStage.cpp:125),
+	// stage and the trace read it first: the log stage takes its redactor as the outcome comes back (VaRestLogStage.cpp:130),
 	// before the refresh ends. Layer 2 -- each token path's last segment as a JSON key -- is what masks them there. Paths
 	// off the defaults: "bearer" and "renewal" match no built-in rule (VaRestJsonRedact.h:20-24), so none hides a missing key.
 	TGuardConsoleVariable<int32> Level(TEXT("VaRest.LogLevel"), -1);
@@ -4078,7 +4078,7 @@ bool FVaRestHttpAuthRefreshIdUniqueTest::RunTest(const FString& Parameters)
 {
 	using namespace VaRest::Http::Testing;
 	using namespace VaRest::Http::AuthTestPrivate;
-	// Spec review I-2: a refresh's id is a process-unique request id (FVaRestTrace::NewRequestId, VaRestSession.cpp:457), so
+	// Spec review I-2: a refresh's id is a process-unique request id (FVaRestTrace::NewRequestId, VaRestSession.cpp:486), so
 	// two clients' refresh requests are two Inspector records. VaRest.Http.Auth.BearerRefresh cannot see a per-client
 	// number: the refresh request carries whatever id its refresh has (VaRestClient.cpp:164), so the two always agree.
 	uint64 Ids[2] = {};
@@ -4110,7 +4110,7 @@ bool FVaRestHttpAuthRefreshCapTest::RunTest(const FString& Parameters)
 	using namespace VaRest::Http::Testing;
 	using namespace VaRest::Http::AuthTestPrivate;
 	// The threading rule: the refresh response is parsed on a task, bounded by the client's MaxJsonBytes (the transport
-	// stops the body at it, VaRestPipeline.cpp:543), so a hostile endpoint's huge answer costs no more than the cap. A
+	// stops the body at it, VaRestPipeline.cpp:544), so a hostile endpoint's huge answer costs no more than the cap. A
 	// success that cannot be read is the endpoint's own "no" (ruling I-7): Rejected, as one that is not JSON.
 	FTestRig Rig;
 	Rig.Client.WithMaxJsonBytes(64).WithAuth(FVaRestAuth::BearerRefresh(FVaRestBearerRefreshConfig()));
@@ -4227,7 +4227,7 @@ bool FVaRestHttpAuthBearerConfigNoRefreshTest::RunTest(const FString& Parameters
 	using namespace VaRest::Http::AuthTestPrivate;
 	// Task 18 review I-1: with an unusable configuration a session that is due -- expired, or with a refresh token only --
 	// sends no refresh, which would be Rejected and expire it. Every refresh door asks CanRefreshNow (M4a final review B5,
-	// VaRestAuth.cpp:256-260), and BearerRefresh's own CanRefresh is false then too (VaRestBearerRefresh.cpp:164-171)
+	// VaRestAuth.cpp:256-260), and BearerRefresh's own CanRefresh is false then too (VaRestBearerRefresh.cpp:192-199)
 	AddExpectedErrorPlain(TEXT("FVaRestAuth::BearerRefresh: AccessTokenPath is empty"), EAutomationExpectedErrorFlags::Contains, 3);
 	FVaRestBearerRefreshConfig Config;
 	Config.AccessTokenPath.Reset();
@@ -4501,8 +4501,8 @@ bool FVaRestHttpAuthReplayBodiesTest::RunTest(const FString& Parameters)
 	// Carry (e), plan decision 24: a session replay is a new transport request carrying the whole body again, a stream body
 	// re-created -- the engine's Apple request takes no new content while in flight and makes its NSInputStream once per
 	// setup (AppleHttp.cpp:627-634, :751-753), so a stream cannot be resent in place. Resolve copies the body when an auth
-	// that can refresh may replay it (VaRestPipeline.cpp:812-814), the transport stage then hands each attempt its own copy
-	// (VaRestPipeline.cpp:522-537), and the gate replays only a body it can send again (VaRestAuthGate.cpp:269). BearerRefresh,
+	// that can refresh may replay it (VaRestPipeline.cpp:814-816), the transport stage then hands each attempt its own copy
+	// (VaRestPipeline.cpp:523-538), and the gate replays only a body it can send again (VaRestAuthGate.cpp:303). BearerRefresh,
 	// so the 401s, the refresh request and the replays all go through the real path; multipart (with a file part), BodyFile
 	// and JSON: the three body shapes.
 	const FString Dir = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir() / TEXT("VaRestAuthTest") / FGuid::NewGuid().ToString(EGuidFormats::Digits));
@@ -4621,7 +4621,7 @@ bool FVaRestHttpAuthBypassTest::RunTest(const FString& Parameters)
 {
 	using namespace VaRest::Http::Testing;
 	using namespace VaRest::Http::AuthTestPrivate;
-	// Ruling M-8: the refresh request skips the limiter's queue (VaRestPipeline.cpp:367-376). One slot, which a long poll
+	// Ruling M-8: the refresh request skips the limiter's queue (VaRestPipeline.cpp:368-377). One slot, which a long poll
 	// (NoAuth, never answered) takes when A's 401 frees it; A's refresh still reaches the transport, and A's replay then waits
 	// its turn. Beside VaRest.Http.Auth.BearerRefreshPassesTheGate (the limiter's books, two parks): the count at the
 	// transport that WithMaxConcurrent's doc promises, with a NoAuth() request holding the one slot.
@@ -4691,7 +4691,7 @@ bool FVaRestHttpAuthDeadlineParkTest::RunTest(const FString& Parameters)
 {
 	using namespace VaRest::Http::Testing;
 	using namespace VaRest::Http::AuthTestPrivate;
-	// Concurrency review M-1: a park is bounded by the request's retry deadline (VaRestAuthGate.cpp:187-190) -- an auth may
+	// Concurrency review M-1: a park is bounded by the request's retry deadline (VaRestAuthGate.cpp:202-205) -- an auth may
 	// hold its refresh open (a re-login screen, ruling I-4) -- and ends as Timeout (Deadline), not retryable, out of the
 	// refresh, which goes on. Beside VaRest.Http.Auth.ParkEndsAtItsDeadline (a replay's park, retry disabled): a park before
 	// the first attempt, under a policy that would retry, which still does not retry a Deadline.
@@ -4741,7 +4741,7 @@ bool FVaRestHttpAuthHeaderChangeTest::RunTest(const FString& Parameters)
 	using namespace VaRest::Http::AuthTestPrivate;
 	// Concurrency review M-6: a session header set while a request is out does not make its 401 a "newer credentials"
 	// replay -- that would spend its one replay on the same expired token; it refreshes instead. SetSessionHeader moves
-	// Generation, not CredentialGeneration (VaRestSession.cpp:240), which is what the gate compares (VaRestAuthGate.cpp:271).
+	// Generation, not CredentialGeneration (VaRestSession.cpp:263), which is what the gate compares (VaRestAuthGate.cpp:305).
 	// The positive half (a token change replays at once) is VaRest.Http.Auth.NewerCredentialsReplayAtOnce.
 	FTestRig Rig;
 	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = HandRig(Rig);
@@ -4795,8 +4795,8 @@ bool FVaRestHttpAuthChangeWhileParkedTest::RunTest(const FString& Parameters)
 	using namespace VaRest::Http::Testing;
 	using namespace VaRest::Http::AuthTestPrivate;
 	// Task 16 review M-5 (ruled), carried here: WithAuth while requests are parked behind a refresh does not end it
-	// (VaRestClient.h:812-815). The refresh belongs to the session; the parked requests keep their Send()-time auth (spec
-	// 3.1), which started it (Park joins with Run->Auth, VaRestAuthGate.cpp:196) and applies their replay (AuthApply reads
+	// (VaRestClient.h:836-839). The refresh belongs to the session; the parked requests keep their Send()-time auth (spec
+	// 3.1), which started it (Park joins with Run->Auth, VaRestAuthGate.cpp:213) and applies their replay (AuthApply reads
 	// the snapshot's, VaRestAuth.cpp:186). Ending it Failed would fail them for nothing. A request sent after the change
 	// carries the new auth's credentials, so the old auth's on the replays is the snapshot's doing, not a change ignored.
 	FTestRig Rig;

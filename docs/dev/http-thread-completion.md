@@ -101,7 +101,7 @@ What M3 knows but could not run, in the order the release pass should check it.
 1. **`SaveTo` replace is not atomic.** `MoveFileW` without flags does not replace an existing file
    (`WindowsPlatformFile.cpp:1216-1219`), so on Windows only `MoveIntoPlace` moves the old file aside to a unique
    `.bak`, moves the new one in, then deletes the `.bak` (`VaRestDecode.cpp:327-354`, `PLATFORM_WINDOWS` at `:408`;
-   documented on `SaveTo`, `VaRestClient.h:347-358`). A crash between the two moves leaves the old file only as that
+   documented on `SaveTo`, `VaRestClient.h:348-359`). A crash between the two moves leaves the old file only as that
    `.bak`. Every other platform makes one `rename()`, which replaces atomically. Check `VaRest.Integration.Http.SaveTo`
    and `VaRest.Http.Decode.SaveTo*` on Win64, onto an existing destination.
 2. curl as on Linux; the checklist below covers the rest.

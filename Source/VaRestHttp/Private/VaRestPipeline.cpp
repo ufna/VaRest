@@ -1055,7 +1055,7 @@ void VaRest::Http::FClientState::OnChainDone(const FVaRestExchangeRef& Exchange,
 	{
 		// M4a final review A6 (review C M-3): the decode task's Basic Warning shows the server's Content-Type; values in log
 		// lines are redacted, then escaped, as the trace (VaRestTracePoints.cpp:230) and the Headers lines
-		// (VaRestLogStage.cpp:167) scrub that header. RedactorFor checks the game thread, so it is taken here.
+		// (VaRestLogStage.cpp:172) scrub that header. RedactorFor checks the game thread, so it is taken here.
 		Finish.LogRedactor = RedactorFor(Ex);
 	}
 	const bool bTask = bDownload
