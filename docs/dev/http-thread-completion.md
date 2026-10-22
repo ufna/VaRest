@@ -89,6 +89,9 @@ What M3 knows but could not run, in the order the release pass should check it.
    (`SetContentFromStream`), which NSURLSession sends as `HTTPBodyStream` (`AppleHttp.cpp:627-634`, `:751-753`); the
    engine implements no `needNewBodyStream`, so a 307/308 or an auth challenge that must resend it fails. Check one
    multipart POST to `/status/307?location=/echo`.
+   VaRest's own re-issues -- a retry (M4a Task 8) and a session replay after a refresh (Task 17) -- are new engine requests
+   with a new stream (M4a plan decision 24), so they are not affected; only a resend NSURLSession attempts by itself is.
+   Check `VaRest.Http.Auth.ReplayBodies` and `VaRest.Http.Retry.BodiesResent` on the device.
 
 **Win64**
 

@@ -73,6 +73,7 @@ Tools/run_tests.sh VaRest.Json        # narrower filter
 Tools/run_tests.sh --no-build VaRest  # skip the build
 python3 -I Tools/testserver/selftest.py   # the HTTP test server's own tests (stdlib only)
 python3 -I Tools/testserver/ws_selftest.py  # the WebSocket test server's own tests (ws.py, the TLS listener; stdlib only)
+VAREST_EXTRA_ARGS=-llm Tools/run_tests.sh --no-build VaRest.Http.Stats.LlmTags  # the LLM attribution test: checks nothing without -llm
 Tools/run_tests.sh Probe.VaRest.Lws         # LWS 3.0 probe (WS W0): minutes long, host-dependent, outside the default ^VaRest filter
 Tools/run_tests.sh --no-build Probe.VaRest.Risky.Lws.StatusInConnectionError.Refused  # may crash: one case per run; also ConnectRefused, DnsFailure, NoUpgrade, TlsVerifyFailure, KilledPending
 # probe passport: every run deletes and rewrites <Host>/Saved/Logs/VaRestTests.log, so copy it after each probe run, then python3 -I Tools/lws_probe_passport.py --log <the copies> --out docs/passport/<date>-lws30-probe.md (full sequence: "Re-run" in docs/passport/2026-10-22-lws30-probe.md)
@@ -111,7 +112,7 @@ VaRest 2 is being built on branch `v2`. The design is
 | Module | Type | Role |
 | --- | --- | --- |
 | `VaRestJson` | Runtime | `FVaRestJson`: own arena DOM, RapidJSON (engine copy) as SAX reader + writer; `FVaRestJsonConvert` struct <-> JSON; `UVaRestJsonLibrary` BP JSON library (CustomThunk wildcards). Has a module class (`VaRestJsonModule.cpp`). Depends on Engine (public) |
-| `VaRestHttp` | Runtime | `FVaRestClient` and its `[[nodiscard]]` builder over a stage pipeline (log/redaction, limiter, transport; M4 adds retry, auth, cache, offline), HTTP-thread completion with zero-copy JSON decode off the game thread, the public redactor, the Inspector trace surface, `UVaRestHttpSettings`; M5 adds the `UVaRestApi` asset, `UVaRestHub` and async BP actions |
+| `VaRestHttp` | Runtime | `FVaRestClient` and its `[[nodiscard]]` builder over a stage pipeline (retry, auth gate, attempt boundary, limiter, auth apply, log/redaction, transport; M4b adds the offline queue and the cache), HTTP-thread completion with zero-copy JSON decode off the game thread, the envelope, the session and its single-flight refresh, the public redactor, the Inspector trace surface with excerpts, `stat VaRest`, `UVaRestHttpSettings`; M5 adds the `UVaRestApi` asset, `UVaRestHub` and async BP actions |
 | `VaRest` | Runtime | the **v1 API at unchanged paths**, reimplemented as deprecated shims (removed in v3) |
 | `VaRestEditor` | UncookedOnly | K2 nodes, v1 and v2 (`K2Node_VaRestMakeJson`); drops the convert cache on Blueprint struct changes |
 | `VaRestEditorTools` | Editor | asset definition, validation, menus |
@@ -137,6 +138,10 @@ fixture is authored from it.
   CoreRedirect in the same commit.
 - **`UVaRestHttpSettings` property names are frozen from M3**: they are persisted config keys
   (`[/Script/VaRestHttp.VaRestHttpSettings]` in a project's ini). `FVaRestError`'s fields, `EVaRestErrorKind`,
-  `EVaRestPriority`, `EVaRestLogLevel` and `EVaRestQueryStyle` freeze with M5, when they become pin names. A rename
-  needs a CoreRedirect (or a config redirect) in the same commit.
+  `EVaRestPriority`, `EVaRestLogLevel` and `EVaRestQueryStyle` freeze with M5, when they become pin names.
+  `EVaRestJitter`, `FVaRestBackoff`, `FVaRestRetryPolicy`, `FVaRestEnvelope`, `EVaRestAuthMode`, `EVaRestApiKeyPlacement`,
+  `EVaRestRefreshStyle`, `EVaRestSessionChange` and `FVaRestBearerRefreshConfig` (M4a), with their `UPROPERTY` field names,
+  freeze with M5 too: M5's asset stores them. `EVaRestAuthRefreshOutcome` (`RefreshAuth`'s answer) is a plain C++ enum, not
+  a Blueprint type: it freezes only if M5 makes it a `UENUM`. A rename needs a CoreRedirect (or a config redirect) in the
+  same commit.
 - **Push back with sources** when a premise is wrong.
