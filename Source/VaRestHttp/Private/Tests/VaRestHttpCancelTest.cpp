@@ -570,4 +570,49 @@ bool FVaRestHttpCancelSaveToTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpCancelVoidPredicateDecodeTest, "VaRest.Http.Cancel.WhileVoidPredicateDecodes",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpCancelVoidPredicateDecodeTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::CancelTestPrivate;
+	// Task 11 review M-3: a void result with an envelope predicate now decodes on a task (plan decision 9), so a Cancel() can
+	// land while that task holds the handler. It must deliver Canceled exactly once -- not the predicate's Kind=Server, and
+	// not both. The stage holds the outcome; forwarding it starts the decode task, whose result can come back only through
+	// a game-thread task, which cannot run before the Cancel() below (as Cancel.ShutdownWhileDecoding).
+	FTestRig Rig;
+	TSharedRef<FOutcomeHoldingStage, ESPMode::ThreadSafe> Stage = MakeShared<FOutcomeHoldingStage, ESPMode::ThreadSafe>();
+	Rig.Client.Use(Stage, EVaRestStageSlot::Outer);
+	Rig.Client.WithEnvelope(FVaRestEnvelope().SuccessWhen(TEXT("ok"), { TEXT("true") }));
+	Rig.Fake->Enqueue(Json(200, R"({"ok":false})"));
+	auto Outcome = MakeOutcome<void>();
+	const FVaRestRequestHandle Handle = Observe(Rig.Client.Post<void>(TEXT("/judged")), Outcome).Send();
+	if (!TestTrue(TEXT("the stage holds the outcome"), PumpUntil([&Stage] { return Stage->bHolding; })))
+	{
+		Rig.Client.CancelAll();
+		PumpUntil([&Rig] { return Rig.Client.GetInFlightCount() == 0; });
+		return false;
+	}
+	const int32 LaunchedBefore = Counters().DecodeTasksLaunched.load();
+	{
+		TUniqueFunction<void()> Run = MoveTemp(Stage->Forward);
+		Run();
+	}
+	TestEqual(TEXT("a void result with a predicate: a decode task started"), Counters().DecodeTasksLaunched.load() - LaunchedBefore, 1);
+	bool bHeld = false;
+	VaRest::Http::FClientAccess::State(Rig.Client)->ForEachInFlight([&bHeld](VaRest::Http::FExchangeState& Ex)
+	{
+		bHeld = Ex.Phase == EVaRestExchangePhase::Decoding && !Ex.Handler.IsValid();
+	});
+	TestTrue(TEXT("... and holds the handler"), bHeld);
+	Handle.Cancel();
+	TestTrue(TEXT("completes"), Rig.Wait(Outcome));
+	TestTrue(TEXT("drained"), Rig.Drain());
+	TestTrue(TEXT("Canceled, exactly once: not the predicate's Kind=Server"), Outcome->ErrorCalls.load() == 1 && Outcome->CompleteCalls.load() == 1
+		&& Outcome->SuccessCalls.load() == 0 && Outcome->Error.Kind == EVaRestErrorKind::Canceled);
+	TestEqual(TEXT("... and nothing is left in flight"), Rig.Client.GetInFlightCount(), 0);
+	return true;
+}
+
 #endif

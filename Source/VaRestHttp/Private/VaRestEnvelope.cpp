@@ -125,36 +125,41 @@ void FVaRestEnvelope::ReadErrorFields(const FVaRestJson& Body, FString& OutCode,
 	OutMessage = Text.IsSet() ? MoveTemp(Text.GetValue()) : Shown(ValueText(Found));
 }
 
-FVaRestEnvelopeResult FVaRestEnvelope::Evaluate(const FVaRestJson& Body) const
+FVaRestEnvelopeResult FVaRestEnvelope::EvaluatePredicate(const FVaRestJson& Body) const
 {
 	using namespace VaRest::Http::EnvelopePrivate;
 	FVaRestEnvelopeResult Out;
-	if (HasPredicate())
+	// Never looked up here: a void result keeps no data (plan decision 9), and Evaluate fills both on a success
+	Out.bDataFound = false;
+	if (!HasPredicate())
 	{
-		const FVaRestJson Found = Body.Path(SuccessPath);
-		// Ruling Q3: compared as MatchText renders it, case-sensitive; null, objects and arrays never match
-		const TOptional<FString> Text = MatchText(Found);
-		const bool bPass = Text.IsSet() && SuccessValues.ContainsByPredicate([&Text](const FString& Value) { return Value.Equals(Text.GetValue(), ESearchCase::CaseSensitive); });
-		if (!bPass)
-		{
-			Out.bSuccess = false;
-			Out.bDataFound = false;
-			Out.FailedPath = SuccessPath;
-			// An empty allow-list allows nothing (Task 10 review minor 4): it says so, not "..., not )"
-			Out.Expected = SuccessValues.Num() > 0 ? FString::Join(SuccessValues, TEXT("|")) : FString(TEXT("(none)"));
-			// The body's own text for display (IN-5): what the server sent, not what was compared
-			Out.Actual = Found.IsValid() ? Shown(ValueText(Found)) : FString(TEXT("(missing)"));
-			ReadErrorFields(Body, Out.Code, Out.Message);
-			return Out;
-		}
-	}
-	if (DataPath.IsEmpty())
-	{
-		Out.Data = Body;
-		Out.bDataFound = Body.IsValid();
 		return Out;
 	}
-	Out.Data = Body.Path(DataPath);
+	const FVaRestJson Found = Body.Path(SuccessPath);
+	// Ruling Q3: compared as MatchText renders it, case-sensitive; null, objects and arrays never match
+	const TOptional<FString> Text = MatchText(Found);
+	const bool bPass = Text.IsSet() && SuccessValues.ContainsByPredicate([&Text](const FString& Value) { return Value.Equals(Text.GetValue(), ESearchCase::CaseSensitive); });
+	if (!bPass)
+	{
+		Out.bSuccess = false;
+		Out.FailedPath = SuccessPath;
+		// An empty allow-list allows nothing (Task 10 review minor 4): it says so, not "..., not )"
+		Out.Expected = SuccessValues.Num() > 0 ? FString::Join(SuccessValues, TEXT("|")) : FString(TEXT("(none)"));
+		// The body's own text for display (IN-5): what the server sent, not what was compared
+		Out.Actual = Found.IsValid() ? Shown(ValueText(Found)) : FString(TEXT("(missing)"));
+		ReadErrorFields(Body, Out.Code, Out.Message);
+	}
+	return Out;
+}
+
+FVaRestEnvelopeResult FVaRestEnvelope::Evaluate(const FVaRestJson& Body) const
+{
+	FVaRestEnvelopeResult Out = EvaluatePredicate(Body);
+	if (!Out.bSuccess)
+	{
+		return Out;
+	}
+	Out.Data = DataPath.IsEmpty() ? Body : Body.Path(DataPath);
 	Out.bDataFound = Out.Data.IsValid();
 	return Out;
 }

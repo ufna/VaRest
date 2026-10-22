@@ -267,8 +267,10 @@ struct FVaRestTraceDecodeWarning
 };
 
 /**
- * IN-5: what the response envelope did (spec 3.4). bApplied: one judged a 2xx body, or read a 4xx/5xx body's fields
- * (bParseErrorBodies). The predicate's fields are set only when it failed; Actual, Code and Message are value-scrubbed.
+ * IN-5: what the response envelope did (spec 3.4). bApplied: its success half judged a 2xx body; DataPath is set when that
+ * included the data unwrap (FVaRestJson and struct results, not void ones: plan decision 9), and the predicate's fields
+ * only when it failed. Code and Message without bApplied: bParseErrorBodies read them from a 4xx/5xx body, which it does
+ * for every result type. Actual, Code and Message are value-scrubbed.
  */
 struct FVaRestTraceEnvelope
 {

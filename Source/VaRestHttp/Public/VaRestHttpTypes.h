@@ -170,7 +170,10 @@ struct VARESTHTTP_API FVaRestError
 	UPROPERTY(BlueprintReadOnly, Category = "VaRest|Http")
 	FString Message;
 
-	/** The parsed error body when it is JSON, else an invalid handle */
+	/**
+	 * The parsed error body when it is JSON, else an invalid handle. For the envelope's errors (spec 3.4) it is the whole 2xx
+	 * body: the one whose predicate failed (Kind=Server), or the one a struct's data path was missing from (Kind=Decode).
+	 */
 	UPROPERTY(BlueprintReadOnly, Category = "VaRest|Http")
 	FVaRestJson Body;
 
@@ -252,8 +255,11 @@ struct FVaRestResponse
 	 * Raw bytes (spec 3.2's release rule, decision 26): kept for raw results, with KeepBody(), and on an error that left
 	 * them intact (an HTTP error, a non-JSON Content-Type, a body over MaxJsonBytes refused before parsing). A JSON body
 	 * is parsed in place (zero copy), so after a syntax error or a struct mismatch the bytes are gone: the error keeps
-	 * the first 4 KiB as RawBody (copied before the parse) and, for a mismatch, the parsed DOM as Body. KeepBody() keeps
-	 * all of it (a copy before the parse). Released after a successful decode.
+	 * the first 4 KiB as RawBody (copied before the parse) and, for a mismatch, the parsed DOM as Body. The envelope's
+	 * errors follow the same rule: a void result's Kind=Server keeps them (its predicate parsed a copy), while an
+	 * FVaRestJson or struct result's Kind=Server, and a struct's missing data path (Kind=Decode), do not (the parse was in
+	 * place) and keep the parsed body as Error.Body. KeepBody() keeps all of it (a copy before the parse). Released after a
+	 * successful decode.
 	 */
 	TArray<uint8> Body;
 	/** SaveTo(): where the body was written */

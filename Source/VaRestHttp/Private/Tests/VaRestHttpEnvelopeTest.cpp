@@ -5,6 +5,7 @@
 #include "HAL/IConsoleManager.h"
 #include "Misc/AutomationTest.h"
 #include "VaRestClient.h"
+#include "VaRestDecode.h"
 #include "VaRestEnvelope.h"
 #include "VaRestHttpTesting.h"
 #include "VaRestResultHandler.h"
@@ -26,6 +27,42 @@ namespace VaRest::Http::EnvelopeTestPrivate
 	FVaRestFakeResponse Json(int32 Status, const char* Text)
 	{
 		return FVaRestFakeResponse::Json(Status, FUtf8StringView(reinterpret_cast<const UTF8CHAR*>(Text)));
+	}
+
+	/** IN-5: the envelope Completed carried for one request; unset when there is no Completed */
+	TOptional<FVaRestTraceEnvelope> EnvelopeOf(const VaRest::Http::Testing::FTraceRecorder& Recorder, uint64 RequestId)
+	{
+		for (const FVaRestTraceEvent& Event : Recorder.For(RequestId))
+		{
+			if (Event.Kind == EVaRestTraceKind::Completed)
+			{
+				return Event.Payload.Get<FVaRestTraceCompleted>().Envelope;
+			}
+		}
+		return TOptional<FVaRestTraceEnvelope>();
+	}
+
+	/** A finish as the decode task gets it: a 2xx (or error) JSON body under Envelope */
+	VaRest::Http::FFinish MakeJsonFinish(const FVaRestEnvelope& InEnvelope, int32 Status, const UTF8CHAR* Text, bool bTraced)
+	{
+		VaRest::Http::FFinish Finish;
+		Finish.Envelope = MakeShared<const FVaRestEnvelope, ESPMode::ThreadSafe>(InEnvelope);
+		Finish.Response.Status = Status;
+		Finish.Response.ContentType = TEXT("application/json");
+		Finish.bTimeDecode = bTraced;
+		const FUtf8StringView Body(Text);
+		Finish.Body.Append(reinterpret_cast<const uint8*>(Body.GetData()), Body.Len());
+		return Finish;
+	}
+
+	/** Sends Request and pumps until it completes (Outcome->IsDone() says whether it did): its handle */
+	template <typename T>
+	FVaRestRequestHandle SendAndWait(const VaRest::Http::Testing::FTestRig& Rig, TVaRestRequest<T>&& Request,
+		const TSharedRef<VaRest::Http::Testing::TTestOutcome<T>, ESPMode::ThreadSafe>& Outcome)
+	{
+		const FVaRestRequestHandle Sent = VaRest::Http::Testing::Observe(MoveTemp(Request), Outcome).Send();
+		Rig.Wait(Outcome);
+		return Sent;
 	}
 
 	/** Cancels what the rig has in flight and pumps until it is done: the drain of a test that stops early (spec review M-5) */
@@ -184,6 +221,7 @@ bool FVaRestHttpEnvelopePipelineTest::RunTest(const FString& Parameters)
 	auto VoidOk = MakeOutcome<void>();
 	auto VoidText = MakeOutcome<void>();
 	auto Text = MakeOutcome<FString>();
+	auto RawGone = MakeOutcome<FString>();
 	auto Empty = MakeOutcome<FVaRestJson>();
 	const FVaRestRequestHandle NoHandle = Observe(Rig.Client.Get(TEXT("/no")), No).Send();
 	Observe(Rig.Client.Get(TEXT("/ok")), Ok).Send();
@@ -191,13 +229,14 @@ bool FVaRestHttpEnvelopePipelineTest::RunTest(const FString& Parameters)
 	Observe(Rig.Client.Get(TEXT("/raw")).NoEnvelope(), Raw).Send();
 	Observe(Rig.Client.Get(TEXT("/narrow")).Envelope(FVaRestEnvelope::DataAt(TEXT("data.id"))), Narrow).Send();
 	const int32 EnvelopeParsesBefore = Counters().EnvelopeParsesOnGameThread.load();
-	Observe(Rig.Client.Post<void>(TEXT("/void-no")), VoidNo).Send();
-	Observe(Rig.Client.Post<void>(TEXT("/void-ok")), VoidOk).Send();
+	const FVaRestRequestHandle VoidNoHandle = Observe(Rig.Client.Post<void>(TEXT("/void-no")), VoidNo).Send();
+	const FVaRestRequestHandle VoidOkHandle = Observe(Rig.Client.Post<void>(TEXT("/void-ok")), VoidOk).Send();
 	Observe(Rig.Client.Post<void>(TEXT("/text")), VoidText).Send();
 	Observe(Rig.Client.Get<FString>(TEXT("/ok")), Text).Send();
+	const FVaRestRequestHandle RawGoneHandle = Observe(Rig.Client.Get<FString>(TEXT("/gone")), RawGone).Send();
 	Observe(Rig.Client.Get(TEXT("/empty")), Empty).Send();
 	if (!TestTrue(TEXT("all complete"), PumpUntil([&] { return Ok->IsDone() && No->IsDone() && Gone->IsDone() && Raw->IsDone() && Narrow->IsDone() && VoidNo->IsDone()
-		&& VoidOk->IsDone() && VoidText->IsDone() && Text->IsDone() && Empty->IsDone(); })))
+		&& VoidOk->IsDone() && VoidText->IsDone() && Text->IsDone() && RawGone->IsDone() && Empty->IsDone(); })))
 	{
 		Abandon(Rig);
 		return false;
@@ -215,11 +254,17 @@ bool FVaRestHttpEnvelopePipelineTest::RunTest(const FString& Parameters)
 	// Spec 3.2: raw bytes "are kept on error for diagnostics"; void parsed a copy, so they are all still there
 	TestTrue(TEXT("... its raw bytes kept, as on every error"), VoidNo->Response.Body.Num() > 0 && VoidNo->Error.Body.IsValid());
 	TestTrue(TEXT("... a success is a success"), VoidOk->SuccessCalls.load() == 1 && VoidOk->Response.Body.Num() == 0);
-	TestTrue(TEXT("... a body that is not JSON is nothing to judge"), VoidText->SuccessCalls.load() == 1);
+	TestTrue(TEXT("... a body that is not JSON still succeeds (its Basic Warning: VoidPredicateUnchecked)"), VoidText->SuccessCalls.load() == 1);
 	// Concurrency review I-6: counted where the parse happens, so a game-thread parse cannot hide behind RunDecode's counter
 	TestEqual(TEXT("... and its parse ran off the game thread"), Counters().EnvelopeParsesOnGameThread.load() - EnvelopeParsesBefore, 0);
 	TestTrue(TEXT("an FString result is the body as it came"), Text->Value.IsSet() && Text->Value->Contains(TEXT("\"ok\":true")));
 	TestTrue(TEXT("204: a success with no value to unwrap"), Empty->SuccessCalls.load() == 1 && Empty->Value.IsSet() && !Empty->Value->IsValid());
+	// Ruling M-1 (a): bParseErrorBodies is the envelope's error half, for every result type; a raw result's body stays as it came
+	TestTrue(TEXT("bParseErrorBodies: an FString result's 404 gets the server's code and message"), RawGone->Error.Kind == EVaRestErrorKind::Http
+		&& RawGone->Error.HttpStatus == 404 && RawGone->Error.Code == TEXT("NF") && RawGone->Error.Message == TEXT("gone"));
+	TestEqualSensitive(TEXT("... its raw bytes left as they came"),
+		FString::ConstructFromPtrSize(reinterpret_cast<const UTF8CHAR*>(RawGone->Response.Body.GetData()), RawGone->Response.Body.Num()),
+		FString(TEXT(R"({"error":{"code":"NF","message":"gone"}})")));
 
 	// IN-5: Completed carries the envelope's outcome
 	const TArray<FVaRestTraceEvent> Events = Scoped.Recorder->For(NoHandle.GetId());
@@ -232,6 +277,17 @@ bool FVaRestHttpEnvelopePipelineTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("IN-5 Envelope: applied, data path, the failed predicate, code and message"), Seen.bApplied && Seen.DataPath == TEXT("data")
 		&& Seen.PredicatePath == TEXT("ok") && Seen.Expected == TEXT("true") && Seen.Actual == TEXT("false") && Seen.Code == TEXT("E42")
 		&& Seen.Message == TEXT("the envelope says no"));
+	// Ruling M-1 (b): a void result runs the predicate only, so its trace names no data path
+	const TOptional<FVaRestTraceEnvelope> VoidPassed = EnvelopeOf(*Scoped.Recorder, VoidOkHandle.GetId());
+	TestTrue(TEXT("IN-5, void: the predicate judged, no data path"), VoidPassed.IsSet() && VoidPassed->bApplied && VoidPassed->DataPath.IsEmpty()
+		&& VoidPassed->PredicatePath.IsEmpty());
+	const TOptional<FVaRestTraceEnvelope> VoidFailed = EnvelopeOf(*Scoped.Recorder, VoidNoHandle.GetId());
+	TestTrue(TEXT("... and when it fails, the predicate and no data path"), VoidFailed.IsSet() && VoidFailed->bApplied && VoidFailed->DataPath.IsEmpty()
+		&& VoidFailed->PredicatePath == TEXT("ok") && VoidFailed->Code == TEXT("E42"));
+	// Ruling M-1 (a): the error half says only that it read the fields; the success half judged nothing
+	const TOptional<FVaRestTraceEnvelope> ErrorRead = EnvelopeOf(*Scoped.Recorder, RawGoneHandle.GetId());
+	TestTrue(TEXT("IN-5, an FString 404: the error fields read, nothing applied"), ErrorRead.IsSet() && !ErrorRead->bApplied && ErrorRead->DataPath.IsEmpty()
+		&& ErrorRead->PredicatePath.IsEmpty() && ErrorRead->Code == TEXT("NF") && ErrorRead->Message == TEXT("gone"));
 	return true;
 }
 
@@ -268,8 +324,9 @@ bool FVaRestHttpEnvelopeUncheckedTest::RunTest(const FString& Parameters)
 {
 	using namespace VaRest::Http::Testing;
 	using namespace VaRest::Http::EnvelopeTestPrivate;
-	// Spec review M-13: a void result whose JSON body cannot be parsed (broken, or over MaxJsonBytes) still succeeds --
-	// void decodes nothing -- but says at Basic that its envelope's predicate never ran
+	// Spec review M-13, plan decision 9: a void result whose body is there but cannot be judged (broken JSON, over
+	// MaxJsonBytes, not JSON at all) still succeeds -- void decodes nothing -- but says at Basic that its envelope's predicate
+	// never ran. An empty body (a 204, a 0-byte 200) has nothing to judge and says nothing (ruling M-2).
 	TGuardConsoleVariable<int32> Level(TEXT("VaRest.LogLevel"), -1);
 	FTestRig Rig;
 	Rig.Client.WithEnvelope(OkData()).WithLogLevel(EVaRestLogLevel::Basic).WithMaxJsonBytes(64);
@@ -279,23 +336,58 @@ bool FVaRestHttpEnvelopeUncheckedTest::RunTest(const FString& Parameters)
 		{
 			return Json(200, R"({"ok":)");
 		}
+		if (Request.Url.EndsWith(TEXT("/html")))
+		{
+			return FVaRestFakeResponse::Text(200, TEXT("<html>a captive portal</html>"), TEXT("text/html"));
+		}
+		if (Request.Url.EndsWith(TEXT("/no-content")))
+		{
+			FVaRestFakeResponse Status204;
+			Status204.Status = 204;
+			return Status204;
+		}
+		if (Request.Url.EndsWith(TEXT("/zero")))
+		{
+			return Json(200, "");
+		}
 		return Json(200, R"({"ok":false,"data":"0123456789012345678901234567890123456789012345678901234567890123456789"})");
 	});
 	FLogCapture Capture;
-	AddExpectedMessagePlain(TEXT("VaRest: the envelope's predicate could not be checked"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 2);
+	// One pattern per line (an expected message matches the first pattern that fits, AutomationTest.cpp:2697-2710)
+	AddExpectedMessagePlain(TEXT("VaRest: the envelope's predicate could not be checked (the body is not valid JSON:"), ELogVerbosity::Warning,
+		EAutomationExpectedMessageFlags::Contains, 1);
+	AddExpectedMessagePlain(TEXT("bytes, over the MaxJsonBytes limit of 64)"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
+	AddExpectedMessagePlain(TEXT("VaRest: the envelope's predicate could not be checked (the body is not JSON (Content-Type \"text/html\"))"),
+		ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
 	auto Broken = MakeOutcome<void>();
 	auto Large = MakeOutcome<void>();
-	const FVaRestRequestHandle BrokenHandle = Observe(Rig.Client.Post<void>(TEXT("/broken")), Broken).Send();
-	const FVaRestRequestHandle LargeHandle = Observe(Rig.Client.Post<void>(TEXT("/large")), Large).Send();
-	if (!TestTrue(TEXT("both complete"), PumpUntil([Broken, Large] { return Broken->IsDone() && Large->IsDone(); })))
+	auto Html = MakeOutcome<void>();
+	auto NoContent = MakeOutcome<void>();
+	auto Zero = MakeOutcome<void>();
+	// One at a time: each Warning is written on its decode task, and UE counts an expected message with a plain += under a
+	// read lock (AutomationTest.h:700, AutomationTest.cpp:2696), so two lines written at once from two workers can lose a count
+	const FVaRestRequestHandle BrokenHandle = SendAndWait(Rig, Rig.Client.Post<void>(TEXT("/broken")), Broken);
+	const FVaRestRequestHandle LargeHandle = SendAndWait(Rig, Rig.Client.Post<void>(TEXT("/large")), Large);
+	const FVaRestRequestHandle HtmlHandle = SendAndWait(Rig, Rig.Client.Post<void>(TEXT("/html")), Html);
+	const FVaRestRequestHandle NoContentHandle = SendAndWait(Rig, Rig.Client.Delete<void>(TEXT("/no-content")), NoContent);
+	const FVaRestRequestHandle ZeroHandle = SendAndWait(Rig, Rig.Client.Post<void>(TEXT("/zero")), Zero);
+	if (!TestTrue(TEXT("all complete"), Broken->IsDone() && Large->IsDone() && Html->IsDone() && NoContent->IsDone() && Zero->IsDone()))
 	{
 		Abandon(Rig);
 		return false;
 	}
-	TestTrue(TEXT("void decodes nothing: both succeed (the large one's ok:false was never read)"), Broken->SuccessCalls.load() == 1 && Large->SuccessCalls.load() == 1);
+	TestTrue(TEXT("void decodes nothing: all succeed (the large one's ok:false was never read)"), Broken->SuccessCalls.load() == 1
+		&& Large->SuccessCalls.load() == 1 && Html->SuccessCalls.load() == 1);
+	const TCHAR* const Unchecked = TEXT("VaRest: the envelope's predicate could not be checked");
 	TestTrue(TEXT("... and each says its predicate never ran, with its id (IN-16)"),
-		Capture.Contains(FString::Printf(TEXT("#%llu VaRest: the envelope's predicate could not be checked"), BrokenHandle.GetId()))
-		&& Capture.Contains(FString::Printf(TEXT("#%llu VaRest: the envelope's predicate could not be checked"), LargeHandle.GetId())));
+		Capture.Contains(FString::Printf(TEXT("#%llu %s (the body is not valid JSON:"), BrokenHandle.GetId(), Unchecked))
+		&& Capture.Contains(FString::Printf(TEXT("#%llu %s (the body is "), LargeHandle.GetId(), Unchecked))
+		&& Capture.Contains(FString::Printf(TEXT("#%llu %s (the body is not JSON (Content-Type \"text/html\"))"), HtmlHandle.GetId(), Unchecked)));
+	// Ruling M-2: finished first (above), then nothing said -- a client-wide envelope must not warn on every DELETE
+	TestTrue(TEXT("an empty body (204, a 0-byte 200): a success"), NoContent->SuccessCalls.load() == 1 && Zero->SuccessCalls.load() == 1);
+	TestFalse(TEXT("... with nothing to judge and nothing said"),
+		Capture.Contains(FString::Printf(TEXT("#%llu %s"), NoContentHandle.GetId(), Unchecked)) || Capture.Contains(FString::Printf(TEXT("#%llu %s"), ZeroHandle.GetId(), Unchecked)));
+	TestEqual(TEXT("... so three lines in all"), Capture.Count(Unchecked), 3);
 	return true;
 }
 
@@ -309,20 +401,128 @@ bool FVaRestHttpEnvelopeUntracedTest::RunTest(const FString& Parameters)
 	// only when the mask was set at the finish (bTimeDecode); the request's own result is the same either way
 	for (const bool bTraced : { false, true })
 	{
-		VaRest::Http::FFinish Finish;
-		Finish.Envelope = MakeShared<const FVaRestEnvelope, ESPMode::ThreadSafe>(OkData());
-		Finish.Response.Status = 200;
-		Finish.Response.ContentType = TEXT("application/json");
-		Finish.bTimeDecode = bTraced;
-		const FUtf8StringView Body(UTF8TEXT(R"({"ok":false,"code":"E1","message":"no"})"));
-		Finish.Body.Append(reinterpret_cast<const uint8*>(Body.GetData()), Body.Len());
+		const FString Label = bTraced ? TEXT("with a sink") : TEXT("without one");
+		VaRest::Http::FFinish Finish = MakeJsonFinish(OkData(), 200, UTF8TEXT(R"({"ok":false,"code":"E1","message":"no"})"), bTraced);
 		FVaRestJson Value;
 		const bool bDecoded = VaRest::Http::DecodeJson(Finish, Value);
-		const FString Label = bTraced ? TEXT("with a sink") : TEXT("without one");
 		TestTrue(Label + TEXT(": a failed predicate is Kind Server with its code"), !bDecoded && Finish.Error.Kind == EVaRestErrorKind::Server && Finish.Error.Code == TEXT("E1"));
 		TestEqual(Label + TEXT(": the trace's copy is built only with a sink"), Finish.EnvelopeTrace.bApplied, bTraced);
 		TestEqual(Label + TEXT(": ... its strings too"), Finish.EnvelopeTrace.Code.IsEmpty(), !bTraced);
+
+		// The error half (bParseErrorBodies) has the same gate (Task 11 review M-3)
+		VaRest::Http::FFinish Refused = MakeJsonFinish(OkData().ParseErrorBodies(), 404, UTF8TEXT(R"({"code":"E9","message":"gone"})"), bTraced);
+		Refused.Error.Kind = EVaRestErrorKind::Http;
+		Refused.Error.HttpStatus = 404;
+		VaRest::Http::ProcessErrorBody(Refused);
+		TestTrue(Label + TEXT(": a 404's code and message read either way"), Refused.Error.Code == TEXT("E9") && Refused.Error.Message == TEXT("gone"));
+		TestEqual(Label + TEXT(": ... the trace's copy of them only with a sink"), Refused.EnvelopeTrace.Code.IsEmpty() && Refused.EnvelopeTrace.Message.IsEmpty(), !bTraced);
+		TestFalse(Label + TEXT(": ... and never as an applied envelope"), Refused.EnvelopeTrace.bApplied);
 	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpEnvelopeVoidPredicateOnlyTest, "VaRest.Http.Envelope.VoidPredicateOnly",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpEnvelopeVoidPredicateOnlyTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::EnvelopeTestPrivate;
+	// Ruling M-1 (b), plan decision 9: "void: the success predicate only" -- no data unwrap, no EnvelopeBody kept until
+	// delivery (the parsed DOM goes on the task), no data path in the trace
+	VaRest::Http::FFinish NoData = MakeJsonFinish(OkData(), 200, UTF8TEXT(R"({"ok":true})"), true);
+	VaRest::Http::CheckEnvelopePredicate(NoData);
+	TestFalse(TEXT("a passing predicate: no error"), NoData.Error.IsError());
+	TestTrue(TEXT("... a missing data path is no concern of void's: nothing flagged, no body kept"), !NoData.bEnvelopeDataMissing && !NoData.EnvelopeBody.IsValid());
+	TestTrue(TEXT("... its trace: the predicate judged, no data path"), NoData.EnvelopeTrace.bApplied && NoData.EnvelopeTrace.DataPath.IsEmpty());
+	TestEqual(TEXT("... the raw bytes untouched (a copy was parsed)"), NoData.Body.Num(), 11);
+
+	VaRest::Http::FFinish WithData = MakeJsonFinish(OkData(), 200, UTF8TEXT(R"({"ok":true,"data":{"id":1}})"), true);
+	VaRest::Http::CheckEnvelopePredicate(WithData);
+	TestTrue(TEXT("data present: still nothing kept"), !WithData.Error.IsError() && !WithData.bEnvelopeDataMissing && !WithData.EnvelopeBody.IsValid()
+		&& WithData.EnvelopeTrace.DataPath.IsEmpty());
+
+	VaRest::Http::FFinish Failed = MakeJsonFinish(OkData(), 200, UTF8TEXT(R"({"ok":false,"code":"E7"})"), true);
+	VaRest::Http::CheckEnvelopePredicate(Failed);
+	TestTrue(TEXT("a failed predicate: Kind Server, the parsed body as its error body"), Failed.Error.Kind == EVaRestErrorKind::Server
+		&& Failed.Error.Code == TEXT("E7") && Failed.Error.Body.IsValid() && !Failed.EnvelopeBody.IsValid());
+	TestTrue(TEXT("... its trace: the predicate, no data path"), Failed.EnvelopeTrace.bApplied && Failed.EnvelopeTrace.PredicatePath == TEXT("ok")
+		&& Failed.EnvelopeTrace.DataPath.IsEmpty());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpEnvelopeTraceScrubbedTest, "VaRest.Http.Envelope.TraceScrubbed",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpEnvelopeTraceScrubbedTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::EnvelopeTestPrivate;
+	// Inspector 2.2 layer 3: IN-5's Envelope.Actual, Code and Message are the server's text, so a known secret value in them
+	// reaches a sink as *** (as VaRest.Http.Trace.Failures pins for Error.Message)
+	FScopedTraceRecorder Scoped(EVaRestTraceDetail::Metadata);
+	FTestRig Rig;
+	Rig.Client.SetSecretValue(TEXT("bearer"), TEXT("secret-value-123456"));
+	Rig.Client.WithEnvelope(OkData());
+	Rig.Fake->Enqueue(Json(200, R"({"ok":"secret-value-123456","code":"C-secret-value-123456","message":"M secret-value-123456"})"));
+	auto Outcome = MakeOutcome<FVaRestJson>();
+	const FVaRestRequestHandle Handle = Observe(Rig.Client.Get(TEXT("/s")), Outcome).Send();
+	if (!TestTrue(TEXT("completes"), Rig.Wait(Outcome)))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	TestTrue(TEXT("Kind Server: the predicate failed"), Outcome->Error.Kind == EVaRestErrorKind::Server);
+	const TOptional<FVaRestTraceEnvelope> Seen = EnvelopeOf(*Scoped.Recorder, Handle.GetId());
+	if (!TestTrue(TEXT("Completed carries the envelope"), Seen.IsSet() && Seen->bApplied))
+	{
+		return false;
+	}
+	auto Scrubbed = [](const FString& Text)
+	{
+		return Text.Contains(TEXT("***"), ESearchCase::CaseSensitive) && !Text.Contains(TEXT("secret-value-123456"), ESearchCase::CaseSensitive);
+	};
+	TestTrue(TEXT("IN-5 Envelope.Actual value-scrubbed"), Scrubbed(Seen->Actual));
+	TestTrue(TEXT("IN-5 Envelope.Code value-scrubbed"), Scrubbed(Seen->Code));
+	TestTrue(TEXT("IN-5 Envelope.Message value-scrubbed"), Scrubbed(Seen->Message));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpEnvelopeClientDefaultsTest, "VaRest.Http.Envelope.ClientDefaults",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpEnvelopeClientDefaultsTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::EnvelopeTestPrivate;
+	FScopedTraceRecorder Scoped(EVaRestTraceDetail::Metadata);
+	FTestRig Rig;
+	// Error paths without bParseErrorBodies: they serve a 2xx failure only, so a 404 keeps the default message
+	Rig.Client.WithEnvelope(OkData());
+	Rig.Fake->Enqueue(Json(404, R"({"code":"NF","message":"gone"})"));
+	auto Gone = MakeOutcome<FVaRestJson>();
+	const FVaRestRequestHandle GoneHandle = Observe(Rig.Client.Get(TEXT("/gone")), Gone).Send();
+	if (!TestTrue(TEXT("the 404 completes"), Rig.Wait(Gone)))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	TestTrue(TEXT("no bParseErrorBodies: the default message, no code, the body parsed"), Gone->Error.Kind == EVaRestErrorKind::Http
+		&& Gone->Error.Message == FVaRestError::DefaultMessage(EVaRestErrorKind::Http, 404) && Gone->Error.Code.IsEmpty() && Gone->Error.Body.IsValid());
+	const TOptional<FVaRestTraceEnvelope> Seen = EnvelopeOf(*Scoped.Recorder, GoneHandle.GetId());
+	TestTrue(TEXT("... and its trace says the envelope did nothing"), Seen.IsSet() && !Seen->bApplied && Seen->Code.IsEmpty() && Seen->Message.IsEmpty());
+
+	// WithoutEnvelope(): the client's envelope gone, the body comes whole and ok:false judges nothing
+	Rig.Client.WithoutEnvelope();
+	Rig.Fake->Enqueue(Json(200, R"({"ok":false,"data":1})"));
+	auto Whole = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/whole")), Whole).Send();
+	if (!TestTrue(TEXT("the 200 completes"), Rig.Wait(Whole)))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	TestTrue(TEXT("WithoutEnvelope(): a success with the whole body"), Whole->SuccessCalls.load() == 1 && Whole->Value.IsSet()
+		&& !Whole->Value->Get(TEXT("ok")).AsBool(true) && Whole->Value->Get(TEXT("data")).AsInt() == 1);
 	return true;
 }
 

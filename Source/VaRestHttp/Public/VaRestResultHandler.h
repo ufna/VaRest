@@ -39,7 +39,10 @@ namespace VaRest::Http
 		TSharedPtr<const FVaRestEnvelope, ESPMode::ThreadSafe> Envelope;
 		/** IN-5: what the envelope did, for Completed (unscrubbed here; the trace point scrubs it). Filled only when bTimeDecode (IN-11). */
 		FVaRestTraceEnvelope EnvelopeTrace;
-		/** The envelope's DataPath named nothing: a struct result fails (plan decision 9) and keeps EnvelopeBody as its error body */
+		/**
+		 * The envelope's DataPath named nothing (FVaRestJson and struct results; a void result never looks): a struct result
+		 * fails (plan decision 9) and keeps EnvelopeBody as its error body
+		 */
 		bool bEnvelopeDataMissing = false;
 		FVaRestJson EnvelopeBody;
 		/** The request's effective log level: the decode task's one line (a void predicate it could not check, spec review M-13) */
@@ -81,9 +84,12 @@ namespace VaRest::Http
 	VARESTHTTP_API bool DecodeJson(FFinish& Finish, FVaRestJson& Out);
 
 	/**
-	 * Plan decision 9: a void result's envelope predicate -- a JSON body (by type, or sniffed without one) is parsed (a copy;
-	 * void keeps no value) and a failed predicate sets a Kind=Server error. Nothing to judge without a predicate, without a
-	 * body, for 204, for a body in a SaveTo file, or for a body that is not JSON. Background thread.
+	 * Plan decision 9: a void result's envelope predicate, the success predicate only -- a JSON body (by type, or sniffed
+	 * without one) is parsed (a copy, dropped on this task: void keeps no value and no data) and a failed predicate sets a
+	 * Kind=Server error. Nothing to judge, and nothing said, without a predicate, for an empty body (204, a 0-byte 200) or
+	 * for a body in a SaveTo file. A body that is there but cannot be judged -- not JSON, not valid JSON, over MaxJsonBytes
+	 * -- still succeeds, and the request's Basic Warning says its predicate could not be checked (spec review M-13).
+	 * Background thread.
 	 */
 	VARESTHTTP_API void CheckEnvelopePredicate(FFinish& Finish);
 

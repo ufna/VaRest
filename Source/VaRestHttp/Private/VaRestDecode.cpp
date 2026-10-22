@@ -19,6 +19,28 @@ namespace VaRest::Http::DecodePrivate
 		return FString::ConstructFromPtrSize(Repaired.GetData(), Repaired.Num());
 	}
 
+	/**
+	 * IN-5's copy of a judged 2xx body (IN-11, spec review M-14: called only when the mask was set at the finish). DataPath
+	 * only when the data half ran: a void result's trace names no data (plan decision 9).
+	 */
+	void RecordEnvelopeTrace(FFinish& Finish, const FVaRestEnvelopeResult& Result, bool bDataHalf)
+	{
+		FVaRestTraceEnvelope& Trace = Finish.EnvelopeTrace;
+		Trace.bApplied = true;
+		if (bDataHalf)
+		{
+			Trace.DataPath = Finish.Envelope->DataPath;
+		}
+		if (!Result.bSuccess)
+		{
+			Trace.PredicatePath = Result.FailedPath;
+			Trace.Expected = Result.Expected;
+			Trace.Actual = Result.Actual;
+			Trace.Code = Result.Code;
+			Trace.Message = Result.Message;
+		}
+	}
+
 	bool LooksLikeJson(TConstArrayView<uint8> Bytes)
 	{
 		for (const uint8 Byte : Bytes)
@@ -111,22 +133,11 @@ bool VaRest::Http::ApplyEnvelope(FFinish& Finish, FVaRestJson& InOut)
 	{
 		return true;
 	}
-	const FVaRestEnvelope& Applied = *Finish.Envelope;
-	const FVaRestEnvelopeResult Result = Applied.Evaluate(InOut);
+	const FVaRestEnvelopeResult Result = Finish.Envelope->Evaluate(InOut);
 	// IN-11 (spec review M-14): the trace's strings are built only when the mask was set at the finish
 	if (Finish.bTimeDecode)
 	{
-		FVaRestTraceEnvelope& Trace = Finish.EnvelopeTrace;
-		Trace.bApplied = true;
-		Trace.DataPath = Applied.DataPath;
-		if (!Result.bSuccess)
-		{
-			Trace.PredicatePath = Result.FailedPath;
-			Trace.Expected = Result.Expected;
-			Trace.Actual = Result.Actual;
-			Trace.Code = Result.Code;
-			Trace.Message = Result.Message;
-		}
+		DecodePrivate::RecordEnvelopeTrace(Finish, Result, true);
 	}
 	if (!Result.bSuccess)
 	{
@@ -151,16 +162,20 @@ void VaRest::Http::CheckEnvelopePredicate(FFinish& Finish)
 	{
 		return;
 	}
+	// An empty body (a 204, a 0-byte 200) returned above, silently: nothing to judge, and a client-wide envelope must not
+	// warn on every DELETE (Task 11 review M-2). A body that is there but cannot be judged -- not JSON, broken, or over MaxJsonBytes (refused before
+	// parsing, as DecodeJson does) -- is no envelope failure, since a void result decodes nothing; but the predicate never
+	// ran, which the request's Basic line says (plan decision 9, spec review M-13: a 200 text/html page from a proxy or a
+	// captive portal must not pass in silence)
+	FString Unchecked;
 	const FString& ContentType = Finish.Response.ContentType;
+	const int64 Cap = Finish.ParseOptions.MaxInputBytes;
 	if (!IsJsonContentType(ContentType) && !(ContentType.IsEmpty() && DecodePrivate::LooksLikeJson(Finish.Body)))
 	{
-		return;
+		Unchecked = ContentType.IsEmpty() ? FString(TEXT("the body is not JSON (no Content-Type)"))
+			: FString::Printf(TEXT("the body is not JSON (Content-Type \"%s\")"), *ContentType);
 	}
-	// A void result decodes nothing: a broken body, or one over MaxJsonBytes (refused before parsing, as DecodeJson does), is
-	// no envelope failure -- but the predicate never ran, which the request's Basic line says (spec review M-13)
-	FString Unchecked;
-	const int64 Cap = Finish.ParseOptions.MaxInputBytes;
-	if (Cap > 0 && Finish.Body.Num() > Cap)
+	else if (Cap > 0 && Finish.Body.Num() > Cap)
 	{
 		Unchecked = FString::Printf(TEXT("the body is %d bytes, over the MaxJsonBytes limit of %lld"), Finish.Body.Num(), Cap);
 	}
@@ -177,8 +192,19 @@ void VaRest::Http::CheckEnvelopePredicate(FFinish& Finish)
 		TValueOrError<FVaRestJson, FVaRestJsonError> Parsed = FVaRestJson::Parse(TConstArrayView<uint8>(Finish.Body), Finish.ParseOptions);
 		if (Parsed.HasValue())
 		{
-			FVaRestJson ParsedBody = Parsed.StealValue();
-			ApplyEnvelope(Finish, ParsedBody);
+			// Plan decision 9: "the success predicate only" -- no data is looked up or kept, and the parsed DOM goes when this
+			// returns, on this task, unless it is a Kind=Server failure's error body
+			const FVaRestJson ParsedBody = Parsed.StealValue();
+			const FVaRestEnvelopeResult Result = Finish.Envelope->EvaluatePredicate(ParsedBody);
+			if (Finish.bTimeDecode)
+			{
+				DecodePrivate::RecordEnvelopeTrace(Finish, Result, false);
+			}
+			if (!Result.bSuccess)
+			{
+				// Spec 3.4, as ApplyEnvelope: Kind=Server, never retried
+				Finish.Error = Result.ToError(ParsedBody, Finish.Response.Status);
+			}
 			return;
 		}
 		// The parser's own text: a reason and a position, never the body's bytes (VaRestJsonReader.cpp:96-98, :108)
@@ -265,11 +291,10 @@ void VaRest::Http::ProcessErrorBody(FFinish& Finish)
 		{
 			Finish.Error.Message = Message;
 		}
-		// IN-11 (spec review M-14): only when the trace mask was set at the finish
+		// IN-11 (spec review M-14): only when the trace mask was set at the finish. Only what happened: the error fields were
+		// read; the success half judged nothing (bApplied stays false, no DataPath), whatever the result type
 		if (Finish.bTimeDecode)
 		{
-			Finish.EnvelopeTrace.bApplied = true;
-			Finish.EnvelopeTrace.DataPath = Finish.Envelope->DataPath;
 			Finish.EnvelopeTrace.Code = MoveTemp(Code);
 			Finish.EnvelopeTrace.Message = MoveTemp(Message);
 		}

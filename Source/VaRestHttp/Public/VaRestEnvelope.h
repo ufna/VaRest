@@ -32,7 +32,10 @@ struct VARESTHTTP_API FVaRestEnvelopeResult
 /**
  * Spec 3.4: where a response's data and its success flag are. Per client (WithEnvelope), replaced per request (Envelope(),
  * NoEnvelope()); M5's asset holds one per API and per endpoint, so it is BlueprintType and its field names freeze then
- * (plan decision 27). Applied to FVaRestJson, struct and void results (plan decision 9); raw results get the body as it came.
+ * (plan decision 27). Its success half judges a 2xx body (plan decision 9): FVaRestJson and struct results are unwrapped at
+ * DataPath and checked by the predicate, a void result is checked by the predicate alone, and raw results (FString,
+ * TArray<uint8>, FVaRestResponse) and a body in a SaveTo() file get the body as it came. bParseErrorBodies is the error
+ * half and reads every result type's 4xx/5xx body, raw results included.
  * Paths are FVaRestJson::Path's: "data", "result.items[0]", or a JSON pointer ("/a.b/c"). SuccessValues compare as text,
  * case-sensitive (ruling Q3; MatchText): a string by its content; true and false as "true" and "false"; an integral number
  * in [-2^63, 2^64) as its decimal with no fraction and no exponent (200, 200.0 and 2e2 are all "200"); any other number --
@@ -68,7 +71,13 @@ struct VARESTHTTP_API FVaRestEnvelope
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VaRest|Http")
 	FString ErrorCodePath;
 
-	/** Read ErrorMessagePath and ErrorCodePath from 4xx and 5xx JSON bodies too (spec 3.4) */
+	/**
+	 * Read ErrorMessagePath and ErrorCodePath from 4xx and 5xx JSON bodies too (spec 3.4), into FVaRestError::Message and
+	 * Code, whatever the result type: plan decision 9 limits only the success half, so a raw result (FString, TArray<uint8>,
+	 * FVaRestResponse) gets the same FVaRestError, its body left as it came. It reads the body the error parsed into
+	 * FVaRestError::Body (a SaveTo() error's is its first 4 KiB, read back from the file); a body that is not JSON has no
+	 * fields to read, and Message keeps its default.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VaRest|Http")
 	bool bParseErrorBodies = false;
 
@@ -82,6 +91,12 @@ struct VARESTHTTP_API FVaRestEnvelope
 
 	/** WebSocket spec 19 item 6: Body through this envelope. Any thread: it only reads Body (spec 2.2's thread contract). */
 	FVaRestEnvelopeResult Evaluate(const FVaRestJson& Body) const;
+
+	/**
+	 * Evaluate's predicate alone, for a void result (plan decision 9: "the success predicate only"): DataPath is never looked
+	 * up, so Data is an invalid handle and bDataFound false either way. Any thread, as Evaluate.
+	 */
+	FVaRestEnvelopeResult EvaluatePredicate(const FVaRestJson& Body) const;
 
 	/**
 	 * ErrorCodePath's and ErrorMessagePath's values in Body, as text (MatchText's, else condensed JSON); empty when absent.

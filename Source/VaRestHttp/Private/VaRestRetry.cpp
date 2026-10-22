@@ -1,11 +1,12 @@
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 
-#include "VaRestRetryInternal.h"
+#include "VaRestRetry.h"
 
 #include "VaRestClassify.h"
 #include "VaRestClientState.h"
 #include "VaRestExchangeState.h"
 #include "VaRestHttpLog.h"
+#include "VaRestRetryInternal.h"
 #include "VaRestTracePoints.h"
 
 FVaRestRetryPolicy FVaRestRetryPolicy::Disabled()

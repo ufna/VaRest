@@ -720,7 +720,9 @@ bool VaRest::Http::FClientState::Resolve(FExchangeState& Exchange, FString& OutE
 	}
 	else if (Exchange.EnvelopeOverride.IsSet())
 	{
-		Exchange.Envelope = MakeShared<const FVaRestEnvelope, ESPMode::ThreadSafe>(Exchange.EnvelopeOverride.GetValue());
+		// Moved: the shared copy is the only one the request needs from here on (Task 11 review M-6)
+		Exchange.Envelope = MakeShared<const FVaRestEnvelope, ESPMode::ThreadSafe>(MoveTemp(Exchange.EnvelopeOverride.GetValue()));
+		Exchange.EnvelopeOverride.Reset();
 	}
 	else
 	{
