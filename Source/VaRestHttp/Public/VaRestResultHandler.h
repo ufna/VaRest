@@ -49,6 +49,12 @@ namespace VaRest::Http
 		/** The request's effective log level: the decode task's one line (a void predicate it could not check, spec review M-13) */
 		EVaRestLogLevel LogLevel = EVaRestLogLevel::None;
 		/**
+		 * M4a final review A6: that line's redactor -- RedactorFor(Ex), taken on the game thread (immutable, any thread may use
+		 * it) -- set only when the line can be written (a void predicate to check, LogLevel not None); it scrubs the server's
+		 * Content-Type before the line escapes it
+		 */
+		TSharedPtr<const FVaRestRedactor, ESPMode::ThreadSafe> LogRedactor;
+		/**
 		 * IN-14: the decode task excerpts the body before parsing it -- the attempt (0 = no), the redactor (the request's,
 		 * taken on the game thread: immutable, any thread may use it) and the cap
 		 */

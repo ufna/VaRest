@@ -9,6 +9,7 @@
 #include "VaRestHttpLog.h"
 #include "VaRestHttpTesting.h"
 #include "VaRestJsonUtf8.h"
+#include "VaRestRedactor.h"
 
 namespace VaRest::Http::DecodePrivate
 {
@@ -172,8 +173,11 @@ void VaRest::Http::CheckEnvelopePredicate(FFinish& Finish)
 	const int64 Cap = Finish.ParseOptions.MaxInputBytes;
 	if (!IsJsonContentType(ContentType) && !(ContentType.IsEmpty() && DecodePrivate::LooksLikeJson(Finish.Body)))
 	{
+		// M4a final review A6 (review C M-3): the server's header value, scrubbed (OnChainDone gives the line its redactor
+		// whenever the line can be written), then escaped with the rest of the line below
 		Unchecked = ContentType.IsEmpty() ? FString(TEXT("the body is not JSON (no Content-Type)"))
-			: FString::Printf(TEXT("the body is not JSON (Content-Type \"%s\")"), *ContentType);
+			: FString::Printf(TEXT("the body is not JSON (Content-Type \"%s\")"),
+				Finish.LogRedactor.IsValid() ? *Finish.LogRedactor->ScrubText(ContentType) : TEXT("(not shown)"));
 	}
 	else if (Cap > 0 && Finish.Body.Num() > Cap)
 	{

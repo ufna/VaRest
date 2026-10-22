@@ -1049,6 +1049,13 @@ void VaRest::Http::FClientState::OnChainDone(const FVaRestExchangeRef& Exchange,
 	const bool bDownload = !Finish.TempFile.IsEmpty() || (!Finish.SaveTo.IsEmpty() && !Finish.Error.IsError());
 	// Plan decision 9: a void result with a predicate is parsed too, on the task, never here (concurrency review I-6)
 	const bool bEnvelopeCheck = Finish.Envelope.IsValid() && Finish.Envelope->HasPredicate() && Ex.Handler->AppliesEnvelope() && !Finish.bBodyInFile;
+	if (bEnvelopeCheck && Ex.LogLevel != EVaRestLogLevel::None)
+	{
+		// M4a final review A6 (review C M-3): the decode task's Basic Warning shows the server's Content-Type; values in log
+		// lines are redacted, then escaped, as the trace (VaRestTracePoints.cpp:230) and the Headers lines
+		// (VaRestLogStage.cpp:167) scrub that header. RedactorFor checks the game thread, so it is taken here.
+		Finish.LogRedactor = RedactorFor(Ex);
+	}
 	const bool bTask = bDownload
 		|| (Finish.Error.IsError() ? Finish.Error.Kind == EVaRestErrorKind::Http && bHasBody : (Ex.Handler->DecodesBody() || bEnvelopeCheck) && bHasBody);
 	if (!bTask)

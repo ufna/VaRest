@@ -391,6 +391,41 @@ bool FVaRestHttpEnvelopeUncheckedTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpEnvelopeUncheckedScrubbedTest, "VaRest.Http.Envelope.VoidPredicateUncheckedScrubbed",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpEnvelopeUncheckedScrubbedTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::EnvelopeTestPrivate;
+	// M4a final review A6 (review C M-3): the decode task's Basic Warning for a void predicate it could not check shows the
+	// server's Content-Type; a known secret in it is scrubbed before the line escapes it, as everywhere else a log line
+	// shows a server's header value
+	TGuardConsoleVariable<int32> Level(TEXT("VaRest.LogLevel"), -1);
+	FTestRig Rig;
+	Rig.Client.WithEnvelope(OkData()).WithLogLevel(EVaRestLogLevel::Basic);
+	Rig.Client.SetSecretValue(TEXT("Canary"), TEXT("canary-secret-9876"));
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest&)
+	{
+		return FVaRestFakeResponse::Text(200, TEXT("<html>a portal</html>"), TEXT("text/html; session=canary-secret-9876"));
+	});
+	FLogCapture Capture;
+	AddExpectedMessagePlain(TEXT("VaRest: the envelope's predicate could not be checked (the body is not JSON (Content-Type \"text/html; session=***\"))"),
+		ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
+	auto Html = MakeOutcome<void>();
+	const FVaRestRequestHandle Handle = SendAndWait(Rig, Rig.Client.Post<void>(TEXT("/html")), Html);
+	if (!TestTrue(TEXT("completes"), Html->IsDone()))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	TestEqual(TEXT("void decodes nothing: a success"), Html->SuccessCalls.load(), 1);
+	TestTrue(TEXT("the Warning shows the type with the secret scrubbed"), Capture.Contains(FString::Printf(
+		TEXT("#%llu VaRest: the envelope's predicate could not be checked (the body is not JSON (Content-Type \"text/html; session=***\"))"), Handle.GetId())));
+	TestFalse(TEXT("... and the secret nowhere"), Capture.Contains(TEXT("canary-secret-9876")));
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpEnvelopeUntracedTest, "VaRest.Http.Envelope.TraceFieldsOnlyWithSink",
 	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
 
