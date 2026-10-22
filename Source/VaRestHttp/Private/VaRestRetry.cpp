@@ -109,6 +109,15 @@ VaRest::Http::FRetryDecision VaRest::Http::DecideRetry(const FVaRestRetryPolicy&
 	return Out;
 }
 
+FVaRestAttemptOutcome VaRest::Http::MakeDeadlineOutcome()
+{
+	FVaRestAttemptOutcome Late;
+	Late.Failure = EVaRestTransportFailure::Timeout;
+	Late.FailureDetail = TEXT("Deadline");
+	Late.FailureMessage = TEXT("the retry deadline passed before this attempt could start");
+	return Late;
+}
+
 namespace VaRest::Http::RetryPrivate
 {
 	/** One exchange's way through the retry stage: shared by its attempt continuations and its backoff timer */
@@ -220,7 +229,18 @@ namespace VaRest::Http::RetryPrivate
 
 	void StartAttempt(const FRunRef& Run)
 	{
-		Run->Next.Proceed(Run->Exchange, [Run](FVaRestAttemptOutcome&& Outcome) { OnAttempt(Run, MoveTemp(Outcome)); });
+		// Once per attempt: a PerAttempt stage that breaks its contract by reporting twice (review C-3: the second report is
+		// ignored) would otherwise arm a second backoff over the first, whose timer the interrupt hook could then not reach
+		// (Task 8 re-review); the limiter's release is once-only for the same stage (FLimiterStage)
+		Run->Next.Proceed(Run->Exchange, [Run, bSeen = false](FVaRestAttemptOutcome&& Outcome) mutable
+		{
+			if (bSeen)
+			{
+				return;
+			}
+			bSeen = true;
+			OnAttempt(Run, MoveTemp(Outcome));
+		});
 	}
 
 	/** Spec 4.1. Outer: it sees each logical request once and re-issues it; the attempt boundary after it numbers the attempts. */

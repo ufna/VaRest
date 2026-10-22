@@ -586,6 +586,7 @@ public:
 	 * The waits this adds:
 	 * - The queue is strict: while higher-priority requests keep arriving, a Low one can wait indefinitely (review M-19).
 	 * - A timeout does not cover the wait: it is per attempt and starts at the transport (spec 4.7), and a retry queues again.
+	 *   A retry policy's Deadline does: the wait ends at it, Kind=Timeout (plan decision 10).
 	 * - A queued request whose Owner() is gone leaves the queue only when a slot reaches it, and then ends silently; until
 	 *   then it keeps its callbacks, everything they capture and this client alive. Cancel() takes a request out of the
 	 *   queue at once.

@@ -3,11 +3,18 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "Algo/Count.h"
+#include "HAL/FileManager.h"
 #include "HAL/IConsoleManager.h"
 #include "Misc/AutomationTest.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Guid.h"
+#include "Misc/Paths.h"
+#include "Misc/ScopeExit.h"
+#include "UObject/Package.h"
 #include "VaRestClient.h"
 #include "VaRestClientState.h"
 #include "VaRestExchangeState.h"
+#include "VaRestHttpSettings.h"
 #include "VaRestHttpTesting.h"
 #include "VaRestRetry.h"
 #include "VaRestRetryInternal.h"
@@ -227,6 +234,12 @@ namespace VaRest::Http::RetryTestPrivate
 			}
 			FVaRestAttemptOutcome Own;
 			Own.Status = Code;
+			if (!JsonBody.IsEmpty())
+			{
+				// An answer the pipeline decodes on a task: the request is in Phase Decoding until it comes back
+				Own.ContentType = TEXT("application/json");
+				Own.Body.Append(reinterpret_cast<const uint8*>(JsonBody.GetData()), JsonBody.Len());
+			}
 			(*Done)(MoveTemp(Own));
 		}
 
@@ -261,6 +274,8 @@ namespace VaRest::Http::RetryTestPrivate
 
 		const bool bProceed;
 		const int32 Code;
+		/** Set (to a literal): the answer carries this JSON body */
+		FUtf8StringView JsonBody;
 		TWeakPtr<FVaRestExchange, ESPMode::ThreadSafe> Kept;
 		TOptional<FVaRestStageNext> KeptNext;
 		TSharedPtr<FVaRestOutcomeCallback, ESPMode::ThreadSafe> Done;
@@ -1242,6 +1257,580 @@ bool FVaRestHttpRetryQueuedWhileDecodingTest::RunTest(const FString& Parameters)
 		&& Answered->Value->Get(TEXT("from")).AsString() == TEXT("stage"));
 	TestTrue(TEXT("the blocker's own answer"), Blocker->SuccessCalls.load() == 1);
 	TestEqual(TEXT("nothing more behind the stage"), Outer->LateAnswers->load(), 1);
+	return true;
+}
+
+namespace VaRest::Http::RetryTestPrivate
+{
+	/** A PerAttempt stage that holds every attempt Delay seconds on Clock before passing it on (re-review N-5) */
+	class FDeferringStage final : public IVaRestStage
+	{
+	public:
+		FDeferringStage(TSharedRef<FVaRestVirtualClock, ESPMode::ThreadSafe> InClock, double InDelay)
+			: Clock(MoveTemp(InClock))
+			, Delay(InDelay)
+		{
+		}
+
+		virtual FName GetStageName() const override { return TEXT("Deferring"); }
+
+		virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) override
+		{
+			// The timer owns the continuation until the test advances the clock
+			Clock->SetTimer(Delay, [Exchange, Next, Done = MoveTemp(OnOutcome)]() mutable
+			{
+				Next.Proceed(Exchange, MoveTemp(Done));
+			});
+		}
+
+	private:
+		TSharedRef<FVaRestVirtualClock, ESPMode::ThreadSafe> Clock;
+		double Delay = 0.0;
+	};
+
+	/**
+	 * A PerAttempt stage that breaks its contract (IVaRestStage::Process: "Call OnOutcome exactly once"): it answers each
+	 * attempt twice, inside Process, with Code (Task 8 re-review, out of scope 2)
+	 */
+	class FReportsTwice final : public IVaRestStage
+	{
+	public:
+		explicit FReportsTwice(int32 InCode)
+			: Code(InCode)
+		{
+		}
+
+		virtual FName GetStageName() const override { return TEXT("ReportsTwice"); }
+
+		virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) override
+		{
+			++*Calls;
+			for (int32 Report = 0; Report < 2; ++Report)
+			{
+				FVaRestAttemptOutcome Own;
+				Own.Status = Code;
+				OnOutcome(MoveTemp(Own));
+			}
+		}
+
+		const int32 Code;
+		TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> Calls = MakeShared<std::atomic<int32>, ESPMode::ThreadSafe>(0);
+	};
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpRetryDeadlineTest, "VaRest.Http.Retry.Deadline",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpRetryDeadlineTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::RetryTestPrivate;
+	// Plan decision 10: t=0 attempt 1 (503), wait 1 s; t=1 attempt 2 (503), a 2 s wait would end at 3 >= 2.5: no retry
+	FTestRig Rig;
+	FVaRestRetryPolicy Policy = Exact(5).WithDeadline(2.5f);
+	Policy.Backoff.BaseDelay = 1.f;
+	Rig.Client.WithRetry(Policy).WithTimeout(10.f);
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest&) { return Json(503); });
+	auto Outcome = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/d")), Outcome).Send();
+	if (!TestTrue(TEXT("first backoff armed"), PumpUntil([&Rig] { return Rig.Clock->NumPendingTimers() == 1; })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Clock->Advance(1.0);
+	if (!TestTrue(TEXT("completes"), Rig.Wait(Outcome)) || !TestEqual(TEXT("two attempts: the third would start past the deadline"), Rig.Fake->NumCalls(), 2))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	TestTrue(TEXT("the last answer is the error"), Outcome->Error.HttpStatus == 503 && Outcome->Error.Attempts == 2);
+	TestTrue(TEXT("each attempt's total timeout is cut to the time left: 2.5 s, then 1.5 s"),
+		FMath::IsNearlyEqual(Rig.Fake->GetCall(0).Request.Timeout, 2.5f, 1e-4f) && FMath::IsNearlyEqual(Rig.Fake->GetCall(1).Request.Timeout, 1.5f, 1e-4f));
+
+	// Waiting in the limiter counts (spec 4.7 "across attempts" from the request's start)
+	FTestRig Queue;
+	Queue.Client.WithMaxConcurrent(1).WithRetry(Exact(3).WithDeadline(1.f));
+	Queue.Fake->SetResponder([](const FVaRestTransportRequest& Request) { return Request.Url.EndsWith(TEXT("/hold")) ? FVaRestFakeResponse::Manual() : Json(200); });
+	auto Hold = MakeOutcome<FVaRestJson>();
+	auto Late = MakeOutcome<FVaRestJson>();
+	Observe(Queue.Client.Get(TEXT("/hold")).NoRetry(), Hold).Send();
+	Observe(Queue.Client.Get(TEXT("/late")), Late).Send();
+	if (!TestTrue(TEXT("one holds the slot"), PumpUntil([&Queue] { return Queue.Fake->NumCalls() == 1; })))
+	{
+		Abandon(Queue);
+		return false;
+	}
+	Queue.Clock->Advance(1.5);
+	// Concurrency review M-1: armed in the queue, not only checked at the grant -- it ends at 1 s while the slot is held
+	if (!TestTrue(TEXT("the late one ends at its deadline, while the slot is still held"), PumpUntil([Late] { return Late->IsDone(); })))
+	{
+		Abandon(Queue);
+		return false;
+	}
+	Queue.Fake->Complete(0, Json(200));
+	if (!TestTrue(TEXT("both complete"), PumpUntil([Hold, Late] { return Hold->IsDone() && Late->IsDone(); })))
+	{
+		Abandon(Queue);
+		return false;
+	}
+	Queue.Drain();
+	TestEqual(TEXT("the late one never reached the transport"), Queue.Fake->NumCalls(), 1);
+	TestEqual(TEXT("... and its deadline timer is gone"), Queue.Clock->NumPendingTimers(), 0);
+	TestTrue(TEXT("... it is a Timeout, not retryable, saying why"), Late->Error.Kind == EVaRestErrorKind::Timeout && !Late->Error.bRetryable
+		&& Late->Error.Message.Contains(TEXT("Deadline")));
+
+	// Re-review N-5: an attempt a PerAttempt stage holds past the deadline (2 s on a 1 s deadline) is refused by the
+	// transport stage's check at dispatch -- the one path to it now that the queue's own timer ends a queued wait
+	FTestRig Held;
+	Held.Client.WithRetry(Exact(3).WithDeadline(1.f)).Use(MakeShared<FDeferringStage, ESPMode::ThreadSafe>(Held.Clock, 2.0), EVaRestStageSlot::PerAttempt);
+	auto Deferred = MakeOutcome<FVaRestJson>();
+	Observe(Held.Client.Get(TEXT("/deferred")), Deferred).Send();
+	if (!TestTrue(TEXT("the stage holds the attempt"), PumpUntil([&Held] { return Held.Clock->NumPendingTimers() == 1; })))
+	{
+		Abandon(Held);
+		return false;
+	}
+	Held.Clock->Advance(2.0);
+	if (!TestTrue(TEXT("the deferred attempt completes"), Held.Wait(Deferred)))
+	{
+		Abandon(Held);
+		return false;
+	}
+	TestTrue(TEXT("... as Timeout, not retryable, saying Deadline"), Deferred->Error.Kind == EVaRestErrorKind::Timeout && !Deferred->Error.bRetryable
+		&& Deferred->Error.Message.Contains(TEXT("Deadline")));
+	TestEqual(TEXT("... and never sent"), Held.Fake->NumCalls(), 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpRetryQueueTest, "VaRest.Http.Retry.QueuesBehindWaiting",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpRetryQueueTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::RetryTestPrivate;
+	// Carry (c), spec 4.6: "queued retries wait their turn too". A's retry has no delay; B and C wait in the limiter
+	// when A fails, so the retry goes behind them: a, b, c, a.
+	FTestRig Rig;
+	Rig.Client.WithMaxConcurrent(1);
+	FVaRestRetryPolicy Instant = Exact(3);
+	Instant.Backoff.BaseDelay = 0.f;
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest&) { return FVaRestFakeResponse::Manual(); });
+	auto A = MakeOutcome<FVaRestJson>();
+	auto B = MakeOutcome<FVaRestJson>();
+	auto C = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/a")).Retry(Instant), A).Send();
+	Observe(Rig.Client.Get(TEXT("/b")), B).Send();
+	Observe(Rig.Client.Get(TEXT("/c")), C).Send();
+	if (!TestTrue(TEXT("A holds the slot"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 1; })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Fake->Complete(0, Json(503));
+	if (!TestTrue(TEXT("B gets the slot A freed; A's retry is armed"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 2 && Rig.Clock->NumPendingTimers() == 1; })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Clock->Advance(0.0);
+	Rig.Drain();
+	TestEqual(TEXT("the retry waits behind C"), Rig.Fake->NumCalls(), 2);
+	for (int32 Index = 1; Index < 4; ++Index)
+	{
+		Rig.Fake->Complete(Index, Json(200));
+		if (Index < 3 && !TestTrue(FString::Printf(TEXT("call %d"), Index + 2), PumpUntil([&Rig, Index] { return Rig.Fake->NumCalls() == Index + 2; })))
+		{
+			Abandon(Rig);
+			return false;
+		}
+	}
+	if (!TestTrue(TEXT("all complete"), PumpUntil([A, B, C] { return A->IsDone() && B->IsDone() && C->IsDone(); })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	TArray<FString> Order;
+	for (int32 Index = 0; Index < Rig.Fake->NumCalls(); ++Index)
+	{
+		Order.Add(Rig.Fake->GetCall(Index).Request.Url.RightChop(FString(TEXT("https://api.test/")).Len()));
+	}
+	TestEqualSensitive(TEXT("dispatch order"), FString::Join(Order, TEXT(",")), FString(TEXT("a,b,c,a")));
+	TestTrue(TEXT("A succeeds on its retry"), A->SuccessCalls.load() == 1 && A->Response.Attempts == 2);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpRetryTimeoutTest, "VaRest.Http.Retry.TimeoutPerAttempt",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpRetryTimeoutTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::RetryTestPrivate;
+	// Spec 4.7: the timeout is per attempt; without a deadline the request lasts 1 + 0.5 + 1 + 1 + 1 = 4.5 s
+	FTestRig Rig;
+	Rig.Client.WithTimeout(1.f).WithRetry(Exact(2));
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest&) { return FVaRestFakeResponse::Manual(); });
+	auto Outcome = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/slow")), Outcome).Send();
+	const double Waits[] = { 0.5, 1.0 };
+	for (int32 Step = 0; Step < 3; ++Step)
+	{
+		if (!TestTrue(FString::Printf(TEXT("attempt %d starts"), Step + 1), PumpUntil([&Rig, Step] { return Rig.Fake->NumCalls() == Step + 1; })))
+		{
+			Abandon(Rig);
+			return false;
+		}
+		Rig.Clock->Advance(1.0);
+		if (Step < 2)
+		{
+			if (!TestTrue(FString::Printf(TEXT("attempt %d timed out; backoff armed"), Step + 1), PumpUntil([&Rig] { return Rig.Clock->NumPendingTimers() == 1; })))
+			{
+				Abandon(Rig);
+				return false;
+			}
+			Rig.Clock->Advance(Waits[Step]);
+		}
+	}
+	if (!TestTrue(TEXT("completes"), Rig.Wait(Outcome)))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	TestTrue(TEXT("a Timeout after three attempts"), Outcome->Error.Kind == EVaRestErrorKind::Timeout && Outcome->Error.Attempts == 3);
+	bool bEachOne = true;
+	for (int32 Index = 0; Index < Rig.Fake->NumCalls(); ++Index)
+	{
+		bEachOne &= Rig.Fake->GetCall(Index).Request.Timeout == 1.f;
+	}
+	TestTrue(TEXT("every attempt has the whole per-attempt timeout"), bEachOne);
+	TestTrue(TEXT("elapsed: three timeouts and two waits"), FMath::IsNearlyEqual(Outcome->Response.Elapsed, 4.5, 1e-6));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpRetryStopTest, "VaRest.Http.Retry.StopWhileBackingOff",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpRetryStopTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::RetryTestPrivate;
+	// Plan decision 7: Cancel(), shutdown and the owner's destruction reach a request that waits on a backoff timer, and
+	// an Outer stage in front of Retry gets exactly one outcome for each (concurrency review I-5: the probe)
+	FTestRig Rig;
+	const TSharedRef<FOutcomeProbe, ESPMode::ThreadSafe> Probe = MakeShared<FOutcomeProbe, ESPMode::ThreadSafe>();
+	Rig.Client.Use(Probe, EVaRestStageSlot::Outer).WithRetry(Exact(3));
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest&) { return Json(503); });
+	UObject* Owner = NewObject<UVaRestHttpSettings>(GetTransientPackage(), NAME_None, RF_Transient);
+	auto Canceled = MakeOutcome<FVaRestJson>();
+	auto Owned = MakeOutcome<FVaRestJson>();
+	auto ShutDown = MakeOutcome<FVaRestJson>();
+	const FVaRestRequestHandle Handle = Observe(Rig.Client.Get(TEXT("/c")), Canceled).Send();
+	const FVaRestRequestHandle OwnedHandle = Observe(Rig.Client.Get(TEXT("/o")).Owner(Owner), Owned).Send();
+	const FVaRestRequestHandle ShutDownHandle = Observe(Rig.Client.Get(TEXT("/s")).Tag(TEXT("Exit")), ShutDown).Send();
+	if (!TestTrue(TEXT("all three back off"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 3 && Rig.Clock->NumPendingTimers() == 3; })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+
+	Handle.Cancel();
+	// Inside Cancel(), before any pump: the interrupt answered through the chain and cleared the timer (plan decision 7)
+	TestEqual(TEXT("Cancel() clears the timer at once"), Rig.Clock->NumPendingTimers(), 2);
+	TestEqual(TEXT("... and the Outer stage got its one Canceled inside Cancel()"), Probe->Count(Handle.GetId(), EVaRestTransportFailure::Canceled), 1);
+	if (!TestTrue(TEXT("Cancel() ends the wait"), PumpUntil([Canceled] { return Canceled->IsDone(); })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	TestTrue(TEXT("... one OnError(Canceled), one OnComplete"), Canceled->ErrorCalls.load() == 1 && Canceled->CompleteCalls.load() == 1
+		&& Canceled->Error.Kind == EVaRestErrorKind::Canceled);
+
+	VaRest::Http::FClientAccess::State(Rig.Client)->CancelAll(TEXT("Exit"), EVaRestCancelReason::Shutdown);
+	Rig.Drain();
+	TestEqual(TEXT("shutdown: its timer is gone too"), Rig.Clock->NumPendingTimers(), 1);
+
+	Owner->MarkAsGarbage();
+	Rig.Clock->Advance(0.5);
+	if (!TestTrue(TEXT("the owner's request ends when its timer fires"), PumpUntil([&Rig] { return Rig.Client.GetInFlightCount() == 0; })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Drain();
+	TestEqual(TEXT("no attempt after any stop"), Rig.Fake->NumCalls(), 3);
+	TestEqual(TEXT("shutdown and owner gone: no callbacks (spec 3.2, decision 2)"), ShutDown->CompleteCalls.load() + ShutDown->ErrorCalls.load()
+		+ Owned->CompleteCalls.load() + Owned->ErrorCalls.load(), 0);
+	TestEqual(TEXT("nothing left armed"), Rig.Clock->NumPendingTimers(), 0);
+	TestTrue(TEXT("each stop: one outcome for the Outer stage, a Canceled"), Probe->Total(Handle.GetId()) == 1 && Probe->Total(OwnedHandle.GetId()) == 1
+		&& Probe->Total(ShutDownHandle.GetId()) == 1 && Probe->Count(OwnedHandle.GetId(), EVaRestTransportFailure::Canceled) == 1
+		&& Probe->Count(ShutDownHandle.GetId(), EVaRestTransportFailure::Canceled) == 1);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpRetryBodiesTest, "VaRest.Http.Retry.BodiesResent",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpRetryBodiesTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::RetryTestPrivate;
+	// Plan decisions 8 and 24 (carry (e)): every re-issue is a new transport request with the whole body -- a JSON body,
+	// a multipart body with a file part, a BodyFile -- and a SaveTo keeps only the final attempt's file
+	const FString Dir = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir() / TEXT("VaRestRetryTest") / FGuid::NewGuid().ToString(EGuidFormats::Digits));
+	IFileManager::Get().MakeDirectory(*Dir, true);
+	ON_SCOPE_EXIT { IFileManager::Get().DeleteDirectory(*Dir, false, true); };
+	TArray<uint8> Pattern;
+	for (int32 Index = 0; Index < 1000; ++Index)
+	{
+		Pattern.Add(static_cast<uint8>(Index * 7 + 3));
+	}
+	const FString PartFile = Dir / TEXT("part.bin");
+	const FString UploadFile = Dir / TEXT("upload.bin");
+	const FString Destination = Dir / TEXT("download.bin");
+	if (!TestTrue(TEXT("fixtures written"), FFileHelper::SaveArrayToFile(Pattern, *PartFile) && FFileHelper::SaveArrayToFile(Pattern, *UploadFile)))
+	{
+		return false;
+	}
+	FTestRig Rig;
+	Rig.Client.WithRetry(Exact(1));
+	TSharedRef<TMap<FString, int32>, ESPMode::ThreadSafe> Seen = MakeShared<TMap<FString, int32>, ESPMode::ThreadSafe>();
+	Rig.Fake->SetResponder([Seen](const FVaRestTransportRequest& Request)
+	{
+		const bool bFirst = ++Seen->FindOrAdd(Request.Url) == 1;
+		if (Request.Url.EndsWith(TEXT("/download")))
+		{
+			return bFirst ? FVaRestFakeResponse::Text(503, TEXT("busy")) : FVaRestFakeResponse::Bytes(200, TArray<uint8>{ 'o', 'k' });
+		}
+		return bFirst ? Json(503) : Json(200);
+	});
+	auto Json1 = MakeOutcome<FVaRestJson>();
+	auto Parts = MakeOutcome<FVaRestJson>();
+	auto File = MakeOutcome<FVaRestJson>();
+	auto Saved = MakeOutcome<void>();
+	Observe(Rig.Client.Put(TEXT("/json")).Body(FVaRestJson::Object().Set(TEXT("a"), 1)), Json1).Send();
+	Observe(Rig.Client.Put(TEXT("/multipart")).Body(FVaRestMultipart().AddField(TEXT("f"), TEXT("v")).AddFile(TEXT("file"), PartFile)), Parts).Send();
+	Observe(Rig.Client.Put(TEXT("/file")).BodyFile(UploadFile), File).Send();
+	Observe(Rig.Client.Get<void>(TEXT("/download")).SaveTo(Destination), Saved).Send();
+	if (!TestTrue(TEXT("all four back off"), PumpUntil([&Rig] { return Rig.Clock->NumPendingTimers() == 4; })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Clock->Advance(0.5);
+	if (!TestTrue(TEXT("all complete"), PumpUntil([&] { return Json1->IsDone() && Parts->IsDone() && File->IsDone() && Saved->IsDone(); })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	if (!TestEqual(TEXT("two calls each"), Rig.Fake->NumCalls(), 8))
+	{
+		return false;
+	}
+	for (const TCHAR* Path : { TEXT("/json"), TEXT("/multipart"), TEXT("/file") })
+	{
+		TArray<int32> Calls;
+		for (int32 Index = 0; Index < Rig.Fake->NumCalls(); ++Index)
+		{
+			if (Rig.Fake->GetCall(Index).Request.Url.EndsWith(Path))
+			{
+				Calls.Add(Index);
+			}
+		}
+		if (!TestEqual(FString::Printf(TEXT("%s: two attempts"), Path), Calls.Num(), 2))
+		{
+			continue;
+		}
+		const TArray<uint8> First = Rig.Fake->ReadBody(Calls[0]);
+		TestTrue(FString::Printf(TEXT("%s: the retry sends the whole body again"), Path), First.Num() > 0 && First == Rig.Fake->ReadBody(Calls[1]));
+	}
+	TArray<uint8> Downloaded;
+	TestTrue(TEXT("SaveTo: the final attempt's body"), Saved->SuccessCalls.load() == 1 && FFileHelper::LoadFileToArray(Downloaded, *Destination)
+		&& Downloaded == TArray<uint8>{ 'o', 'k' });
+	// Spec review I-7: the lambda's local is not "Parts" (the test's own Parts above; MSVC C4456)
+	const auto Leftovers = [&Dir]
+	{
+		TArray<FString> Found;
+		IFileManager::Get().FindFiles(Found, *(Dir / TEXT("*.part")), true, false);
+		return Found.Num();
+	};
+	// The first attempt's temp file is deleted by a UE::Tasks task (FTransportStage): give it the time it needs
+	TestTrue(TEXT("... and no attempt's temp file is left"), PumpUntil([&Leftovers] { return Leftovers() == 0; }));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpRetryQueueEndLoggedTest, "VaRest.Http.Retry.QueueEndLogged",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpRetryQueueEndLoggedTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::RetryTestPrivate;
+	// Task 8 re-review minor 1: an attempt the request itself lost in the limiter's queue writes its Basic line (the
+	// deadline's here; a Cancel()'s is VaRest.Http.Log's queued-time test), and one dropped because the request's answer
+	// was accepted (FClientState::EndWaits) ends silently, as a finished request's dead entry does at its grant
+	TGuardConsoleVariable<int32> Level(TEXT("VaRest.LogLevel"), -1);
+	FLogCapture Capture;
+	FTestRig Queue;
+	Queue.Client.WithMaxConcurrent(1).WithLogLevel(EVaRestLogLevel::Basic).WithRetry(Exact(3).WithDeadline(1.f));
+	Queue.Fake->SetResponder([](const FVaRestTransportRequest& Request) { return Request.Url.EndsWith(TEXT("/hold")) ? FVaRestFakeResponse::Manual() : Json(200); });
+	AddExpectedMessagePlain(TEXT("GET https://api.test/late -> Timeout Deadline (0 ms, 1000 ms queued)"), ELogVerbosity::Warning,
+		EAutomationExpectedMessageFlags::Contains, 1);
+	auto Hold = MakeOutcome<FVaRestJson>();
+	auto Late = MakeOutcome<FVaRestJson>();
+	Observe(Queue.Client.Get(TEXT("/hold")).NoRetry(), Hold).Send();
+	const FVaRestRequestHandle LateHandle = Observe(Queue.Client.Get(TEXT("/late")), Late).Send();
+	if (!TestTrue(TEXT("one holds the slot"), PumpUntil([&Queue] { return Queue.Fake->NumCalls() == 1; })))
+	{
+		Abandon(Queue);
+		return false;
+	}
+	Queue.Clock->Advance(1.5);
+	if (!TestTrue(TEXT("the late one ends at its deadline"), PumpUntil([Late] { return Late->IsDone(); })))
+	{
+		Abandon(Queue);
+		return false;
+	}
+	Queue.Fake->Complete(0, Json(200));
+	if (!TestTrue(TEXT("both complete"), PumpUntil([Hold, Late] { return Hold->IsDone() && Late->IsDone(); })))
+	{
+		Abandon(Queue);
+		return false;
+	}
+	Queue.Drain();
+	const FString DeadlineLine = FString::Printf(TEXT("#%llu GET https://api.test/late -> Timeout Deadline (0 ms, 1000 ms queued)"), LateHandle.GetId());
+	TestEqual(TEXT("the deadline's abort writes the attempt's Basic line, once"), Capture.Count(DeadlineLine), 1);
+
+	// The decode window of VaRest.Http.Retry.QueuedRetryWhileDecoding, at Basic: the stage's answer takes the queued retry
+	// out of the queue, and that abort is not the request's own end
+	FTestRig Rig;
+	Rig.Fake->bCompleteOnWorker = false;
+	const TSharedRef<FHoldingOuter, ESPMode::ThreadSafe> Outer = MakeShared<FHoldingOuter, ESPMode::ThreadSafe>(true);
+	Outer->OnlyTag = TEXT("Held");
+	Rig.Client.Use(Outer, EVaRestStageSlot::Outer).WithRetry(Exact(3)).WithMaxConcurrent(1).WithLogLevel(EVaRestLogLevel::Basic);
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest& Request)
+	{
+		return Request.Url.EndsWith(TEXT("/blocker")) ? FVaRestFakeResponse::Manual() : Json(503);
+	});
+	AddExpectedMessagePlain(TEXT("GET https://api.test/held -> 503"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
+	VaRest::Http::FLimiter& Limiter = VaRest::Http::FClientAccess::State(Rig.Client)->GetLimiter();
+	auto Answered = MakeOutcome<FVaRestJson>();
+	auto Blocker = MakeOutcome<FVaRestJson>();
+	const FVaRestRequestHandle HeldHandle = Observe(Rig.Client.Get(TEXT("/held")).Tag(TEXT("Held")), Answered).Send();
+	if (!TestTrue(TEXT("the first attempt, then a backoff"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 1 && Rig.Clock->NumPendingTimers() == 1; })))
+	{
+		Outer->Held.Reset();
+		Abandon(Rig);
+		return false;
+	}
+	Observe(Rig.Client.Get(TEXT("/blocker")), Blocker).Send();
+	if (!TestEqual(TEXT("the blocker takes the one slot"), Rig.Fake->NumCalls(), 2))
+	{
+		Outer->Held.Reset();
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Clock->Advance(0.5);
+	if (!TestEqual(TEXT("the retry waits in the limiter's queue"), Limiter.NumQueued(), 1))
+	{
+		Outer->Held.Reset();
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Fake->Complete(1, Json(200));
+	Outer->AnswerNow(200, FUtf8StringView(UTF8TEXT(R"({"from":"stage"})")));
+	TestEqual(TEXT("the stage's answer took the retry out of the queue"), Limiter.NumQueued(), 0);
+	if (!TestTrue(TEXT("both delivered"), PumpUntil([Answered, Blocker] { return Answered->IsDone() && Blocker->IsDone(); })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Drain();
+	TestTrue(TEXT("the stage's answer is the request's"), Answered->SuccessCalls.load() == 1);
+	TestEqual(TEXT("the freed slot dispatched nothing for it"), Rig.Fake->NumCalls(), 2);
+	const FString Dropped = FString::Printf(TEXT("#%llu GET https://api.test/held -> canceled"), HeldHandle.GetId());
+	TestEqual(TEXT("... and the retry it took out of the queue wrote no canceled line"), Capture.Count(Dropped), 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpRetryProceedWhileDecodingTest, "VaRest.Http.Retry.ProceedRefusedWhileDecoding",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpRetryProceedWhileDecodingTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::RetryTestPrivate;
+	// Task 8 re-review, out of scope 1 (re-review N-6's family, closed centrally): once an answer is accepted and handed to
+	// its decode task, a stage that proceeds again starts no attempt -- Proceed refuses outside Phase InChain
+	FTestRig Rig;
+	const TSharedRef<FEagerOuter, ESPMode::ThreadSafe> Outer = MakeShared<FEagerOuter, ESPMode::ThreadSafe>(false, 200);
+	Outer->JsonBody = FUtf8StringView(UTF8TEXT(R"({"from":"stage"})"));
+	Rig.Client.Use(Outer, EVaRestStageSlot::Outer);
+	auto Outcome = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/decoding")), Outcome).Send();
+	// Before any pump: the decode task's result comes back through a game-thread task, so the request is still decoding
+	{
+		const TSharedPtr<FVaRestExchange, ESPMode::ThreadSafe> Pinned = Outer->Kept.Pin();
+		if (!TestTrue(TEXT("the stage's answer is being decoded"), Pinned.IsValid() && !Outcome->IsDone()
+			&& VaRest::Http::Internals(*Pinned).Phase == EVaRestExchangePhase::Decoding))
+		{
+			Outer->Release();
+			Abandon(Rig);
+			return false;
+		}
+	}
+	Outer->ProceedAgain();
+	TestEqual(TEXT("a stage proceeding while its answer decodes: Canceled at once"), Outer->AgainCanceled->load(), 1);
+	TestEqual(TEXT("... and no network attempt"), Rig.Fake->NumCalls(), 0);
+	if (!TestTrue(TEXT("the decoded answer is delivered"), Rig.Wait(Outcome)))
+	{
+		Outer->Release();
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Drain();
+	TestTrue(TEXT("... the stage's, once"), Outcome->SuccessCalls.load() == 1 && Outcome->ErrorCalls.load() == 0 && Outcome->Value.IsSet()
+		&& Outcome->Value->Get(TEXT("from")).AsString() == TEXT("stage"));
+	TestEqual(TEXT("no network attempt at all"), Rig.Fake->NumCalls(), 0);
+	Outer->Release();
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpRetryReportsTwiceTest, "VaRest.Http.Retry.StageReportsTwice",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpRetryReportsTwiceTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::RetryTestPrivate;
+	// Task 8 re-review, out of scope 2: a PerAttempt stage that reports twice (review C-3: the second report is ignored)
+	// must not arm a second backoff. A second timer would overwrite the one the interrupt hook clears, so Cancel() could
+	// not reach the first, and the two would start two attempts at once.
+	FTestRig Rig;
+	const TSharedRef<FOutcomeProbe, ESPMode::ThreadSafe> Probe = MakeShared<FOutcomeProbe, ESPMode::ThreadSafe>();
+	const TSharedRef<FReportsTwice, ESPMode::ThreadSafe> Twice = MakeShared<FReportsTwice, ESPMode::ThreadSafe>(503);
+	Rig.Client.Use(Probe, EVaRestStageSlot::Outer).Use(Twice, EVaRestStageSlot::PerAttempt).WithRetry(Exact(3));
+	auto Outcome = MakeOutcome<FVaRestJson>();
+	const FVaRestRequestHandle Handle = Observe(Rig.Client.Get(TEXT("/twice")), Outcome).Send();
+	// Inside Send(): the stage answered the first attempt twice
+	TestEqual(TEXT("one backoff for the two reports"), Rig.Clock->NumPendingTimers(), 1);
+	Handle.Cancel();
+	TestEqual(TEXT("Cancel() reaches the one wait: nothing left armed"), Rig.Clock->NumPendingTimers(), 0);
+	TestEqual(TEXT("... and the Outer stage got its one Canceled inside Cancel()"), Probe->Count(Handle.GetId(), EVaRestTransportFailure::Canceled), 1);
+	if (!TestTrue(TEXT("Cancel() ends it"), Rig.Wait(Outcome)))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	// A timer the hook could not reach would fire here
+	Rig.Clock->Advance(10.0);
+	Rig.Drain();
+	TestTrue(TEXT("one OnError(Canceled), one OnComplete"), Outcome->ErrorCalls.load() == 1 && Outcome->CompleteCalls.load() == 1
+		&& Outcome->Error.Kind == EVaRestErrorKind::Canceled);
+	TestEqual(TEXT("the stage ran for the first attempt only"), Twice->Calls->load(), 1);
+	TestEqual(TEXT("the Outer stage got one outcome"), Probe->Total(Handle.GetId()), 1);
+	TestEqual(TEXT("nothing reached the network"), Rig.Fake->NumCalls(), 0);
 	return true;
 }
 

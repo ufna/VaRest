@@ -189,6 +189,48 @@ namespace VaRest::Http::Testing
 		bool Drain(double TimeoutSeconds = 5.0) const;
 	};
 
+	/**
+	 * An Outer stage that records every outcome it is given, per request: plan decision 7 says every Outer stage gets one
+	 * outcome per request, its wait interrupted or not (concurrency review I-5). Game thread.
+	 */
+	class FOutcomeProbe final : public IVaRestStage
+	{
+	public:
+		virtual FName GetStageName() const override { return TEXT("OutcomeProbe"); }
+
+		virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) override
+		{
+			Next.Proceed(Exchange, [Into = Seen, Id = Exchange->GetRequestId(), Done = MoveTemp(OnOutcome)](FVaRestAttemptOutcome&& Outcome) mutable
+			{
+				Into->FindOrAdd(Id).Add(Outcome.Failure);
+				Done(MoveTemp(Outcome));
+			});
+		}
+
+		/** The outcomes RequestId got that carried Failure */
+		int32 Count(uint64 RequestId, EVaRestTransportFailure Failure) const
+		{
+			int32 Matching = 0;
+			if (const TArray<EVaRestTransportFailure>* Found = Seen->Find(RequestId))
+			{
+				for (const EVaRestTransportFailure One : *Found)
+				{
+					Matching += One == Failure ? 1 : 0;
+				}
+			}
+			return Matching;
+		}
+
+		/** Every outcome RequestId got */
+		int32 Total(uint64 RequestId) const
+		{
+			const TArray<EVaRestTransportFailure>* Found = Seen->Find(RequestId);
+			return Found ? Found->Num() : 0;
+		}
+
+		TSharedRef<TMap<uint64, TArray<EVaRestTransportFailure>>, ESPMode::ThreadSafe> Seen = MakeShared<TMap<uint64, TArray<EVaRestTransportFailure>>, ESPMode::ThreadSafe>();
+	};
+
 	/** The request an event belongs to (0 for client-level kinds, a socket frame's excerpt, and kinds it does not know) */
 	VARESTHTTP_API uint64 RequestIdOf(const FVaRestTraceEvent& Event);
 

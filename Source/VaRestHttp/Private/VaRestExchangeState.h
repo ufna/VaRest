@@ -95,8 +95,12 @@ namespace VaRest::Http
 		bool bRetryEligible = false;
 		/** Plan decision 8: a later attempt can need the body again, so the transport stage copies it */
 		bool bMayReissue = false;
-		/** Plan decision 10 (Task 9): clock seconds; 0 = none */
+		/** Plan decision 10: StartedAt + the policy's Deadline, clock seconds; 0 = none. Set for any policy with one, eligible or not. */
 		double DeadlineAt = 0.0;
+		/** Concurrency review M-1: the deadline's timer while an attempt waits in the limiter's queue */
+		FVaRestTimerHandle QueueDeadline;
+		/** Set by that timer before it takes the entry out of the queue: the abort answers Deadline, not Canceled */
+		bool bQueueDeadlinePassed = false;
 		int32 RetriesDone = 0;
 
 		/**

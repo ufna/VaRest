@@ -35,4 +35,7 @@ namespace VaRest::Http
 
 	/** Spec 4's retry stage (Task 8): the first built-in Outer stage */
 	FVaRestStageRef MakeRetryStage();
+
+	/** Plan decision 10: what an attempt that would start past the retry deadline answers -- Kind=Timeout, not retryable */
+	FVaRestAttemptOutcome MakeDeadlineOutcome();
 }

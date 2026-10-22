@@ -62,7 +62,11 @@ public:
 	{
 	}
 
-	/** Game thread. Runs the remaining stages for Exchange; OnOutcome receives what they produce. A finished or canceled exchange reports Canceled at once. */
+	/**
+	 * Game thread. Runs the remaining stages for Exchange; OnOutcome receives what they produce. An exchange that is
+	 * canceled, or whose answer is already accepted (being decoded, delivered, or its delivery queued), reports Canceled
+	 * at once and starts no attempt.
+	 */
 	void Proceed(const FVaRestExchangeRef& Exchange, FVaRestOutcomeCallback&& OnOutcome) const;
 
 private:

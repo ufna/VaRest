@@ -276,6 +276,9 @@ namespace VaRest::Http::PipelinePrivate
 				{
 					FExchangeState& Granted = Internals(*Exchange);
 					Granted.bInLimiterQueue = false;
+					// Concurrency review M-1: out of the queue, the deadline's queue timer goes; the transport stage checks the
+					// deadline again at dispatch
+					Granted.Config->Clock->ClearTimer(Granted.QueueDeadline);
 					Granted.LimiterWait = Granted.Config->Clock->Now() - EnqueuedAt;
 					if (!Granted.bFinished && Exchange->IsCancelRequested())
 					{
@@ -303,14 +306,52 @@ namespace VaRest::Http::PipelinePrivate
 				{
 					FExchangeState& Aborted = Internals(*Exchange);
 					Aborted.bInLimiterQueue = false;
+					Aborted.Config->Clock->ClearTimer(Aborted.QueueDeadline);
 					// Task 14 re-review N2 (P14.2): the time spent queued is the queue's, as for a grant, so the log line
 					// shows "canceled (0 ms, N ms queued)" and not the wait as the attempt's own milliseconds
 					Aborted.LimiterWait = Aborted.Config->Clock->Now() - EnqueuedAt;
-					FVaRestAttemptOutcome Ended = FVaRestAttemptOutcome::Canceled();
-					// Ruling I-3: nothing after the limiter ran, the log stage included
-					LogEndedInQueue(Aborted, Ended);
+					// Concurrency review M-1: the deadline's timer took it out -- the refusal the transport stage makes for an
+					// attempt that would start past the deadline. Read once and cleared, so no later abort inherits it.
+					const bool bPastDeadline = Aborted.bQueueDeadlinePassed;
+					Aborted.bQueueDeadlinePassed = false;
+					FVaRestAttemptOutcome Ended = bPastDeadline ? MakeDeadlineOutcome() : FVaRestAttemptOutcome::Canceled();
+					// Ruling I-3: nothing after the limiter ran, the log stage included, so the line is written here -- for an
+					// attempt the request itself lost (a cancel, engine exit, the deadline). One dropped because the request's
+					// answer was accepted (FClientState::EndWaits: Phase moved on, or the delivery is queued) ends silently, as
+					// a finished request's dead entry does at its grant (Task 8 re-review minor 1).
+					if (Aborted.Phase == EVaRestExchangePhase::InChain && !Aborted.bCompletionQueued)
+					{
+						LogEndedInQueue(Aborted, Ended);
+					}
 					(*Outcome)(MoveTemp(Ended));
 				});
+			if (Ex.bInLimiterQueue && Ex.DeadlineAt > 0.0 && !Ex.QueueDeadline.IsValid())
+			{
+				// Concurrency review M-1: armed, not only checked at the grant, so a wait behind long requests ends at the
+				// deadline. The timer takes the entry out of the queue; the abort above answers Deadline. Weak: the queue
+				// entry holds the exchange already. An entry granted inside Acquire has bInLimiterQueue false again by now,
+				// so no timer is armed for it; a valid handle is the timer of an entry queued while this call ran (a stage
+				// that re-issued synchronously), and is kept.
+				Ex.QueueDeadline = Ex.Config->Clock->SetTimer(FMath::Max(0.0, Ex.DeadlineAt - EnqueuedAt),
+					[Weak = TWeakPtr<FVaRestExchange, ESPMode::ThreadSafe>(Exchange)]
+				{
+					const TSharedPtr<FVaRestExchange, ESPMode::ThreadSafe> Pinned = Weak.Pin();
+					if (!Pinned.IsValid())
+					{
+						return;
+					}
+					FExchangeState& Late = Internals(*Pinned);
+					Late.QueueDeadline.Invalidate();
+					if (Late.bInLimiterQueue)
+					{
+						Late.bQueueDeadlinePassed = true;
+						if (!Late.State->GetLimiter().Abort(Late.RequestId))
+						{
+							Late.bQueueDeadlinePassed = false;
+						}
+					}
+				});
+			}
 		}
 	};
 
@@ -344,6 +385,19 @@ namespace VaRest::Http::PipelinePrivate
 				Refused.FailureDetail = TEXT("InvalidHeader");
 				OnOutcome(MoveTemp(Refused));
 				return;
+			}
+			double AttemptTimeout = Ex.Timeout;
+			if (Ex.DeadlineAt > 0.0)
+			{
+				// Plan decision 10 (spec 4.7, "plus the retry Deadline across attempts"): the time left bounds this attempt,
+				// and with none left it never starts -- a long wait in the limiter's queue counts
+				const double Left = Ex.DeadlineAt - Cfg.Clock->Now();
+				if (Left <= 0.0)
+				{
+					OnOutcome(MakeDeadlineOutcome());
+					return;
+				}
+				AttemptTimeout = AttemptTimeout > 0.0 ? FMath::Min(AttemptTimeout, Left) : Left;
 			}
 			if (!Ex.SaveTo.IsEmpty())
 			{
@@ -379,7 +433,7 @@ namespace VaRest::Http::PipelinePrivate
 				Request.BodySegments = MoveTemp(Ex.Body.Segments);
 				Request.Body = MoveTemp(Ex.Body.Bytes);
 			}
-			Request.Timeout = Ex.Timeout;
+			Request.Timeout = static_cast<float>(AttemptTimeout);
 			Request.ActivityTimeout = Ex.ActivityTimeout;
 			Request.Priority = Ex.Priority;
 			Request.ResponseFile = Ex.TempFile;
@@ -473,9 +527,10 @@ void FVaRestStageNext::Proceed(const FVaRestExchangeRef& Exchange, FVaRestOutcom
 {
 	check(IsInGameThread());
 	const VaRest::Http::FExchangeState& Ex = VaRest::Http::Internals(*Exchange);
-	// A queued completion is an accepted answer (Task 8 review minor 1): a backoff or a stage that proceeds again after
-	// it starts no attempt
-	if (Ex.bFinished || Ex.bCompletionQueued || Exchange->IsCancelRequested())
+	// Only a request in the chain starts an attempt. Its answer accepted -- being decoded (Phase Decoding), delivered
+	// (Done), or its delivery queued (Task 8 review minor 1; Phase stays InChain until that task runs) -- a backoff, a park
+	// or a stage that proceeds again after it starts none: one check for re-review N-6's whole family (Task 8 re-review)
+	if (Ex.Phase != EVaRestExchangePhase::InChain || Ex.bFinished || Ex.bCompletionQueued || Exchange->IsCancelRequested())
 	{
 		OnOutcome(FVaRestAttemptOutcome::Canceled());
 		return;
@@ -617,6 +672,9 @@ bool VaRest::Http::FClientState::Resolve(FExchangeState& Exchange, FString& OutE
 	Exchange.RetryPolicy = Exchange.RetryOverride.IsSet() ? Exchange.RetryOverride.GetValue() : Cfg.Retry;
 	Exchange.bRetryEligible = Exchange.RetryPolicy.IsEnabled() && (Exchange.bIdempotent || IsIdempotentVerb(Exchange.Verb));
 	Exchange.bMayReissue = Cfg.bMayReissue || Exchange.bRetryEligible;
+	// Plan decision 10: an absolute time on the request's clock; Enter stamped StartedAt before Resolve
+	const float Deadline = Exchange.RetryPolicy.Deadline;
+	Exchange.DeadlineAt = FMath::IsFinite(Deadline) && Deadline > 0.f ? Exchange.StartedAt + Deadline : 0.0;
 	Exchange.Timeout = Exchange.TimeoutOverride.Get(Cfg.Timeout);
 	Exchange.ActivityTimeout = Exchange.ActivityTimeoutOverride.Get(Cfg.ActivityTimeout);
 	Exchange.MaxJsonBytes = Exchange.MaxJsonBytesOverride.Get(Cfg.MaxJsonBytes);
