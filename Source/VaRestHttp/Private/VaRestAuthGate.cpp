@@ -47,6 +47,15 @@ namespace VaRest::Http::AuthGatePrivate
 
 	using FRunRef = TSharedRef<FRun, ESPMode::ThreadSafe>;
 
+	/**
+	 * M4a final review B6: the session's access token may still be sent -- there is one, and its expiry is unknown or later
+	 * than Now. Unknown counts as unexpired, as NeedsRefresh reads it (a token with no known expiry is never due).
+	 */
+	bool IsAccessTokenUnexpired(const FVaRestSessionData& Session, double Now)
+	{
+		return Session.HasAccessToken() && (Session.ExpiresAt <= 0.0 || Now < Session.ExpiresAt);
+	}
+
 	FVaRestAttemptOutcome FailureFor(const FExchangeState& Ex, const FRefreshEnded& End)
 	{
 		// Task 17 review M-5, Task 14 review M-1's rule: the refresh's message is the auth's text, third-party, and
@@ -199,7 +208,9 @@ namespace VaRest::Http::AuthGatePrivate
 		// ends; a request that finishes first leaves the list through the hook above (LeaveRefresh), so no waiter outlives it.
 		// C-I-1: kept for Completed. Set after the call: a request the auth's Refresh ends from inside it (a Cancel()) is
 		// completed from a later task (FClientState::Complete defers inside Cancel, decision 3)
-		Ex.ParkRefreshId = Client.JoinRefresh(WaiterId, Run->Auth, Ex.RequestId, [Run, ParkedAt, bReplay](const FRefreshEnded& End)
+		// M4a final review B6: a park before an attempt starts a proactive refresh (BeforeAttempt parks for a due expiry or a
+		// missing access token when none runs); a replay's park starts a reactive one (its 401)
+		Ex.ParkRefreshId = Client.JoinRefresh(WaiterId, Run->Auth, Ex.RequestId, /*bProactive*/ !bReplay, [Run, ParkedAt, bReplay](const FRefreshEnded& End)
 		{
 			// M4a final review A5 (review A M-4, spec 4.8): the refresh's end runs this from a game-thread task that took the
 			// tags of whoever answered the refresh (an auth's Done, the game's SetSession; TaskPrivate.h:192), and the attempt
@@ -213,7 +224,14 @@ namespace VaRest::Http::AuthGatePrivate
 			FExchangeState& Back = Internals(*Run->Exchange);
 			Back.Interrupt.Reset();
 			Back.Config->Clock->ClearTimer(Run->DeadlineTimer);
-			if (End.End != ERefreshEnd::Ready || IsOwnerGone(Back))
+			// M4a final review B6 (ruling): a proactive refresh is an optimization. When one fails (not Rejected, not Cleared),
+			// a request parked before its attempt whose access token is still unexpired is sent with that token instead of
+			// failing -- a Wi-Fi blip inside the lead must not fail a request that would succeed; if the token is refused
+			// after all, its 401 takes the reactive path. A replay's park (its token was refused) and a park behind a 401's
+			// or RefreshAuth's refresh keep spec 4.2's rule: they fail with the refresh's kind.
+			const bool bSendAnyway = End.End == ERefreshEnd::Failed && End.bProactive && !bReplay
+				&& IsAccessTokenUnexpired(Back.State->GetSessionData(), Back.Config->Clock->Now());
+			if ((End.End != ERefreshEnd::Ready && !bSendAnyway) || IsOwnerGone(Back))
 			{
 				FVaRestAttemptOutcome Ended;
 				if (End.End != ERefreshEnd::Ready)

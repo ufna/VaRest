@@ -40,6 +40,8 @@ namespace VaRest::Http
 		/** Failed: what the waiters fail with */
 		EVaRestErrorKind Kind = EVaRestErrorKind::Connection;
 		FString Message;
+		/** FRefreshInFlight::bProactive of the refresh that ended (M4a final review B6) */
+		bool bProactive = false;
 	};
 
 	using FRefreshWaiter = TUniqueFunction<void(const FRefreshEnded&)>;
@@ -50,6 +52,12 @@ namespace VaRest::Http
 		uint64 RefreshId = 0;
 		/** IN-9 CauseRequestId: the request whose 401 (or due expiry) started it; 0 for RefreshAuth */
 		uint64 CauseRequestId = 0;
+		/**
+		 * M4a final review B6: a park before an attempt started it (spec 4.2's "proactively": a due expiry, no access token),
+		 * not a 401 or RefreshAuth. When it fails, a request parked before its attempt whose token is still unexpired is sent
+		 * with it (the auth gate's waiter).
+		 */
+		bool bProactive = false;
 		TArray<TPair<uint64, FRefreshWaiter>> Waiters;
 	};
 

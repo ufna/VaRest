@@ -473,7 +473,8 @@ bool VaRest::Http::FClientState::ImportSession(FStringView InJson, bool bSameIde
 	return true;
 }
 
-uint64 VaRest::Http::FClientState::JoinRefresh(uint64 WaiterId, const TSharedRef<IVaRestAuth, ESPMode::ThreadSafe>& Auth, uint64 CauseRequestId, FRefreshWaiter&& OnDone)
+uint64 VaRest::Http::FClientState::JoinRefresh(uint64 WaiterId, const TSharedRef<IVaRestAuth, ESPMode::ThreadSafe>& Auth, uint64 CauseRequestId, bool bProactive,
+	FRefreshWaiter&& OnDone)
 {
 	check(IsInGameThread());
 	const bool bStart = !Session.Refresh.IsValid();
@@ -484,6 +485,7 @@ uint64 VaRest::Http::FClientState::JoinRefresh(uint64 WaiterId, const TSharedRef
 		// AuthRefreshId names a record the Inspector has
 		Session.Refresh->RefreshId = FVaRestTrace::NewRequestId();
 		Session.Refresh->CauseRequestId = CauseRequestId;
+		Session.Refresh->bProactive = bProactive;
 	}
 	Session.Refresh->Waiters.Emplace(WaiterId, MoveTemp(OnDone));
 	// Read before StartRefresh: the auth's Refresh is game code and may end this refresh inside the call
@@ -537,6 +539,7 @@ void VaRest::Http::FClientState::FinishRefresh(uint64 RefreshId, FVaRestAuthRefr
 	FRefreshEnded End;
 	End.RefreshId = RefreshId;
 	End.Message = Result.Message;
+	End.bProactive = Ended->bProactive;
 	if (Result.Outcome == EVaRestAuthRefreshOutcome::Refreshed && !Result.AccessToken.IsEmpty() && IsValidHeaderValue(Result.AccessToken)
 		&& IsValidHeaderValue(Result.RefreshToken))
 	{
@@ -589,6 +592,7 @@ void VaRest::Http::FClientState::EndRefresh(ERefreshEnd EndKind, const TCHAR* Me
 	End.End = EndKind;
 	End.RefreshId = Ended->RefreshId;
 	End.Message = Message;
+	End.bProactive = Ended->bProactive;
 	// The refresh's own late answer finds another id (or none) and is ignored (FinishRefresh)
 	SessionPrivate::ResolveWaitersLater(*this, MoveTemp(Ended), MoveTemp(End));
 }

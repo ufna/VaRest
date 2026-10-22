@@ -775,7 +775,9 @@ void FVaRestClient::RefreshAuth(TUniqueFunction<void(EVaRestAuthRefreshOutcome O
 		}, UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
 		return;
 	}
-	Pinned->JoinRefresh(Pinned->NewWaiterId(), Auth.ToSharedRef(), 0, Wait(MoveTemp(OnDone)));
+	// Not proactive (M4a final review B6): the core cannot tell a socket's 401 from its due expiry, so a request parked behind
+	// this refresh keeps spec 4.2's rule when it fails
+	Pinned->JoinRefresh(Pinned->NewWaiterId(), Auth.ToSharedRef(), 0, /*bProactive*/ false, Wait(MoveTemp(OnDone)));
 }
 
 FVaRestClient& FVaRestClient::Use(FVaRestStageRef Stage, EVaRestStageSlot Slot)

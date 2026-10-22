@@ -2837,12 +2837,13 @@ bool FVaRestHttpAuthParkEndLineTest::RunTest(const FString& Parameters)
 		return Count;
 	};
 	int32 Parks = 0;
-	const auto ParkDue = [&Rig, &Auth, &Parks](const TCHAR* Path, const TSharedRef<TTestOutcome<FVaRestJson>, ESPMode::ThreadSafe>& Outcome, FVaRestRequestHandle& OutHandle)
+	const auto ParkDue = [&Rig, &Auth, &Parks](const TCHAR* Path, const TSharedRef<TTestOutcome<FVaRestJson>, ESPMode::ThreadSafe>& Outcome, FVaRestRequestHandle& OutHandle,
+		double ExpiresIn = 20.0)
 	{
 		// A known expiry within the lead: the request parks before its first attempt (spec 4.2, "proactively"). The game's
 		// new access token ends a refresh still in flight (Ready; only a new one does, M4a final review B3), so each park
 		// starts its own.
-		Rig.Client.SetSession(FString::Printf(TEXT("park-access-%d-123456"), ++Parks), TEXT("old-refresh-123456"), 20.0);
+		Rig.Client.SetSession(FString::Printf(TEXT("park-access-%d-123456"), ++Parks), TEXT("old-refresh-123456"), ExpiresIn);
 		const int32 Before = Auth->Refreshes;
 		OutHandle = Observe(Rig.Client.Get(Path), Outcome).Send();
 		return Rig.Drain() && Auth->IsPending() && Auth->Refreshes == Before + 1 && Rig.Fake->NumCalls() == 0;
@@ -2864,7 +2865,8 @@ bool FVaRestHttpAuthParkEndLineTest::RunTest(const FString& Parameters)
 
 	FVaRestRequestHandle FailedHandle;
 	auto Failed = MakeOutcome<FVaRestJson>();
-	if (!TestTrue(TEXT("parked again"), ParkDue(TEXT("/failed"), Failed, FailedHandle)))
+	// A token that expires while it waits: a failed proactive refresh sends one still valid (M4a final review B6)
+	if (!TestTrue(TEXT("parked again"), ParkDue(TEXT("/failed"), Failed, FailedHandle, 0.05)))
 	{
 		Abandon(Rig);
 		return false;
@@ -3083,6 +3085,139 @@ bool FVaRestHttpAuthRefreshTokenOnlyTest::RunTest(const FString& Parameters)
 	Hand->Answer(FVaRestAuthRefreshResult::Refreshed(TEXT("new-access-123456")));
 	TestTrue(TEXT("... C replays with its token and succeeds"), Kept.Wait(Waiting) && Waiting->SuccessCalls.load() == 1 && Hand->Refreshes == 1);
 	Kept.Drain();
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthProactiveFailedTest, "VaRest.Http.Auth.ProactiveFailedSendsAValidToken",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthProactiveFailedTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// M4a final review B6 (ruling): a proactive refresh is an optimization. A request parked before its attempt by one
+	// (a known expiry within the lead) is sent with its token when the refresh fails and that token has not expired yet; it
+	// fails with the refresh's kind when the token has expired, and Kind=Auth when the refresh is rejected. Spec 4.2's
+	// rule stays for the 401 cases: a request parked before its attempt behind a 401's refresh, and a replay parked behind a
+	// proactive one, fail with the refresh's kind.
+	const auto Due = [](FTestRig& Into)
+	{
+		const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Hand = HandRig(Into);
+		Into.Client.SetSession(TEXT("old-access-123456"), TEXT("old-refresh-123456"), 20.0);
+		AcceptTokens(Into, { TEXT("old-access-123456"), TEXT("new-access-123456") });
+		return Hand;
+	};
+	{
+		FTestRig Rig;
+		const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = Due(Rig);
+		FScopedTraceRecorder Scoped(EVaRestTraceDetail::Metadata);
+		auto Outcome = MakeOutcome<FVaRestJson>();
+		const FVaRestRequestHandle Handle = Observe(Rig.Client.Get(TEXT("/valid")), Outcome).Send();
+		if (!TestTrue(TEXT("valid: parked before its attempt, a proactive refresh"), Rig.Drain() && Auth->IsPending() && Rig.Fake->NumCalls() == 0))
+		{
+			Abandon(Rig);
+			return false;
+		}
+		Rig.Clock->Advance(1.0);
+		Auth->Answer(FVaRestAuthRefreshResult::Failed(EVaRestErrorKind::Connection, TEXT("no route to the refresh endpoint")));
+		TestTrue(TEXT("valid: Failed, the token 19 s from expiry -- sent with it, and succeeds"), Rig.Wait(Outcome) && Outcome->SuccessCalls.load() == 1
+			&& Outcome->Response.Attempts == 1 && Rig.Fake->NumCalls() == 1);
+		TestTrue(TEXT("... with the old token"), Rig.Fake->NumCalls() == 1
+			&& Rig.Fake->GetCall(0).Request.Headers.Get(TEXT("Authorization")).Equals(TEXT("Bearer old-access-123456"), ESearchCase::CaseSensitive));
+		Rig.Drain();
+		const TArray<FVaRestTraceAttemptDispatched> Dispatched = DispatchesOf(*Scoped.Recorder, Handle.GetId());
+		TestTrue(TEXT("... IN-2: attempt 1, the 1 s behind the refresh its AuthWait, naming that refresh"), Dispatched.Num() == 1 && Dispatched[0].Attempt == 1
+			&& FMath::IsNearlyEqual(Dispatched[0].AuthWait, 1.0) && Dispatched[0].AuthRefreshId == Auth->LastRefreshId);
+		FString Why;
+		TestTrue(TEXT("... PhasesHold"), PhasesHold(*Scoped.Recorder, Handle.GetId(), Why));
+		TestTrue(TEXT("... the session kept"), Rig.Client.GetSession().HasRefreshToken());
+	}
+	{
+		FTestRig Rig;
+		const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = Due(Rig);
+		auto Outcome = MakeOutcome<FVaRestJson>();
+		Observe(Rig.Client.Get(TEXT("/expired")), Outcome).Send();
+		Rig.Drain();
+		Rig.Clock->Advance(25.0);
+		Auth->Answer(FVaRestAuthRefreshResult::Failed(EVaRestErrorKind::Timeout, TEXT("the refresh timed out")));
+		TestTrue(TEXT("expired: Failed after the token expired -- fails with its kind (Timeout), nothing sent"), Rig.Wait(Outcome, 2.0)
+			&& Outcome->Error.Kind == EVaRestErrorKind::Timeout && Rig.Fake->NumCalls() == 0);
+		Rig.Drain();
+	}
+	{
+		FTestRig Rig;
+		const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = Due(Rig);
+		auto Outcome = MakeOutcome<FVaRestJson>();
+		Observe(Rig.Client.Get(TEXT("/rejected")), Outcome).Send();
+		Rig.Drain();
+		Auth->Answer(FVaRestAuthRefreshResult::Rejected(TEXT("the refresh endpoint answered 400")));
+		TestTrue(TEXT("rejected: Kind Auth, nothing sent"), Rig.Wait(Outcome, 2.0) && Outcome->Error.Kind == EVaRestErrorKind::Auth && Rig.Fake->NumCalls() == 0);
+		Rig.Drain();
+	}
+	{
+		// A's 401 starts the refresh; B starts while it runs and parks before its attempt, its token unexpired (no expiry)
+		FTestRig Rig;
+		const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = HandRig(Rig);
+		auto Refused = MakeOutcome<FVaRestJson>();
+		Observe(Rig.Client.Get(TEXT("/a")), Refused).Send();
+		if (!TestTrue(TEXT("reactive: A's 401 starts a refresh"), PumpUntil([Auth] { return Auth->IsPending(); })))
+		{
+			Abandon(Rig);
+			return false;
+		}
+		auto Behind = MakeOutcome<FVaRestJson>();
+		Observe(Rig.Client.Get(TEXT("/b")), Behind).Send();
+		Auth->Answer(FVaRestAuthRefreshResult::Failed(EVaRestErrorKind::Connection, TEXT("no route to the refresh endpoint")));
+		const bool bBoth = Rig.Wait(Refused, 2.0) && Rig.Wait(Behind, 2.0);
+		TestTrue(TEXT("reactive: A and B fail Connection; B was not sent"), bBoth && Refused->Error.Kind == EVaRestErrorKind::Connection
+			&& Behind->Error.Kind == EVaRestErrorKind::Connection && Rig.Fake->NumCalls() == 1);
+		if (!bBoth)
+		{
+			Abandon(Rig);
+		}
+		Rig.Drain();
+	}
+	{
+		// C is out with the token when its expiry comes due; D parks and starts a proactive refresh; C's 401 parks it for a
+		// replay behind that refresh
+		FTestRig Rig;
+		const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = HandRig(Rig);
+		Rig.Fake->SetResponder([](const FVaRestTransportRequest& Request)
+		{
+			if (Request.Headers.Get(TEXT("Authorization")).Equals(TEXT("Bearer new-access-123456"), ESearchCase::CaseSensitive))
+			{
+				return Json(200);
+			}
+			return Request.Url.EndsWith(TEXT("/c")) ? Json(401) : Json(200);
+		});
+		Rig.Fake->Enqueue(FVaRestFakeResponse::Manual());
+		auto Replay = MakeOutcome<FVaRestJson>();
+		Observe(Rig.Client.Get(TEXT("/c")), Replay).Send();
+		if (!TestTrue(TEXT("replay: C is out"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 1; })))
+		{
+			Abandon(Rig);
+			return false;
+		}
+		Rig.Client.SetSession(TEXT("old-access-123456"), TEXT("old-refresh-123456"), 20.0);
+		auto Proactive = MakeOutcome<FVaRestJson>();
+		Observe(Rig.Client.Get(TEXT("/d")), Proactive).Send();
+		Rig.Fake->Complete(0, Json(401));
+		if (!TestTrue(TEXT("replay: D's proactive refresh runs; C's 401 parks C behind it"), PumpUntil([Auth] { return Auth->IsPending(); })
+			&& Rig.Drain() && Auth->Refreshes == 1 && !Replay->IsDone() && !Proactive->IsDone()))
+		{
+			Abandon(Rig);
+			return false;
+		}
+		Auth->Answer(FVaRestAuthRefreshResult::Failed(EVaRestErrorKind::Connection, TEXT("no route to the refresh endpoint")));
+		const bool bBoth = Rig.Wait(Replay, 2.0) && Rig.Wait(Proactive, 2.0);
+		TestTrue(TEXT("replay: D is sent and succeeds; C, a replay, fails Connection"), bBoth && Proactive->SuccessCalls.load() == 1
+			&& Replay->Error.Kind == EVaRestErrorKind::Connection && Rig.Fake->NumCalls() == 2);
+		if (!bBoth)
+		{
+			Abandon(Rig);
+		}
+		Rig.Drain();
+	}
 	return true;
 }
 

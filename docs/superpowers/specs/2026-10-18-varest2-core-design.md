@@ -398,6 +398,9 @@ Any other refresh failure (no connection, a timeout, 408, 429, 5xx, a canceled r
 refusal by the configuration such as HTTP disabled) keeps the session: the parked requests fail with
 that failure's kind — `Connection` and `Timeout` retryable, so retry and the offline queue can act on
 them — and a Wi-Fi blip does not log the player out. *(Amended 2026-10-21: M4a plan rulings Q1, I-7.)*
+A request parked before its attempt by a proactive refresh whose access token is still unexpired when that refresh
+fails (not rejected, not a logout) is sent with that token instead: a proactive refresh is an optimization, and a 401
+then takes the reactive path; requests parked by a 401 keep the rule above. *(M4a final review, 2026-10-23.)*
 The refresh request and `.NoAuth()` requests bypass the auth stages; the refresh request also skips
 the limiter's queue (§4.6).
 
