@@ -9,6 +9,7 @@
 #include "VaRestClient.h"
 #include "VaRestEnvelope.h"
 #include "VaRestExchangeState.h"
+#include "VaRestHttpStatsInternal.h"
 #include "VaRestLimiter.h"
 #include "VaRestRedactor.h"
 #include "VaRestRetry.h"
@@ -88,6 +89,8 @@ namespace VaRest::Http
 		int32 NumInFlight() const { return InFlight.Num(); }
 		/** Game thread */
 		FLimiter& GetLimiter() { return Limiter; }
+		/** This client's share of stat VaRest (concurrency review M-13: what a test compares exactly). Any thread. */
+		FHttpCounters& GetCounters() { return Counters; }
 
 		/**
 		 * Game thread: the game's layer-3 values (SetSecretValue; Inspector 2.2), each stored as GameSecretSlot(Slot) (review
@@ -249,6 +252,8 @@ namespace VaRest::Http
 		TMap<uint64, FVaRestExchangeRef> InFlight;
 		/** Spec 4.6 */
 		FLimiter Limiter;
+		/** Spec 4.8: written on the game thread (Enter, Complete, OnAttemptDone, Retry's re-issue), read anywhere */
+		FHttpCounters Counters;
 		/** Game thread; Publish copies its active values into each redactor */
 		FVaRestSecretSet Secrets;
 		FVaRestTimerHandle SecretExpiryTimer;

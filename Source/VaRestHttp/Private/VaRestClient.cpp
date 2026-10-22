@@ -9,6 +9,7 @@
 #include "VaRestClientState.h"
 #include "VaRestHttpLog.h"
 #include "VaRestHttpSettings.h"
+#include "VaRestHttpStatsInternal.h"
 #include "VaRestHttpTesting.h"
 #include "VaRestRedactor.h"
 #include "VaRestRequestSpec.h"
@@ -151,11 +152,17 @@ FVaRestRequestHandle VaRest::Http::FRequestSpecAccess::Send(TUniquePtr<FRequestS
 	Spec->bSent = true;
 	if (!Spec->State.IsValid())
 	{
+		// Spec 4.8: no pipeline, so no request in stat VaRest. Before the VaRest scope below: the delivery task takes the
+		// sender's LLM tags at its launch (TaskPrivate.h:192), so the game's callbacks are not charged to VaRest.
 		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: Send() on an empty FVaRestClient (make one with FVaRestClient::Make); the %s request is not sent, and its callbacks get Kind=Config"),
 			*EscapeForLog(Spec->Verb));
 		DeliverWithoutClient(*Spec);
 		return FVaRestRequestHandle();
 	}
+	// Spec 4.8: the sender's tags, for the callbacks, are taken before VaRest's own scope starts
+	FLlmSenderTags Sender;
+	Sender.Capture();
+	LLM_SCOPE_BYTAG(VaRest);
 	// A TSharedPtr, so that the worker path can move it into the Enter task (review I-1; a TSharedRef "move" copies,
 	// SharedPointer.h:354-361): this thread then holds no reference that could be the last one
 	TSharedPtr<FVaRestExchange, ESPMode::ThreadSafe> Created = MakeShared<FVaRestExchange, ESPMode::ThreadSafe>();
@@ -196,6 +203,7 @@ FVaRestRequestHandle VaRest::Http::FRequestSpecAccess::Send(TUniquePtr<FRequestS
 	Ex.bHasOwner = Spec->bHasOwner;
 	Ex.SourceFile = SourceFile;
 	Ex.SourceLine = SourceLine;
+	Ex.SenderTags = Sender;
 	Ex.Handler = MoveTemp(Spec->Handler);
 
 	FVaRestRequestHandle Handle(Created.ToSharedRef());

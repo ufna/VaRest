@@ -10,6 +10,7 @@
 #include "VaRestDecode.h"
 #include "VaRestExchangeState.h"
 #include "VaRestHttpLog.h"
+#include "VaRestHttpStatsInternal.h"
 #include "VaRestHttpTesting.h"
 #include "VaRestRetryInternal.h"
 #include "VaRestTracePoints.h"
@@ -152,6 +153,8 @@ namespace VaRest::Http::PipelinePrivate
 			return;
 		}
 		Ex.LastProgress = Current;
+		// Spec 4.8: the game's callback, under the tags it was sent with (FLlmSenderTags), not VaRest's
+		VAREST_LLM_SCOPE_SENDER(Ex.SenderTags);
 		Ex.Handler->Progress(Current);
 	}
 
@@ -758,6 +761,7 @@ void VaRest::Http::FClientState::Enter(const FVaRestExchangeRef& Exchange)
 {
 	using namespace PipelinePrivate;
 	check(IsInGameThread());
+	LLM_SCOPE_BYTAG(VaRest);
 	FExchangeState& Ex = Internals(*Exchange);
 	FApiScope Scope(Ex);
 	// Spec 3.1: "A request snapshots the configuration at Send()" -- SendRequest took it (decision 27); an exchange made
@@ -776,6 +780,14 @@ void VaRest::Http::FClientState::Enter(const FVaRestExchangeRef& Exchange)
 	const FVaRestExchangeRef* InUse = InFlight.Find(Ex.RequestId);
 	ensureAlwaysMsgf(!InUse || *InUse == Exchange, TEXT("VaRest: request id #%llu is already in flight on this client (a refresh context made with an id in use)"), Ex.RequestId);
 	InFlight.Add(Ex.RequestId, Exchange);
+	if (!Ex.bCounted)
+	{
+		// Spec 4.8: one request per exchange, whatever ends it -- every end reaches Complete, which counts it out. Before the
+		// cancel and owner checks below: a request that ends here (shutdown, owner gone, canceled before the hop, a
+		// configuration error) is counted in and out like any other. Once: an exchange entered again stays one request.
+		Ex.bCounted = true;
+		FHttpStats::RequestStarted(Counters);
+	}
 	if (IsShuttingDown())
 	{
 		// Review M-14: after OnEnginePreExit; the HTTP module unloads next (LaunchEngineLoop.cpp:5182)
@@ -820,8 +832,12 @@ void VaRest::Http::FClientState::OnAttemptDone(const FVaRestExchangeRef& Exchang
 {
 	using namespace PipelinePrivate;
 	check(IsInGameThread());
+	LLM_SCOPE_BYTAG(VaRest);
 	FExchangeState& Ex = Internals(*Exchange);
 	Ex.TransportCall.Reset();
+	// Spec 4.8: every attempt that reached a transport, as the transport counted it -- a retried or replayed attempt each
+	// time, and a late one whose request a cancel already finished (its bytes moved all the same)
+	FHttpStats::Transferred(Counters, Result.BytesUp, Result.BytesDown);
 	if (IsOwnerGone(Ex))
 	{
 		// Seen as canceled by every stage the outcome passes on its way up (M4's retry stops here)
@@ -948,6 +964,10 @@ void VaRest::Http::FClientState::OnChainDone(const FVaRestExchangeRef& Exchange,
 #endif
 	UE::Tasks::Launch(TEXT("VaRest.Decode"), [Held = TSharedPtr<FVaRestExchange, ESPMode::ThreadSafe>(Exchange), Decoder = MoveTemp(Handler), Pending = MoveTemp(Finish)]() mutable
 	{
+		// Spec 4.8: the decode's DOM and values are VaRest's until the callbacks take them. A launch from OnAttemptDone or
+		// Enter inherits this tag from their scope (TaskPrivate.h:192, :521); one from elsewhere -- a custom stage answering
+		// from its own timer -- would not.
+		LLM_SCOPE_BYTAG(VaRest);
 		// Spec 1: "Parsing, decoding, cache disk IO ... run on UE::Tasks background tasks"
 		RunDecode(*Decoder, Pending, Internals(*Held));
 		OnGameThread(TEXT("VaRest.Deliver"), [Target = MoveTemp(Held), Delivered = MoveTemp(Decoder), Done = MoveTemp(Pending)]() mutable
@@ -1043,6 +1063,13 @@ void VaRest::Http::FClientState::Complete(const FVaRestExchangeRef& Exchange, FF
 	{
 		InFlight.Remove(Ex.RequestId);
 	}
+	if (Ex.bCounted)
+	{
+		// Spec 4.8: here, once (bFinished above), for every end -- before the silent return below (owner gone, shutdown), and
+		// whether or not the map entry was this exchange's: a second exchange under the id (the ensure in Enter) replaced
+		// it, and both were counted in
+		FHttpStats::RequestFinished(Counters);
+	}
 	// IN-5: before any callback, OnHttpThread ones included, and also when none will run (owner gone, shutdown)
 	TracePoints::Completed(Ex, Finish);
 	// The request has ended: its cached union goes (a late outcome's line rebuilds one). What its attempts applied
@@ -1056,6 +1083,9 @@ void VaRest::Http::FClientState::Complete(const FVaRestExchangeRef& Exchange, FF
 	{
 		return;
 	}
+	// Spec 4.8: the game's callbacks run under the tags the request was sent with, not VaRest's (FLlmSenderTags); the
+	// worker task below takes them from this scope at its launch (TaskPrivate.h:192)
+	VAREST_LLM_SCOPE_SENDER(Ex.SenderTags);
 	if (Ex.bOnHttpThread)
 	{
 		// Decision 4: the game thread has seen the result (Completed, Task 15); the callbacks run on a worker.

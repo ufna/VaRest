@@ -6,6 +6,7 @@
 #include "VaRestClientState.h"
 #include "VaRestExchangeState.h"
 #include "VaRestHttpLog.h"
+#include "VaRestHttpStatsInternal.h"
 #include "VaRestRetryInternal.h"
 #include "VaRestTracePoints.h"
 
@@ -217,6 +218,10 @@ namespace VaRest::Http::RetryPrivate
 				Run->Answer(FVaRestAttemptOutcome::Canceled());
 				return;
 			}
+			// Spec 4.8: a retry is a re-issue, counted as it goes -- not where it is scheduled (RetriesDone, the policy's
+			// budget): a backoff that a cancel, an owner gone or an accepted answer ends (the interrupt hook) re-issues nothing.
+			// The auth gate's replay is not one (plan decision 2): it never comes through here.
+			FHttpStats::Retried(Waited.State->GetCounters());
 			StartAttempt(Run);
 		});
 		LogRetry(Ex, Decision);

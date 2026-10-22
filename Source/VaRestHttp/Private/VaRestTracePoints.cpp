@@ -7,6 +7,7 @@
 #include "UObject/Script.h"
 #include "UObject/Stack.h"
 #include "VaRestClientState.h"
+#include "VaRestHttpStats.h"
 #include "VaRestTransport.h"
 #include "VaRestUrl.h"
 
@@ -132,6 +133,8 @@ void VaRest::Http::TracePoints::Started(FExchangeState& Ex)
 	{
 		return;
 	}
+	// Inspector IN-14: what a trace point builds -- its copies of the request -- is the trace's, not the request's
+	LLM_SCOPE_BYTAG(VaRest_Trace);
 	FVaRestTrace::FScopedCycles Cycles;
 	const TSharedRef<const FVaRestRedactor, ESPMode::ThreadSafe> Held = RedactorFor(Ex);
 	const FVaRestRedactor& Redactor = *Held;
@@ -167,6 +170,7 @@ void VaRest::Http::TracePoints::AttemptDispatched(const FExchangeState& Ex)
 	{
 		return;
 	}
+	LLM_SCOPE_BYTAG(VaRest_Trace);
 	FVaRestTrace::FScopedCycles Cycles;
 	FVaRestTraceAttemptDispatched Payload;
 	Payload.RequestId = Ex.RequestId;
@@ -191,6 +195,7 @@ void VaRest::Http::TracePoints::AttemptEnded(const FExchangeState& Ex, const FVa
 	{
 		return;
 	}
+	LLM_SCOPE_BYTAG(VaRest_Trace);
 	FVaRestTrace::FScopedCycles Cycles;
 	const TSharedRef<const FVaRestRedactor, ESPMode::ThreadSafe> Held = RedactorFor(Ex);
 	const FVaRestRedactor& Redactor = *Held;
@@ -225,6 +230,7 @@ void VaRest::Http::TracePoints::Completed(const FExchangeState& Ex, const FFinis
 	{
 		return;
 	}
+	LLM_SCOPE_BYTAG(VaRest_Trace);
 	FVaRestTrace::FScopedCycles Cycles;
 	const TSharedRef<const FVaRestRedactor, ESPMode::ThreadSafe> Held = RedactorFor(Ex);
 	const FVaRestRedactor& Redactor = *Held;
@@ -274,6 +280,7 @@ void VaRest::Http::TracePoints::Client(uint64 ClientId, const FClientConfig& Con
 	{
 		return;
 	}
+	LLM_SCOPE_BYTAG(VaRest_Trace);
 	FVaRestTrace::FScopedCycles Cycles;
 	FVaRestTraceClient Payload;
 	Payload.bCreated = bCreated;
@@ -288,6 +295,8 @@ void VaRest::Http::TracePoints::Client(uint64 ClientId, const FClientConfig& Con
 void VaRest::Http::TracePoints::ContributeSnapshot(FVaRestTraceSnapshot& Snapshot)
 {
 	using namespace TracePointsPrivate;
+	// No mask check: a sink being added asked for this snapshot
+	LLM_SCOPE_BYTAG(VaRest_Trace);
 	// Review M-9: ForEachLive releases its pins from a later game-thread task, so a client listed here that loses its last
 	// other reference meanwhile dies after AddSink added the sink, and its Client{Destroyed} reaches it
 	FClientState::ForEachLive([&Snapshot](FClientState& State)
@@ -316,6 +325,7 @@ void VaRest::Http::TracePoints::Note(const FExchangeState& Ex, FVaRestTraceNote&
 	{
 		return;
 	}
+	LLM_SCOPE_BYTAG(VaRest_Trace);
 	FVaRestTrace::FScopedCycles Cycles;
 	Payload.RequestId = Ex.RequestId;
 	Payload.Attempt = Ex.Attempt;
@@ -328,6 +338,7 @@ void VaRest::Http::TracePoints::Marker(const FClientState& Client, EVaRestTraceM
 	{
 		return;
 	}
+	LLM_SCOPE_BYTAG(VaRest_Trace);
 	FVaRestTrace::FScopedCycles Cycles;
 	const TSharedRef<const FClientConfig, ESPMode::ThreadSafe> Current = Client.GetConfig();
 	FVaRestTraceMarker Payload;

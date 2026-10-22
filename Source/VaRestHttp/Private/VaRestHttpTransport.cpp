@@ -13,6 +13,7 @@
 #include "Interfaces/IHttpResponse.h"
 #include "Misc/ConfigCacheIni.h"
 #include "VaRestBodySink.h"
+#include "VaRestHttpStats.h"
 #include "VaRestHttpTransportInternal.h"
 #include "VaRestTrace.h"
 
@@ -135,6 +136,8 @@ namespace VaRest::Http::HttpTransportPrivate
 	TSharedRef<IVaRestTransportCall, ESPMode::ThreadSafe> FHttpModuleTransport::Start(FVaRestTransportRequest&& Request, FVaRestTransportComplete&& OnComplete)
 	{
 		check(IsInGameThread());
+		// Spec 4.8: the engine request VaRest makes and what it copies into it are VaRest's
+		LLM_SCOPE_BYTAG(VaRest);
 		const TSharedRef<IHttpRequest, ESPMode::ThreadSafe> Http = FHttpModule::Get().CreateRequest();
 		Http->SetVerb(Request.Verb);
 		Http->SetURL(Request.Url);
@@ -281,6 +284,8 @@ namespace VaRest::Http::HttpTransportPrivate
 		const TWeakPtr<IHttpRequest, ESPMode::ThreadSafe> WeakHttp = Http;
 		Http->SetResponseBodyReceiveStreamDelegateV2(FHttpRequestStreamDelegateV2::CreateLambda([Completion, WeakHttp](void* Ptr, int64& InOutLength)
 		{
+			// Spec 4.8: the response body grows here, on the HTTP thread, outside any scope VaRest set on the game thread
+			LLM_SCOPE_BYTAG(VaRest);
 			int64 ContentLength = -1;
 			if (Completion->Sink->Num() == 0)
 			{

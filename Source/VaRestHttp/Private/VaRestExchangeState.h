@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "VaRestAuthTypes.h"
 #include "VaRestEnvelope.h"
+#include "VaRestHttpStatsInternal.h"
 #include "VaRestRetry.h"
 #include "VaRestStage.h"
 
@@ -53,6 +54,8 @@ namespace VaRest::Http
 		/** Send ran on the game thread, so Enter runs inside it and the Blueprint stack is the caller's (IN-15) */
 		bool bSentOnGameThread = false;
 		FVaRestTraceInitiator Initiator;
+		/** Spec 4.8: the sender's LLM tags, under which the callbacks run (FLlmSenderTags) */
+		FLlmSenderTags SenderTags;
 		TUniquePtr<IResultHandler> Handler;
 		/** Spec 3.1, decision 27: the configuration snapshot, taken by Send on the sending thread (Enter fills it only for an exchange made another way) */
 		TSharedPtr<const FClientConfig, ESPMode::ThreadSafe> Config;
@@ -181,6 +184,12 @@ namespace VaRest::Http
 		 * a game-thread Send() is covered, and so is the Enter task of a request sent from another thread (one extra hop).
 		 */
 		int32 ApiDepth = 0;
+		/**
+		 * Spec 4.8: Enter counted this exchange as a request in flight (FHttpStats::RequestStarted). Set once, never cleared:
+		 * an exchange entered a second time (the VaRest.Http.Auth.InFlightEntryIsTheExchange case) is still one request, and
+		 * Complete -- whose body runs once, behind bFinished -- counts out only one that Enter counted.
+		 */
+		bool bCounted = false;
 		std::atomic<bool> bCancelRequested{ false };
 		std::atomic<bool> bDone{ false };
 	};
