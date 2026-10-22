@@ -200,15 +200,15 @@ namespace VaRest::Http::BearerRefreshPrivate
 				FVaRestForm Form;
 				Form.Add(TEXT("grant_type"), TEXT("refresh_token"));
 				Form.Add(TEXT("refresh_token"), Token);
-				if (!Config.ClientId.IsEmpty())
+				if (!Config.OAuthClientId.IsEmpty())
 				{
-					Form.Add(TEXT("client_id"), Config.ClientId);
+					Form.Add(TEXT("client_id"), Config.OAuthClientId);
 				}
 				Refreshing = MoveTemp(Refreshing).Body(Form);
 			}
 			else
 			{
-				Refreshing = MoveTemp(Refreshing).Body(FVaRestJson::Object().Set(Config.RefreshTokenField, Token));
+				Refreshing = MoveTemp(Refreshing).Body(FVaRestJson::Object().Set(Config.RefreshBodyField, Token));
 			}
 			// The game thread (no OnHttpThread()): Done may be called from any thread, but the path reads need none
 			MoveTemp(Refreshing).OnComplete([Paths = Config, Host = RefreshHost, Finish = MoveTemp(Done)](const TVaRestResult<FVaRestJson>& Result) mutable
@@ -230,9 +230,9 @@ namespace VaRest::Http::BearerRefreshPrivate
 					OutKeys.Add(Segment);
 				}
 			}
-			if (!Config.RefreshTokenField.IsEmpty())
+			if (!Config.RefreshBodyField.IsEmpty())
 			{
-				OutKeys.Add(Config.RefreshTokenField);
+				OutKeys.Add(Config.RefreshBodyField);
 			}
 		}
 
@@ -262,11 +262,11 @@ FVaRestAuth::FRef FVaRestAuth::BearerRefresh(const FVaRestBearerRefreshConfig& C
 		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: FVaRestAuth::BearerRefresh: RefreshPath is empty; requests fail with Kind=Config"));
 		ConfigError = TEXT("the BearerRefresh RefreshPath is empty");
 	}
-	else if (Config.Style == EVaRestRefreshStyle::Json && Config.RefreshTokenField.IsEmpty())
+	else if (Config.Style == EVaRestRefreshStyle::Json && Config.RefreshBodyField.IsEmpty())
 	{
 		// The body would be {"":"<token>"}. OAuth2Form never reads the field (it always sends refresh_token): no error there.
-		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: FVaRestAuth::BearerRefresh: the Json style's RefreshTokenField is empty; requests fail with Kind=Config"));
-		ConfigError = TEXT("the BearerRefresh RefreshTokenField is empty (Json style)");
+		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: FVaRestAuth::BearerRefresh: the Json style's RefreshBodyField is empty; requests fail with Kind=Config"));
+		ConfigError = TEXT("the BearerRefresh RefreshBodyField is empty (Json style)");
 	}
 	return MakeShared<VaRest::Http::BearerRefreshPrivate::FBearerRefreshAuth, ESPMode::ThreadSafe>(Config, MoveTemp(ConfigError));
 }

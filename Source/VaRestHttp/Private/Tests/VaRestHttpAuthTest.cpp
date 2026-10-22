@@ -2966,7 +2966,7 @@ bool FVaRestHttpAuthBearerRefreshTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("a success on the replay"), Outcome->SuccessCalls.load() == 1 && Outcome->Response.Attempts == 2);
 	const FVaRestTransportRequest& Refresh = Rig.Fake->GetCall(1).Request;
 	TestTrue(TEXT("the refresh: POST to the refresh path"), Refresh.Verb == TEXT("POST") && Refresh.Url == TEXT("https://api.test/auth/refresh"));
-	TestEqualSensitive(TEXT("... a JSON body with the refresh token under RefreshTokenField"), BodyText(Rig.Fake->ReadBody(1)), FString(TEXT(R"({"refreshToken":"old-refresh-123456"})")));
+	TestEqualSensitive(TEXT("... a JSON body with the refresh token under RefreshBodyField"), BodyText(Rig.Fake->ReadBody(1)), FString(TEXT(R"({"refreshToken":"old-refresh-123456"})")));
 	TestTrue(TEXT("... application/json, no Authorization (it bypasses the auth stages)"), Refresh.Headers.Get(TEXT("Content-Type")) == TEXT("application/json")
 		&& !Refresh.Headers.Contains(TEXT("Authorization")));
 	TestTrue(TEXT("... Highest for the engine (it skips the limiter's queue, ruling M-8)"), Refresh.Priority == EVaRestPriority::Highest);
@@ -3002,7 +3002,7 @@ bool FVaRestHttpAuthOAuthFormTest::RunTest(const FString& Parameters)
 	FVaRestBearerRefreshConfig Config;
 	Config.RefreshPath = TEXT("/auth/token");
 	Config.Style = EVaRestRefreshStyle::OAuth2Form;
-	Config.ClientId = TEXT("game");
+	Config.OAuthClientId = TEXT("game");
 	Config.AccessTokenPath = TEXT("access_token");
 	Config.RefreshTokenPath = TEXT("refresh_token");
 	Config.ExpiresInPath = TEXT("expires_in");
@@ -3679,9 +3679,9 @@ bool FVaRestHttpAuthBearerConfigErrorsTest::RunTest(const FString& Parameters)
 	}
 	{
 		FCase& Case = Cases.AddDefaulted_GetRef();
-		Case.Name = TEXT("the Json style with an empty RefreshTokenField");
-		Case.Logged = TEXT("FVaRestAuth::BearerRefresh: the Json style's RefreshTokenField is empty");
-		Case.Config.RefreshTokenField.Reset();
+		Case.Name = TEXT("the Json style with an empty RefreshBodyField");
+		Case.Logged = TEXT("FVaRestAuth::BearerRefresh: the Json style's RefreshBodyField is empty");
+		Case.Config.RefreshBodyField.Reset();
 	}
 	for (const FCase& Case : Cases)
 	{
@@ -3702,18 +3702,18 @@ bool FVaRestHttpAuthBearerConfigErrorsTest::RunTest(const FString& Parameters)
 		const FVaRestSessionData Data = Rig.Client.GetSession();
 		TestTrue(FString::Printf(TEXT("%s: the session kept"), Case.Name), Data.AccessToken == TEXT("old-access-123456") && Data.RefreshToken == TEXT("old-refresh-123456"));
 	}
-	// Not Q7: the OAuth2 form never reads RefreshTokenField, and an empty RefreshStatuses refreshes before a known expiry only
+	// Not Q7: the OAuth2 form never reads RefreshBodyField, and an empty RefreshStatuses refreshes before a known expiry only
 	{
 		FVaRestBearerRefreshConfig Config;
 		Config.Style = EVaRestRefreshStyle::OAuth2Form;
-		Config.RefreshTokenField.Reset();
+		Config.RefreshBodyField.Reset();
 		FTestRig Rig;
 		Rig.Client.WithAuth(FVaRestAuth::BearerRefresh(Config));
 		Rig.Client.SetSession(TEXT("old-access-123456"), TEXT("old-refresh-123456"));
 		RefreshServer(Rig, NewTokens());
 		auto Outcome = MakeOutcome<FVaRestJson>();
 		Observe(Rig.Client.Get(TEXT("/p")), Outcome).Send();
-		TestTrue(TEXT("OAuth2Form, no RefreshTokenField: the 401, the refresh, the replay succeeds"), Rig.Wait(Outcome) && Rig.Drain()
+		TestTrue(TEXT("OAuth2Form, no RefreshBodyField: the 401, the refresh, the replay succeeds"), Rig.Wait(Outcome) && Rig.Drain()
 			&& Outcome->SuccessCalls.load() == 1 && Rig.Fake->NumCalls() == 3);
 	}
 	{

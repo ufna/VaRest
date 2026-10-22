@@ -224,7 +224,7 @@ public:
 	 * proactive lead is RefreshLeadSeconds, at most half the token's lifetime (concurrency review M-7); an empty
 	 * RefreshStatuses refreshes only then, before a known expiry. Each path's last segment becomes a redaction key (plan
 	 * decision 22).
-	 * Ruling Q7: an empty AccessTokenPath or RefreshPath, or the Json style with an empty RefreshTokenField, cannot work --
+	 * Ruling Q7: an empty AccessTokenPath or RefreshPath, or the Json style with an empty RefreshBodyField, cannot work --
 	 * an Error here, every request fails Kind=Config with nothing sent, nothing refreshes, and the session is kept.
 	 * What bounds a refresh: its request is built on the client (FVaRestAuthRefreshContext::Request), so it has the client's
 	 * WithTimeout() like any request, and with none the engine's defaults (HttpModule.cpp:96-98: no total timeout, 30 s to

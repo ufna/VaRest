@@ -32,7 +32,7 @@ enum class EVaRestApiKeyPlacement : uint8
 UENUM(BlueprintType)
 enum class EVaRestRefreshStyle : uint8
 {
-	/** application/json: { <RefreshTokenField>: "<refresh token>" } */
+	/** application/json: { <RefreshBodyField>: "<refresh token>" } */
 	Json,
 	/** application/x-www-form-urlencoded, RFC 6749 6: grant_type=refresh_token&refresh_token=...[&client_id=...] */
 	OAuth2Form
@@ -67,13 +67,16 @@ struct VARESTHTTP_API FVaRestBearerRefreshConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VaRest|Http")
 	EVaRestRefreshStyle Style = EVaRestRefreshStyle::Json;
 
-	/** Json style: the request body's key for the refresh token (OAuth2Form always sends refresh_token) */
+	/**
+	 * Json style: the request body's key for the refresh token (OAuth2Form always sends refresh_token). Named for the body
+	 * (M4a final review B9), as RefreshTokenPath below is a path in the response: the two are pin names from M5.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VaRest|Http")
-	FString RefreshTokenField = TEXT("refreshToken");
+	FString RefreshBodyField = TEXT("refreshToken");
 
-	/** OAuth2Form: client_id, when the server wants one; empty sends none */
+	/** OAuth2Form: client_id, when the server wants one; empty sends none. OAuth's, not VaRest's client id (GetId; M4a final review B9). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VaRest|Http")
-	FString ClientId;
+	FString OAuthClientId;
 
 	/** The new access token in the response (required) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VaRest|Http")
