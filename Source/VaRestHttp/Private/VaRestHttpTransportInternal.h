@@ -3,9 +3,12 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Async/Mutex.h"
+#include "Async/UniqueLock.h"
 #include "HAL/PlatformTime.h"
 #include "Serialization/Archive.h"
 #include "VaRestBodySink.h"
+#include "VaRestHttpTypes.h"
 #include "VaRestTransport.h"
 
 #include <atomic>
@@ -176,6 +179,27 @@ namespace VaRest::Http
 			return Clock.IsValid() ? Clock->Now() : FPlatformTime::Seconds();
 		}
 
+		/**
+		 * Plan decision 14 (final review M2): one header line of the final response, as OnHeaderReceived reports it -- on curl
+		 * once per line, repeats apart, a followed redirect's skipped (CurlHttp.cpp:509-535, :556-560); on Apple the folded
+		 * dictionary replayed (HttpRequestImpl.cpp:40-60). Any thread: curl's HTTP thread, Apple's session delegate queue
+		 * (didReceiveResponse, AppleHttp.cpp:171-187, :865-874), or the game thread under the spec 9 fallback, where curl
+		 * broadcasts what is left before it completes (CurlHttp.cpp:1305-1308) and Apple replays all of them in one game-thread
+		 * task (:875-881). The completion takes them under the same lock: every line, or none and the engine's folded list.
+		 */
+		void AddHeader(const FString& Name, const FString& Value)
+		{
+			UE::TUniqueLock<UE::FMutex> Lock(HeadersMutex);
+			CollectedHeaders.Add(Name, Value);
+		}
+
+		/** What AddHeader collected, once; empty when the delegate never ran (an engine mock response, review M-15) */
+		FVaRestHeaders TakeHeaders()
+		{
+			UE::TUniqueLock<UE::FMutex> Lock(HeadersMutex);
+			return MoveTemp(CollectedHeaders);
+		}
+
 		FVaRestTransportComplete OnComplete;
 		TSharedRef<FBodySink, ESPMode::ThreadSafe> Sink;
 		TSharedRef<FVaRestTransportProbe, ESPMode::ThreadSafe> Probe;
@@ -203,5 +227,7 @@ namespace VaRest::Http
 
 	private:
 		std::atomic<bool> bDone{ false };
+		UE::FMutex HeadersMutex;
+		FVaRestHeaders CollectedHeaders;
 	};
 }

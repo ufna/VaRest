@@ -273,7 +273,7 @@ public:
 
 	/**
 	 * A file streamed while uploading, as one segment of an FVaRestSegmentStream handed to IHttpRequest::SetContentFromStream
-	 * (VaRestHttpTransport.cpp:202-217; the counting archive when OnProgress is bound, decision 29), not
+	 * (VaRestHttpTransport.cpp:214-229; the counting archive when OnProgress is bound, decision 29), not
 	 * SetContentAsStreamedFile, whose reader sends stale bytes when the file shrinks mid-upload (task 7 review M-1). Its
 	 * size is read now and checked again at the start; a missing file fails the request with Kind=Config.
 	 */
@@ -604,10 +604,8 @@ public:
 	 *
 	 * A body is sent only with POST, PUT, PATCH and DELETE on the engine's curl transport (Linux, Windows, Android): only
 	 * those attach curl's read function (CurlHttp.cpp:941-968, :979-988, :995-1001). GET drops its body with a Warning
-	 * (spec 3.2). With HEAD (CURLOPT_NOBODY, :975-978) and any other verb -- OPTIONS, QUERY, PROPFIND, sent as
-	 * CURLOPT_CUSTOMREQUEST only, :990-993 -- the body is not sent, while its Content-Type header is, and
-	 * FVaRestResponse::BytesUp still counts it unless progress is watched (VaRestHttpTransport.cpp:398). Final review M1;
-	 * refusing or warning there is carried to M4.
+	 * (spec 3.2). A body on any other verb -- HEAD (CURLOPT_NOBODY, :975-978), OPTIONS, QUERY, PROPFIND -- fails the request
+	 * with Kind=Config before anything is sent, on every platform (plan decision 13; IVaRestTransport::SendsBodyFor).
 	 */
 	template <typename T = FVaRestJson>
 	TVaRestRequest<T> Request(FStringView Verb, FStringView Path) const

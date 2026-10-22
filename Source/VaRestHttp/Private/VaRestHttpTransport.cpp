@@ -7,6 +7,7 @@
 #include "HAL/IConsoleManager.h"
 #include "HAL/PlatformFileManager.h"
 #include "HAL/PlatformTime.h"
+#include "HttpManager.h"
 #include "HttpModule.h"
 #include "Interfaces/IHttpRequest.h"
 #include "Interfaces/IHttpResponse.h"
@@ -128,6 +129,7 @@ namespace VaRest::Http::HttpTransportPrivate
 	{
 	public:
 		virtual TSharedRef<IVaRestTransportCall, ESPMode::ThreadSafe> Start(FVaRestTransportRequest&& Request, FVaRestTransportComplete&& OnComplete) override;
+		virtual bool SendsBodyFor(FStringView Verb) const override { return IsBodyVerb(Verb); }
 	};
 
 	TSharedRef<IVaRestTransportCall, ESPMode::ThreadSafe> FHttpModuleTransport::Start(FVaRestTransportRequest&& Request, FVaRestTransportComplete&& OnComplete)
@@ -173,6 +175,16 @@ namespace VaRest::Http::HttpTransportPrivate
 			{
 				return FailBeforeConnect(Http, Completion, TEXT("UploadReadFailed"));
 			}
+		}
+		// Plan decision 15 (final review M9): the engine's PreCheck refuses these (HttpRequestCommon.cpp:83-87, :109-113) and
+		// reports EHttpFailureReason::Other, which reads as a retryable network failure; they are the configuration's
+		if (!FHttpModule::Get().IsHttpEnabled())
+		{
+			return FailBeforeConnect(Http, Completion, TEXT("HttpDisabled"));
+		}
+		if (!FHttpModule::Get().GetHttpManager().IsDomainAllowed(Request.Url))
+		{
+			return FailBeforeConnect(Http, Completion, TEXT("DomainNotAllowed"));
 		}
 
 		bool bBodyAccepted = true;
@@ -251,14 +263,16 @@ namespace VaRest::Http::HttpTransportPrivate
 		// HttpRequestImpl.cpp:40-60; delegateQueue nil, ApplePlatformHttp.cpp:265). Under the spec 9 fallback both defer it
 		// to the game-thread tick (CurlHttp.cpp:536-539, :1212-1219; AppleHttp.cpp:875-881) while body chunks still arrive on
 		// the receiving thread, so the first chunk can come first: the reserve then follows a compressed Content-Length and
-		// DownloadTotal shows it (docs/dev/http-thread-completion.md). Not an IN-11 bind: the sink needs it whether or not
-		// anything is traced, so DelegateBinds does not count it.
+		// DownloadTotal shows it (docs/dev/http-thread-completion.md). It also collects each header line apart (AddHeader,
+		// plan decision 14). Not an IN-11 bind: the sink and the result need it whether or not anything is traced, so
+		// DelegateBinds does not count it.
 		Http->OnHeaderReceived().BindLambda([Completion](FHttpRequestPtr, const FString& HeaderName, const FString& HeaderValue)
 		{
 			if (!HeaderValue.IsEmpty() && HeaderName.Equals(TEXT("Content-Encoding"), ESearchCase::IgnoreCase))
 			{
 				Completion->bEncodedBody = true;
 			}
+			Completion->AddHeader(HeaderName, HeaderValue);
 		});
 
 		const TWeakPtr<IHttpRequest, ESPMode::ThreadSafe> WeakHttp = Http;
@@ -329,7 +343,12 @@ namespace VaRest::Http::HttpTransportPrivate
 			if (Resp.IsValid())
 			{
 				Result.Status = Resp->GetResponseCode();
-				Result.Headers = FVaRestHeaders::FromLines(Resp->GetAllHeaders());
+				// Plan decision 14: the lines one by one when the delegate saw them, else the engine's folded list
+				Result.Headers = Completion->TakeHeaders();
+				if (Result.Headers.IsEmpty())
+				{
+					Result.Headers = FVaRestHeaders::FromLines(Resp->GetAllHeaders());
+				}
 				Result.EffectiveUrl = Resp->GetEffectiveURL();
 				Result.ContentType = Resp->GetContentType();
 			}
@@ -553,6 +572,12 @@ void VaRest::Http::FCountingUpload::Count(int64 Length)
 	{
 		Probe->UploadDoneAt = Clock.IsValid() ? Clock->Now() : FPlatformTime::Seconds();
 	}
+}
+
+bool VaRest::Http::IsBodyVerb(FStringView Verb)
+{
+	return Verb.Equals(TEXTVIEW("POST"), ESearchCase::IgnoreCase) || Verb.Equals(TEXTVIEW("PUT"), ESearchCase::IgnoreCase)
+		|| Verb.Equals(TEXTVIEW("PATCH"), ESearchCase::IgnoreCase) || Verb.Equals(TEXTVIEW("DELETE"), ESearchCase::IgnoreCase);
 }
 
 TSharedRef<IVaRestTransport, ESPMode::ThreadSafe> VaRest::Http::GetDefaultTransport()

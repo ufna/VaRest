@@ -89,8 +89,10 @@ struct FVaRestTransportResult
 	 * (MaxBodyBytes), "ResponseFileWriteFailed", "ResponseBodyRejected", "BodyRejected", "InvalidHeader",
 	 * "TransportDropped" (the transport never called back), "UploadReadFailed" (the body could not be read while it was
 	 * sent, or a BodyFile changed size since it was built), "BodyFileMissing" (a BodyFile missing or unreadable at Start:
-	 * nothing was sent). BodyRejected, InvalidHeader, UploadReadFailed and BodyFileMissing describe the request itself
-	 * (Kind=Config, not retryable).
+	 * nothing was sent), "HttpDisabled" and "DomainNotAllowed" (the engine's PreCheck would refuse it: [HTTP] bEnableHttp
+	 * off, or a URL the HTTP manager's domain filter does not allow; nothing was sent, plan decision 15). BodyRejected,
+	 * InvalidHeader, UploadReadFailed, BodyFileMissing, HttpDisabled and DomainNotAllowed describe the request itself
+	 * (Kind=Config, not retryable; ClassifyAttempt, VaRestClassify.h).
 	 */
 	FName FailureDetail;
 	int64 BytesUp = 0;
@@ -123,10 +125,23 @@ public:
 	 * OnComplete so that its destruction reports Failure Other, detail TransportDropped (review I-3).
 	 */
 	virtual TSharedRef<IVaRestTransportCall, ESPMode::ThreadSafe> Start(FVaRestTransportRequest&& Request, FVaRestTransportComplete&& OnComplete) = 0;
+
+	/**
+	 * Game thread. False when this transport sends no request body with Verb: Resolve then fails a request with a body on
+	 * that verb, Kind=Config, instead of letting it go out without one (plan decision 13). GET is spec 3.2's case and never
+	 * reaches this (its body is dropped with a Warning). Default: every verb.
+	 */
+	virtual bool SendsBodyFor(FStringView Verb) const { return true; }
 };
 
 namespace VaRest::Http
 {
 	/** The FHttpModule transport (spec 0.4: "UE's FHttpModule is the transport"); every client uses it unless WithTransport replaces it */
 	VARESTHTTP_API TSharedRef<IVaRestTransport, ESPMode::ThreadSafe> GetDefaultTransport();
+
+	/**
+	 * The verbs the engine's HTTP transport sends a body with: POST, PUT, PATCH, DELETE, any case (curl upper-cases the verb,
+	 * CurlHttp.cpp:321, and attaches its read function only for those four, :941-993; HEAD sets CURLOPT_NOBODY, :975-978)
+	 */
+	VARESTHTTP_API bool IsBodyVerb(FStringView Verb);
 }

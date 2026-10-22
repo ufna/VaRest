@@ -34,8 +34,9 @@ struct VARESTHTTP_API FVaRestFakeResponse
  * The fake transport of spec 7.1, on a virtual clock. Mirrors the real transport where the core depends on it:
  * completion from a background task (bCompleteOnWorker), a body with one byte of slack, a total timeout as Timeout and an
  * activity timeout as Connection (HttpRequestCommon.cpp:299-305), the probe, ResponseFile, MaxBodyBytes (a body over it is
- * Failure Other, detail ResponseTooLarge, nothing kept), and IN-11's bind counting. Game thread, except completions with
- * bCompleteOnWorker. Compiled with WITH_DEV_AUTOMATION_TESTS only (review M15): it is not for games.
+ * Failure Other, detail ResponseTooLarge, nothing kept), the verbs it sends a body with (SendsBodyFor), and IN-11's bind
+ * counting. Game thread, except completions with bCompleteOnWorker. Compiled with WITH_DEV_AUTOMATION_TESTS only (review
+ * M15): it is not for games.
  */
 class VARESTHTTP_API FVaRestFakeTransport final : public IVaRestTransport, public TSharedFromThis<FVaRestFakeTransport, ESPMode::ThreadSafe>
 {
@@ -51,6 +52,11 @@ public:
 
 	/** true (default): completions come from a UE::Tasks task, as the HTTP thread's do; false: inline, inside Start, Complete or Advance */
 	bool bCompleteOnWorker = true;
+
+	/** false (default): like the HTTP transport, a body only with POST, PUT, PATCH and DELETE (plan decision 13); true: any verb */
+	bool bSendsBodyForAnyVerb = false;
+
+	virtual bool SendsBodyFor(FStringView Verb) const override { return bSendsBodyForAnyVerb || VaRest::Http::IsBodyVerb(Verb); }
 
 	struct FCall
 	{

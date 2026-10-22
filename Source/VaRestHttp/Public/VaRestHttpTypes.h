@@ -106,11 +106,10 @@ enum class EVaRestCancelReason : uint8
  * HTTP headers in order. Names compare ignoring case (RFC 9110 5.1) and may repeat (Set-Cookie). Not thread-safe: copy
  * it to hand it to another thread.
  *
- * What the engine's curl transport does with repeats (final review M2; collecting each response header apart is carried
- * to M4): a response never repeats a name, because curl folds every repeat into the first, joined with ", "
- * (CurlHttp.cpp:519-530), so two Set-Cookie headers arrive as one value, which the comma in an Expires date keeps from
- * being split back. Repeats a stage Add()s to a request go out joined with ", " as well (VaRestHttpTransport.cpp:139-150),
- * which is wrong for Cookie ("; "): set that one once.
+ * Response headers arrive one per header line (plan decision 14): the HTTP transport collects them from the engine's
+ * OnHeaderReceived, so two Set-Cookie headers are two entries. On Mac and iOS NSURLSession folds repeats into one value
+ * before the engine sees them (allHeaderFields, AppleHttp.cpp:55). Repeats a stage Add()s to a request go out joined with
+ * ", " (VaRestHttpTransport.cpp:141-152), which is wrong for Cookie ("; "): set that one once.
  */
 class VARESTHTTP_API FVaRestHeaders
 {
@@ -182,7 +181,11 @@ struct VARESTHTTP_API FVaRestError
 	UPROPERTY(BlueprintReadOnly, Category = "VaRest|Http")
 	int32 Attempts = 0;
 
-	/** A connection error, a timeout, or status 408/425/429/500/502/503/504 (spec 4.1) */
+	/**
+	 * Spec 4.1's rule, as ClassifyAttempt reports it (plan decision 12): a connection error, a timeout, or status
+	 * 408/425/429/500/502/503/504 -- except a completion the transport dropped (TransportDropped) and a request past its
+	 * retry Deadline, which would only fail again
+	 */
 	UPROPERTY(BlueprintReadOnly, Category = "VaRest|Http")
 	bool bRetryable = false;
 
@@ -228,7 +231,7 @@ struct FVaRestResponse
 	uint64 RequestId = 0;
 	/** 0 when there was no response */
 	int32 Status = 0;
-	/** On curl a header name appears once: repeats arrive joined with ", " (CurlHttp.cpp:519-530; see FVaRestHeaders) */
+	/** One entry per response header line (see FVaRestHeaders; Apple folds repeats) */
 	FVaRestHeaders Headers;
 	FString EffectiveUrl;
 	FString ContentType;

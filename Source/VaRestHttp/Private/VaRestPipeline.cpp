@@ -6,6 +6,7 @@
 #include "HAL/FileManager.h"
 #include "Tasks/Task.h"
 #include "UObject/StrongObjectPtr.h"
+#include "VaRestClassify.h"
 #include "VaRestDecode.h"
 #include "VaRestExchangeState.h"
 #include "VaRestHttpLog.h"
@@ -45,35 +46,6 @@ namespace VaRest::Http::PipelinePrivate
 		}
 		FExchangeState& Exchange;
 	};
-
-	EVaRestErrorKind KindFor(EVaRestTransportFailure Failure, FName Detail)
-	{
-		// Review M14: a local failure is not a network one, and M4's retry reads bRetryable from the kind
-		static const FName BodyRejected(TEXT("BodyRejected"));
-		static const FName InvalidHeader(TEXT("InvalidHeader"));
-		// Review N-4: the body could not be read while it was sent (a file gone or changed); sending it again fails again
-		static const FName UploadReadFailed(TEXT("UploadReadFailed"));
-		// Task 7 review M-1: a BodyFile missing or unreadable at Start; nothing was sent, and nothing would be next time
-		static const FName BodyFileMissing(TEXT("BodyFileMissing"));
-		static const FName FileWriteFailed(TEXT("ResponseFileWriteFailed"));
-		static const FName BodyTooBig(TEXT("ResponseBodyRejected"));
-		static const FName TooLarge(TEXT("ResponseTooLarge"));
-		if (Detail == BodyRejected || Detail == InvalidHeader || Detail == UploadReadFailed || Detail == BodyFileMissing)
-		{
-			return EVaRestErrorKind::Config;
-		}
-		if (Detail == FileWriteFailed || Detail == BodyTooBig || Detail == TooLarge)
-		{
-			return EVaRestErrorKind::Decode;
-		}
-		switch (Failure)
-		{
-		case EVaRestTransportFailure::None: return EVaRestErrorKind::None;
-		case EVaRestTransportFailure::Timeout: return EVaRestErrorKind::Timeout;
-		case EVaRestTransportFailure::Canceled: return EVaRestErrorKind::Canceled;
-		default: return EVaRestErrorKind::Connection; // Connection, Other: no usable response
-		}
-	}
 
 	/**
 	 * Review I3: decision 11 holds for the final headers too. The builder checks the request's headers, but a custom
@@ -605,6 +577,14 @@ bool VaRest::Http::FClientState::Resolve(FExchangeState& Exchange, FString& OutE
 		UE_LOG(LogVaRestHttp, Warning, TEXT("#%llu VaRest: GET %s has a body; it is dropped (spec 3.2)"), Exchange.RequestId, *EscapeForLog(Cfg.Redactor->RedactUrl(Exchange.Url)));
 		Exchange.Body = FVaRestRequestBody();
 	}
+	if (!Exchange.Body.IsEmpty() && Cfg.Transport.IsValid() && !Cfg.Transport->SendsBodyFor(Exchange.Verb))
+	{
+		// Plan decision 13 (final review M1): sent without its body it would be another request, and BytesUp would count bytes
+		// that never left (VaRestHttpTransport.cpp:417). The verb is a token here (checked above), so it is shown as it is.
+		OutError = FString::Printf(TEXT("the client's transport sends no request body with %s (the engine's HTTP transport sends one only with POST, PUT, PATCH and DELETE)"),
+			*Exchange.Verb);
+		return false;
+	}
 	if (!Exchange.Body.IsEmpty() && !Exchange.OwnHeaders.Contains(TEXT("Content-Type")))
 	{
 		// Final review I2: the request's own Header() beats the body's type, which beats a client default (WithHeader):
@@ -742,15 +722,16 @@ void VaRest::Http::FClientState::OnChainDone(const FVaRestExchangeRef& Exchange,
 	Finish.bBodyInFile = Outcome.bBodyInFile;
 
 	static const FName TooLarge(TEXT("ResponseTooLarge"));
-	static const FName Dropped(TEXT("TransportDropped"));
-	if (Outcome.IsTransportFailure() && Outcome.FailureDetail == TooLarge && Outcome.Status > 0 && !IsSuccessStatus(Outcome.Status))
+	// Plan decision 12: one classification for this error and for the retry stage (Task 8)
+	const FAttemptClass Class = ClassifyAttempt(Outcome);
+	if (Outcome.IsTransportFailure() && Outcome.FailureDetail == TooLarge && Class.Kind == EVaRestErrorKind::Http)
 	{
 		// Reviews M-6, M13: an error response whose body passed the JSON cap is still the HTTP error it was; the body is gone
 		Finish.Error.Kind = EVaRestErrorKind::Http;
 		Finish.Error.HttpStatus = Outcome.Status;
 		Finish.Error.Message = FString::Printf(TEXT("%s (its body is over the MaxJsonBytes limit of %lld and was not kept)"),
 			*FVaRestError::DefaultMessage(EVaRestErrorKind::Http, Outcome.Status), Ex.MaxJsonBytes);
-		Finish.Error.bRetryable = FVaRestError::IsRetryableStatus(Outcome.Status);
+		Finish.Error.bRetryable = Class.bRetryable;
 	}
 	else if (Outcome.IsTransportFailure() && Outcome.FailureDetail == TooLarge)
 	{
@@ -760,22 +741,20 @@ void VaRest::Http::FClientState::OnChainDone(const FVaRestExchangeRef& Exchange,
 	}
 	else if (Outcome.IsTransportFailure())
 	{
-		Finish.Error.Kind = KindFor(Outcome.Failure, Outcome.FailureDetail);
-		Finish.Error.Message = FVaRestError::DefaultMessage(Finish.Error.Kind, 0);
+		Finish.Error.Kind = Class.Kind;
+		Finish.Error.Message = Outcome.FailureMessage.IsEmpty() ? FVaRestError::DefaultMessage(Class.Kind, 0) : Outcome.FailureMessage;
 		if (!Outcome.FailureDetail.IsNone())
 		{
 			Finish.Error.Message += FString::Printf(TEXT(" (%s)"), *Outcome.FailureDetail.ToString());
 		}
-		// A dropped completion (engine shutdown, NullHttp) would only be dropped again
-		Finish.Error.bRetryable = (Finish.Error.Kind == EVaRestErrorKind::Connection || Finish.Error.Kind == EVaRestErrorKind::Timeout)
-			&& Outcome.FailureDetail != Dropped;
+		Finish.Error.bRetryable = Class.bRetryable;
 	}
-	else if (!IsSuccessStatus(Outcome.Status))
+	else if (Class.Kind == EVaRestErrorKind::Http)
 	{
 		Finish.Error.Kind = EVaRestErrorKind::Http;
 		Finish.Error.HttpStatus = Outcome.Status;
 		Finish.Error.Message = FVaRestError::DefaultMessage(EVaRestErrorKind::Http, Outcome.Status);
-		Finish.Error.bRetryable = FVaRestError::IsRetryableStatus(Outcome.Status);
+		Finish.Error.bRetryable = Class.bRetryable;
 	}
 
 	const bool bHasBody = Finish.Body.Num() > 0 || Finish.bBodyInFile;

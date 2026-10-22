@@ -814,4 +814,47 @@ bool FVaRestIntegrationFallbackTest::RunTest(const FString& Parameters)
 	return bRan;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestIntegrationRepeatedHeadersTest, "VaRest.Integration.Http.RepeatedHeaders",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestIntegrationRepeatedHeadersTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRestTestsIntegrationPrivate;
+	FString BaseUrl;
+	if (!ServerUrl(*this, BaseUrl))
+	{
+		return false;
+	}
+	// Plan decision 14: curl joins repeats with ", " in GetAllHeaders (CurlHttp.cpp:519-530); an Expires date has a comma,
+	// so two cookies could not be split back. Collected from OnHeaderReceived they arrive apart.
+	FVaRestClient Client = MakeClient(BaseUrl);
+	auto Outcome = MakeOutcome<FVaRestJson>();
+	Observe(Client.Get(TEXT("/headers/set")).Query(TEXT("Set-Cookie"), TEXT("a=1; Expires=Wed, 21 Oct 2026 07:28:00 GMT")).Query(TEXT("Set-Cookie"), TEXT("b=2")), Outcome).Send();
+	if (!TestTrue(TEXT("completes"), Wait(Outcome)) || !Succeeded(*this, TEXT("the request"), Outcome))
+	{
+		return false;
+	}
+	TArray<FString> Cookies;
+	for (const FVaRestHeaders::FPair& Pair : Outcome->Response.Headers)
+	{
+		if (Pair.Key.Equals(TEXT("Set-Cookie"), ESearchCase::IgnoreCase))
+		{
+			Cookies.Add(Pair.Value);
+		}
+	}
+#if PLATFORM_APPLE
+	// NSURLSession folds repeats itself (allHeaderFields, AppleHttp.cpp:55); the delegate replays that dictionary
+	AddInfo(TEXT("Apple: repeated headers arrive as NSURLSession folded them"));
+#else
+	if (!TestEqual(TEXT("two Set-Cookie headers"), Cookies.Num(), 2))
+	{
+		return false;
+	}
+	TestEqualSensitive(TEXT("the first, its comma intact"), Cookies[0], FString(TEXT("a=1; Expires=Wed, 21 Oct 2026 07:28:00 GMT")));
+	TestEqualSensitive(TEXT("the second"), Cookies[1], FString(TEXT("b=2")));
+#endif
+	return true;
+}
+
 #endif
