@@ -39,7 +39,11 @@ struct VARESTHTTP_API FVaRestRetryPolicy
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VaRest|Http")
 	bool bRetryTimeouts = true;
 
-	/** Wait what a Retry-After header asks (seconds or an HTTP-date) instead of the backoff, at most MaxRetryAfter (plan decision 11) */
+	/**
+	 * Wait what a Retry-After header asks (seconds or an HTTP-date) instead of the backoff, at most MaxRetryAfter (plan
+	 * decision 11). Its first line is read; one the platform folded from several lines ("2, 5", Mac and iOS) is not a
+	 * delay, and the backoff applies.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VaRest|Http")
 	bool bRespectRetryAfter = true;
 

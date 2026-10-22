@@ -101,9 +101,10 @@ namespace VaRest::Http
 
 		/**
 		 * Plan decision 7. Game thread. Set by a stage while it holds this exchange waiting (a backoff, a park behind a
-		 * refresh); FClientState::Cancel takes it and calls it, and the stage answers Canceled through the chain. Complete
-		 * calls it too when something else finished the request while it waited (concurrency review M-3), so the wait's
-		 * timer or park goes with it, and so does OnChainDone before it hands a result to the decode task (re-review N-6).
+		 * refresh); FClientState::Cancel takes it and calls it, and the stage answers Canceled through the chain. When
+		 * something else answered the request while it waited, FClientState::EndWaits calls it too, so the wait's timer or
+		 * park goes with the answer: from Complete (concurrency review M-3), from a deferred Complete (Task 8 review minor
+		 * 1) and from OnChainDone before it hands a result to the decode task (re-review N-6).
 		 * It returns true when it answered; false (the stage's state is already gone) lets Cancel finish the request itself
 		 * (review M-4). The stage clears it when the wait ends. It holds the stage's state weakly, so it makes no cycle
 		 * through this exchange.
@@ -124,6 +125,12 @@ namespace VaRest::Http
 		EVaRestCancelReason CancelReason = EVaRestCancelReason::None;
 		/** Complete ran: nothing else is delivered */
 		bool bFinished = false;
+		/**
+		 * Complete accepted an answer and queued its delivery for a later game-thread task (ApiDepth > 0, decision 3). From
+		 * then on the request is finished in all but name: Proceed starts no attempt and OnChainDone takes no second outcome
+		 * (Task 8 review minor 1).
+		 */
+		bool bCompletionQueued = false;
 		/**
 		 * Inside Enter or Cancel() on this exchange: Complete defers the callbacks (decision 3). The scope is taken in Enter, so
 		 * a game-thread Send() is covered, and so is the Enter task of a request sent from another thread (one extra hop).

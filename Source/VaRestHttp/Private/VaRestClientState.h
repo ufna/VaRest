@@ -122,6 +122,14 @@ namespace VaRest::Http
 		bool Resolve(FExchangeState& Exchange, FString& OutError) const;
 		void OnChainDone(const FVaRestExchangeRef& Exchange, FVaRestAttemptOutcome&& Outcome);
 		void Complete(const FVaRestExchangeRef& Exchange, FFinish&& Finish);
+		/**
+		 * Game thread: Ex's answer was accepted (Complete, a deferred Complete, OnChainDone's decode), so nothing more may
+		 * start for it. A stage's wait ends through its interrupt hook (plan decision 7; concurrency review M-3, re-review
+		 * N-6), and an attempt still in the limiter's queue -- a retry re-issued just before the answer -- leaves it, so a
+		 * grant cannot dispatch it (Task 8 review minor 3). Each answers Canceled up the chain; the caller has already made
+		 * the exchange ignore it (bFinished, bCompletionQueued or Phase).
+		 */
+		void EndWaits(FExchangeState& Ex);
 		FFinish MakeFinish(const FExchangeState& Exchange) const;
 		void Publish(const TSharedRef<FClientConfig, ESPMode::ThreadSafe>& Next);
 		/** Publishes again when the next rotated-out value expires */

@@ -472,7 +472,10 @@ bool FVaRestExchange::IsDone() const { return Impl->bDone.load(); }
 void FVaRestStageNext::Proceed(const FVaRestExchangeRef& Exchange, FVaRestOutcomeCallback&& OnOutcome) const
 {
 	check(IsInGameThread());
-	if (VaRest::Http::Internals(*Exchange).bFinished || Exchange->IsCancelRequested())
+	const VaRest::Http::FExchangeState& Ex = VaRest::Http::Internals(*Exchange);
+	// A queued completion is an accepted answer (Task 8 review minor 1): a backoff or a stage that proceeds again after
+	// it starts no attempt
+	if (Ex.bFinished || Ex.bCompletionQueued || Exchange->IsCancelRequested())
 	{
 		OnOutcome(FVaRestAttemptOutcome::Canceled());
 		return;
@@ -717,11 +720,12 @@ void VaRest::Http::FClientState::OnChainDone(const FVaRestExchangeRef& Exchange,
 	using namespace PipelinePrivate;
 	check(IsInGameThread());
 	FExchangeState& Ex = Internals(*Exchange);
-	if (Ex.bFinished || Ex.Phase != EVaRestExchangePhase::InChain)
+	if (Ex.bFinished || Ex.bCompletionQueued || Ex.Phase != EVaRestExchangePhase::InChain)
 	{
-		// Finished, or a second outcome while the first is being decoded (a stage that reported twice): ignored (review C-3).
-		// A finished one's attempt file is removed (a second outcome's file is its decode task's to finish).
-		if (Ex.bFinished && !Ex.TempFile.IsEmpty())
+		// Finished, its answer's delivery queued (Task 8 review minor 1), or a second outcome while the first is being
+		// decoded (a stage that reported twice): ignored (review C-3), so a Canceled cannot overtake a queued answer. A
+		// finished or queued one's attempt file is removed (a second outcome's file is its decode task's to finish).
+		if ((Ex.bFinished || Ex.bCompletionQueued) && !Ex.TempFile.IsEmpty())
 		{
 			UE::Tasks::Launch(TEXT("VaRest.DeleteTemp"), [Stale = Ex.TempFile] { IFileManager::Get().Delete(*Stale, false, false, true); });
 		}
@@ -793,15 +797,11 @@ void VaRest::Http::FClientState::OnChainDone(const FVaRestExchangeRef& Exchange,
 	Finish.bTimeDecode = FVaRestTrace::Detail() != EVaRestTraceDetail::None;
 	// Re-review N-6: a stage that waits (a backoff, a park) is ended here, as Complete ends it -- the decode task runs for
 	// a while before Complete, and a timer or a refresh's end in that window would start a network attempt for a request
-	// already being delivered. Taken before the phase moves; run after it, so a Canceled the hook sends back up the chain
+	// already being delivered; so is a retry waiting in the limiter's queue (Task 8 review minor 3). Ended right after the
+	// phase moves (nothing runs in between: the ruling's "taken before, run after"), so a Canceled sent back up the chain
 	// meets OnChainDone's guard (Phase != InChain) instead of counting as a second outcome.
-	TUniqueFunction<bool()> Wake = MoveTemp(Ex.Interrupt);
-	Ex.Interrupt.Reset();
 	Ex.Phase = EVaRestExchangePhase::Decoding;
-	if (Wake)
-	{
-		Wake();
-	}
+	EndWaits(Ex);
 	// The handler goes with the task and comes back with the result: nothing else touches it meanwhile
 	TUniquePtr<IResultHandler> Handler = MoveTemp(Ex.Handler);
 	// The exchange travels as a TSharedPtr moved into the continuation, so the worker never drops the last reference
@@ -843,7 +843,14 @@ void VaRest::Http::FClientState::Complete(const FVaRestExchangeRef& Exchange, FF
 	}
 	if (Ex.ApiDepth > 0)
 	{
-		// Decision 3: never inside Send() or Cancel(); the callbacks run from a later game-thread task
+		// Decision 3: never inside Send() or Cancel(); the callbacks run from a later game-thread task. The answer is
+		// accepted now (Task 8 review minor 1): until that task runs, nothing proceeds and no second outcome is taken, and
+		// a stage's wait ends here as it would when Complete finishes (concurrency review M-3) -- its Canceled meets
+		// OnChainDone's guard. Inside a game-thread Send() a backoff could otherwise fire first (a virtual clock advanced
+		// before the next pump; a 0 s delay armed inside a core-ticker delegate: FTSTicker fires at CurrentTime + Delay and
+		// runs tickers added during its Tick in that same Tick, Ticker.cpp:26, :93-94, :139-140).
+		Ex.bCompletionQueued = true;
+		EndWaits(Ex);
 		OnGameThread(TEXT("VaRest.Complete"), [Exchange, Pending = MoveTemp(Finish)]() mutable
 		{
 			Internals(*Exchange).State->Complete(Exchange, MoveTemp(Pending));
@@ -872,15 +879,10 @@ void VaRest::Http::FClientState::Complete(const FVaRestExchangeRef& Exchange, FF
 	}
 	Ex.bFinished = true;
 	Ex.Phase = EVaRestExchangePhase::Done;
-	if (Ex.Interrupt)
-	{
-		// Concurrency review M-3: something other than Cancel finished a request a stage holds waiting (a custom Outer stage
-		// in front of Retry answering by itself): the hook clears that stage's timer or park, and its Canceled lands on a
-		// finished request, which OnChainDone ignores
-		TUniqueFunction<bool()> Wake = MoveTemp(Ex.Interrupt);
-		Ex.Interrupt.Reset();
-		Wake();
-	}
+	// Concurrency review M-3: something other than Cancel finished a request a stage holds waiting (a custom Outer stage in
+	// front of Retry answering by itself): the hook clears that stage's timer or park, and a queued retry leaves the
+	// limiter's queue (Task 8 review minor 3); their Canceled lands on a finished request, which OnChainDone ignores
+	EndWaits(Ex);
 
 	const FClientConfig& Cfg = *Ex.Config;
 	Finish.Response.Elapsed = Cfg.Clock->Now() - Ex.StartedAt;
@@ -974,7 +976,13 @@ void VaRest::Http::FClientState::Cancel(const FVaRestExchangeRef& Exchange, EVaR
 		Ex.Config->Clock->ClearTimer(Ex.ProgressTimer);
 		// The transport answers Canceled through the normal path, which releases what the attempt holds
 		Ex.TransportCall->Cancel();
-		return;
+		if (!Ex.Interrupt)
+		{
+			return;
+		}
+		// Task 8 review I-1: a PerAttempt stage answered this call's attempt itself while the call ran (its own timeout), and
+		// a stage now waits (Retry's backoff): the call is stale -- its Canceled reaches only the stage that answered it --
+		// and the wait holds the request, so the wait is ended below as well
 	}
 	if (Ex.Interrupt)
 	{
@@ -990,6 +998,23 @@ void VaRest::Http::FClientState::Cancel(const FVaRestExchangeRef& Exchange, EVaR
 	}
 	// Held by a custom stage, or its answer is queued for the game thread: finish now; what arrives later is ignored
 	Complete(Exchange, MakeFinish(Ex));
+}
+
+void VaRest::Http::FClientState::EndWaits(FExchangeState& Ex)
+{
+	check(IsInGameThread());
+	if (Ex.bInLimiterQueue)
+	{
+		// Its abort answers Canceled up the chain (FLimiterStage), and no slot was held
+		Limiter.Abort(Ex.RequestId);
+	}
+	if (Ex.Interrupt)
+	{
+		// Taken first: answering may let a stage set another
+		TUniqueFunction<bool()> Wake = MoveTemp(Ex.Interrupt);
+		Ex.Interrupt.Reset();
+		Wake();
+	}
 }
 
 void VaRest::Http::FClientState::CancelAll(FName InTag, EVaRestCancelReason Reason)

@@ -64,8 +64,10 @@ namespace VaRest::Http
 	/**
 	 * RFC 9110 10.2.3 Retry-After: delay-seconds (digits only, surrounding spaces ignored) or an HTTP-date
 	 * (FDateTime::ParseHttpDate, DateTime.h:695-713), as seconds from NowUtc; a date in the past is 0, and seconds stop
-	 * growing at 1e9. Unset for anything else: a negative number, a fraction, text. Not capped: the retry policy is
-	 * (spec 4.1: 60 s).
+	 * growing at 1e9. Unset for anything else: a negative number, a fraction, text, a list. Not capped: the retry policy is
+	 * (spec 4.1: 60 s). One value: of a response with several Retry-After lines the retry stage passes the first. On Mac
+	 * and iOS NSURLSession folds repeated lines into one value (allHeaderFields, AppleHttp.cpp:55), and a folded "2, 5"
+	 * is unset here, so the policy's backoff applies.
 	 *
 	 * ParseHttpDate is lenient (Misc/DateTime.cpp:612, :663, :676) and its leniency means "retry now": an RFC 850 date's
 	 * two-digit year lands in the 1900s, a past date, so 0; a date whose time part does not parse is read as midnight, so 0

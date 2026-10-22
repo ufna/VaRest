@@ -160,9 +160,10 @@ namespace VaRest::Http::RetryPrivate
 		// The attempt's end for the next gap (spec review M-10): its outcome reaches this stage in the call that ended it
 		Ex.LastAttemptEndedAt = Ex.Config->Clock->Now();
 		// Spec 3.2: "owner gone -> no callbacks, no further retries"; a canceled or finished request is not retried either,
-		// nor one whose answer is already being decoded (a custom Outer stage in front answered while this attempt ran):
-		// a backoff armed now would fire inside the decode window that re-review N-6 closes for a waiting stage
-		if (Ex.bFinished || Ex.Phase != EVaRestExchangePhase::InChain || Run->Exchange->IsCancelRequested() || IsOwnerGone(Ex))
+		// nor one whose answer is already accepted -- being decoded, or its delivery queued (a custom Outer stage in front
+		// answered while this attempt ran): a backoff armed now would fire inside the window that re-review N-6 closes for
+		// a waiting stage
+		if (Ex.bFinished || Ex.bCompletionQueued || Ex.Phase != EVaRestExchangePhase::InChain || Run->Exchange->IsCancelRequested() || IsOwnerGone(Ex))
 		{
 			Run->Answer(MoveTemp(Outcome));
 			return;
@@ -196,6 +197,9 @@ namespace VaRest::Http::RetryPrivate
 		Run->Timer = Ex.Config->Clock->SetTimer(Decision.Delay, [Run]
 		{
 			FExchangeState& Waited = Internals(*Run->Exchange);
+			// Unconditionally: one stage waits at a time, so the hook is still this wait's own. A stage behind Retry (Task
+			// 17's park) waits only inside an attempt, while Retry is not waiting; one that could wait alongside it would
+			// need its own check here (Task 8 review minor 6).
 			Waited.Interrupt.Reset();
 			if (IsOwnerGone(Waited))
 			{
