@@ -339,7 +339,13 @@ Per attempt, from a `Connect` command:
   and each socket's own, shorter deadline is enforced by VaRest's kill. LWS's cut and VaRest's kill
   both end in `CONNECTION_ERROR` with an empty string
   [timeout.configured_secs, hs.status_in_connection_error.killed_pending], so VaRest records which
-  one fired.
+  one fired. The deadline is exact unless the service thread itself is blocked: LWS 3.0 resolves
+  the host synchronously there (`getaddrinfo` inside `lws_client_connect_2`), so one slow name
+  stalls every connection's I/O, commands and deadlines, and the exit join; and it connects to the
+  first address the resolver returns only (W1a records it, `Probe.VaRest.Lws.Connect.LocalhostAddress`).
+  W1b B9 (VaRest-gi0) resolves on `UE::Tasks`, passes the address with the name as the host, and
+  tries the next address after a failure. A 3xx's `Location` host is resolved the same way, before
+  any VaRest callback can refuse the redirect (W1 plan rulings I-4, Q5).
 * **Upgrade refusal**: the status comes from the error string (T7: "not 101, was N";
   "unauthorized" = 401; "forbidden" = 403), and from `lws_http_client_http_response(wsi)` only when
   the error comes from the status-line parser (the strings `HS: ws upgrade …`)
