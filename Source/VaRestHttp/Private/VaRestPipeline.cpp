@@ -275,11 +275,19 @@ namespace VaRest::Http::PipelinePrivate
 		virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) override
 		{
 			FExchangeState& Ex = Internals(*Exchange);
-			++Ex.Attempt;
 			// Spec review I-1 (Inspector 3.3): an attempt parked behind a refresh before it started (the auth gate) started
 			// when it parked -- its Auth phase is inside its span, so Prepare (dispatch - start - Auth - Queued) is never
-			// negative. Taken once: a later pass is another attempt.
-			Ex.AttemptStartedAt = Ex.PendingAttemptStart >= 0.0 ? Ex.PendingAttemptStart : Ex.Config->Clock->Now();
+			// negative. M4a final review C-I-1: that park numbered it too (VaRestAuthGate.cpp, Park). Taken once: a later pass
+			// is another attempt.
+			if (Ex.PendingAttemptStart >= 0.0)
+			{
+				Ex.AttemptStartedAt = Ex.PendingAttemptStart;
+			}
+			else
+			{
+				++Ex.Attempt;
+				Ex.AttemptStartedAt = Ex.Config->Clock->Now();
+			}
 			Ex.PendingAttemptStart = -1.0;
 			if (Ex.NextGap == EVaRestTraceGap::Backoff)
 			{

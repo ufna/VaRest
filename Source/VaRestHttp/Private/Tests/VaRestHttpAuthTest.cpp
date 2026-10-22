@@ -4453,4 +4453,116 @@ bool FVaRestHttpGoldenProactiveTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpGoldenParkFailedTest, "VaRest.Http.Trace.Golden.ParkedRefreshFailed",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpGoldenParkFailedTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// M4a final review C-I-1 (ruling, option b), Review Focus line 2: a request parks before its first attempt behind a
+	// refresh another request's 401 started, the refresh fails on the network (Failed(Connection), retryable) and Retry is
+	// on. The park took attempt 1's number: the note is about attempt 1, the retry is attempt 2 with its backoff gap,
+	// Error.Attempts is 2, and Completed names the refresh -- attempt 1 itself has no Dispatched/Ended pair (it never left).
+	FTestRig Rig;
+	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = HandRig(Rig);
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest& Request) { return Request.Url.EndsWith(TEXT("/first")) ? Json(401) : Json(503); });
+	FVaRestRetryPolicy Retry = FVaRestRetryPolicy::Exponential(1);
+	Retry.Backoff.Jitter = EVaRestJitter::None;
+	Rig.Client.WithRetry(Retry);
+	FScopedTraceRecorder Scoped(EVaRestTraceDetail::Metadata);
+	auto First = MakeOutcome<FVaRestJson>();
+	const uint64 A = Observe(Rig.Client.Get(TEXT("/first")).NoRetry(), First).Send().GetId();
+	if (!TestTrue(TEXT("A's 401 started a refresh"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 1; }) && Rig.Drain() && Auth->IsPending()))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	auto Outcome = MakeOutcome<FVaRestJson>();
+	const uint64 Id = Observe(Rig.Client.Get(TEXT("/target")), Outcome).Send().GetId();
+	Rig.Drain();
+	if (!TestEqual(TEXT("B parked before its first attempt"), Rig.Fake->NumCalls(), 1))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Clock->Advance(0.25);
+	Auth->Answer(FVaRestAuthRefreshResult::Failed(EVaRestErrorKind::Connection, TEXT("the refresh endpoint did not answer")));
+	if (!TestTrue(TEXT("A fails; B backs off"), PumpUntil([&Rig, First] { return First->IsDone() && Rig.Clock->NumPendingTimers() == 1; })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Clock->Advance(0.5);
+	if (!TestTrue(TEXT("B completes"), Rig.Wait(Outcome)))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Drain();
+	const FTraceRecorder& Recorder = *Scoped.Recorder;
+	TestEqualSensitive(TEXT("the sequence: attempt 1 ended in the park, unsent"), Recorder.KindsOf(Id), FString(TEXT("Started,Note,Dispatched,Ended,Completed")));
+	TestTrue(TEXT("Error.Attempts counts the parked attempt"), Outcome->Error.Kind == EVaRestErrorKind::Http && Outcome->Error.HttpStatus == 503
+		&& Outcome->Error.Attempts == 2);
+	TestTrue(TEXT("... the refresh has an id"), Auth->LastRefreshId != 0);
+	const TArray<FVaRestTraceEvent> Events = Recorder.For(Id);
+	const FVaRestTraceEvent* Note = Events.FindByPredicate([](const FVaRestTraceEvent& Event) { return Event.Kind == EVaRestTraceKind::Note; });
+	TestTrue(TEXT("the note at 0.25 s: attempt 1 ended (Connection), retry in 0.5 s"), Note && Note->Time == 0.25
+		&& Note->Payload.Get<FVaRestTraceNote>().Attempt == 1 && Note->Payload.Get<FVaRestTraceNote>().Kind == EVaRestTraceNoteKind::RetryScheduled
+		&& Note->Payload.Get<FVaRestTraceNote>().Reason == FName(TEXT("Connection")) && Note->Payload.Get<FVaRestTraceNote>().Delay == 0.5);
+	const TArray<FVaRestTraceAttemptDispatched> Dispatched = DispatchesOf(Recorder, Id);
+	TestTrue(TEXT("attempt 2 at 0.75 s: GapBefore Backoff 0.5 s from the park's end, no AuthWait, no refresh"), Dispatched.Num() == 1
+		&& Dispatched[0].Attempt == 2 && Dispatched[0].AttemptStart == 0.75 && Dispatched[0].GapKind == EVaRestTraceGap::Backoff
+		&& FMath::IsNearlyEqual(Dispatched[0].GapSeconds, 0.5) && Dispatched[0].AuthWait == 0.0 && Dispatched[0].AuthRefreshId == 0);
+	const FVaRestTraceEvent* Ended = Events.FindByPredicate([](const FVaRestTraceEvent& Event) { return Event.Kind == EVaRestTraceKind::AttemptEnded; });
+	TestTrue(TEXT("... ended 503"), Ended && Ended->Payload.Get<FVaRestTraceAttemptEnded>().Attempt == 2 && Ended->Payload.Get<FVaRestTraceAttemptEnded>().Status == 503);
+	const FVaRestTraceEvent* Done = Events.FindByPredicate([](const FVaRestTraceEvent& Event) { return Event.Kind == EVaRestTraceKind::Completed; });
+	TestTrue(TEXT("Completed: the 503, naming the refresh the park waited on"), Done && Done->Payload.Get<FVaRestTraceCompleted>().Outcome == EVaRestTraceOutcome::Error
+		&& Done->Payload.Get<FVaRestTraceCompleted>().AuthRefreshId == Auth->LastRefreshId);
+	const TArray<FVaRestTraceEvent> ForA = Recorder.For(A);
+	const FVaRestTraceEvent* DoneA = ForA.FindByPredicate([](const FVaRestTraceEvent& Event) { return Event.Kind == EVaRestTraceKind::Completed; });
+	TestTrue(TEXT("A's Completed names it too (its replay's park)"), DoneA && DoneA->Payload.Get<FVaRestTraceCompleted>().AuthRefreshId == Auth->LastRefreshId);
+	FString Why;
+	TestTrue(TEXT("Inspector 3.3's phases hold"), PhasesHold(Recorder, Id, Why));
+	TestEqualSensitive(TEXT("... (why not)"), Why, FString());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpGoldenParkRejectedTest, "VaRest.Http.Trace.Golden.ParkedRefreshRejected",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpGoldenParkRejectedTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// M4a final review C-I-1: a request parked before its first attempt (a proactive refresh) whose refresh is rejected
+	// ends in the park: no Dispatched/Ended pair, one attempt counted, and Completed names the refresh it waited on
+	FTestRig Rig;
+	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = HandRig(Rig);
+	Rig.Client.SetSession(TEXT("old-access-123456"), TEXT("old-refresh-123456"), 10.0);
+	FScopedTraceRecorder Scoped(EVaRestTraceDetail::Metadata);
+	auto Outcome = MakeOutcome<FVaRestJson>();
+	const uint64 Id = Observe(Rig.Client.Get(TEXT("/p")), Outcome).Send().GetId();
+	Rig.Drain();
+	if (!TestTrue(TEXT("parked before its first attempt"), Rig.Fake->NumCalls() == 0 && Auth->IsPending()))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Auth->Answer(FVaRestAuthRefreshResult::Rejected(TEXT("the refresh token was revoked")));
+	if (!TestTrue(TEXT("completes"), Rig.Wait(Outcome)))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Drain();
+	const FTraceRecorder& Recorder = *Scoped.Recorder;
+	TestEqualSensitive(TEXT("no attempt left: Started, Completed"), Recorder.KindsOf(Id), FString(TEXT("Started,Completed")));
+	TestTrue(TEXT("Kind Auth, one attempt counted"), Outcome->Error.Kind == EVaRestErrorKind::Auth && Outcome->Error.Attempts == 1 && Rig.Fake->NumCalls() == 0);
+	const TArray<FVaRestTraceEvent> Events = Recorder.For(Id);
+	const FVaRestTraceEvent* Done = Events.FindByPredicate([](const FVaRestTraceEvent& Event) { return Event.Kind == EVaRestTraceKind::Completed; });
+	TestTrue(TEXT("Completed names the refresh"), Auth->LastRefreshId != 0 && Done && Done->Payload.Get<FVaRestTraceCompleted>().AuthRefreshId == Auth->LastRefreshId);
+	return true;
+}
+
 #endif

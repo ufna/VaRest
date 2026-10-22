@@ -311,6 +311,12 @@ struct FVaRestTraceCompleted
 	TArray<FVaRestTraceDecodeWarning> DecodeWarnings;
 	int32 DecodeWarningCount = 0;
 	FVaRestTraceEnvelope Envelope;
+	/**
+	 * M4a final review C-I-1: the refresh request (its RequestId) this request's last park behind a session refresh waited
+	 * on; 0 = it never parked. Set also when a park ended it before any dispatch (a failed or rejected refresh), which no
+	 * AttemptDispatched.AuthRefreshId reports.
+	 */
+	uint64 AuthRefreshId = 0;
 };
 
 /** IN-7. M3 has only scope 0, "Process"; M5's hubs add one per game instance. */
@@ -350,6 +356,10 @@ enum class EVaRestTraceNoteKind : uint8
 struct FVaRestTraceNote
 {
 	uint64 RequestId = 0;
+	/**
+	 * The attempt the note is about; for RetryScheduled the one that ended, which may be one a park behind a refresh or
+	 * the limiter ended before any dispatch (M4a final review C-I-1: such an attempt has its number, so this is never 0)
+	 */
 	int32 Attempt = 0;
 	EVaRestTraceNoteKind Kind = EVaRestTraceNoteKind::RetryScheduled;
 	/** RetryScheduled: why ("Status503", "Connection", "Timeout"); Queued (M4b): why it was queued */

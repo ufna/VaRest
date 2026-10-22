@@ -310,6 +310,8 @@ void VaRest::Http::TracePoints::Completed(FExchangeState& Ex, const FFinish& Fin
 	Payload.Envelope.Actual = Redactor.ScrubText(Payload.Envelope.Actual);
 	Payload.Envelope.Code = Redactor.ScrubText(Payload.Envelope.Code);
 	Payload.Envelope.Message = Redactor.ScrubText(Payload.Envelope.Message);
+	// M4a final review C-I-1: links a request a park ended unsent to refresh #R (Inspector 2.3's back-link table)
+	Payload.AuthRefreshId = Ex.ParkRefreshId;
 	FVaRestTrace::Emit(EVaRestTraceKind::Completed, Ex.Config->Clock->Now(), FVaRestTracePayload(TInPlaceType<FVaRestTraceCompleted>(), MoveTemp(Payload)));
 }
 

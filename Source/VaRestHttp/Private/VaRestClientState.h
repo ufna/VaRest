@@ -163,9 +163,10 @@ namespace VaRest::Http
 		/**
 		 * Waits for the refresh in flight, or starts one with Auth. Not a session change (it queues no event), so callable
 		 * outside RunSessionChange; the caller keeps this state alive (an exchange, RefreshAuth's pin). OnDone runs once,
-		 * from a later game-thread task -- never inside this call (concurrency review I-1).
+		 * from a later game-thread task -- never inside this call (concurrency review I-1). Returns the id of the refresh
+		 * joined (M4a final review C-I-1: a parked request's Completed names it).
 		 */
-		void JoinRefresh(uint64 WaiterId, const TSharedRef<IVaRestAuth, ESPMode::ThreadSafe>& Auth, uint64 CauseRequestId, FRefreshWaiter&& OnDone);
+		uint64 JoinRefresh(uint64 WaiterId, const TSharedRef<IVaRestAuth, ESPMode::ThreadSafe>& Auth, uint64 CauseRequestId, FRefreshWaiter&& OnDone);
 		/**
 		 * Task 17 review M-8 (ruled): waits for the refresh in flight -- whatever auth started it, and whether or not the
 		 * current one could refresh. Only while one runs (IsRefreshing); OnDone as JoinRefresh's.

@@ -171,8 +171,17 @@ namespace VaRest::Http
 		 */
 		double AuthWait = 0.0;
 		uint64 AuthRefreshId = 0;
-		/** Spec review I-1: when an attempt that has not started parked behind a refresh; the boundary starts it there. -1 = none. */
+		/**
+		 * Spec review I-1: when an attempt that has not started parked behind a refresh; the boundary starts it there. -1 =
+		 * none. M4a final review C-I-1: that park took the attempt's number (the gate incremented Attempt when it set this),
+		 * so the boundary does not number the attempt again.
+		 */
 		double PendingAttemptStart = -1.0;
+		/**
+		 * M4a final review C-I-1: the refresh this request's last park waited on (0 = none), before an attempt or for a
+		 * replay -- IN-5's Completed.AuthRefreshId, so a request a park ended unsent still names its refresh
+		 */
+		uint64 ParkRefreshId = 0;
 
 		/**
 		 * IN-14, game thread: the attempt whose 2xx response the decode task excerpts (0 = none), and that response's size.

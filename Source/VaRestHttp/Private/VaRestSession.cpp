@@ -445,7 +445,7 @@ bool VaRest::Http::FClientState::ImportSession(FStringView InJson, bool bSameIde
 	return true;
 }
 
-void VaRest::Http::FClientState::JoinRefresh(uint64 WaiterId, const TSharedRef<IVaRestAuth, ESPMode::ThreadSafe>& Auth, uint64 CauseRequestId, FRefreshWaiter&& OnDone)
+uint64 VaRest::Http::FClientState::JoinRefresh(uint64 WaiterId, const TSharedRef<IVaRestAuth, ESPMode::ThreadSafe>& Auth, uint64 CauseRequestId, FRefreshWaiter&& OnDone)
 {
 	check(IsInGameThread());
 	const bool bStart = !Session.Refresh.IsValid();
@@ -458,10 +458,13 @@ void VaRest::Http::FClientState::JoinRefresh(uint64 WaiterId, const TSharedRef<I
 		Session.Refresh->CauseRequestId = CauseRequestId;
 	}
 	Session.Refresh->Waiters.Emplace(WaiterId, MoveTemp(OnDone));
+	// Read before StartRefresh: the auth's Refresh is game code and may end this refresh inside the call
+	const uint64 Joined = Session.Refresh->RefreshId;
 	if (bStart)
 	{
 		StartRefresh(Auth);
 	}
+	return Joined;
 }
 
 void VaRest::Http::FClientState::JoinRefreshInFlight(uint64 WaiterId, FRefreshWaiter&& OnDone)

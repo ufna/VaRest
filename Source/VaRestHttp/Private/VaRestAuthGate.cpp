@@ -154,6 +154,10 @@ namespace VaRest::Http::AuthGatePrivate
 		{
 			// Spec review I-1 (Inspector 3.3): a park before an attempt starts is inside that attempt (its Auth phase), so the
 			// attempt starts here; the boundary takes this time. A replay's park is the Gap before its attempt, outside both.
+			// M4a final review C-I-1 (ruling, option b): the attempt takes its number here too, and the boundary does not
+			// number it again (PendingAttemptStart set), so an attempt this park ends unsent is counted as the log line, Retry's
+			// note and FVaRestError::Attempts count it -- with no Dispatched/Ended pair, as the limiter's queue ends one.
+			++Ex.Attempt;
 			Ex.PendingAttemptStart = ParkedAt;
 		}
 		const TWeakPtr<FRun, ESPMode::ThreadSafe> Weak = Run;
@@ -185,7 +189,9 @@ namespace VaRest::Http::AuthGatePrivate
 		// The waiter runs from the refresh's one game-thread task (concurrency review I-1), never inside this call. It holds
 		// the run, so the exchange (and through it the client, as any request in flight does, spec 3.2) until the refresh
 		// ends; a request that finishes first leaves the list through the hook above (LeaveRefresh), so no waiter outlives it.
-		Client.JoinRefresh(WaiterId, Run->Auth, Ex.RequestId, [Run, ParkedAt, bReplay](const FRefreshEnded& End)
+		// C-I-1: kept for Completed. Set after the call: a request the auth's Refresh ends from inside it (a Cancel()) is
+		// completed from a later task (FClientState::Complete defers inside Cancel, decision 3)
+		Ex.ParkRefreshId = Client.JoinRefresh(WaiterId, Run->Auth, Ex.RequestId, [Run, ParkedAt, bReplay](const FRefreshEnded& End)
 		{
 			if (Run->IsAnswered())
 			{
