@@ -41,6 +41,9 @@ namespace VaRest::Http
 	// game's (review I-1); an auth's (M4a Task 14, VaRest.Auth.*) stay while it is configured.
 	/** Every secret slot the session takes starts with this, so ClearSession forgets exactly them (plan decision 17) */
 	inline const TCHAR* SessionSecretPrefix() { return TEXT("VaRest.Session."); }
+
+	/** Spec review M-12: ImportSession parses on the game thread, so its input is bounded (a session is a few hundred bytes) */
+	inline constexpr int32 MaxSessionJsonChars = 64 * 1024;
 	/**
 	 * Review M-1, by shape: FClientState::SetSecret (SetSecretValue, the game's one door) stores every game slot under this,
 	 * so no name a game picks -- "VaRest.Session.AccessToken" included -- is the session's or an auth's slot

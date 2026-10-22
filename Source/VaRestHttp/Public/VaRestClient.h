@@ -681,6 +681,19 @@ public:
 	/** Logout: tokens, session headers and their secret values; OnSessionChanged(Cleared) */
 	void ClearSession();
 	FVaRestSessionData GetSession() const;
+	/**
+	 * Spec 4.2: the session as JSON, for a game that persists it itself. It holds the tokens in clear: store it like a
+	 * password (the platform's keychain), never in a save file others can read. Written on the game thread (spec review
+	 * M-12: the session JSON is the one game-thread parse, bounded).
+	 */
+	FString ExportSession() const;
+	/**
+	 * False, and nothing changes, when Json is not an ExportSession() result: not JSON, another version, a control character
+	 * in a token or a header, a bad date, or more than 64 Ki characters (parsed on the game thread, so bounded; spec review
+	 * M-12). An import is Replaced, or Refreshed with bSameIdentity. An import whose tokens are both empty is a logout, as
+	 * SetSession("", "") is: ClearSession(), true. Unknown fields are ignored.
+	 */
+	bool ImportSession(FStringView Json, bool bSameIdentity = false);
 	/** WebSocket spec 19 item 2: a socket's terminal auth failure. The tokens go; OnSessionExpired fires, once per expiry. */
 	void NotifySessionExpired();
 	/** Game thread. An empty client returns a delegate that never fires. */

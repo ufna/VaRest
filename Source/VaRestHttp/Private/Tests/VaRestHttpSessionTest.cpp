@@ -396,4 +396,93 @@ bool FVaRestHttpSessionListenersTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpSessionExportTest, "VaRest.Http.Session.ExportImport",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpSessionExportTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::SessionTestPrivate;
+	FTestRig From;
+	From.Client.SetSession(TEXT("access-export-12345"), TEXT("refresh-export-1234"), 120.0);
+	From.Client.SetSessionHeader(TEXT("X-Session-ID"), TEXT("session-export-123"));
+	const FString Exported = From.Client.ExportSession();
+	TestTrue(TEXT("an export holds the tokens (the docs carry the caveat)"), Exported.Contains(TEXT("access-export-12345")) && Exported.Contains(TEXT("\"version\":1")));
+
+	FTestRig To;
+	const FChanges Seen = Watch(To.Client);
+	if (!TestTrue(TEXT("imported"), To.Client.ImportSession(Exported)))
+	{
+		return false;
+	}
+	const FVaRestSessionData Data = To.Client.GetSession();
+	TestTrue(TEXT("the same tokens and header"), Data.AccessToken == TEXT("access-export-12345") && Data.RefreshToken == TEXT("refresh-export-1234")
+		&& Data.Headers.Get(TEXT("X-Session-ID")) == TEXT("session-export-123"));
+	TestTrue(TEXT("the expiry carried through UTC, within a second"), FMath::Abs(Data.ExpiresAt - 120.0) < 1.0);
+	TestTrue(TEXT("an import is Replaced"), Seen->Num() == 1 && (*Seen)[0] == EVaRestSessionChange::Replaced);
+	TestEqualSensitive(TEXT("... and its values are secrets"), Scrub(To.Client, TEXT("session-export-123")), FString(TEXT("***")));
+
+	FTestRig Bad;
+	TestFalse(TEXT("not JSON"), Bad.Client.ImportSession(TEXT("{nope")));
+	TestFalse(TEXT("another version"), Bad.Client.ImportSession(TEXT(R"({"version":2,"accessToken":"a"})")));
+	TestFalse(TEXT("a token with CR LF"), Bad.Client.ImportSession(TEXT(R"({"version":1,"accessToken":"a\r\nX-Evil: 1"})")));
+	TestFalse(TEXT("a bad date"), Bad.Client.ImportSession(TEXT(R"({"version":1,"accessToken":"a","expiresAt":"tomorrow"})")));
+	// Spec review M-12: the one game-thread parse is bounded -- valid JSON padded past 64 Ki characters is refused unparsed
+	const FString Padded = FString(TEXT(R"({"version":1,"accessToken":"padded-token-123456"})")) + FString::ChrN(65 * 1024, TEXT(' '));
+	TestFalse(TEXT("over 64 KiB"), Bad.Client.ImportSession(Padded));
+	TestFalse(TEXT("nothing changed"), Bad.Client.GetSession().HasAccessToken());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpSessionImportEmptyTest, "VaRest.Http.Session.ImportEmptyIsLogout",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpSessionImportEmptyTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::SessionTestPrivate;
+	// Controller ruling (Task 13), consistent with review M-4: an import with no token is a logout, and an empty session's
+	// export imports as an empty session
+	FTestRig Rig;
+	const FChanges Seen = Watch(Rig.Client);
+	Rig.Client.SetSession(TEXT("access-gone-1234567"), TEXT("refresh-gone-123456"));
+	Rig.Client.SetSessionHeader(TEXT("X-Session-ID"), TEXT("session-gone-12345"));
+	TestTrue(TEXT("an import with both tokens empty is accepted"),
+		Rig.Client.ImportSession(TEXT(R"({"version":1,"accessToken":"","refreshToken":"","headers":[{"name":"X-Other","value":"other-value-123456"}]})")));
+	const FVaRestSessionData Data = Rig.Client.GetSession();
+	TestTrue(TEXT("... nothing left, the imported header ignored"), !Data.HasAccessToken() && !Data.HasRefreshToken() && Data.Headers.IsEmpty());
+	TestTrue(TEXT("... Cleared, not Replaced"), Seen->Num() == 2 && (*Seen)[0] == EVaRestSessionChange::Replaced && (*Seen)[1] == EVaRestSessionChange::Cleared);
+	TestEqualSensitive(TEXT("... the session's secrets forgotten"), Scrub(Rig.Client, TEXT("access-gone-1234567 session-gone-12345")),
+		FString(TEXT("access-gone-1234567 session-gone-12345")));
+	TestTrue(TEXT("the empty session's own export imports as empty, with no event"), Rig.Client.ImportSession(Rig.Client.ExportSession()) && Seen->Num() == 2);
+	TestTrue(TEXT("... and still empty"), !Rig.Client.GetSession().HasAccessToken() && !Rig.Client.GetSession().HasRefreshToken());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpSessionImportRedactsTest, "VaRest.Http.Session.ImportRedactsHeaders",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpSessionImportRedactsTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::SessionTestPrivate;
+	// IN-13 layers 2 and 3 for an import, with nothing sent: the name is a redaction key, the value a session slot
+	FTestRig Rig;
+	Rig.Client.SetSessionHeader(TEXT("X-Old-Header"), TEXT("old-header-value-12"));
+	TestTrue(TEXT("imported"), Rig.Client.ImportSession(
+		TEXT(R"({"version":1,"accessToken":"access-import-1234567","unknown":[1],"headers":[{"name":"X-Imported-Id","value":"imported-value-1234"}]})")));
+	const TSharedPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> State = VaRest::Http::FClientAccess::State(Rig.Client);
+	if (!TestTrue(TEXT("a client state"), State.IsValid()))
+	{
+		return false;
+	}
+	TestEqualSensitive(TEXT("the imported header's value is scrubbed"), Scrub(Rig.Client, TEXT("imported-value-1234")), FString(TEXT("***")));
+	TestEqualSensitive(TEXT("... the token too"), Scrub(Rig.Client, TEXT("access-import-1234567")), FString(TEXT("***")));
+	TestTrue(TEXT("... and the name is a redaction key"), State->GetConfig()->RedactedKeys.ContainsByPredicate(
+		[](const FString& Key) { return Key.Equals(TEXT("X-Imported-Id"), ESearchCase::IgnoreCase); }));
+	TestTrue(TEXT("the replaced header is gone from the session"), !Rig.Client.GetSession().Headers.Find(TEXT("X-Old-Header")));
+	TestEqualSensitive(TEXT("... its value retired, still known"), Scrub(Rig.Client, TEXT("old-header-value-12")), FString(TEXT("***")));
+	return true;
+}
+
 #endif

@@ -565,6 +565,26 @@ FVaRestSessionData FVaRestClient::GetSession() const
 	return State.IsValid() ? State->GetSessionData() : FVaRestSessionData();
 }
 
+FString FVaRestClient::ExportSession() const
+{
+	check(IsInGameThread());
+	return State.IsValid() ? State->ExportSession() : FString();
+}
+
+bool FVaRestClient::ImportSession(FStringView Json, bool bSameIdentity)
+{
+	check(IsInGameThread());
+	if (!State.IsValid())
+	{
+		return false;
+	}
+	// Concurrency review C-1: a change like any other, through the one door. By reference: RunSessionChange runs it
+	// synchronously (VaRestSession.cpp RunSessionChange), nothing outlives this frame.
+	bool bImported = false;
+	State->RunSessionChange([Json, bSameIdentity, &bImported](VaRest::Http::FClientState& Target) { bImported = Target.ImportSession(Json, bSameIdentity); });
+	return bImported;
+}
+
 void FVaRestClient::NotifySessionExpired()
 {
 	check(IsInGameThread());

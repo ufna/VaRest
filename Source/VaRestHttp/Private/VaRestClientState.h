@@ -132,6 +132,13 @@ namespace VaRest::Http
 		 * Once: a session with no token left queues nothing (concurrency review I-2).
 		 */
 		void ExpireSession(uint64 CauseRequestId, FStringView Why);
+		/** Spec 4.2: the session as JSON (Task 13). Game thread; not a change. */
+		FString ExportSession() const;
+		/**
+		 * Inside a change only: false, and nothing changes, for anything but an ExportSession() result of at most
+		 * MaxSessionJsonChars. Tokens that are both empty are a logout: ClearSession(), true.
+		 */
+		bool ImportSession(FStringView InJson, bool bSameIdentity);
 
 		/** Every live client (game thread): the trace snapshot, engine shutdown */
 		static void ForEachLive(TFunctionRef<void(FClientState&)> Visit);

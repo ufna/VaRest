@@ -5,6 +5,9 @@
 #include "VaRestClientState.h"
 #include "VaRestTracePoints.h"
 
+#include "Misc/DateTime.h"
+#include "Misc/Timespan.h"
+
 namespace VaRest::Http::SessionPrivate
 {
 	FName Slot(const TCHAR* Name)
@@ -196,4 +199,109 @@ void VaRest::Http::FClientState::ExpireSession(uint64 CauseRequestId, FStringVie
 	Event.bExpired = true;
 	Event.CauseRequestId = CauseRequestId;
 	Event.Text = FString(Why);
+}
+
+FString VaRest::Http::FClientState::ExportSession() const
+{
+	check(IsInGameThread());
+	const FVaRestSessionData& Data = Session.Data;
+	FVaRestJson Root = FVaRestJson::Object();
+	Root.Set(TEXT("version"), 1);
+	Root.Set(TEXT("accessToken"), Data.AccessToken);
+	Root.Set(TEXT("refreshToken"), Data.RefreshToken);
+	if (Data.ExpiresAt > 0.0)
+	{
+		// The client's clock is monotonic and per process: an export carries the expiry as a UTC time
+		const double Left = Data.ExpiresAt - GetConfig()->Clock->Now();
+		Root.Set(TEXT("expiresAt"), (FDateTime::UtcNow() + FTimespan::FromSeconds(Left)).ToIso8601());
+	}
+	FVaRestJson Headers = FVaRestJson::Array();
+	for (const FVaRestHeaders::FPair& Pair : Data.Headers)
+	{
+		Headers.Add(FVaRestJson::Object().Set(TEXT("name"), Pair.Key).Set(TEXT("value"), Pair.Value));
+	}
+	Root.Set(TEXT("headers"), Headers);
+	return Root.ToString();
+}
+
+bool VaRest::Http::FClientState::ImportSession(FStringView InJson, bool bSameIdentity)
+{
+	CheckInSessionChange();
+	// Spec review M-12: the game thread never parses a body (spec 1, Inspector 7) -- this is the one bounded exception: a
+	// session is a few hundred bytes and the call is synchronous; anything past MaxSessionJsonChars is refused unparsed
+	if (InJson.Len() > MaxSessionJsonChars)
+	{
+		return false;
+	}
+	TValueOrError<FVaRestJson, FVaRestJsonError> Parsed = FVaRestJson::Parse(InJson);
+	if (Parsed.HasError())
+	{
+		return false;
+	}
+	const FVaRestJson Root = Parsed.StealValue();
+	if (!Root.IsObject() || Root[TEXT("version")].AsInt(0) != 1)
+	{
+		return false;
+	}
+	const FString Access = Root[TEXT("accessToken")].AsString();
+	const FString Refresh = Root[TEXT("refreshToken")].AsString();
+	if (!IsValidHeaderValue(Access) || !IsValidHeaderValue(Refresh))
+	{
+		return false;
+	}
+	double ExpiresIn = 0.0;
+	const FString ExpiresText = Root[TEXT("expiresAt")].AsString();
+	if (!ExpiresText.IsEmpty())
+	{
+		FDateTime When;
+		if (!FDateTime::ParseIso8601(*ExpiresText, When))
+		{
+			return false;
+		}
+		// Already expired: a moment from now, so the auth refreshes at once (NeedsRefresh), instead of "unknown"
+		ExpiresIn = FMath::Max((When - FDateTime::UtcNow()).GetTotalSeconds(), 1e-3);
+	}
+	FVaRestHeaders Headers;
+	for (const FVaRestJson& Entry : Root[TEXT("headers")].Elements())
+	{
+		const FString Name = Entry[TEXT("name")].AsString();
+		const FString Value = Entry[TEXT("value")].AsString();
+		if (!IsValidHeaderName(Name) || !IsValidHeaderValue(Value))
+		{
+			return false;
+		}
+		Headers.Set(Name, Value);
+	}
+	if (Access.IsEmpty() && Refresh.IsEmpty())
+	{
+		// Controller ruling (Task 13), consistent with review M-4: a session with no token is a logout, not a login --
+		// an export of an empty session imports as an empty one, and no Replaced goes out with nothing to send.
+		ClearSession();
+		return true;
+	}
+	TArray<FString> Names;
+	TArray<TPair<FName, FString>> Retired;
+	for (const FVaRestHeaders::FPair& Pair : Headers)
+	{
+		Names.Add(Pair.Key);
+	}
+	for (const FVaRestHeaders::FPair& Old : Session.Data.Headers)
+	{
+		if (!Headers.Find(Old.Key))
+		{
+			// As RemoveSessionHeader: a header the import drops is retired, its value known for 10 minutes (Inspector D21)
+			Retired.Emplace(SessionPrivate::HeaderSlot(Old.Key), FString());
+		}
+	}
+	Session.Data.Headers = MoveTemp(Headers);
+	++Session.Data.Generation;
+	// IN-13 layer 2 and 3 in one republish, as SetSessionHeader: the imported names are keys, the values session slots
+	PublishSessionSecrets([&Names](FClientConfig& Edited) { AppendRedactKeys(Edited.RedactedKeys, Names); });
+	if (!Retired.IsEmpty())
+	{
+		SetSecrets(Retired);
+	}
+	// Re-review N-10: the time left is not the token's lifetime -- unknown, so BearerRefresh's configured lead applies
+	SetTokensByGame(Access, &Refresh, ExpiresIn, 0.0, bSameIdentity);
+	return true;
 }
