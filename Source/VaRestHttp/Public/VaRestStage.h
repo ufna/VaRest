@@ -93,6 +93,8 @@ public:
 	 * and Cancel() does not return it sooner (ruling I-3: the limiter opens the attempt). Work that waits on another request
 	 * through the same client belongs in an Outer stage or on another client: the request it waits on could queue forever
 	 * behind the slot the stage holds (task 4 review I-1).
+	 * A PerAttempt stage that answers while its call still runs gets that call canceled and its limiter slot released, when the
+	 * attempt's outcome returns through the attempt boundary (M4a final review A1); it cannot keep the call downloading.
 	 */
 	virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) = 0;
 };

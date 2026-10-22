@@ -1047,8 +1047,10 @@ bool FVaRestHttpRetryCancelEarlyTest::RunTest(const FString& Parameters)
 	using namespace VaRest::Http::Testing;
 	using namespace VaRest::Http::RetryTestPrivate;
 	// Task 8 review I-1: a PerAttempt stage answers its attempt itself while the transport call still runs (its own timeout,
-	// VaRestClient.h WithMaxConcurrent), Retry backs off, and the request still holds that stale call. Cancel() and
-	// shutdown must end the wait anyway: the timer goes and every Outer stage gets its one Canceled, inside the call.
+	// VaRestClient.h WithMaxConcurrent), Retry backs off. Since M4a final review A1 the call is canceled at the attempt's end,
+	// before the backoff starts. Cancel() and shutdown must end the wait anyway: the timer goes and every Outer stage gets its
+	// one Canceled, inside the call. Cancel()'s CancelHeldCall defence path (VaRestPipeline.cpp:1300-1304) is kept as defence in
+	// depth, and no row reaches it now.
 	FTestRig Rig;
 	const TSharedRef<FOutcomeProbe, ESPMode::ThreadSafe> Probe = MakeShared<FOutcomeProbe, ESPMode::ThreadSafe>();
 	const TSharedRef<FHoldingOuter, ESPMode::ThreadSafe> Early = MakeShared<FHoldingOuter, ESPMode::ThreadSafe>(true);
@@ -1064,7 +1066,7 @@ bool FVaRestHttpRetryCancelEarlyTest::RunTest(const FString& Parameters)
 		return false;
 	}
 	Early->AnswerNow(503);
-	if (!TestEqual(TEXT("the stage's own 503: Retry backs off, the call still running"), Rig.Clock->NumPendingTimers(), 1))
+	if (!TestEqual(TEXT("the stage's own 503: Retry backs off, the call canceled at the attempt's end"), Rig.Clock->NumPendingTimers(), 1))
 	{
 		Abandon(Rig);
 		return false;

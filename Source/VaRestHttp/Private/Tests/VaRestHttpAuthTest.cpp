@@ -4080,7 +4080,7 @@ bool FVaRestHttpAuthRefreshIdUniqueTest::RunTest(const FString& Parameters)
 	using namespace VaRest::Http::AuthTestPrivate;
 	// Spec review I-2: a refresh's id is a process-unique request id (FVaRestTrace::NewRequestId, VaRestSession.cpp:486), so
 	// two clients' refresh requests are two Inspector records. VaRest.Http.Auth.BearerRefresh cannot see a per-client
-	// number: the refresh request carries whatever id its refresh has (VaRestClient.cpp:164), so the two always agree.
+	// number: the refresh request carries whatever id its refresh has (VaRestClient.cpp:171), so the two always agree.
 	uint64 Ids[2] = {};
 	for (uint64& Id : Ids)
 	{

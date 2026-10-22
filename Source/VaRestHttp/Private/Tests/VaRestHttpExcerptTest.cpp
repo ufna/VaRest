@@ -1149,6 +1149,10 @@ bool FVaRestHttpGoldenStaleEndTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// M4a final review M-5: R4 needs only Metadata, so it stays outside the excerpts guard and an excerpts-off build still pins
+// the stale end's attempt label.
+#endif // VAREST_WITH_TRACE_EXCERPTS
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpGoldenStaleEndQueuedTest, "VaRest.Http.Trace.Golden.StaleAttemptEndQueued",
 	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
 
@@ -1213,6 +1217,7 @@ bool FVaRestHttpGoldenStaleEndQueuedTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+#if VAREST_WITH_TRACE_EXCERPTS
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpExcerptPerDispatchTest, "VaRest.Http.Trace.ExcerptOnePerDispatch",
 	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
 

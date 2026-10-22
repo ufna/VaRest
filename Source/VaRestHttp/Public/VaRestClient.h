@@ -835,8 +835,12 @@ public:
 	 * forgotten (Inspector D21). ClearSession() and ClearSecretValues() leave an auth's values alone.
 	 * A session refresh in flight is not ended by this (Task 16 review M-5, ruled): the refresh belongs to the session, so it
 	 * runs to its end with the auth that started it and its result applies to the session -- a rejection expires it -- and
-	 * requests parked behind it keep their Send()-time auth. The game's own session calls end it: a new access token (or a
-	 * new refresh token alone) from SetBearerToken(), SetSession() or ImportSession(), ClearSession(), NotifySessionExpired().
+	 * requests parked behind it keep their Send()-time auth. The game's own session calls end it: a new access token from
+	 * SetBearerToken(), SetSession() or ImportSession(), ClearSession(), NotifySessionExpired(). Two writes made during a refresh
+	 * are the exceptions (M4a final review M-2): (same access token, new refresh token) does NOT end it -- the refresh in flight
+	 * still uses the old refresh token, and a rejection then expires the session, so call ClearSession() first if the new
+	 * refresh token must survive (bead VaRest-zj4); (empty access token, same refresh token) re-parks the waiters behind a new
+	 * refresh while the in-flight one continues (B4).
 	 */
 	FVaRestClient& WithAuth(TSharedRef<IVaRestAuth, ESPMode::ThreadSafe> InAuth);
 	/**

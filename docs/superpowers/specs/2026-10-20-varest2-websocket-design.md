@@ -535,9 +535,9 @@ A socket shares an HTTP client's session with `WithApi(GameApi)` (resolved throu
   not call `NotifySessionExpired()`. A 401 again after a refresh → terminal `Auth`; the socket raises
   the client's `OnSessionExpired` with `NotifySessionExpired()` (§19 item 2). A refresh `Failed` keeps
   the session: with `Connection` or `Timeout` the socket backs off and reconnects as after a drop
-  (a Wi-Fi blip is no logout); with `Config` (a misconfigured auth) it fails `Config`. *(Amended 2026-10-21:
+  (a Wi-Fi blip is no logout); with `Config` (a misconfigured auth, or a refresh request the configuration refuses: HTTP disabled, a domain not allowed) it fails `Config`. *(Amended 2026-10-21:
   M4a plan rulings Q1, Q6, I-5.)* A refresh `Unavailable` (nothing can refresh this session: no auth, or an
-  auth that cannot refresh it — a plain `Bearer`, a session with no refresh token) → the upgrade's own 401
+  auth that cannot refresh it — a plain `Bearer`, a session with no refresh token) → the upgrade's own 401 (or close 4401)
   is the answer, as HTTP's auth gate answers a 401 it cannot refresh: terminal with that 401's kind (§3.4's
   upgrade-401 row, `Auth`), not `Config` — a refused token is not a misconfiguration — and no
   `NotifySessionExpired()`, as the gate leaves the session to the game. *(Amended 2026-10-23: M4a final
