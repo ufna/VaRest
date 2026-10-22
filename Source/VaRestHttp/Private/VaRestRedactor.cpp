@@ -61,6 +61,36 @@ namespace VaRest::Http::RedactorPrivate
 			|| Type.EndsWith(TEXTVIEW("+xml"), ESearchCase::IgnoreCase) || Type.Equals(TEXTVIEW("application/javascript"), ESearchCase::IgnoreCase);
 	}
 
+	/** What RedactBody makes of a body (M4a final review A7: one decision, shared with FVaRestRedactor::IsBinaryBody) */
+	enum class EBodyClass : uint8
+	{
+		Json,
+		Form,
+		Multipart,
+		Text,
+		Binary
+	};
+
+	/** Type: the media type (MediaType); Head: the body's first bytes, up to the cap -- JSON is sniffed from them */
+	EBodyClass ClassifyBody(FStringView Type, TConstArrayView<uint8> Head)
+	{
+		const uint8 First = FirstNonSpace(Head);
+		const bool bSniffJson = (Type.IsEmpty() || Type.StartsWith(TEXTVIEW("text/"), ESearchCase::IgnoreCase)) && (First == '{' || First == '[');
+		if (VaRest::Http::IsJsonContentType(Type) || bSniffJson)
+		{
+			return EBodyClass::Json;
+		}
+		if (Type.Equals(TEXTVIEW("application/x-www-form-urlencoded"), ESearchCase::IgnoreCase))
+		{
+			return EBodyClass::Form;
+		}
+		if (Type.StartsWith(TEXTVIEW("multipart/"), ESearchCase::IgnoreCase))
+		{
+			return EBodyClass::Multipart;
+		}
+		return IsTextual(Type) ? EBodyClass::Text : EBodyClass::Binary;
+	}
+
 	/** Bytes up to the last whole UTF-8 character (a cut excerpt never ends in half a character) */
 	int32 WholeCharacters(TConstArrayView<uint8> Bytes)
 	{
@@ -812,11 +842,10 @@ FVaRestTraceExcerpt FVaRestRedactor::RedactBody(FStringView ContentType, TConstA
 	const TConstArrayView<uint8> Head = Prefix.Left(Seen);
 	const bool bWhole = Seen == TotalBytes;
 	const FStringView Type = MediaType(ContentType);
-	const uint8 First = FirstNonSpace(Head);
-	const bool bSniffJson = (Type.IsEmpty() || Type.StartsWith(TEXTVIEW("text/"), ESearchCase::IgnoreCase)) && (First == '{' || First == '[');
+	const EBodyClass Class = ClassifyBody(Type, Head);
 	TArray<uint8> Out;
 
-	if (VaRest::Http::IsJsonContentType(Type) || bSniffJson)
+	if (Class == EBodyClass::Json)
 	{
 		Excerpt.Kind = EVaRestExcerptKind::Json;
 		const FVaRestRedactResult Result = VaRest::Json::RedactPrefix(
@@ -827,7 +856,7 @@ FVaRestTraceExcerpt FVaRestRedactor::RedactBody(FStringView ContentType, TConstA
 			: Result.StopReason == EVaRestRedactStop::Cap ? FString(TEXT("cap"))
 			: FString::Printf(TEXT("parse error at byte %lld: %s"), Result.ErrorOffset, *Result.Error);
 	}
-	else if (Type.Equals(TEXTVIEW("application/x-www-form-urlencoded"), ESearchCase::IgnoreCase))
+	else if (Class == EBodyClass::Form)
 	{
 		Excerpt.Kind = EVaRestExcerptKind::Form;
 		FString Text = ToText(Head);
@@ -851,12 +880,12 @@ FVaRestTraceExcerpt FVaRestRedactor::RedactBody(FStringView ContentType, TConstA
 		Excerpt.bRedacted = !Redacted.Equals(Text, ESearchCase::CaseSensitive);
 		Out = ToUtf8(Redacted);
 	}
-	else if (Type.StartsWith(TEXTVIEW("multipart/"), ESearchCase::IgnoreCase))
+	else if (Class == EBodyClass::Multipart)
 	{
 		Excerpt.Kind = EVaRestExcerptKind::Multipart;
 		Out = ToUtf8(FString::Printf(TEXT("<multipart body, %lld bytes>"), TotalBytes));
 	}
-	else if (IsTextual(Type))
+	else if (Class == EBodyClass::Text)
 	{
 		Excerpt.Kind = EVaRestExcerptKind::Text;
 		const TConstArrayView<uint8> Whole = bWhole ? Head : Head.Left(WholeCharacters(Head));
@@ -866,7 +895,9 @@ FVaRestTraceExcerpt FVaRestRedactor::RedactBody(FStringView ContentType, TConstA
 	}
 	else
 	{
-		// Layer 4: binary is a descriptor. Protobuf and FlatBuffers store strings verbatim, so no byte is copied.
+		// Layer 4: binary is a descriptor. Protobuf and FlatBuffers store strings verbatim, so no byte of the body reaches the
+		// excerpt: the prefix is read only for the SHA-256, and only when it is the whole body. The trace copies nothing for a
+		// binary body over the cap, and calls this with no prefix (IsBinaryBody; M4a final review A7).
 		Excerpt.Kind = EVaRestExcerptKind::Binary;
 		if (Prefix.Num() == TotalBytes)
 		{
@@ -888,6 +919,12 @@ FVaRestTraceExcerpt FVaRestRedactor::RedactBody(FStringView ContentType, TConstA
 	}
 	Excerpt.Bytes = Share(MoveTemp(Out));
 	return Excerpt;
+}
+
+bool FVaRestRedactor::IsBinaryBody(FStringView ContentType, TConstArrayView<uint8> Head)
+{
+	using namespace VaRest::Http::RedactorPrivate;
+	return ClassifyBody(MediaType(ContentType), Head) == EBodyClass::Binary;
 }
 
 FVaRestTraceExcerpt FVaRestRedactor::DescribeMultipart(TConstArrayView<FVaRestMultipartPart> Parts, int64 TotalBytes, int32 Cap) const

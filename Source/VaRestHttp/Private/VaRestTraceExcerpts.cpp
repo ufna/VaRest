@@ -45,10 +45,21 @@ namespace VaRest::Http::ExcerptsPrivate
 	void CountCopied(int64) {}
 #endif
 
-	/** At most Cap bytes copied and admitted, or a backlog skip */
+	/** At most Cap bytes copied and admitted, or a backlog skip; nothing for a binary body over the cap */
 	Excerpts::FJob WithCopy(Excerpts::FJob&& Job, TConstArrayView<uint8> Bytes, int32 Cap, FString ContentType)
 	{
 		const int32 Take = FMath::Min(Bytes.Num(), FMath::Max(0, Cap));
+		if (Take < Bytes.Num() && FVaRestRedactor::IsBinaryBody(ContentType, Bytes.Left(Take)))
+		{
+			// M4a final review A7 (review C M-4): a binary body over the cap is described by its size and type alone -- the
+			// SHA-256 prefix needs the whole body -- so nothing is copied on the game thread and nothing is admitted (an image
+			// or an asset bundle with the Inspector capturing bodies). A body within the cap keeps its copy, which the SHA reads.
+			Job.Redact = [Type = MoveTemp(ContentType), Total = Job.TotalBytes, Cap](const FVaRestRedactor& Redactor)
+			{
+				return Redactor.RedactBody(Type, TConstArrayView<uint8>(), Total, Cap);
+			};
+			return MoveTemp(Job);
+		}
 		TOptional<Excerpts::FAdmission> Admission = Excerpts::TryAdmit(Take);
 		if (!Admission.IsSet())
 		{

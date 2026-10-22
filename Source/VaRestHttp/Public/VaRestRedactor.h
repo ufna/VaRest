@@ -109,6 +109,13 @@ public:
 	FVaRestTraceExcerpt RedactBody(FStringView ContentType, TConstArrayView<uint8> Prefix, int64 TotalBytes, int32 Cap) const;
 
 	/**
+	 * True when RedactBody describes a body of this Content-Type, whose first bytes (up to the cap) are Head, as binary: no
+	 * byte of it reaches the excerpt, only its size, its type and -- when the whole body is passed -- its SHA-256 prefix.
+	 * Any thread. The trace uses it to describe a binary body over the cap without copying any of it (M4a final review A7).
+	 */
+	static bool IsBinaryBody(FStringView ContentType, TConstArrayView<uint8> Head);
+
+	/**
 	 * A multipart request body (a negative Cap is 0): one line per part; a text part's value by its name's rules, then
 	 * scrubbed; binary as a descriptor. A text part is read up to Cap + GetMaxNeedleBytes(); one cut there, or given with
 	 * fewer Bytes than its Size (a caller's capped copy), loses the tail that begins a known secret, and the excerpt is

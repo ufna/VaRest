@@ -1317,6 +1317,73 @@ bool FVaRestHttpExcerptPerDispatchTest::RunTest(const FString& Parameters)
 	TestEqualSensitive(TEXT("... and every announced excerpt resolved"), Unresolved(Recorder, KeptId), FString());
 	return true;
 }
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpExcerptBinaryNoCopyTest, "VaRest.Http.Trace.ExcerptBinaryOverCapCopiesNothing",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpExcerptBinaryNoCopyTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::ExcerptTestPrivate;
+	// M4a final review A7 (review C M-4): a 1 MiB binary download with a Bodies sink gets its descriptor (size and type, no
+	// SHA-256: that needs the whole body) with no byte copied for it on the game thread and nothing admitted. A binary body
+	// within the cap keeps its copy, which the SHA-256 prefix reads; a body over the cap that sniffs as JSON is still copied
+	// up to the cap. One request at a time: the copy counter is the process's.
+	FTestRig Rig;
+	TArray<uint8> Large;
+	Large.SetNumUninitialized(1024 * 1024);
+	for (int32 Index = 0; Index < Large.Num(); ++Index)
+	{
+		Large[Index] = static_cast<uint8>(Index * 31 + 7);
+	}
+	Large[0] = 0x89; // not '{' or '[': nothing to sniff
+	TArray<uint8> Sniffed;
+	Sniffed.Init('1', 2048);
+	Sniffed[0] = '[';
+	Rig.Fake->SetResponder([Large, Sniffed](const FVaRestTransportRequest& Request)
+	{
+		if (Request.Url.EndsWith(TEXT("/large")))
+		{
+			return FVaRestFakeResponse::Bytes(200, Large);
+		}
+		if (Request.Url.EndsWith(TEXT("/sniffed")))
+		{
+			return FVaRestFakeResponse::Bytes(200, Sniffed, TEXTVIEW(""));
+		}
+		return FVaRestFakeResponse::Bytes(200, TArray<uint8>{ 1, 2, 3, 4 });
+	});
+	FScopedTraceRecorder Scoped(EVaRestTraceDetail::Metadata | EVaRestTraceDetail::Bodies, 1024);
+	const FTraceRecorder& Recorder = *Scoped.Recorder;
+	const auto Fetch = [this, &Rig](const TCHAR* Path, int64& OutCopied) -> uint64
+	{
+		auto Outcome = MakeOutcome<TArray<uint8>>();
+		const int64 Before = Counters().TraceExcerptBytesCopied.load();
+		const uint64 Id = Observe(Rig.Client.Get<TArray<uint8>>(Path), Outcome).Send().GetId();
+		TestTrue(FString::Printf(TEXT("%s completes"), Path), Rig.Wait(Outcome) && Rig.Drain() && Outcome->SuccessCalls.load() == 1);
+		OutCopied = Counters().TraceExcerptBytesCopied.load() - Before;
+		return Id;
+	};
+	int64 CopiedLarge = -1;
+	int64 CopiedSmall = -1;
+	int64 CopiedSniffed = -1;
+	const uint64 LargeId = Fetch(TEXT("/large"), CopiedLarge);
+	const uint64 SmallId = Fetch(TEXT("/small"), CopiedSmall);
+	const uint64 SniffedId = Fetch(TEXT("/sniffed"), CopiedSniffed);
+	FlushRedactionPipe();
+	TestEqual(TEXT("1 MiB of binary over the cap: nothing copied"), CopiedLarge, static_cast<int64>(0));
+	const TOptional<FVaRestTraceExcerptEvent> LargeExcerpt = Find(Recorder.ExcerptsOf(LargeId), EVaRestTraceExcerptOwner::Response);
+	TestTrue(TEXT("... still described: binary, its size and type, no SHA-256"), LargeExcerpt.IsSet() && LargeExcerpt->Excerpt.Kind == EVaRestExcerptKind::Binary
+		&& LargeExcerpt->Excerpt.TotalBytes == 1024 * 1024 && LargeExcerpt->Excerpt.Sha256Prefix.IsEmpty()
+		&& LargeExcerpt->Excerpt.ToText().Equals(TEXT("<binary: 1048576 bytes, application/octet-stream>"), ESearchCase::CaseSensitive));
+	TestEqual(TEXT("binary within the cap: its 4 bytes copied"), CopiedSmall, static_cast<int64>(4));
+	const TOptional<FVaRestTraceExcerptEvent> SmallExcerpt = Find(Recorder.ExcerptsOf(SmallId), EVaRestTraceExcerptOwner::Response);
+	TestTrue(TEXT("... for its SHA-256 prefix"), SmallExcerpt.IsSet() && SmallExcerpt->Excerpt.Kind == EVaRestExcerptKind::Binary
+		&& !SmallExcerpt->Excerpt.Sha256Prefix.IsEmpty());
+	TestEqual(TEXT("over the cap, untyped but sniffed as JSON: copied up to the cap"), CopiedSniffed, static_cast<int64>(1024));
+	const TOptional<FVaRestTraceExcerptEvent> SniffedExcerpt = Find(Recorder.ExcerptsOf(SniffedId), EVaRestTraceExcerptOwner::Response);
+	TestTrue(TEXT("... and excerpted as JSON"), SniffedExcerpt.IsSet() && SniffedExcerpt->Excerpt.Kind == EVaRestExcerptKind::Json);
+	TestEqual(TEXT("the admission counter is back at 0"), VaRest::Http::Excerpts::PendingBytes(), static_cast<int64>(0));
+	return true;
+}
 #endif // VAREST_WITH_TRACE_EXCERPTS
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpTraceCancelAtDispatchTest, "VaRest.Http.Trace.CancelAtDispatch",
