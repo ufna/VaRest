@@ -310,6 +310,15 @@ namespace VaRest::Http::PipelinePrivate
 		virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) override
 		{
 			FExchangeState& Ex = Internals(*Exchange);
+			if (Ex.bIsAuthRefresh)
+			{
+				// Ruling M-8: the refresh request skips the queue. Single flight makes it at most one more connection per client,
+				// and every parked request waits on it: behind long polls holding every slot it would never run. It takes no
+				// slot, so its outcome goes up as it is -- never through the grant's Release below -- and the queue, its
+				// deadline timer (ArmQueueDeadline) and LimiterWait (0 from the attempt boundary) never see it.
+				Next.Proceed(Exchange, MoveTemp(OnOutcome));
+				return;
+			}
 			// One of the two closures below runs, exactly once: the grant or the abort
 			TSharedRef<FVaRestOutcomeCallback, ESPMode::ThreadSafe> Outcome = MakeShared<FVaRestOutcomeCallback, ESPMode::ThreadSafe>(MoveTemp(OnOutcome));
 			// Inspector IN-2: both ends of the wait on this exchange's own clock (review Minor 3). The grant comes from

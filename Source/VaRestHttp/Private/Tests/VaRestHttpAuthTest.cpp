@@ -785,4 +785,210 @@ bool FVaRestHttpAuthRetryTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthRefreshContextTest, "VaRest.Http.Auth.RefreshContext",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthRefreshContextTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// Plan decision 23: what Context.Request() sends -- no credentials, no retry, no envelope; past a full limiter (ruling
+	// M-8); the first one under the refresh's id (spec review I-2); and a context that does not keep its client (M-10)
+	FTestRig Rig;
+	Rig.Client.WithMaxConcurrent(1).WithBearer(TEXT("bearer-token-123456")).WithRetry(FVaRestRetryPolicy::Exponential(3));
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest& Request) { return Request.Url.EndsWith(TEXT("/hold")) ? FVaRestFakeResponse::Manual() : Json(503); });
+	FScopedTraceRecorder Scoped(EVaRestTraceDetail::Metadata);
+	auto Holder = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/hold")), Holder).Send();
+	if (!TestTrue(TEXT("the only slot is held"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 1; })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	const uint64 RefreshId = FVaRestTrace::NewRequestId();
+	const FVaRestAuthRefreshContext Context(Rig.Client, Rig.Client.GetSession(), RefreshId);
+	// Re-review N-9: an auth that keeps the context by value, copied before any request
+	const FVaRestAuthRefreshContext Copy = Context;
+	auto First = MakeOutcome<FVaRestJson>();
+	auto Second = MakeOutcome<FVaRestJson>();
+	// Re-review N-2: Idempotent(), so the client's Exponential(3) would retry it -- only MarkAuthRefresh's Disabled() stops that
+	const FVaRestRequestHandle FirstHandle = Observe(Context.Request(TEXT("POST"), TEXT("/auth/refresh")).Idempotent().Body(TEXT("{}")), First).Send();
+	const FVaRestRequestHandle SecondHandle = Observe(Context.Request(TEXT("POST"), TEXT("/auth/other")).Body(TEXT("{}")), Second).Send();
+	if (!TestTrue(TEXT("ruling M-8: both complete although the only slot is held"), PumpUntil([First, Second] { return First->IsDone() && Second->IsDone(); })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	TestEqual(TEXT("spec review I-2: the first carries the refresh's id as its own"), FirstHandle.GetId(), RefreshId);
+	TestTrue(TEXT("... a second one gets a fresh id"), SecondHandle.GetId() != RefreshId && SecondHandle.GetId() != 0);
+	auto FromCopy = MakeOutcome<FVaRestJson>();
+	const FVaRestRequestHandle CopyHandle = Observe(Copy.Request(TEXT("POST"), TEXT("/auth/copy")).Body(TEXT("{}")), FromCopy).Send();
+	TestTrue(TEXT("... and so does one from a copy of the context (re-review N-9)"), Rig.Wait(FromCopy) && CopyHandle.GetId() != RefreshId);
+	const int32 Call = FindCall(Rig, TEXT("/auth/refresh"));
+	if (!TestTrue(TEXT("sent"), Call != INDEX_NONE))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	TestFalse(TEXT("plan decision 23: no credentials on a refresh request"), Rig.Fake->GetCall(Call).Request.Headers.Contains(TEXT("Authorization")));
+	TestTrue(TEXT("... no retry: the 503 is the answer, after one attempt"), First->Error.HttpStatus == 503 && First->Error.Attempts == 1);
+	TestEqual(TEXT("... and one transport call"), FindCall(Rig, TEXT("/auth/refresh"), 1), INDEX_NONE);
+	EVaRestTraceRequestFlags Flags = EVaRestTraceRequestFlags::Partial;
+	for (const FVaRestTraceEvent& Event : Scoped.Recorder->For(RefreshId))
+	{
+		if (Event.Kind == EVaRestTraceKind::Started)
+		{
+			Flags = Event.Payload.Get<FVaRestTraceStarted>().Flags;
+		}
+	}
+	TestTrue(TEXT("IN-1: flagged AuthRefresh"), EnumHasAnyFlags(Flags, EVaRestTraceRequestFlags::AuthRefresh) && !EnumHasAnyFlags(Flags, EVaRestTraceRequestFlags::Partial));
+
+	// Concurrency review M-10: an auth may keep its context to answer later; the context must not keep the client alive
+	TUniquePtr<FVaRestAuthRefreshContext> Kept;
+	TWeakPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> GoneState;
+	{
+		FVaRestClient Gone = FVaRestClient::Make(TEXT("https://gone.test"));
+		GoneState = VaRest::Http::FClientAccess::State(Gone);
+		Kept = MakeUnique<FVaRestAuthRefreshContext>(Gone, FVaRestSessionData(), FVaRestTrace::NewRequestId());
+	}
+	TestFalse(TEXT("M-10: the context does not keep its client alive"), GoneState.IsValid());
+	// Re-review N-1: Send() on an empty client logs this Error before it delivers Kind=Config (VaRestClient.cpp:148-152)
+	AddExpectedErrorPlain(TEXT("Send() on an empty FVaRestClient"), EAutomationExpectedErrorFlags::Contains, 1);
+	auto Orphan = MakeOutcome<FVaRestJson>();
+	Observe(Kept->Request(TEXT("POST"), TEXT("/auth/refresh")), Orphan).Send();
+	TestTrue(TEXT("... and a request it builds then fails Kind Config"), PumpUntil([Orphan] { return Orphan->IsDone(); }) && Orphan->Error.Kind == EVaRestErrorKind::Config);
+	Rig.Fake->Complete(0, Json(200));
+	TestTrue(TEXT("the holder finishes"), Rig.Wait(Holder));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthRefreshBypassTest, "VaRest.Http.Auth.RefreshBypass",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthRefreshBypassTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// Plan decision 23, past RefreshContext: the limiter's books are untouched by a request that skipped its queue (ruling
+	// M-8); the client's envelope never judges the refresh body; the client's retry never repeats it; and the auth's own
+	// chain on Context.Request() cannot undo any of it
+	FTestRig Rig;
+	Rig.Client.WithMaxConcurrent(1).WithBearer(TEXT("bearer-token-123456")).WithRetry(ExactRetry(2))
+		.WithEnvelope(FVaRestEnvelope::DataAt(TEXT("data")).SuccessWhen(TEXT("ok"), { TEXT("true") }));
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest& Request)
+	{
+		if (Request.Url.EndsWith(TEXT("/hold")) || Request.Url.EndsWith(TEXT("/auth/refresh")))
+		{
+			return FVaRestFakeResponse::Manual();
+		}
+		if (Request.Url.EndsWith(TEXT("/auth/busy")))
+		{
+			return Json(503);
+		}
+		if (Request.Url.EndsWith(TEXT("/queued")))
+		{
+			return Json(200, R"({"ok":true,"data":{"n":1}})");
+		}
+		// The client's envelope fails this body: "ok" is false
+		return Json(200, R"({"ok":false,"accessToken":"fresh-access-token-123"})");
+	});
+	const TSharedPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> ClientState = VaRest::Http::FClientAccess::State(Rig.Client);
+	if (!TestTrue(TEXT("a client state"), ClientState.IsValid()))
+	{
+		return false;
+	}
+	VaRest::Http::FLimiter& Limiter = ClientState->GetLimiter();
+	auto Holder = MakeOutcome<FVaRestJson>();
+	auto Queued = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/hold")), Holder).Send();
+	Observe(Rig.Client.Get(TEXT("/queued")), Queued).Send();
+	if (!TestTrue(TEXT("the only slot is held, a request queued behind it"), PumpUntil([&Rig, &Limiter] { return Rig.Fake->NumCalls() == 1 && Limiter.NumQueued() == 1; })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	const int32 ActiveBefore = Limiter.NumActive();
+	const int32 QueuedBefore = Limiter.NumQueued();
+	const int32 InFlightBefore = Rig.Client.GetInFlightCount();
+	TestTrue(TEXT("one held, one queued, two in flight"), ActiveBefore == 1 && QueuedBefore == 1 && InFlightBefore == 2);
+
+	const FVaRestAuthRefreshContext Context(Rig.Client, Rig.Client.GetSession(), FVaRestTrace::NewRequestId());
+	auto Raw = MakeOutcome<FVaRestJson>();
+	Observe(Context.Request(TEXT("POST"), TEXT("/auth/refresh")).Body(TEXT("{}")), Raw).Send();
+	if (!TestTrue(TEXT("ruling M-8: the refresh request goes out past the full limiter"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 2; })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	TestTrue(TEXT("... taking no slot and leaving the queue as it was"), Limiter.NumActive() == ActiveBefore && Limiter.NumQueued() == QueuedBefore);
+	TestEqual(TEXT("... counted in flight as any request"), Rig.Client.GetInFlightCount(), InFlightBefore + 1);
+	Rig.Fake->Complete(1, Json(200, R"({"ok":false,"accessToken":"fresh-access-token-123"})"));
+	if (!TestTrue(TEXT("the refresh request completes"), Rig.Wait(Raw)))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Drain();
+	TestTrue(TEXT("its end released no slot: the queued request still waits"), Limiter.NumActive() == ActiveBefore && Limiter.NumQueued() == QueuedBefore
+		&& Rig.Fake->NumCalls() == 2);
+	TestEqual(TEXT("... and the in-flight count is back"), Rig.Client.GetInFlightCount(), InFlightBefore);
+	TestTrue(TEXT("plan decision 23: the client's envelope would fail this body; the refresh gets it raw"), Raw->SuccessCalls.load() == 1 && Raw->Value.IsSet()
+		&& Raw->Value->Get(TEXT("accessToken")).AsString() == TEXT("fresh-access-token-123"));
+
+	Rig.Fake->Complete(0, Json(200, R"({"ok":true,"data":{}})"));
+	if (!TestTrue(TEXT("the holder ends, and the queue drains normally"), PumpUntil([Holder, Queued] { return Holder->IsDone() && Queued->IsDone(); })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Drain();
+	TestTrue(TEXT("... the queued request was granted the slot and succeeded"), Holder->SuccessCalls.load() == 1 && Queued->SuccessCalls.load() == 1
+		&& FindCall(Rig, TEXT("/queued")) != INDEX_NONE);
+	TestTrue(TEXT("... and the books are empty"), Limiter.NumActive() == 0 && Limiter.NumQueued() == 0 && Rig.Client.GetInFlightCount() == 0);
+
+	// The control: the same body through the client fails the client's envelope
+	auto Control = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Post(TEXT("/auth/control")).Body(TEXT("{}")), Control).Send();
+	TestTrue(TEXT("through the client the envelope fails it, Kind Server"), Rig.Wait(Control) && Control->Error.Kind == EVaRestErrorKind::Server);
+
+	// Retry: Idempotent(), so the client's ExactRetry(2) would apply; a retried refresh would wait on the virtual clock
+	auto Busy = MakeOutcome<FVaRestJson>();
+	Observe(Context.Request(TEXT("POST"), TEXT("/auth/busy")).Idempotent().Body(TEXT("{}")), Busy).Send();
+	const auto BusyDone = [Busy] { return Busy->IsDone(); };
+	for (int32 Step = 0; Step < 3 && !PumpUntil(BusyDone, 1.0); ++Step)
+	{
+		// Only a retried refresh gets here: past the backoff it armed (0.5 s, then 1 s)
+		Rig.Clock->Advance(2.0);
+	}
+	TestTrue(TEXT("a 503 refresh under WithRetry: the 503 is the answer"), Busy->IsDone() && Busy->Error.HttpStatus == 503 && Busy->Error.Attempts == 1);
+	TestTrue(TEXT("... after exactly one transport call"), FindCall(Rig, TEXT("/auth/busy")) != INDEX_NONE && FindCall(Rig, TEXT("/auth/busy"), 1) == INDEX_NONE);
+
+	// The auth's chain runs after MarkAuthRefresh: what would undo the bypass fails the request, nothing sent
+	auto Retried = MakeOutcome<FVaRestJson>();
+	auto Enveloped = MakeOutcome<FVaRestJson>();
+	auto Credentialed = MakeOutcome<FVaRestJson>();
+	auto Bare = MakeOutcome<FVaRestJson>();
+	Observe(Context.Request(TEXT("POST"), TEXT("/auth/retry")).Retry(ExactRetry(2)).Body(TEXT("{}")), Retried).Send();
+	Observe(Context.Request(TEXT("POST"), TEXT("/auth/envelope")).Envelope(FVaRestEnvelope::DataAt(TEXT("data"))).Body(TEXT("{}")), Enveloped).Send();
+	Observe(Context.Request(TEXT("POST"), TEXT("/auth/required")).AuthMode(EVaRestAuthMode::Required).Body(TEXT("{}")), Credentialed).Send();
+	Observe(Context.Request(TEXT("POST"), TEXT("/auth/bare")).NoRetry().NoEnvelope().NoAuth().Body(TEXT("{}")), Bare).Send();
+	if (!TestTrue(TEXT("all four complete"), PumpUntil([Retried, Enveloped, Credentialed, Bare] { return Retried->IsDone() && Enveloped->IsDone() && Credentialed->IsDone() && Bare->IsDone(); })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Drain();
+	TestTrue(TEXT("Retry() on a refresh request: Kind Config, not sent"), Retried->Error.Kind == EVaRestErrorKind::Config
+		&& Retried->Error.Message.Contains(TEXT("never retried")) && FindCall(Rig, TEXT("/auth/retry")) == INDEX_NONE);
+	TestTrue(TEXT("Envelope() on a refresh request: Kind Config, not sent"), Enveloped->Error.Kind == EVaRestErrorKind::Config
+		&& Enveloped->Error.Message.Contains(TEXT("read raw")) && FindCall(Rig, TEXT("/auth/envelope")) == INDEX_NONE);
+	TestTrue(TEXT("AuthMode(Required) on a refresh request: Kind Config, not sent"), Credentialed->Error.Kind == EVaRestErrorKind::Config
+		&& Credentialed->Error.Message.Contains(TEXT("no credentials")) && FindCall(Rig, TEXT("/auth/required")) == INDEX_NONE);
+	const int32 BareCall = FindCall(Rig, TEXT("/auth/bare"));
+	TestTrue(TEXT("NoRetry(), NoEnvelope() and NoAuth() keep it as it is: sent bare, read raw"), Bare->SuccessCalls.load() == 1 && BareCall != INDEX_NONE
+		&& !Rig.Fake->GetCall(BareCall).Request.Headers.Contains(TEXT("Authorization")) && Bare->Value.IsSet() && Bare->Value->Get(TEXT("accessToken")).IsValid());
+	TestEqual(TEXT("everything sent has ended"), Rig.Client.GetInFlightCount(), 0);
+	return true;
+}
+
 #endif

@@ -160,7 +160,8 @@ FVaRestRequestHandle VaRest::Http::FRequestSpecAccess::Send(TUniquePtr<FRequestS
 	// SharedPointer.h:354-361): this thread then holds no reference that could be the last one
 	TSharedPtr<FVaRestExchange, ESPMode::ThreadSafe> Created = MakeShared<FVaRestExchange, ESPMode::ThreadSafe>();
 	FExchangeState& Ex = Internals(*Created);
-	Ex.RequestId = FVaRestTrace::NewRequestId(); // IN-10: assigned at creation, whatever the trace mask
+	// IN-10: assigned at creation, whatever the trace mask; a refresh request takes its refresh's id (spec review I-2)
+	Ex.RequestId = Spec->PresetRequestId != 0 ? Spec->PresetRequestId : FVaRestTrace::NewRequestId();
 	Ex.ClientId = Spec->State->GetClientId();
 	// Spec 3.1, verbatim: "A request snapshots the configuration at Send()" -- here, on the sending thread, under the
 	// state's read lock (decision 27). A struct body was encoded in Body() with the naming of that moment.
@@ -190,6 +191,7 @@ FVaRestRequestHandle VaRest::Http::FRequestSpecAccess::Send(TUniquePtr<FRequestS
 	Ex.EnvelopeOverride = MoveTemp(Spec->Envelope);
 	Ex.bNoEnvelope = Spec->bNoEnvelope;
 	Ex.AuthMode = Spec->AuthMode;
+	Ex.bIsAuthRefresh = Spec->bAuthRefresh;
 	Ex.Owner = Spec->Owner;
 	Ex.bHasOwner = Spec->bHasOwner;
 	Ex.SourceFile = SourceFile;

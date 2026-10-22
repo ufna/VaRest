@@ -18,6 +18,7 @@
 
 #include <type_traits>
 
+class FVaRestAuthRefreshContext;
 class FVaRestClient;
 class FVaRestRequestHandle;
 class IVaRestAuth;
@@ -85,6 +86,10 @@ namespace VaRest::Http
 		bool bNoEnvelope = false;
 		/** AuthMode() / NoAuth() (plan decision 4) */
 		EVaRestAuthMode AuthMode = EVaRestAuthMode::Required;
+		/** A refresh request (FVaRestAuthRefreshContext::Request; plan decision 23) */
+		bool bAuthRefresh = false;
+		/** Spec review I-2: the request id to use instead of a new one -- the refresh's own (FVaRestTrace::NewRequestId); 0 = a new one */
+		uint64 PresetRequestId = 0;
 		/** The current body is a struct, encoded with Naming: Naming() now fails. A later Body() or BodyFile() clears it. */
 		bool bStructBodySet = false;
 		TUniquePtr<IResultHandler> Handler;
@@ -443,7 +448,16 @@ public:
 	 */
 	TVaRestRequest Retry(const FVaRestRetryPolicy& InPolicy) &&
 	{
-		Spec->Retry = InPolicy;
+		if (Spec->bAuthRefresh && InPolicy.IsEnabled())
+		{
+			// Plan decision 23: MarkAuthRefresh ran before the auth's own chain (FVaRestAuthRefreshContext::Request), so this
+			// would undo its Disabled(): every request parked behind the refresh would wait out the refresh's backoffs
+			Spec->Fail(TEXT("Retry() on an auth refresh request: it is never retried (plan decision 23); the requests waiting on it retry by their own policy"));
+		}
+		else
+		{
+			Spec->Retry = InPolicy;
+		}
 		return MoveTemp(*this);
 	}
 
@@ -461,8 +475,16 @@ public:
 	 */
 	TVaRestRequest Envelope(const FVaRestEnvelope& InEnvelope) &&
 	{
-		Spec->Envelope = InEnvelope;
-		Spec->bNoEnvelope = false;
+		if (Spec->bAuthRefresh)
+		{
+			// Plan decision 23: a refresh response is read raw (the auth's token paths are against the whole body)
+			Spec->Fail(TEXT("Envelope() on an auth refresh request: its response is read raw (plan decision 23)"));
+		}
+		else
+		{
+			Spec->Envelope = InEnvelope;
+			Spec->bNoEnvelope = false;
+		}
 		return MoveTemp(*this);
 	}
 
@@ -477,7 +499,15 @@ public:
 	/** Spec 4.2 / OpenAPI N15 (plan decision 4): Required (the default), IfAvailable, or None */
 	TVaRestRequest AuthMode(EVaRestAuthMode InMode) &&
 	{
-		Spec->AuthMode = InMode;
+		if (Spec->bAuthRefresh && InMode != EVaRestAuthMode::None)
+		{
+			// Plan decision 23: the refresh request carries no credentials -- the ones it would carry are what it replaces
+			Spec->Fail(TEXT("AuthMode() on an auth refresh request: it carries no credentials (plan decision 23)"));
+		}
+		else
+		{
+			Spec->AuthMode = InMode;
+		}
 		return MoveTemp(*this);
 	}
 
@@ -559,6 +589,26 @@ public:
 private:
 	/** Only Request<T>, which gives the spec a TResultHandler<T>: Handler() casts to that type (final review I1) */
 	friend class FVaRestClient;
+	/** MarkAuthRefresh: a refresh request is made only by the context an auth's Refresh is handed (plan decision 23) */
+	friend class ::FVaRestAuthRefreshContext;
+
+	/**
+	 * Plan decision 23: a refresh request bypasses the auth stages (AuthMode None), the envelope, retry and (ruling M-8) the
+	 * limiter's queue; InPresetId, when not 0, becomes its request id (spec review I-2). Retry(), Envelope() and AuthMode()
+	 * refuse to undo it afterwards.
+	 */
+	TVaRestRequest MarkAuthRefresh(uint64 InPresetId) &&
+	{
+		Spec->bAuthRefresh = true;
+		Spec->PresetRequestId = InPresetId;
+		Spec->AuthMode = EVaRestAuthMode::None;
+		Spec->Envelope.Reset();
+		Spec->bNoEnvelope = true;
+		Spec->Retry = FVaRestRetryPolicy::Disabled();
+		// Not the limiter's (it skips the queue): the transport's, for the engine request
+		Spec->Priority = EVaRestPriority::Highest;
+		return MoveTemp(*this);
+	}
 
 	explicit TVaRestRequest(TUniquePtr<VaRest::Http::FRequestSpec>&& InSpec)
 		: Spec(MoveTemp(InSpec))
@@ -645,6 +695,8 @@ public:
 	 *   WithHeader() are still the ones the request snapshotted at Send() (spec 3.1). A PerAttempt stage holds the slot
 	 *   while it works; one that answers its attempt itself while the transport call still runs gives the slot back with
 	 *   its answer, and the call it left runs on, uncounted, until the engine ends it.
+	 * - An auth's refresh request (FVaRestAuthRefreshContext::Request) skips the queue: during a refresh up to
+	 *   MaxConcurrent + 1 requests are out, so a client whose slots all hold long polls can still refresh (ruling M-8).
 	 */
 	FVaRestClient& WithMaxConcurrent(int32 MaxConcurrent);
 	/**

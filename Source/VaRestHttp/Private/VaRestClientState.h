@@ -235,6 +235,8 @@ namespace VaRest::Http
 	struct FClientAccess
 	{
 		static TSharedPtr<FClientState, ESPMode::ThreadSafe> State(const FVaRestClient& Client) { return Client.GetStateInternal(); }
+		/** A handle on a state, for the refresh context and the coordinator (Tasks 15-16) */
+		static FVaRestClient Wrap(TSharedPtr<FClientState, ESPMode::ThreadSafe> InState) { return FVaRestClient(MoveTemp(InState)); }
 	};
 
 	/**

@@ -9,6 +9,49 @@
 #include "VaRestHttpLog.h"
 #include "VaRestUrl.h"
 
+FVaRestAuthRefreshResult FVaRestAuthRefreshResult::Refreshed(FString InAccessToken, FString InRefreshToken, double InExpiresInSeconds)
+{
+	FVaRestAuthRefreshResult Out;
+	Out.Outcome = EVaRestAuthRefreshOutcome::Refreshed;
+	Out.AccessToken = MoveTemp(InAccessToken);
+	Out.RefreshToken = MoveTemp(InRefreshToken);
+	Out.ExpiresInSeconds = InExpiresInSeconds;
+	return Out;
+}
+
+FVaRestAuthRefreshResult FVaRestAuthRefreshResult::Rejected(FString InMessage)
+{
+	FVaRestAuthRefreshResult Out;
+	Out.Outcome = EVaRestAuthRefreshOutcome::Rejected;
+	Out.Message = MoveTemp(InMessage);
+	return Out;
+}
+
+FVaRestAuthRefreshResult FVaRestAuthRefreshResult::Failed(EVaRestErrorKind InKind, FString InMessage)
+{
+	FVaRestAuthRefreshResult Out;
+	Out.Outcome = EVaRestAuthRefreshOutcome::Failed;
+	// Ruling I-7: the kinds a parked request can fail with and keep its meaning; the rest is a network failure
+	Out.FailedKind = InKind == EVaRestErrorKind::Timeout || InKind == EVaRestErrorKind::Config ? InKind : EVaRestErrorKind::Connection;
+	Out.Message = MoveTemp(InMessage);
+	return Out;
+}
+
+FVaRestAuthRefreshContext::FVaRestAuthRefreshContext(const FVaRestClient& InClient, FVaRestSessionData InSession, uint64 InRefreshId)
+	: State(VaRest::Http::FClientAccess::State(InClient))
+	, Session(MoveTemp(InSession))
+	, RefreshId(InRefreshId)
+	, IdTaken(MakeShared<std::atomic<bool>, ESPMode::ThreadSafe>(false))
+{
+}
+
+FVaRestClient FVaRestAuthRefreshContext::GetClient() const
+{
+	// Concurrency review M-10: an empty client's requests fail Kind=Config, which the auth reports as its refresh's failure
+	const TSharedPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> Pinned = State.Pin();
+	return Pinned.IsValid() ? VaRest::Http::FClientAccess::Wrap(Pinned) : FVaRestClient();
+}
+
 namespace VaRest::Http::AuthPrivate
 {
 	class FBearerAuth final : public IVaRestAuth
@@ -131,8 +174,10 @@ namespace VaRest::Http::AuthPrivate
 		virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) override
 		{
 			FExchangeState& Ex = Internals(*Exchange);
-			// NoAuth() -- a login, and (Task 15) the refresh request, which MarkAuthRefresh sends with AuthMode None -- goes out bare
-			if (Ex.AuthMode == EVaRestAuthMode::None)
+			// First, before the configuration check and the session: the refresh request (plan decision 23) and NoAuth() -- a
+			// login -- go out bare, with neither credentials nor session headers. MarkAuthRefresh sends the refresh request with
+			// AuthMode None too; the flag is checked as well, so the refresh request is bare by what it is, not by a mode.
+			if (Ex.bIsAuthRefresh || Ex.AuthMode == EVaRestAuthMode::None)
 			{
 				Next.Proceed(Exchange, MoveTemp(OnOutcome));
 				return;

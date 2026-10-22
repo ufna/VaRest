@@ -56,6 +56,10 @@ namespace VaRest::Http::TracePointsPrivate
 		{
 			Out.Flags |= EVaRestTraceRequestFlags::NoAuth;
 		}
+		if (Ex.bIsAuthRefresh)
+		{
+			Out.Flags |= EVaRestTraceRequestFlags::AuthRefresh;
+		}
 		// Scrubbed once, when Started wrote it into the exchange
 		Out.Initiator = Ex.Initiator;
 		// The request's own Content-Type wins (spec 3.2); the body's bytes may already have moved into the transport (Task 8),
