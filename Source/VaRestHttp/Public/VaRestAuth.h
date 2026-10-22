@@ -51,7 +51,12 @@ enum class EVaRestAuthRefreshOutcome : uint8
 /** What IVaRestAuth::Refresh reports */
 struct VARESTHTTP_API FVaRestAuthRefreshResult
 {
-	EVaRestAuthRefreshOutcome Outcome = EVaRestAuthRefreshOutcome::Rejected;
+	/**
+	 * Failed, FailedKind Connection, until set (Task 15 review M-5, ruling): a result built by hand that forgets its outcome
+	 * keeps the session, as a dropped Done does (concurrency review I-4) -- it never logs the player out. Use the factories
+	 * below.
+	 */
+	EVaRestAuthRefreshOutcome Outcome = EVaRestAuthRefreshOutcome::Failed;
 	FString AccessToken;
 	/** Empty: keep the current refresh token (an OAuth2 server need not rotate it) */
 	FString RefreshToken;
@@ -73,21 +78,21 @@ struct VARESTHTTP_API FVaRestAuthRefreshResult
 
 /**
  * Handed to IVaRestAuth::Refresh: the session the refresh starts from and the one way to send the refresh request (plan
- * decision 23). Game thread. Holds its client weakly (concurrency review M-10): an auth may keep it to answer later.
+ * decision 23). Game thread. Holds its client weakly (concurrency review M-10): an auth may keep it, or a copy, to answer
+ * later. Only the core makes one (Task 15 review M-1): its refresh id is a fresh request id, never one in use.
  */
 class VARESTHTTP_API FVaRestAuthRefreshContext
 {
 public:
-	FVaRestAuthRefreshContext(const FVaRestClient& InClient, FVaRestSessionData InSession, uint64 InRefreshId);
-
 	/**
 	 * A refresh request on the client. It bypasses the auth stages (no credentials, no session headers, no park, no
-	 * replay), the envelope (the body is read raw), retry and the limiter's queue (ruling M-8: one more connection at most,
-	 * so a client whose slots all hold long polls still refreshes), and carries trace flag AuthRefresh. Chaining Retry()
-	 * with an enabled policy, Envelope() or an AuthMode() other than None onto it would undo that: each fails the request
-	 * Kind=Config, and nothing is sent. The first one a context builds has the refresh's id as its request id (spec review
-	 * I-2). On a client that is gone: a builder on an empty client, whose request fails Kind=Config (and, as any Send() on
-	 * an empty client, logs an Error). A refresh sent through the client itself would park behind its own refresh.
+	 * replay), the envelope (the body is read raw), retry and the limiter's queue (ruling M-8: one more connection per
+	 * refresh request the auth sends, so a client whose slots all hold long polls still refreshes), and carries trace flag
+	 * AuthRefresh. Chaining Retry() with an enabled policy, Envelope() or an AuthMode() other than None onto it would undo
+	 * that: each fails the request Kind=Config, and nothing is sent. The first one a context builds has the refresh's id
+	 * as its request id (spec review I-2). On a client that is gone: a builder on an empty client, whose request fails
+	 * Kind=Config (and, as any Send() on an empty client, logs an Error). A refresh sent through the client itself would
+	 * park behind its own refresh.
 	 */
 	template <typename T = FVaRestJson>
 	TVaRestRequest<T> Request(FStringView Verb, FStringView Path) const
@@ -103,6 +108,11 @@ public:
 	uint64 GetRefreshId() const { return RefreshId; }
 
 private:
+	/** Task 15 review M-1, by shape: FClientAccess::MakeRefreshContext (the coordinator, VaRestHttp's tests) is the one maker */
+	friend struct VaRest::Http::FClientAccess;
+
+	FVaRestAuthRefreshContext(const FVaRestClient& InClient, FVaRestSessionData InSession, uint64 InRefreshId);
+
 	/** The client while it lives, else an empty one (VaRestAuth.cpp) */
 	FVaRestClient GetClient() const;
 

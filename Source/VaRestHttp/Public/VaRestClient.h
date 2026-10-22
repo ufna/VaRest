@@ -20,6 +20,8 @@
 
 class FVaRestAuthRefreshContext;
 class FVaRestClient;
+/** VaRestAuth.h defines it; declared here for FVaRestClient::RefreshAuth (VaRestAuth.h includes this header) */
+enum class EVaRestAuthRefreshOutcome : uint8;
 class FVaRestRequestHandle;
 class IVaRestAuth;
 /** Declared here for FRequestSpec's friendship; the definition below carries [[nodiscard]] (allowed on a later declaration) */
@@ -695,8 +697,9 @@ public:
 	 *   WithHeader() are still the ones the request snapshotted at Send() (spec 3.1). A PerAttempt stage holds the slot
 	 *   while it works; one that answers its attempt itself while the transport call still runs gives the slot back with
 	 *   its answer, and the call it left runs on, uncounted, until the engine ends it.
-	 * - An auth's refresh request (FVaRestAuthRefreshContext::Request) skips the queue: during a refresh up to
-	 *   MaxConcurrent + 1 requests are out, so a client whose slots all hold long polls can still refresh (ruling M-8).
+	 * - An auth's refresh request (FVaRestAuthRefreshContext::Request) skips the queue and takes no slot: during a refresh
+	 *   one more connection is out per refresh request the auth sends (BearerRefresh sends one), so a client whose slots
+	 *   all hold long polls can still refresh (ruling M-8).
 	 */
 	FVaRestClient& WithMaxConcurrent(int32 MaxConcurrent);
 	/**
@@ -731,18 +734,23 @@ public:
 
 	// ---- session (spec 4.2; game thread). Live state: every attempt uses the session as it is when it starts (plan decision 6).
 	// A listener of OnSessionChanged or OnSessionExpired may change the session again or drop this client: the events of one
-	// change reach every listener in order, after the change is done (concurrency review C-1, I-2).
+	// change reach every listener in order, after the change is done (concurrency review C-1, I-2). The game's own changes
+	// end a session refresh in flight (plan decision 3): new tokens resume what waits on it, ClearSession and
+	// NotifySessionExpired fail it. Requests parked behind a session refresh that this ends or resumes continue from a later
+	// game-thread task, never inside this call.
 	/**
 	 * The access token (a login, a token from elsewhere). Replaced, or Refreshed with bSameIdentity (plan decision 5); the
 	 * refresh token stays, the expiry becomes unknown. An empty token is ClearSession(). A token holding a control character
-	 * is refused with an Error log (it would go into a header line).
+	 * is refused with an Error log (it would go into a header line). Requests parked behind a session refresh that this
+	 * ends or resumes continue from a later game-thread task, never inside this call.
 	 */
 	void SetBearerToken(FStringView AccessToken, bool bSameIdentity = false);
 	/**
 	 * A login's result: both tokens and the access token's lifetime in seconds (0 = unknown), taken as the token's whole
 	 * lifetime. A game restoring a session it saved itself uses ImportSession, which records the lifetime as unknown. Both
 	 * tokens empty is ClearSession(), as SetBearerToken("") is. Either token holding a control character is refused with an
-	 * Error log.
+	 * Error log. Requests parked behind a session refresh that this ends or resumes continue from a later game-thread task,
+	 * never inside this call.
 	 */
 	void SetSession(FStringView AccessToken, FStringView RefreshToken, double ExpiresInSeconds = 0.0, bool bSameIdentity = false);
 	/**
@@ -752,7 +760,10 @@ public:
 	 */
 	void SetSessionHeader(FStringView Name, FStringView Value);
 	void RemoveSessionHeader(FStringView Name);
-	/** Logout: tokens, session headers and their secret values; OnSessionChanged(Cleared) */
+	/**
+	 * Logout: tokens, session headers and their secret values; OnSessionChanged(Cleared). Requests parked behind a session
+	 * refresh that this ends or resumes continue from a later game-thread task, never inside this call.
+	 */
 	void ClearSession();
 	FVaRestSessionData GetSession() const;
 	/**
@@ -770,10 +781,15 @@ public:
 	 * Otherwise it is SetSession (the lifetime unknown) plus the headers, and each part announces by its own rule: the
 	 * tokens are Replaced, or Refreshed with bSameIdentity, and no event at all when they and the expiry are unchanged; the
 	 * headers announce nothing, as SetSessionHeader announces nothing (the headers an import drops are retired). So a game
-	 * importing the same tokens with other headers sees the headers change and no OnSessionChanged.
+	 * importing the same tokens with other headers sees the headers change and no OnSessionChanged. Requests parked behind a
+	 * session refresh that this ends or resumes continue from a later game-thread task, never inside this call.
 	 */
 	bool ImportSession(FStringView Json, bool bSameIdentity = false);
-	/** WebSocket spec 19 item 2: a socket's terminal auth failure. The tokens go; OnSessionExpired fires, once per expiry. */
+	/**
+	 * WebSocket spec 19 item 2: a socket's terminal auth failure. The tokens go; OnSessionExpired fires, once per expiry.
+	 * Requests parked behind a session refresh that this ends or resumes continue from a later game-thread task, never
+	 * inside this call.
+	 */
 	void NotifySessionExpired();
 	/** Game thread. An empty client returns a delegate that never fires. */
 	FVaRestSessionChangedEvent& OnSessionChanged();
@@ -801,6 +817,19 @@ public:
 	 * A false for missing credentials may leave the session headers in OutHeaders already.
 	 */
 	bool ApplyAuth(FVaRestHeaders& OutHeaders, TArray<TPair<FString, FString>>& OutQuery, FString* OutConfigError = nullptr) const;
+	/** WebSocket spec 19 item 2: a refresh is due -- no access token but a refresh token, or a known expiry within the auth's lead time */
+	bool NeedsAuthRefresh() const;
+	/**
+	 * WebSocket spec 19 item 2: refresh the session now, sharing a refresh already in flight (single flight, spec 4.2).
+	 * OnDone(Outcome, FailedKind), from a later game-thread task -- never inside this call (decision 3):
+	 * - Refreshed: the session has new credentials (FailedKind None).
+	 * - Rejected: the session is gone -- the refresh endpoint rejected it (the client has already expired the session and
+	 *   fired OnSessionExpired), or the game cleared or expired it meanwhile. Do not call NotifySessionExpired: it is done.
+	 * - Failed: the session stays; FailedKind says why -- Connection or Timeout (try again later), Config (no auth, nothing
+	 *   to refresh with, or a refresh the configuration refuses).
+	 * Spec review I-5: a socket must not treat a Wi-Fi blip as a logout (ruling Q1).
+	 */
+	void RefreshAuth(TUniqueFunction<void(EVaRestAuthRefreshOutcome Outcome, EVaRestErrorKind FailedKind)>&& OnDone);
 
 	// ---- requests (any thread)
 	template <typename T = FVaRestJson>

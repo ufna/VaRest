@@ -4,6 +4,9 @@
 
 #include "HAL/IConsoleManager.h"
 #include "Misc/AutomationTest.h"
+#include "Misc/CommandLine.h"
+#include "Misc/ConfigCacheIni.h"
+#include "Misc/Parse.h"
 #include "Misc/ScopeExit.h"
 #include "UObject/Package.h"
 #include "VaRestAuth.h"
@@ -184,6 +187,107 @@ namespace VaRest::Http::AuthTestPrivate
 			}
 		}
 		return Out;
+	}
+
+	/** A bearer whose refresh the test answers by hand: a refresh endpoint as slow as the test wants */
+	class FHandAuth final : public IVaRestAuth
+	{
+	public:
+		virtual FName GetAuthName() const override { return TEXT("Hand"); }
+
+		virtual bool Apply(FVaRestAuthTarget& Target) const override
+		{
+			if (!Target.Session.HasAccessToken())
+			{
+				return false;
+			}
+			Target.Headers.Set(TEXT("Authorization"), FString(TEXT("Bearer ")) + Target.Session.AccessToken);
+			return true;
+		}
+
+		virtual bool CanRefresh(const FVaRestSessionData& Session) const override { return Session.HasRefreshToken(); }
+
+		virtual bool NeedsRefresh(const FVaRestSessionData& Session, double Now) const override
+		{
+			return Session.HasRefreshToken() && (!Session.HasAccessToken() || (Session.ExpiresAt > 0.0 && Now >= Session.ExpiresAt - 30.0));
+		}
+
+		virtual void Refresh(const FVaRestAuthRefreshContext& Context, TUniqueFunction<void(FVaRestAuthRefreshResult&&)>&& Done) override
+		{
+			++Refreshes;
+			LastRefreshId = Context.GetRefreshId();
+			Pending = MoveTemp(Done);
+		}
+
+		bool IsPending() const { return static_cast<bool>(Pending); }
+
+		void Answer(FVaRestAuthRefreshResult&& Result)
+		{
+			if (Pending)
+			{
+				TUniqueFunction<void(FVaRestAuthRefreshResult&&)> Done = MoveTemp(Pending);
+				Pending.Reset();
+				Done(MoveTemp(Result));
+			}
+		}
+
+		/** Concurrency review I-4: an auth that drops its Done uncalled (an error branch that forgot it) */
+		void Drop()
+		{
+			Pending.Reset();
+		}
+
+		int32 Refreshes = 0;
+		uint64 LastRefreshId = 0;
+
+	private:
+		TUniqueFunction<void(FVaRestAuthRefreshResult&&)> Pending;
+	};
+
+	/** 200 for the accepted tokens, 401 for anything else */
+	void AcceptTokens(VaRest::Http::Testing::FTestRig& Rig, TArray<FString> Accepted)
+	{
+		Rig.Fake->SetResponder([Accepted](const FVaRestTransportRequest& Request)
+		{
+			const FString Given = Request.Headers.Get(TEXT("Authorization"));
+			return Accepted.ContainsByPredicate([&Given](const FString& Token) { return Given == FString(TEXT("Bearer ")) + Token; }) ? Json(200) : Json(401);
+		});
+	}
+
+	TSharedRef<FHandAuth, ESPMode::ThreadSafe> HandRig(VaRest::Http::Testing::FTestRig& Rig)
+	{
+		TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = MakeShared<FHandAuth, ESPMode::ThreadSafe>();
+		Rig.Client.WithAuth(Auth);
+		Rig.Client.SetSession(TEXT("old-access-123456"), TEXT("old-refresh-123456"));
+		AcceptTokens(Rig, { TEXT("new-access-123456") });
+		return Auth;
+	}
+
+	TArray<FVaRestTraceAttemptDispatched> DispatchesOf(const VaRest::Http::Testing::FTraceRecorder& Recorder, uint64 Id)
+	{
+		TArray<FVaRestTraceAttemptDispatched> Out;
+		for (const FVaRestTraceEvent& Event : Recorder.For(Id))
+		{
+			if (Event.Kind == EVaRestTraceKind::AttemptDispatched)
+			{
+				Out.Add(Event.Payload.Get<FVaRestTraceAttemptDispatched>());
+			}
+		}
+		return Out;
+	}
+
+	using FRefreshAnswer = TPair<EVaRestAuthRefreshOutcome, EVaRestErrorKind>;
+	using FRefreshAnswers = TSharedRef<TArray<FRefreshAnswer>, ESPMode::ThreadSafe>;
+
+	FRefreshAnswers MakeAnswers()
+	{
+		return MakeShared<TArray<FRefreshAnswer>, ESPMode::ThreadSafe>();
+	}
+
+	/** RefreshAuth's callback, recording what it was told */
+	TUniqueFunction<void(EVaRestAuthRefreshOutcome, EVaRestErrorKind)> Record(const FRefreshAnswers& Into)
+	{
+		return [Into](EVaRestAuthRefreshOutcome Outcome, EVaRestErrorKind FailedKind) { Into->Emplace(Outcome, FailedKind); };
 	}
 }
 
@@ -806,7 +910,8 @@ bool FVaRestHttpAuthRefreshContextTest::RunTest(const FString& Parameters)
 		return false;
 	}
 	const uint64 RefreshId = FVaRestTrace::NewRequestId();
-	const FVaRestAuthRefreshContext Context(Rig.Client, Rig.Client.GetSession(), RefreshId);
+	// Task 15 review M-1: the constructor is private; the core and the tests make one through FClientAccess
+	const FVaRestAuthRefreshContext Context = VaRest::Http::FClientAccess::MakeRefreshContext(Rig.Client, Rig.Client.GetSession(), RefreshId);
 	// Re-review N-9: an auth that keeps the context by value, copied before any request
 	const FVaRestAuthRefreshContext Copy = Context;
 	auto First = MakeOutcome<FVaRestJson>();
@@ -849,10 +954,10 @@ bool FVaRestHttpAuthRefreshContextTest::RunTest(const FString& Parameters)
 	{
 		FVaRestClient Gone = FVaRestClient::Make(TEXT("https://gone.test"));
 		GoneState = VaRest::Http::FClientAccess::State(Gone);
-		Kept = MakeUnique<FVaRestAuthRefreshContext>(Gone, FVaRestSessionData(), FVaRestTrace::NewRequestId());
+		Kept = MakeUnique<FVaRestAuthRefreshContext>(VaRest::Http::FClientAccess::MakeRefreshContext(Gone, FVaRestSessionData(), FVaRestTrace::NewRequestId()));
 	}
 	TestFalse(TEXT("M-10: the context does not keep its client alive"), GoneState.IsValid());
-	// Re-review N-1: Send() on an empty client logs this Error before it delivers Kind=Config (VaRestClient.cpp:148-152)
+	// Re-review N-1: Send() on an empty client logs this Error before it delivers Kind=Config (VaRestClient.cpp:152-156)
 	AddExpectedErrorPlain(TEXT("Send() on an empty FVaRestClient"), EAutomationExpectedErrorFlags::Contains, 1);
 	auto Orphan = MakeOutcome<FVaRestJson>();
 	Observe(Kept->Request(TEXT("POST"), TEXT("/auth/refresh")), Orphan).Send();
@@ -912,7 +1017,7 @@ bool FVaRestHttpAuthRefreshBypassTest::RunTest(const FString& Parameters)
 	const int32 InFlightBefore = Rig.Client.GetInFlightCount();
 	TestTrue(TEXT("one held, one queued, two in flight"), ActiveBefore == 1 && QueuedBefore == 1 && InFlightBefore == 2);
 
-	const FVaRestAuthRefreshContext Context(Rig.Client, Rig.Client.GetSession(), FVaRestTrace::NewRequestId());
+	const FVaRestAuthRefreshContext Context = VaRest::Http::FClientAccess::MakeRefreshContext(Rig.Client, Rig.Client.GetSession(), FVaRestTrace::NewRequestId());
 	auto Raw = MakeOutcome<FVaRestJson>();
 	Observe(Context.Request(TEXT("POST"), TEXT("/auth/refresh")).Body(TEXT("{}")), Raw).Send();
 	if (!TestTrue(TEXT("ruling M-8: the refresh request goes out past the full limiter"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 2; })))
@@ -988,6 +1093,338 @@ bool FVaRestHttpAuthRefreshBypassTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("NoRetry(), NoEnvelope() and NoAuth() keep it as it is: sent bare, read raw"), Bare->SuccessCalls.load() == 1 && BareCall != INDEX_NONE
 		&& !Rig.Fake->GetCall(BareCall).Request.Headers.Contains(TEXT("Authorization")) && Bare->Value.IsSet() && Bare->Value->Get(TEXT("accessToken")).IsValid());
 	TestEqual(TEXT("everything sent has ended"), Rig.Client.GetInFlightCount(), 0);
+	return true;
+}
+
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthRefreshPublicTest, "VaRest.Http.Auth.RefreshAuthPublic",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthRefreshPublicTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// WebSocket spec 19 item 2: a socket refreshes through the client, sharing HTTP's single flight. Spec review I-5: it is
+	// told how the refresh ended, so a rejection (the session is gone) is not mistaken for a network failure (try later).
+	FTestRig Rig;
+	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = HandRig(Rig);
+	TSharedRef<int32, ESPMode::ThreadSafe> Expired = MakeShared<int32, ESPMode::ThreadSafe>(0);
+	Rig.Client.OnSessionExpired().AddLambda([Expired] { ++*Expired; });
+	const TSharedPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> State = VaRest::Http::FClientAccess::State(Rig.Client);
+	if (!TestTrue(TEXT("a client state"), State.IsValid()))
+	{
+		return false;
+	}
+
+	// Refreshed, one refresh for two callers
+	const FRefreshAnswers Shared = MakeAnswers();
+	Rig.Client.RefreshAuth(Record(Shared));
+	Rig.Client.RefreshAuth(Record(Shared));
+	TestEqual(TEXT("one refresh for both"), Auth->Refreshes, 1);
+	TestEqual(TEXT("... two waiters"), State->NumRefreshWaitersInternal(), 2);
+	TestTrue(TEXT("spec review I-2: the refresh's id is a request id"), Auth->LastRefreshId != 0);
+	Auth->Answer(FVaRestAuthRefreshResult::Refreshed(TEXT("new-access-123456")));
+	TestEqual(TEXT("concurrency review I-1: nothing inside the answer either"), Shared->Num(), 0);
+	TestTrue(TEXT("both told: Refreshed"), PumpUntil([Shared] { return Shared->Num() == 2; })
+		&& (*Shared)[0] == FRefreshAnswer(EVaRestAuthRefreshOutcome::Refreshed, EVaRestErrorKind::None) && (*Shared)[1] == (*Shared)[0]);
+	TestEqualSensitive(TEXT("... the session holds the new token"), Rig.Client.GetSession().AccessToken, FString(TEXT("new-access-123456")));
+
+	// The game's own token ends the refresh in flight (Ready); its waiters go on from a later task, not inside the call (I-1)
+	const FRefreshAnswers Game = MakeAnswers();
+	Rig.Client.RefreshAuth(Record(Game));
+	Rig.Client.SetBearerToken(TEXT("game-access-123456"), /*bSameIdentity*/ true);
+	TestEqual(TEXT("concurrency review I-1: the waiter does not run inside SetBearerToken"), Game->Num(), 0);
+	TestTrue(TEXT("... it runs later: Refreshed"), PumpUntil([Game] { return Game->Num() == 1; })
+		&& (*Game)[0] == FRefreshAnswer(EVaRestAuthRefreshOutcome::Refreshed, EVaRestErrorKind::None));
+	Auth->Answer(FVaRestAuthRefreshResult::Refreshed(TEXT("late-access-123456")));
+	Rig.Drain();
+	TestEqualSensitive(TEXT("... and the ended refresh's late answer changes nothing"), Rig.Client.GetSession().AccessToken, FString(TEXT("game-access-123456")));
+
+	// Failed(Connection): the session stays (ruling Q1, I-7)
+	const FRefreshAnswers Failed = MakeAnswers();
+	Rig.Client.RefreshAuth(Record(Failed));
+	Auth->Answer(FVaRestAuthRefreshResult::Failed(EVaRestErrorKind::Connection, TEXT("no route to the refresh endpoint")));
+	TestTrue(TEXT("Failed: (Failed, Connection)"), PumpUntil([Failed] { return Failed->Num() == 1; })
+		&& (*Failed)[0] == FRefreshAnswer(EVaRestAuthRefreshOutcome::Failed, EVaRestErrorKind::Connection));
+	TestTrue(TEXT("... the session kept, nothing expired"), Rig.Client.GetSession().HasRefreshToken() && *Expired == 0);
+
+	// Concurrency review I-4: Done dropped uncalled ends the refresh as Failed(Connection), the session kept
+	const FRefreshAnswers Dropped = MakeAnswers();
+	Rig.Client.RefreshAuth(Record(Dropped));
+	Auth->Drop();
+	TestTrue(TEXT("a dropped Done: (Failed, Connection)"), PumpUntil([Dropped] { return Dropped->Num() == 1; })
+		&& (*Dropped)[0] == FRefreshAnswer(EVaRestAuthRefreshOutcome::Failed, EVaRestErrorKind::Connection));
+	TestTrue(TEXT("... the session kept, no refresh left running"), Rig.Client.GetSession().HasRefreshToken() && !State->IsRefreshing() && *Expired == 0);
+
+	// Rejected: the session goes, OnSessionExpired once -- also when the socket calls NotifySessionExpired anyway (I-2)
+	const FRefreshAnswers Rejected = MakeAnswers();
+	Rig.Client.RefreshAuth([Rejected, Notifier = Rig.Client](EVaRestAuthRefreshOutcome Outcome, EVaRestErrorKind FailedKind) mutable
+	{
+		Rejected->Emplace(Outcome, FailedKind);
+		Notifier.NotifySessionExpired();
+	});
+	Auth->Answer(FVaRestAuthRefreshResult::Rejected(TEXT("the refresh endpoint answered 400")));
+	TestTrue(TEXT("Rejected: (Rejected, None)"), PumpUntil([Rejected] { return Rejected->Num() == 1; })
+		&& (*Rejected)[0] == FRefreshAnswer(EVaRestAuthRefreshOutcome::Rejected, EVaRestErrorKind::None));
+	TestTrue(TEXT("... the session expired"), !Rig.Client.GetSession().HasAccessToken() && !Rig.Client.GetSession().HasRefreshToken());
+	TestEqual(TEXT("... OnSessionExpired once, the socket's NotifySessionExpired notwithstanding"), *Expired, 1);
+
+	// No auth (or nothing to refresh with): (Failed, Config), and still not inside the call
+	FTestRig Plain;
+	const FRefreshAnswers None = MakeAnswers();
+	Plain.Client.RefreshAuth(Record(None));
+	TestEqual(TEXT("decision 3: nothing inside the call"), None->Num(), 0);
+	TestTrue(TEXT("no auth: (Failed, Config)"), PumpUntil([None] { return None->Num() == 1; })
+		&& (*None)[0] == FRefreshAnswer(EVaRestAuthRefreshOutcome::Failed, EVaRestErrorKind::Config));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthRefreshEndsWithGameTest, "VaRest.Http.Auth.RefreshEndsWithGameChanges",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthRefreshEndsWithGameTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// Plan decision 3: the game's logout and NotifySessionExpired end a refresh in flight too -- its waiters are told the
+	// session is gone (Rejected), from a later task (concurrency review I-1) -- and the ended refresh's late answer is
+	// ignored: a Refreshed after a logout must not log the player back in
+	FTestRig Rig;
+	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = HandRig(Rig);
+	const TSharedPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> State = VaRest::Http::FClientAccess::State(Rig.Client);
+	if (!TestTrue(TEXT("a client state"), State.IsValid()))
+	{
+		return false;
+	}
+	const FRefreshAnswers Cleared = MakeAnswers();
+	Rig.Client.RefreshAuth(Record(Cleared));
+	Rig.Client.ClearSession();
+	TestEqual(TEXT("ClearSession: the waiter does not run inside it"), Cleared->Num(), 0);
+	TestFalse(TEXT("... the refresh has ended"), State->IsRefreshing());
+	TestTrue(TEXT("... it runs later: Rejected (the session is gone)"), PumpUntil([Cleared] { return Cleared->Num() == 1; })
+		&& (*Cleared)[0] == FRefreshAnswer(EVaRestAuthRefreshOutcome::Rejected, EVaRestErrorKind::None));
+	Auth->Answer(FVaRestAuthRefreshResult::Refreshed(TEXT("late-access-123456"), TEXT("late-refresh-123456")));
+	Rig.Drain();
+	TestFalse(TEXT("... the late Refreshed does not log back in"), Rig.Client.GetSession().HasAccessToken() || Rig.Client.GetSession().HasRefreshToken());
+
+	TSharedRef<int32, ESPMode::ThreadSafe> Expired = MakeShared<int32, ESPMode::ThreadSafe>(0);
+	Rig.Client.OnSessionExpired().AddLambda([Expired] { ++*Expired; });
+	Rig.Client.SetSession(TEXT("old-access-123456"), TEXT("old-refresh-123456"));
+	const FRefreshAnswers Notified = MakeAnswers();
+	Rig.Client.RefreshAuth(Record(Notified));
+	TestEqual(TEXT("a second refresh, the first ended"), Auth->Refreshes, 2);
+	Rig.Client.NotifySessionExpired();
+	TestEqual(TEXT("NotifySessionExpired: the waiter does not run inside it"), Notified->Num(), 0);
+	TestTrue(TEXT("... it runs later: Rejected"), PumpUntil([Notified] { return Notified->Num() == 1; })
+		&& (*Notified)[0] == FRefreshAnswer(EVaRestAuthRefreshOutcome::Rejected, EVaRestErrorKind::None));
+	TestEqual(TEXT("... OnSessionExpired once"), *Expired, 1);
+	Auth->Answer(FVaRestAuthRefreshResult::Rejected(TEXT("the refresh endpoint answered 400")));
+	Rig.Drain();
+	TestEqual(TEXT("... and the ended refresh's late Rejected expires nothing more"), *Expired, 1);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthRefreshDefaultResultTest, "VaRest.Http.Auth.RefreshDefaultResultKeepsSession",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthRefreshDefaultResultTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// Task 15 review M-5 (ruled): a result built by hand that forgets its outcome is Failed(Connection), as a dropped Done
+	// is (concurrency review I-4) -- it keeps the session instead of logging the player out
+	const FVaRestAuthRefreshResult Default;
+	TestTrue(TEXT("a default result: Failed, Connection"), Default.Outcome == EVaRestAuthRefreshOutcome::Failed && Default.FailedKind == EVaRestErrorKind::Connection);
+	FTestRig Rig;
+	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = HandRig(Rig);
+	TSharedRef<int32, ESPMode::ThreadSafe> Expired = MakeShared<int32, ESPMode::ThreadSafe>(0);
+	Rig.Client.OnSessionExpired().AddLambda([Expired] { ++*Expired; });
+	const FRefreshAnswers Answers = MakeAnswers();
+	Rig.Client.RefreshAuth(Record(Answers));
+	Auth->Answer(FVaRestAuthRefreshResult());
+	TestTrue(TEXT("FinishRefresh with a default result: the waiter fails (Failed, Connection)"), PumpUntil([Answers] { return Answers->Num() == 1; })
+		&& (*Answers)[0] == FRefreshAnswer(EVaRestAuthRefreshOutcome::Failed, EVaRestErrorKind::Connection));
+	TestTrue(TEXT("... the session kept, nothing expired"), Rig.Client.GetSession().AccessToken.Equals(TEXT("old-access-123456"), ESearchCase::CaseSensitive)
+		&& Rig.Client.GetSession().HasRefreshToken() && *Expired == 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthRefreshWaiterDropsClientTest, "VaRest.Http.Auth.RefreshWaiterDropsClient",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthRefreshWaiterDropsClientTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// Concurrency review C-1's rule for waiters: a socket's RefreshAuth callback may drop the last FVaRestClient (a fresh
+	// client after the refresh). The waiters' task keeps the state until the last waiter has run, as RunSessionChange
+	// keeps it for listeners (VaRest.Http.Session.HandlerDropsClient); a weak probe shows it alive in both and gone after.
+	using FClientHolder = TSharedRef<FVaRestClient, ESPMode::ThreadSafe>;
+	using FStateWeak = TWeakPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe>;
+	using FAlive = TSharedRef<TArray<bool>, ESPMode::ThreadSafe>;
+	const FClientHolder Holder = MakeShared<FVaRestClient, ESPMode::ThreadSafe>(FVaRestClient::Make(TEXT("https://api.test")));
+	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = MakeShared<FHandAuth, ESPMode::ThreadSafe>();
+	Holder->WithAuth(Auth);
+	Holder->SetSession(TEXT("old-access-123456"), TEXT("old-refresh-123456"));
+	const FStateWeak Weak = VaRest::Http::FClientAccess::State(*Holder);
+	const FAlive Alive = MakeShared<TArray<bool>, ESPMode::ThreadSafe>();
+	Holder->RefreshAuth([Holder, Weak, Alive](EVaRestAuthRefreshOutcome, EVaRestErrorKind)
+	{
+		// Copied out first: the assignment may free what this lambda captured with the client
+		const FClientHolder Owner = Holder;
+		const FStateWeak Watched = Weak;
+		const FAlive Into = Alive;
+		*Owner = FVaRestClient();
+		Into->Add(Watched.IsValid());
+	});
+	Holder->RefreshAuth([Weak, Alive](EVaRestAuthRefreshOutcome, EVaRestErrorKind) { Alive->Add(Weak.IsValid()); });
+	Auth->Answer(FVaRestAuthRefreshResult::Refreshed(TEXT("new-access-123456")));
+	TestTrue(TEXT("the first waiter dropped the last client and saw the state alive; the second ran too and saw it alive"),
+		PumpUntil([Alive] { return Alive->Num() == 2; }) && (*Alive)[0] && (*Alive)[1]);
+	TestFalse(TEXT("... and the state went after the last waiter"), Weak.IsValid());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthRefreshCancelTest, "VaRest.Http.Auth.RefreshCancelLeavesLimiter",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthRefreshCancelTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// Task 15 review M-4: a refresh request held at the transport and then canceled took no slot, so its end releases none
+	// -- the limiter's books stay as they were and a queued request still waits (ruling M-8) -- and its log line carries
+	// its id, the refresh's (spec review I-2), as every core line about a request carries #<RequestId>
+	FTestRig Rig;
+	Rig.Client.WithMaxConcurrent(1).WithBearer(TEXT("bearer-token-123456")).WithLogLevel(EVaRestLogLevel::Basic);
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest& Request)
+	{
+		return Request.Url.EndsWith(TEXT("/hold")) || Request.Url.EndsWith(TEXT("/auth/refresh")) ? FVaRestFakeResponse::Manual() : Json(200);
+	});
+	const TSharedPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> ClientState = VaRest::Http::FClientAccess::State(Rig.Client);
+	if (!TestTrue(TEXT("a client state"), ClientState.IsValid()))
+	{
+		return false;
+	}
+	VaRest::Http::FLimiter& Limiter = ClientState->GetLimiter();
+	auto Holder = MakeOutcome<FVaRestJson>();
+	auto Queued = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/hold")), Holder).Send();
+	Observe(Rig.Client.Get(TEXT("/queued")), Queued).Send();
+	if (!TestTrue(TEXT("the only slot is held, a request queued behind it"), PumpUntil([&Rig, &Limiter] { return Rig.Fake->NumCalls() == 1 && Limiter.NumQueued() == 1; })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	const int32 ActiveBefore = Limiter.NumActive();
+	const int32 QueuedBefore = Limiter.NumQueued();
+	const int32 InFlightBefore = Rig.Client.GetInFlightCount();
+
+	FLogCapture Capture;
+	const uint64 RefreshId = FVaRestTrace::NewRequestId();
+	const FVaRestAuthRefreshContext Context = VaRest::Http::FClientAccess::MakeRefreshContext(Rig.Client, Rig.Client.GetSession(), RefreshId);
+	auto Raw = MakeOutcome<FVaRestJson>();
+	const FVaRestRequestHandle Handle = Observe(Context.Request(TEXT("POST"), TEXT("/auth/refresh")).Body(TEXT("{}")), Raw).Send();
+	if (!TestTrue(TEXT("the refresh request is held at the transport"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 2; })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	TestTrue(TEXT("... past the full limiter, taking no slot"), Limiter.NumActive() == ActiveBefore && Limiter.NumQueued() == QueuedBefore
+		&& Rig.Client.GetInFlightCount() == InFlightBefore + 1);
+	Handle.Cancel();
+	if (!TestTrue(TEXT("Cancel() ends it: Kind Canceled"), PumpUntil([Raw] { return Raw->IsDone(); }) && Raw->Error.Kind == EVaRestErrorKind::Canceled))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Drain();
+	TestTrue(TEXT("its end released no slot: the books are as they were"), Limiter.NumActive() == ActiveBefore && Limiter.NumQueued() == QueuedBefore);
+	TestEqual(TEXT("... the in-flight count is back"), Rig.Client.GetInFlightCount(), InFlightBefore);
+	TestTrue(TEXT("... and the queued request still waits"), !Queued->IsDone() && Rig.Fake->NumCalls() == 2 && FindCall(Rig, TEXT("/queued")) == INDEX_NONE);
+	const FString Prefix = FString::Printf(TEXT("#%llu POST "), RefreshId);
+	TestTrue(TEXT("a Basic line carries #<RefreshId>: the refresh request's canceled line"),
+		Capture.GetLines().ContainsByPredicate([&Prefix](const FString& Line) { return Line.Contains(Prefix) && Line.Contains(TEXT("/auth/refresh -> canceled")); }));
+
+	Rig.Fake->Complete(0, Json(200));
+	if (!TestTrue(TEXT("the holder ends, and the queue drains normally"), PumpUntil([Holder, Queued] { return Holder->IsDone() && Queued->IsDone(); })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Drain();
+	TestTrue(TEXT("... the queued request was granted the slot and succeeded"), Queued->SuccessCalls.load() == 1 && FindCall(Rig, TEXT("/queued")) != INDEX_NONE);
+	TestTrue(TEXT("... and the books are empty"), Limiter.NumActive() == 0 && Limiter.NumQueued() == 0 && Rig.Client.GetInFlightCount() == 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthRefreshIdInUseTest, "VaRest.Http.Auth.RefreshIdInUseEnsures",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthRefreshIdInUseTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+#if DO_ENSURE
+	// As VaRest.Http.Limiter.DoubleReleaseEnsuresEachTime: ensureAlways reports every time only while core.EnsureAlwaysEnabled
+	// is on (AssertionMacros.cpp:136-140, :948) and every ensure is handled at HandleEnsurePercent 100
+	// (GenericPlatformMisc.cpp:2058-2068, :2070-2094); under other settings the count is chance
+	{
+		IConsoleVariable* Always = IConsoleManager::Get().FindConsoleVariable(TEXT("core.EnsureAlwaysEnabled"));
+		float Percent = 100.f;
+		if (!GConfig || !GConfig->GetFloat(TEXT("Core.System"), TEXT("HandleEnsurePercent"), Percent, GEngineIni))
+		{
+			FParse::Value(FCommandLine::Get(), TEXT("handleensurepercent="), Percent);
+		}
+		if (!Always || !Always->GetBool() || Percent < 100.f)
+		{
+			AddInfo(TEXT("core.EnsureAlwaysEnabled is off or HandleEnsurePercent is below 100: ensureAlways does not report every failure here; nothing to check"));
+			return true;
+		}
+	}
+	// Task 15 review M-1: only FClientAccess::MakeRefreshContext makes a context, and the coordinator gives it a fresh id.
+	// A context made with an id in use -- two here, each giving it away once -- puts a second exchange under that id: Enter
+	// ensures. The thread's ensure handler (AssertionMacros.h:55-61) takes this one, so the run leaves no callstack;
+	// FDebug::EnsureFailed asks it first (AssertionMacros.cpp:499).
+	TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> Fired = MakeShared<std::atomic<int32>, ESPMode::ThreadSafe>(0);
+	const TFunction<bool(const FEnsureHandlerArgs&)> Outer = GetEnsureHandler();
+	SetEnsureHandler([Fired, Outer](const FEnsureHandlerArgs& Args)
+	{
+		if (Args.Message && FCString::Strstr(Args.Message, TEXT("is already in flight on this client")))
+		{
+			++*Fired;
+			return true;
+		}
+		return Outer ? Outer(Args) : false;
+	});
+	ON_SCOPE_EXIT { SetEnsureHandler(Outer); };
+	FTestRig Rig;
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest& Request) { return Request.Url.EndsWith(TEXT("/auth/first")) ? FVaRestFakeResponse::Manual() : Json(200); });
+	const uint64 RefreshId = FVaRestTrace::NewRequestId();
+	const FVaRestAuthRefreshContext First = VaRest::Http::FClientAccess::MakeRefreshContext(Rig.Client, FVaRestSessionData(), RefreshId);
+	const FVaRestAuthRefreshContext Second = VaRest::Http::FClientAccess::MakeRefreshContext(Rig.Client, FVaRestSessionData(), RefreshId);
+	auto FirstOutcome = MakeOutcome<FVaRestJson>();
+	auto SecondOutcome = MakeOutcome<FVaRestJson>();
+	Observe(First.Request(TEXT("POST"), TEXT("/auth/first")).Body(TEXT("{}")), FirstOutcome).Send();
+	if (!TestTrue(TEXT("the first is held at the transport"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 1; })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	TestEqual(TEXT("one id in flight: no ensure yet"), Fired->load(), 0);
+	Observe(Second.Request(TEXT("POST"), TEXT("/auth/second")).Body(TEXT("{}")), SecondOutcome).Send();
+	if (!TestTrue(TEXT("the second completes"), Rig.Wait(SecondOutcome)))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	TestEqual(TEXT("Task 15 review M-1: a second exchange under an id in flight ensures"), Fired->load(), 1);
+	Rig.Fake->Complete(0, Json(200));
+	TestTrue(TEXT("the first ends too"), Rig.Wait(FirstOutcome));
+	Rig.Drain();
+#else
+	AddInfo(TEXT("ensures are compiled out: nothing to check"));
+#endif
 	return true;
 }
 

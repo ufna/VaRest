@@ -312,10 +312,11 @@ namespace VaRest::Http::PipelinePrivate
 			FExchangeState& Ex = Internals(*Exchange);
 			if (Ex.bIsAuthRefresh)
 			{
-				// Ruling M-8: the refresh request skips the queue. Single flight makes it at most one more connection per client,
-				// and every parked request waits on it: behind long polls holding every slot it would never run. It takes no
-				// slot, so its outcome goes up as it is -- never through the grant's Release below -- and the queue, its
-				// deadline timer (ArmQueueDeadline) and LimiterWait (0 from the attempt boundary) never see it.
+				// Ruling M-8: the refresh request skips the queue -- one more connection per refresh request the auth sends
+				// (single flight runs one refresh per client) -- since every parked request waits on it: behind long polls
+				// holding every slot it would never run. It takes no slot, so its outcome goes up as it is -- never through the
+				// grant's Release below -- and the queue, its deadline timer (ArmQueueDeadline) and LimiterWait (0 from the
+				// attempt boundary) never see it.
 				Next.Proceed(Exchange, MoveTemp(OnOutcome));
 				return;
 			}
@@ -764,6 +765,11 @@ void VaRest::Http::FClientState::Enter(const FVaRestExchangeRef& Exchange)
 	}
 	Ex.StartedAt = Ex.Config->Clock->Now();
 	Ex.Phase = EVaRestExchangePhase::InChain;
+	// Task 15 review M-1: a refresh request's id is preset (spec review I-2), and a second exchange under one id would
+	// replace the first here -- CancelAll and the shutdown cancel would no longer see it, and whichever ended first would
+	// remove the other's entry (Complete). Only FClientAccess::MakeRefreshContext can make one with an id in use. Always:
+	// each duplicate is the same bug, not only the session's first (AssertionMacros.cpp:970-975).
+	ensureAlwaysMsgf(!InFlight.Contains(Ex.RequestId), TEXT("VaRest: request id #%llu is already in flight on this client (a refresh context made with an id in use)"), Ex.RequestId);
 	InFlight.Add(Ex.RequestId, Exchange);
 	if (IsShuttingDown())
 	{

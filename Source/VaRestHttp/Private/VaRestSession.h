@@ -19,10 +19,44 @@ namespace VaRest::Http
 		FString Text;
 	};
 
+	/** How a waiter's refresh ended (plan decision 3, ruling I-7) */
+	enum class ERefreshEnd : uint8
+	{
+		/** New credentials, from the refresh or from the game: go */
+		Ready,
+		/** The refresh was rejected, or NotifySessionExpired: Kind=Auth */
+		Rejected,
+		/** The refresh failed otherwise (Kind: Connection, Timeout or Config): the session stays */
+		Failed,
+		/** ClearSession (a logout) while waiting: Kind=Auth */
+		Cleared
+	};
+
+	struct FRefreshEnded
+	{
+		ERefreshEnd End = ERefreshEnd::Ready;
+		/** Spec review I-2: the refresh request's RequestId (IN-2 AuthRefreshId) */
+		uint64 RefreshId = 0;
+		/** Failed: what the waiters fail with */
+		EVaRestErrorKind Kind = EVaRestErrorKind::Connection;
+		FString Message;
+	};
+
+	using FRefreshWaiter = TUniqueFunction<void(const FRefreshEnded&)>;
+
+	/** Spec 4.2's single flight: the refresh running now and who waits for it */
+	struct FRefreshInFlight
+	{
+		uint64 RefreshId = 0;
+		/** IN-9 CauseRequestId: the request whose 401 (or due expiry) started it; 0 for RefreshAuth */
+		uint64 CauseRequestId = 0;
+		TArray<TPair<uint64, FRefreshWaiter>> Waiters;
+	};
+
 	/**
 	 * Spec 4.2: one client's session, live (plan decision 6). Game thread. FClientState owns it; its session functions
-	 * (VaRestSession.cpp) change it inside RunSessionChange, publish its secrets and queue its events. Task 16 adds the
-	 * refresh in flight.
+	 * (VaRestSession.cpp) change it inside RunSessionChange, publish its secrets and queue its events, and its refresh in
+	 * flight (Task 16) ends with the game's own changes.
 	 */
 	struct FSessionState
 	{
@@ -35,6 +69,9 @@ namespace VaRest::Http
 		int32 ChangeDepth = 0;
 		/** The outermost RunSessionChange is delivering Pending: a nested change only queues */
 		bool bDelivering = false;
+		/** Null when no refresh runs */
+		TUniquePtr<FRefreshInFlight> Refresh;
+		uint64 NextWaiterId = 0;
 	};
 
 	// ---- Who owns a secret slot. Each door forgets exactly its owner's: ClearSession the session's, ClearSecretValues the

@@ -682,6 +682,60 @@ bool FVaRestClient::ApplyAuth(FVaRestHeaders& OutHeaders, TArray<TPair<FString, 
 	return VaRest::Http::ApplyCredentials(Auth, Target);
 }
 
+bool FVaRestClient::NeedsAuthRefresh() const
+{
+	check(IsInGameThread());
+	if (!State.IsValid())
+	{
+		return false;
+	}
+	// Held for the call: CanRefresh and NeedsRefresh are game code, and the configuration may be replaced under them
+	const TSharedRef<const VaRest::Http::FClientConfig, ESPMode::ThreadSafe> Current = State->GetConfig();
+	const FVaRestSessionData& Data = State->GetSessionData();
+	return Current->Auth.IsValid() && Current->Auth->CanRefresh(Data) && Current->Auth->NeedsRefresh(Data, Current->Clock->Now());
+}
+
+void FVaRestClient::RefreshAuth(TUniqueFunction<void(EVaRestAuthRefreshOutcome Outcome, EVaRestErrorKind FailedKind)>&& OnDone)
+{
+	check(IsInGameThread());
+	// Held for the call: the auth's Refresh runs code that is not VaRest's (concurrency review C-1's rule), and it may drop
+	// this client
+	const TSharedPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> Pinned = State;
+	const TSharedPtr<IVaRestAuth, ESPMode::ThreadSafe> Auth = Pinned.IsValid() ? Pinned->GetConfig()->Auth : nullptr;
+	if (!Auth.IsValid() || !Auth->CanRefresh(Pinned->GetSessionData()))
+	{
+		// Spec review I-5: nothing to refresh with is the configuration's answer -- and still from a later task (decision 3)
+		UE::Tasks::Launch(TEXT("VaRest.RefreshAuth"), [Done = MoveTemp(OnDone)]() mutable
+		{
+			if (Done)
+			{
+				Done(EVaRestAuthRefreshOutcome::Failed, EVaRestErrorKind::Config);
+			}
+		}, UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
+		return;
+	}
+	Pinned->JoinRefresh(Pinned->NewWaiterId(), Auth.ToSharedRef(), 0, [Done = MoveTemp(OnDone)](const VaRest::Http::FRefreshEnded& End) mutable
+	{
+		if (!Done)
+		{
+			return;
+		}
+		switch (End.End)
+		{
+		case VaRest::Http::ERefreshEnd::Ready:
+			Done(EVaRestAuthRefreshOutcome::Refreshed, EVaRestErrorKind::None);
+			break;
+		case VaRest::Http::ERefreshEnd::Failed:
+			Done(EVaRestAuthRefreshOutcome::Failed, End.Kind);
+			break;
+		default:
+			// Rejected, or the game cleared or expired the session meanwhile: it is gone either way
+			Done(EVaRestAuthRefreshOutcome::Rejected, EVaRestErrorKind::None);
+			break;
+		}
+	});
+}
+
 FVaRestClient& FVaRestClient::Use(FVaRestStageRef Stage, EVaRestStageSlot Slot)
 {
 	if (State.IsValid())

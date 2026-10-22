@@ -150,6 +150,24 @@ namespace VaRest::Http
 		 */
 		bool ImportSession(FStringView InJson, bool bSameIdentity);
 
+		// ---- Single-flight refresh (spec 4.2; Task 16; VaRestSession.cpp). Game thread.
+		bool IsRefreshing() const { return Session.Refresh.IsValid(); }
+		uint64 NewWaiterId() { return ++Session.NextWaiterId; }
+		/**
+		 * Waits for the refresh in flight, or starts one with Auth. Not a session change (it queues no event), so callable
+		 * outside RunSessionChange; the caller keeps this state alive (an exchange, RefreshAuth's pin). OnDone runs once,
+		 * from a later game-thread task -- never inside this call (concurrency review I-1).
+		 */
+		void JoinRefresh(uint64 WaiterId, const TSharedRef<IVaRestAuth, ESPMode::ThreadSafe>& Auth, uint64 CauseRequestId, FRefreshWaiter&& OnDone);
+		/** A parked request was canceled: its waiter goes uncalled; the refresh goes on */
+		void LeaveRefresh(uint64 WaiterId);
+		/** Inside a change only: the auth's answer for RefreshId (a stale one is ignored); plan decision 3, ruling I-7 */
+		void FinishRefresh(uint64 RefreshId, FVaRestAuthRefreshResult&& Result);
+#if WITH_DEV_AUTOMATION_TESTS
+		/** Tests (concurrency review I-5): the waiters of the refresh in flight */
+		int32 NumRefreshWaitersInternal() const { return Session.Refresh.IsValid() ? Session.Refresh->Waiters.Num() : 0; }
+#endif
+
 		/** Every live client (game thread): the trace snapshot, engine shutdown */
 		static void ForEachLive(TFunctionRef<void(FClientState&)> Visit);
 		/** Game thread: the trace snapshot (IN-12) */
@@ -202,6 +220,10 @@ namespace VaRest::Http
 		void PublishSessionSecrets(TFunctionRef<void(FClientConfig&)> AlsoEdit);
 		/** Every session function but the getters runs inside RunSessionChange, on the game thread (concurrency review C-1) */
 		void CheckInSessionChange() const;
+		/** JoinRefresh's first waiter: hands the auth its context and a guarded Done (VaRestSession.cpp) */
+		void StartRefresh(const TSharedRef<IVaRestAuth, ESPMode::ThreadSafe>& Auth);
+		/** Inside a change only: ends the refresh in flight without its result -- the game changed the session (Ready, Cleared) or it expired (Rejected) */
+		void EndRefresh(ERefreshEnd EndKind, const TCHAR* Message);
 
 		const uint64 ClientId;
 		mutable FRWLock ConfigLock;
@@ -237,6 +259,15 @@ namespace VaRest::Http
 		static TSharedPtr<FClientState, ESPMode::ThreadSafe> State(const FVaRestClient& Client) { return Client.GetStateInternal(); }
 		/** A handle on a state, for the refresh context and the coordinator (Tasks 15-16) */
 		static FVaRestClient Wrap(TSharedPtr<FClientState, ESPMode::ThreadSafe> InState) { return FVaRestClient(MoveTemp(InState)); }
+		/**
+		 * Task 15 review M-1, by shape: the one way to make a refresh context -- the coordinator (FClientState::StartRefresh,
+		 * InRefreshId fresh from FVaRestTrace::NewRequestId) and VaRestHttp's tests. A context made from a made-up or another
+		 * context's id would put two exchanges under one RequestId; FClientState::Enter ensures against that.
+		 */
+		static FVaRestAuthRefreshContext MakeRefreshContext(const FVaRestClient& Client, FVaRestSessionData InSession, uint64 InRefreshId)
+		{
+			return FVaRestAuthRefreshContext(Client, MoveTemp(InSession), InRefreshId);
+		}
 	};
 
 	/**

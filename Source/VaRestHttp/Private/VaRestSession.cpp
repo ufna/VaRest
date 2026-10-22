@@ -2,11 +2,16 @@
 
 #include "VaRestSession.h"
 
+#include "Tasks/Task.h"
+#include "VaRestAuth.h"
 #include "VaRestClientState.h"
+#include "VaRestTrace.h"
 #include "VaRestTracePoints.h"
 
 #include "Misc/DateTime.h"
 #include "Misc/Timespan.h"
+
+#include <atomic>
 
 namespace VaRest::Http::SessionPrivate
 {
@@ -19,6 +24,91 @@ namespace VaRest::Http::SessionPrivate
 	{
 		return FName(*(FString(SessionSecretPrefix()) + TEXT("Header.") + FString(Header)));
 	}
+
+	/**
+	 * Concurrency review I-1 (ruled): the waiters of an ended refresh run from ONE later game-thread task that holds them,
+	 * so no request callback and no dispatch runs inside the session call that ended the refresh -- M3 decision 3's rule
+	 * for configuration calls (VaRestClientState.cpp:265-268, the limiter's grants after a Publish). A waiter whose request
+	 * was canceled meanwhile finds it answered and returns; one that LeaveRefresh dropped is not in this list any more.
+	 * The task holds the state while the waiters run, as RunSessionChange does (concurrency review C-1): a waiter may drop
+	 * the last FVaRestClient, and the state then goes after the last waiter, not under one. Until the task runs it holds the
+	 * state weakly, so an ended refresh keeps no client alive; the waiters of a state already gone are still told.
+	 */
+	void ResolveWaitersLater(FClientState& Owner, TUniquePtr<FRefreshInFlight>&& Ended, FRefreshEnded&& End)
+	{
+		UE::Tasks::Launch(TEXT("VaRest.RefreshEnded"),
+			[Weak = TWeakPtr<FClientState, ESPMode::ThreadSafe>(Owner.AsShared()), Waiting = MoveTemp(Ended), Result = MoveTemp(End)]() mutable
+			{
+				const TSharedPtr<FClientState, ESPMode::ThreadSafe> Keep = Weak.Pin();
+				for (TPair<uint64, FRefreshWaiter>& Waiter : Waiting->Waiters)
+				{
+					Waiter.Value(Result);
+				}
+			}, UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
+	}
+
+	/**
+	 * Concurrency review I-4: what the auth's Done owns. The first Deliver wins (any thread); a second is ignored. Destroyed
+	 * without one -- the auth dropped Done uncalled -- it ends the refresh as Failed(Connection), the session kept (ruling
+	 * Q1), so nothing parks forever behind a refresh that can no longer end. An auth that holds Done uncalled (a re-login
+	 * screen) is not ended: no watchdog (ruling I-4). Either way the refresh finishes from a later game-thread task, inside
+	 * RunSessionChange (the answer runs listeners, concurrency review C-1). Weak (concurrency review M-10): an auth that
+	 * keeps Done does not keep the client alive.
+	 */
+	class FRefreshDoneGuard
+	{
+	public:
+		FRefreshDoneGuard(TWeakPtr<FClientState, ESPMode::ThreadSafe> InState, uint64 InRefreshId)
+			: State(MoveTemp(InState))
+			, RefreshId(InRefreshId)
+			, Answered(MakeShared<std::atomic<bool>, ESPMode::ThreadSafe>(false))
+		{
+		}
+
+		/** Moving leaves the source without a flag: only the guard the auth's Done holds can fire */
+		FRefreshDoneGuard(FRefreshDoneGuard&&) = default;
+		FRefreshDoneGuard& operator=(FRefreshDoneGuard&&) = default;
+		FRefreshDoneGuard(const FRefreshDoneGuard&) = delete;
+		FRefreshDoneGuard& operator=(const FRefreshDoneGuard&) = delete;
+
+		~FRefreshDoneGuard()
+		{
+			if (Answered.IsValid() && !Answered->exchange(true))
+			{
+				Post(FVaRestAuthRefreshResult::Failed(EVaRestErrorKind::Connection, TEXT("the auth dropped its refresh callback")));
+			}
+		}
+
+		void Deliver(FVaRestAuthRefreshResult&& Result)
+		{
+			if (Answered.IsValid() && !Answered->exchange(true))
+			{
+				Post(MoveTemp(Result));
+			}
+		}
+
+	private:
+		void Post(FVaRestAuthRefreshResult&& Result) const
+		{
+			if (FClientState::IsShuttingDown())
+			{
+				// Engine exit: the refresh no longer matters, and the task system may be going
+				return;
+			}
+			UE::Tasks::Launch(TEXT("VaRest.RefreshDone"), [Weak = State, Id = RefreshId, Moved = MoveTemp(Result)]() mutable
+			{
+				if (const TSharedPtr<FClientState, ESPMode::ThreadSafe> Pinned = Weak.Pin())
+				{
+					Pinned->RunSessionChange([Id, &Moved](FClientState& Target) { Target.FinishRefresh(Id, MoveTemp(Moved)); });
+				}
+			}, UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
+		}
+
+		TWeakPtr<FClientState, ESPMode::ThreadSafe> State;
+		uint64 RefreshId = 0;
+		/** Shared by every copy the move-only callables made on the way to the auth; null in a moved-from guard */
+		TSharedPtr<std::atomic<bool>, ESPMode::ThreadSafe> Answered;
+	};
 }
 
 void VaRest::Http::FClientState::CheckInSessionChange() const
@@ -120,6 +210,9 @@ void VaRest::Http::FClientState::SetTokensByGame(const FString& AccessToken, con
 {
 	if (UpdateTokens(AccessToken, RefreshToken, ExpiresInSeconds, LifetimeSeconds))
 	{
+		// Plan decision 3: the game's credentials end a refresh in flight -- its waiters go on with them (Ready), and the
+		// refresh's own late answer is ignored (FinishRefresh)
+		EndRefresh(ERefreshEnd::Ready, TEXT("the game set new credentials"));
 		AnnounceSession(bSameIdentity ? EVaRestSessionChange::Refreshed : EVaRestSessionChange::Replaced, 0, TEXT("set by the game"));
 	}
 }
@@ -166,7 +259,8 @@ void VaRest::Http::FClientState::ClearSession()
 	FVaRestSessionData& Data = Session.Data;
 	if (!Data.HasAccessToken() && !Data.HasRefreshToken() && Data.Headers.IsEmpty())
 	{
-		// No session to clear: no generation, no Cleared
+		// No session to clear: no generation, no Cleared. A refresh in flight still ends: a logout is a logout (Kind=Auth).
+		EndRefresh(ERefreshEnd::Cleared, TEXT("SessionCleared"));
 		return;
 	}
 	const uint32 Generation = Data.Generation + 1;
@@ -174,6 +268,7 @@ void VaRest::Http::FClientState::ClearSession()
 	Data = FVaRestSessionData();
 	Data.Generation = Generation;
 	Data.CredentialGeneration = CredentialGeneration;
+	EndRefresh(ERefreshEnd::Cleared, TEXT("SessionCleared"));
 	AnnounceSession(EVaRestSessionChange::Cleared, 0, TEXT("ClearSession"));
 }
 
@@ -181,11 +276,11 @@ void VaRest::Http::FClientState::ExpireSession(uint64 CauseRequestId, FStringVie
 {
 	CheckInSessionChange();
 	FVaRestSessionData& Data = Session.Data;
-	if (!Data.HasAccessToken() && !Data.HasRefreshToken())
+	if (!Data.HasAccessToken() && !Data.HasRefreshToken() && !Session.Refresh.IsValid())
 	{
 		// Concurrency review I-2: expired already -- a parked request's OnError calling NotifySessionExpired after a
-		// rejected refresh, a listener of OnSessionExpired calling it again: one expiry, one event (Task 16 adds "and no
-		// refresh in flight")
+		// rejected refresh, a listener of OnSessionExpired calling it again: one expiry, one event. A refresh in flight
+		// (an auth that refreshes from no token) is not expired yet: it ends below.
 		return;
 	}
 	Data.AccessToken.Reset();
@@ -195,6 +290,9 @@ void VaRest::Http::FClientState::ExpireSession(uint64 CauseRequestId, FStringVie
 	++Data.Generation;
 	++Data.CredentialGeneration;
 	PublishSessionSecrets();
+	// Its waiters fail Kind=Auth; FinishRefresh(Rejected) took its refresh out before it came here, so this is the game's
+	// NotifySessionExpired (or a socket's) ending one still running
+	EndRefresh(ERefreshEnd::Rejected, TEXT("AuthRejected"));
 	FSessionEvent& Event = Session.Pending.AddDefaulted_GetRef();
 	Event.bExpired = true;
 	Event.CauseRequestId = CauseRequestId;
@@ -328,4 +426,102 @@ bool VaRest::Http::FClientState::ImportSession(FStringView InJson, bool bSameIde
 	// Re-review N-10: the time left is not the token's lifetime -- unknown, so BearerRefresh's configured lead applies
 	SetTokensByGame(Access, &Refresh, ExpiresIn, 0.0, bSameIdentity);
 	return true;
+}
+
+void VaRest::Http::FClientState::JoinRefresh(uint64 WaiterId, const TSharedRef<IVaRestAuth, ESPMode::ThreadSafe>& Auth, uint64 CauseRequestId, FRefreshWaiter&& OnDone)
+{
+	check(IsInGameThread());
+	const bool bStart = !Session.Refresh.IsValid();
+	if (bStart)
+	{
+		Session.Refresh = MakeUnique<FRefreshInFlight>();
+		// Spec review I-2: a process-unique request id, which the refresh request carries as its own (Task 15), so IN-2's
+		// AuthRefreshId names a record the Inspector has
+		Session.Refresh->RefreshId = FVaRestTrace::NewRequestId();
+		Session.Refresh->CauseRequestId = CauseRequestId;
+	}
+	Session.Refresh->Waiters.Emplace(WaiterId, MoveTemp(OnDone));
+	if (bStart)
+	{
+		StartRefresh(Auth);
+	}
+}
+
+void VaRest::Http::FClientState::LeaveRefresh(uint64 WaiterId)
+{
+	check(IsInGameThread());
+	if (Session.Refresh.IsValid())
+	{
+		Session.Refresh->Waiters.RemoveAll([WaiterId](const TPair<uint64, FRefreshWaiter>& Waiter) { return Waiter.Key == WaiterId; });
+	}
+}
+
+void VaRest::Http::FClientState::StartRefresh(const TSharedRef<IVaRestAuth, ESPMode::ThreadSafe>& Auth)
+{
+	const uint64 Id = Session.Refresh->RefreshId;
+	// Task 15 review M-1: the one maker of a context; Id is fresh, so the refresh request's id is in use nowhere else
+	const FVaRestAuthRefreshContext Context = FClientAccess::MakeRefreshContext(FClientAccess::Wrap(AsShared()), Session.Data, Id);
+	// Concurrency review I-4: Done owns the guard; called or dropped, the refresh ends from a later game-thread task. The
+	// auth's Refresh is game code and may end this refresh itself (a SetSession inside it): nothing here reads
+	// Session.Refresh after the call.
+	Auth->Refresh(Context, [Guard = SessionPrivate::FRefreshDoneGuard(AsShared(), Id)](FVaRestAuthRefreshResult&& Result) mutable
+	{
+		Guard.Deliver(MoveTemp(Result));
+	});
+}
+
+void VaRest::Http::FClientState::FinishRefresh(uint64 RefreshId, FVaRestAuthRefreshResult&& Result)
+{
+	CheckInSessionChange();
+	if (!Session.Refresh.IsValid() || Session.Refresh->RefreshId != RefreshId)
+	{
+		// Ended without its result: the game set, cleared or expired the session meanwhile (EndRefresh)
+		return;
+	}
+	TUniquePtr<FRefreshInFlight> Ended = MoveTemp(Session.Refresh);
+	FRefreshEnded End;
+	End.RefreshId = RefreshId;
+	End.Message = Result.Message;
+	if (Result.Outcome == EVaRestAuthRefreshOutcome::Refreshed && !Result.AccessToken.IsEmpty() && IsValidHeaderValue(Result.AccessToken)
+		&& IsValidHeaderValue(Result.RefreshToken))
+	{
+		// A refresh response's expires_in is the new token's whole lifetime (re-review N-10), as a login's is
+		UpdateTokens(Result.AccessToken, Result.RefreshToken.IsEmpty() ? nullptr : &Result.RefreshToken, Result.ExpiresInSeconds, Result.ExpiresInSeconds);
+		End.End = ERefreshEnd::Ready;
+		AnnounceSession(EVaRestSessionChange::Refreshed, Ended->CauseRequestId, TEXT("refreshed by the auth"));
+	}
+	else if (Result.Outcome == EVaRestAuthRefreshOutcome::Failed)
+	{
+		// Plan decision 3, ruling I-7: the session stays; the waiters fail with the refresh's kind
+		End.End = ERefreshEnd::Failed;
+		End.Kind = Result.FailedKind;
+	}
+	else
+	{
+		// Rejected, or a success with nothing usable in it (a malformed success, ruling Q1): the session expires, once (I-2)
+		End.End = ERefreshEnd::Rejected;
+		if (Result.Outcome == EVaRestAuthRefreshOutcome::Refreshed)
+		{
+			End.Message = TEXT("the refresh gave no usable access token");
+		}
+		ExpireSession(Ended->CauseRequestId, End.Message);
+	}
+	// The events queued above reach the listeners when this change returns; the waiters run after, from their own task
+	SessionPrivate::ResolveWaitersLater(*this, MoveTemp(Ended), MoveTemp(End));
+}
+
+void VaRest::Http::FClientState::EndRefresh(ERefreshEnd EndKind, const TCHAR* Message)
+{
+	CheckInSessionChange();
+	if (!Session.Refresh.IsValid())
+	{
+		return;
+	}
+	TUniquePtr<FRefreshInFlight> Ended = MoveTemp(Session.Refresh);
+	FRefreshEnded End;
+	End.End = EndKind;
+	End.RefreshId = Ended->RefreshId;
+	End.Message = Message;
+	// The refresh's own late answer finds another id (or none) and is ignored (FinishRefresh)
+	SessionPrivate::ResolveWaitersLater(*this, MoveTemp(Ended), MoveTemp(End));
 }
