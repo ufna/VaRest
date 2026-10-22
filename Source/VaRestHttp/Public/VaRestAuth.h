@@ -23,7 +23,10 @@ struct FVaRestAuthTarget
 
 	/** Credential headers go here, with Set: a header of the same name the request set is replaced */
 	FVaRestHeaders& Headers;
-	/** Pairs appended to the URL, each percent-encoded by the core (an API key in the query) */
+	/**
+	 * Pairs for the URL (an API key in the query), raw. On an HTTP attempt the core appends them, each percent-encoded
+	 * (VaRest::Http::AppendQuery); FVaRestClient::ApplyAuth hands them to its caller as they are (M4a final review B-m-6).
+	 */
 	TArray<TPair<FString, FString>>& Query;
 	/** The client's session as it is when this attempt starts (plan decision 6) */
 	const FVaRestSessionData& Session;
@@ -79,6 +82,11 @@ struct VARESTHTTP_API FVaRestAuthRefreshResult
 	/** Why, for the error message and the trace marker; never a token */
 	FString Message;
 
+	/**
+	 * New tokens. An empty access token, or either token holding a control character (it would go into a header line), is
+	 * a malformed success: the core takes it as Rejected and the session expires, as for an endpoint's "no" (ruling Q1; M4a
+	 * final review B-m-6).
+	 */
 	static FVaRestAuthRefreshResult Refreshed(FString InAccessToken, FString InRefreshToken = FString(), double InExpiresInSeconds = 0.0);
 	static FVaRestAuthRefreshResult Rejected(FString InMessage);
 	/** Ruling I-7: the session stays. InKind Timeout and Config are kept; any other kind is Connection. */
@@ -181,7 +189,11 @@ public:
 	 * allowed (a re-login screen): parked requests wait, each bounded by its own retry deadline and Cancel() (CancelAll(),
 	 * engine exit); one whose owner goes meanwhile gets no callback, and ends when its park does -- until then the client
 	 * holds the request, its callbacks and everything they capture (Task 17 review M-4). No watchdog ends the refresh
-	 * (ruling I-4). Send the refresh request with Context.Request(), never through the client.
+	 * (ruling I-4).
+	 * **Send the refresh request with Context.Request(), never through the client** (M4a final review B-m-4): a request
+	 * sent with Client.Post() or the like is an ordinary request, so the auth gate parks it behind this very refresh, which
+	 * it was meant to end -- silently, until its own retry Deadline, and forever without one. Context.Request() bypasses the
+	 * auth stages, the envelope, retry and the limiter's queue.
 	 */
 	virtual void Refresh(const FVaRestAuthRefreshContext& Context, TUniqueFunction<void(FVaRestAuthRefreshResult&&)>&& Done)
 	{

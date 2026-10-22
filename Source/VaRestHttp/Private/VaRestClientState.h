@@ -144,7 +144,11 @@ namespace VaRest::Http
 		void SetTokensByGame(const FString& AccessToken, const FString* RefreshToken, double ExpiresInSeconds, double LifetimeSeconds, bool bSameIdentity);
 		void SetSessionHeader(FStringView Name, FStringView Value);
 		void RemoveSessionHeader(FStringView Name);
-		/** Logout: tokens, headers and the session's secret slots; OnSessionChanged(Cleared). Nothing happens to an empty session. */
+		/**
+		 * Logout: tokens, headers and the session's secret slots; OnSessionChanged(Cleared). On an empty session it still
+		 * forgets the retired session values (Task 12 review M-3) and ends a refresh in flight (Cleared), but announces
+		 * nothing and moves no generation (M4a final review B-m-6).
+		 */
 		void ClearSession();
 		/**
 		 * NotifySessionExpired: the tokens go, the headers stay, a refresh in flight ends (Rejected); OnSessionExpired queued.

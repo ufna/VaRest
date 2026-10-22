@@ -1283,7 +1283,8 @@ For the core plans (one list; nothing else in core changes):
    misconfigured built-in auth: the socket fails `Config`, not `Auth`); the client's public
    single-flight refresh `FVaRestClient::RefreshAuth(OnDone(EVaRestAuthRefreshOutcome Outcome,
    EVaRestErrorKind FailedKind))`, shared with HTTP — `Refreshed`; `Rejected` (the session is gone:
-   the client has already expired it and fired `OnSessionExpired`); `Failed` (the session stays;
+   the client has already expired it and fired `OnSessionExpired`, or the game logged out meanwhile —
+   `OnSessionChanged(Cleared)` and no `OnSessionExpired`); `Failed` (the session stays;
    `FailedKind` `Connection` or `Timeout`: try later; `Config`, a misconfigured auth or a refresh request
    the configuration refuses: not); `Unavailable` (nothing can refresh this session — no auth, or an auth
    that cannot refresh it — and none was in flight: the session stays, and the caller's own 401 is the
@@ -1293,7 +1294,8 @@ For the core plans (one list; nothing else in core changes):
    `Replaced` (another identity: `SetBearerToken`/`ImportSession` with a different subject, or a login
    while logged in) and `Cleared` (logout); the events of one change reach every listener in order,
    after the change. *(Amended 2026-10-21: M4a plan rulings Q6 and I-5 name `RefreshAuth` and drop the
-   separate `OnSessionCleared`. Amended 2026-10-23: M4a final review B-I-1 adds `Unavailable`.)*
+   separate `OnSessionCleared`. Amended 2026-10-23: M4a final review B-I-1 adds `Unavailable`; B-m-6: a
+   `Rejected` may be a logout, which fires no `OnSessionExpired`.)*
 3. **Redactor (M3):** public URL, header and JSON-excerpt redaction.
 4. **Trace (M4):** `FVaRestTraceEvent` carries `Source` (`Http`, `Socket`) and connection/attempt ids;
    sinks ignore types they do not know.

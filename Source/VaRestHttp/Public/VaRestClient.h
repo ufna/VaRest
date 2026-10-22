@@ -671,7 +671,12 @@ public:
 	/** How struct bodies name their fields (spec 2.4); decode accepts every spelling regardless */
 	FVaRestClient& WithNaming(EVaRestJsonNaming Naming);
 	FVaRestClient& WithTransport(TSharedRef<IVaRestTransport, ESPMode::ThreadSafe> Transport);
-	/** Requests already sent keep the clock they started with; a rotated secret value keeps the time it has left (SetSecretValue) */
+	/**
+	 * Requests already sent keep the clock they started with; a rotated secret value keeps the time it has left
+	 * (SetSecretValue). The session's expiry does not move (M4a final review B-m-5): FVaRestSessionData::ExpiresAt stays a
+	 * time on the old clock, so a session set before this refreshes at once or never, and ExportSession() writes a wrong
+	 * expiresAt. Set the clock first (a test's virtual clock), or set the session again after it.
+	 */
 	FVaRestClient& WithClock(TSharedRef<IVaRestClock, ESPMode::ThreadSafe> Clock);
 	/** Game thread: seeds the stream retry jitter draws from (plan decision 26), so a test knows each delay */
 	FVaRestClient& WithRandomSeed(int32 Seed);
@@ -726,8 +731,10 @@ public:
 	FVaRestClient& WithRedactedKeys(TConstArrayView<FString> Keys);
 	/**
 	 * Inspector IN-13 layer 3: a secret value (token, API key, session id) replaced by *** wherever it appears in a log
-	 * line or a trace. Setting a slot again keeps the old value known for 10 minutes (Inspector D21). Values under 8 bytes
-	 * are ignored. Game thread.
+	 * line or a trace. Setting a slot again keeps the old value known for 10 minutes (Inspector D21) -- within a limit: the
+	 * client keeps at most FVaRestSecretSet::MaxPrevious (4) previous values, its own, the session's and an auth's
+	 * together, and past it forgets the oldest at once (M4a final review B-m-6). Values under 8 bytes are ignored. Game
+	 * thread.
 	 * These are the game's own slots. The session's values and an auth's are VaRest's, in internal slots (VaRest.*) kept
 	 * apart from these: a game slot of any name, "VaRest.Session.AccessToken" included, neither replaces one of them nor
 	 * is forgotten by ClearSession().
@@ -846,6 +853,9 @@ public:
 	 * records nothing for the caller, so the caller (the socket, W5) keeps them redacted in its own lines and traces --
 	 * with the redactor GetRedactor() gives at this call, which knows them all.
 	 * A false for missing credentials may leave the session headers in OutHeaders already.
+	 * It never refreshes (M4a final review B-m-6): call NeedsAuthRefresh() first, and RefreshAuth() when it is true. And
+	 * OutQuery's pairs are raw: append them with VaRest::Http::AppendQuery (VaRestUrl.h), which percent-encodes each, as the
+	 * core does for an HTTP attempt.
 	 */
 	bool ApplyAuth(FVaRestHeaders& OutHeaders, TArray<TPair<FString, FString>>& OutQuery, FString* OutConfigError = nullptr) const;
 	/** WebSocket spec 19 item 2: a refresh is due -- no access token but a refresh token, or a known expiry within the auth's lead time */
@@ -854,9 +864,12 @@ public:
 	 * WebSocket spec 19 item 2: refresh the session now, sharing a refresh already in flight (single flight, spec 4.2) --
 	 * also one an auth this client no longer has started (WithAuth does not end it), whatever the current auth is.
 	 * OnDone(Outcome, FailedKind), from a later game-thread task -- never inside this call (decision 3):
-	 * - Refreshed: the session has new credentials (FailedKind None).
+	 * - Refreshed: the session has new credentials (FailedKind None), from the refresh or from the game meanwhile -- a
+	 *   refresh token alone among them (M4a final review B4), and then NeedsAuthRefresh() says a refresh is due.
 	 * - Rejected: the session is gone -- the refresh endpoint rejected it (the client has already expired the session and
-	 *   fired OnSessionExpired), or the game cleared or expired it meanwhile. Do not call NotifySessionExpired: it is done.
+	 *   fired OnSessionExpired), or the game expired it meanwhile (NotifySessionExpired, which fired it), or logged out
+	 *   (ClearSession: OnSessionChanged(Cleared), and no OnSessionExpired; M4a final review B-m-6). Do not call
+	 *   NotifySessionExpired: it is done.
 	 * - Failed: the session stays; FailedKind says why -- Connection or Timeout (try again later), Config (the auth is
 	 *   misconfigured, ruling Q7, or the configuration refused the refresh request: HTTP disabled, a domain not allowed).
 	 * - Unavailable: nothing can refresh this session and no refresh was in flight -- the client has no auth, or its auth
