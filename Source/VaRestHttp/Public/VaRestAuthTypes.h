@@ -117,8 +117,10 @@ struct FVaRestSessionData
 	/** Bumped by every change of the session: tokens, a clear, an expiry, a session header */
 	uint32 Generation = 0;
 	/**
-	 * Bumped by token changes, clears and expiries only, not by a session header (concurrency review M-6): an attempt that
-	 * applied an older one replays without a refresh (Task 17), and a header change must not use up that one replay
+	 * Bumped whenever the access token's value changes -- a new token, a clear or an expiry of one -- and by nothing else
+	 * (concurrency review M-6, M4a final review B3): an attempt that applied an older one replays without a refresh (Task
+	 * 17). A session header, a new expiry or a new refresh token alone must not use up that one replay on the token the
+	 * server just refused.
 	 */
 	uint32 CredentialGeneration = 0;
 

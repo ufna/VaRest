@@ -801,8 +801,11 @@ public:
 	 * Otherwise it is SetSession (the lifetime unknown) plus the headers, and each part announces by its own rule: the
 	 * tokens are Replaced, or Refreshed with bSameIdentity, and no event at all when they and the expiry are unchanged; the
 	 * headers announce nothing, as SetSessionHeader announces nothing (the headers an import drops are retired). So a game
-	 * importing the same tokens with other headers sees the headers change and no OnSessionChanged. Requests parked behind a
-	 * session refresh that this ends or resumes continue from a later game-thread task, never inside this call.
+	 * importing the same tokens with other headers sees the headers change and no OnSessionChanged -- when the export had
+	 * no expiresAt: an expiry never reads back equal (a millisecond UTC time, converted through two clocks), so the import of
+	 * a session with one announces even with the same tokens (M4a final review B3). The same access token is not a new
+	 * credential either way: a refresh in flight goes on, and a 401 refreshes rather than replaying it. Requests parked
+	 * behind a session refresh that this ends or resumes continue from a later game-thread task, never inside this call.
 	 */
 	bool ImportSession(FStringView Json, bool bSameIdentity = false);
 	/**

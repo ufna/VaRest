@@ -2833,11 +2833,13 @@ bool FVaRestHttpAuthParkEndLineTest::RunTest(const FString& Parameters)
 		}
 		return Count;
 	};
-	const auto ParkDue = [&Rig, &Auth](const TCHAR* Path, const TSharedRef<TTestOutcome<FVaRestJson>, ESPMode::ThreadSafe>& Outcome, FVaRestRequestHandle& OutHandle)
+	int32 Parks = 0;
+	const auto ParkDue = [&Rig, &Auth, &Parks](const TCHAR* Path, const TSharedRef<TTestOutcome<FVaRestJson>, ESPMode::ThreadSafe>& Outcome, FVaRestRequestHandle& OutHandle)
 	{
 		// A known expiry within the lead: the request parks before its first attempt (spec 4.2, "proactively"). The game's
-		// SetSession ends a refresh still in flight (Ready), so each park starts its own.
-		Rig.Client.SetSession(TEXT("old-access-123456"), TEXT("old-refresh-123456"), 20.0);
+		// new access token ends a refresh still in flight (Ready; only a new one does, M4a final review B3), so each park
+		// starts its own.
+		Rig.Client.SetSession(FString::Printf(TEXT("park-access-%d-123456"), ++Parks), TEXT("old-refresh-123456"), 20.0);
 		const int32 Before = Auth->Refreshes;
 		OutHandle = Observe(Rig.Client.Get(Path), Outcome).Send();
 		return Rig.Drain() && Auth->IsPending() && Auth->Refreshes == Before + 1 && Rig.Fake->NumCalls() == 0;
@@ -2950,6 +2952,67 @@ bool FVaRestHttpAuthNewerCredentialsTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("IN-2: the replay's GapBefore is SessionRefresh, 0 s, no refresh id, no AuthWait"), Dispatched.Num() == 2
 		&& Dispatched[1].GapKind == EVaRestTraceGap::SessionRefresh && Dispatched[1].GapSeconds == 0.0 && Dispatched[1].AuthRefreshId == 0
 		&& Dispatched[1].AuthWait == 0.0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthSameTokenWriteTest, "VaRest.Http.Auth.SameTokenWriteIsNoNewCredential",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthSameTokenWriteTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// M4a final review B3 (review B m-1, the concurrency review M-6 class through another door): CredentialGeneration counts
+	// access-token values. A write that keeps the access token -- SetSession with only a new expiry, SetBearerToken of the
+	// same token, an ImportSession of the live session -- is no new credential. So the generation stays; a 401 for an
+	// attempt that carried that token refreshes and replays with the refreshed one, instead of replaying the refused token
+	// at once and failing 401; and the same write while a refresh runs does not end it, so a parked request replays with
+	// that refresh's token rather than the refused one.
+	FTestRig Rig;
+	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Auth = HandRig(Rig);
+	const uint32 Before = Rig.Client.GetSession().CredentialGeneration;
+	Rig.Client.SetSession(TEXT("old-access-123456"), TEXT("old-refresh-123456"), 3600.0);
+	TestEqual(TEXT("SetSession with a new expiry only: no new credential"), Rig.Client.GetSession().CredentialGeneration, Before);
+	Rig.Client.SetBearerToken(TEXT("old-access-123456"));
+	TestEqual(TEXT("SetBearerToken of the same token (its expiry now unknown): no new credential"), Rig.Client.GetSession().CredentialGeneration, Before);
+	Rig.Client.SetSession(TEXT("old-access-123456"), TEXT("old-refresh-123456"), 3600.0);
+	TestTrue(TEXT("ImportSession of the live session (with its expiry): imported, no new credential"), Rig.Client.ImportSession(Rig.Client.ExportSession())
+		&& Rig.Client.GetSession().CredentialGeneration == Before);
+
+	// A held attempt with the old token; the same token written again; then its 401
+	Rig.Fake->Enqueue(FVaRestFakeResponse::Manual());
+	auto Held = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/a")), Held).Send();
+	if (!TestTrue(TEXT("attempt 1 is out with the old token"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 1; })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Client.SetSession(TEXT("old-access-123456"), TEXT("old-refresh-123456"), 1800.0);
+	Rig.Fake->Complete(0, Json(401));
+	PumpUntil([Auth, Held] { return Auth->IsPending() || Held->IsDone(); });
+	TestTrue(TEXT("its 401 starts a refresh; the refused token is not replayed"), Auth->IsPending() && Auth->Refreshes == 1 && Rig.Fake->NumCalls() == 1);
+	Auth->Answer(FVaRestAuthRefreshResult::Refreshed(TEXT("new-access-123456")));
+	TestTrue(TEXT("... the replay carries the refreshed token, and succeeds"), Rig.Wait(Held) && Held->SuccessCalls.load() == 1 && Held->Response.Attempts == 2);
+	Rig.Drain();
+
+	// A request parked behind a refresh; the same token written again while it runs
+	FTestRig Parked;
+	const TSharedRef<FHandAuth, ESPMode::ThreadSafe> Hand = HandRig(Parked);
+	const TSharedPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> State = VaRest::Http::FClientAccess::State(Parked.Client);
+	auto Waiting = MakeOutcome<FVaRestJson>();
+	Observe(Parked.Client.Get(TEXT("/b")), Waiting).Send();
+	if (!TestTrue(TEXT("its 401 parks it behind a refresh"), PumpUntil([Hand] { return Hand->IsPending(); }) && State.IsValid()))
+	{
+		Abandon(Parked);
+		return false;
+	}
+	Parked.Client.SetSession(TEXT("old-access-123456"), TEXT("old-refresh-123456"), 3600.0);
+	TestTrue(TEXT("the same token written again does not end the refresh"), State->IsRefreshing() && !Waiting->IsDone());
+	Hand->Answer(FVaRestAuthRefreshResult::Refreshed(TEXT("new-access-123456")));
+	TestTrue(TEXT("... the parked request replays with the refresh's token, and succeeds"), Parked.Wait(Waiting) && Waiting->SuccessCalls.load() == 1
+		&& Waiting->Response.Attempts == 2);
+	Parked.Drain();
 	return true;
 }
 

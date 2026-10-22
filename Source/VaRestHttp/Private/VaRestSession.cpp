@@ -190,6 +190,14 @@ bool VaRest::Http::FClientState::UpdateTokens(const FString& AccessToken, const 
 	{
 		return false;
 	}
+	// Concurrency review M-6, M4a final review B3 (review B m-1): what the auth gate's "newer credentials" replay compares
+	// is the access token's value, which is what AuthApply sends. A new expiry or refresh token alone -- SetSession(T1, R1,
+	// 3600), SetBearerToken(T1) on a session with an expiry, an ImportSession of the live session (whose expiresAt never
+	// round-trips equal) -- is not a new credential: a 401 then refreshes instead of replaying the refused token.
+	if (!Data.AccessToken.Equals(AccessToken, ESearchCase::CaseSensitive))
+	{
+		++Data.CredentialGeneration;
+	}
 	Data.AccessToken = AccessToken;
 	if (RefreshToken)
 	{
@@ -199,8 +207,6 @@ bool VaRest::Http::FClientState::UpdateTokens(const FString& AccessToken, const 
 	// Concurrency review M-7: the lifetime it was given, when known; BearerRefresh refreshes at most half of it early
 	Data.Lifetime = Lifetime;
 	++Data.Generation;
-	// Concurrency review M-6: a token change -- what the auth gate's "newer credentials" replay compares
-	++Data.CredentialGeneration;
 	PublishSessionSecrets();
 	return true;
 }
@@ -218,11 +224,17 @@ void VaRest::Http::FClientState::AnnounceSession(EVaRestSessionChange Change, ui
 
 void VaRest::Http::FClientState::SetTokensByGame(const FString& AccessToken, const FString* RefreshToken, double ExpiresInSeconds, double LifetimeSeconds, bool bSameIdentity)
 {
+	const uint32 CredentialsBefore = Session.Data.CredentialGeneration;
 	if (UpdateTokens(AccessToken, RefreshToken, ExpiresInSeconds, LifetimeSeconds))
 	{
-		// Plan decision 3: the game's credentials end a refresh in flight -- its waiters go on with them (Ready), and the
-		// refresh's own late answer is ignored (FinishRefresh)
-		EndRefresh(ERefreshEnd::Ready, TEXT("the game set new credentials"));
+		if (Session.Data.CredentialGeneration != CredentialsBefore)
+		{
+			// Plan decision 3: the game's credentials end a refresh in flight -- its waiters go on with them (Ready), and the
+			// refresh's own late answer is ignored (FinishRefresh). M4a final review B3 (review B m-1): only a new access
+			// token is new credentials; a write that keeps it leaves the refresh to finish, so its waiters do not replay the
+			// token that was just refused.
+			EndRefresh(ERefreshEnd::Ready, TEXT("the game set new credentials"));
+		}
 		AnnounceSession(bSameIdentity ? EVaRestSessionChange::Refreshed : EVaRestSessionChange::Replaced, 0, TEXT("set by the game"));
 	}
 }
@@ -274,7 +286,8 @@ void VaRest::Http::FClientState::ClearSession()
 		return;
 	}
 	const uint32 Generation = Data.Generation + 1;
-	const uint32 CredentialGeneration = Data.CredentialGeneration + 1;
+	// M4a final review B3: the access token's value changes only when there was one
+	const uint32 CredentialGeneration = Data.CredentialGeneration + (Data.HasAccessToken() ? 1 : 0);
 	Data = FVaRestSessionData();
 	Data.Generation = Generation;
 	Data.CredentialGeneration = CredentialGeneration;
@@ -300,12 +313,16 @@ void VaRest::Http::FClientState::ExpireSessionNow(uint64 CauseRequestId, FString
 {
 	CheckInSessionChange();
 	FVaRestSessionData& Data = Session.Data;
+	if (Data.HasAccessToken())
+	{
+		// M4a final review B3: the access token's value changes only when there was one
+		++Data.CredentialGeneration;
+	}
 	Data.AccessToken.Reset();
 	Data.RefreshToken.Reset();
 	Data.ExpiresAt = 0.0;
 	Data.Lifetime = 0.0;
 	++Data.Generation;
-	++Data.CredentialGeneration;
 	PublishSessionSecrets();
 	// NotifySessionExpired (the game's, or a socket's) ending a refresh still running: its waiters fail Kind=Auth. From
 	// FinishRefresh(Rejected) there is none: it took its refresh out before it came here, and tells the waiters itself.
