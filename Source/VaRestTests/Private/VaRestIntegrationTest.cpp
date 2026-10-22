@@ -919,6 +919,15 @@ bool FVaRestIntegrationRetryTest::RunTest(const FString& Parameters)
 	// Own keys per run: the server counts calls per key, so no other test or run shares this state
 	const FString Key = FGuid::NewGuid().ToString(EGuidFormats::Digits);
 	{
+		// The burst below must outnumber the idle connections curl's pool can hold. While reuse is on that cap
+		// (CURLMOPT_MAXCONNECTS) is this cvar (CurlHttpManager.cpp:139; default 5, HTTP.Build.cs:66, a project may raise it
+		// with [HTTP.Curl] MaxConnects, CurlHttpManager.cpp:250-254), so it is read before the guard turns reuse off
+		const IConsoleVariable* const MaxIdleConnections = IConsoleManager::Get().FindConsoleVariable(TEXT("HTTP.Curl.MaxIdleConnections"));
+		if (!TestNotNull(TEXT("curl's idle-connection cvar exists (this half needs the curl transport)"), MaxIdleConnections))
+		{
+			return false;
+		}
+		const int32 WarmUps = FMath::Max(8, MaxIdleConnections->GetInt() + 1);
 		// libcurl's Curl_retry_request resends any HTTP request on a fresh connect when a REUSED connection yields zero bytes
 		// (lib/transfer.c:690-735 in the engine's 8.12.1 source; the engine ships 8.15.0): on a pooled keep-alive socket the
 		// flaky route's refusals can be absorbed inside one VaRest attempt, and the test would not prove VaRest's retry. With
@@ -928,9 +937,9 @@ bool FVaRestIntegrationRetryTest::RunTest(const FString& Parameters)
 		TGuardConsoleVariable<bool> NoReuse(TEXT("http.CurlReuseConnectionEnabled"), false);
 		// FORBID_REUSE closes a connection after its transfer; it does not evict the idle ones earlier tests left in curl's
 		// pool, and one of them would be picked for the flaky request. So a burst of requests goes first: concurrent, so each
-		// takes a different idle connection (or opens a new one), and each closes its own when done. Eight is more than the
-		// tests before this one keep idle at once (the limiter test runs the most, with at most four in flight).
-		constexpr int32 WarmUps = 8;
+		// takes a different idle connection (or opens a new one), and each closes its own when done. WarmUps (above) is more
+		// than the pool's cap, and at least eight: more than the tests before this one keep idle at once (the limiter test runs
+		// the most, with at most four in flight).
 		TArray<TSharedRef<TTestOutcome<FVaRestJson>, ESPMode::ThreadSafe>> Burst;
 		for (int32 Index = 0; Index < WarmUps; ++Index)
 		{
@@ -961,8 +970,8 @@ bool FVaRestIntegrationRetryTest::RunTest(const FString& Parameters)
 		if (Succeeded(*this, TEXT("the flaky route"), Flaky))
 		{
 			TestEqual(TEXT("... the server's third call"), Flaky->Value.GetValue()[TEXT("attempt")].AsInt(), 3);
-			TestTrue(TEXT("... after a VaRest retry (two refusals reached VaRest, three attempts at most)"),
-				Flaky->Response.Attempts >= 2 && Flaky->Response.Attempts <= 3);
+			// Reuse is forbidden and the pool is drained, so curl cannot absorb a refusal: each one is a VaRest attempt
+			TestEqual(TEXT("... after two VaRest retries (both refusals reached VaRest)"), Flaky->Response.Attempts, 3);
 		}
 	}
 	auto After = MakeOutcome<FVaRestJson>();
