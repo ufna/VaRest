@@ -10,6 +10,7 @@ struct FVaRestTransportResult;
 namespace VaRest::Http
 {
 	struct FClientConfig;
+	struct FDispatchTag;
 	struct FExchangeState;
 	struct FFinish;
 	class FClientState;
@@ -25,10 +26,12 @@ namespace VaRest::Http
 		/** IN-2, immediately before the transport starts */
 		void AttemptDispatched(const FExchangeState& Ex);
 		/**
-		 * IN-3, when the transport's result is back on the game thread. Non-const: it records which attempt's response the
-		 * decode task excerpts (FExchangeState::ExcerptOnDecodeAttempt, IN-14).
+		 * IN-3, when the transport's result is back on the game thread, for the dispatch Tag names: its attempt and its own
+		 * probe's times. Non-const: the current dispatch's end (bCurrent, M4a final review A1) records which attempt's
+		 * response the decode task excerpts (FExchangeState::ExcerptOnDecodeAttempt, IN-14) and resolves an earlier one's;
+		 * a stale end announces no excerpt and touches neither.
 		 */
-		void AttemptEnded(FExchangeState& Ex, const FVaRestTransportResult& Result);
+		void AttemptEnded(FExchangeState& Ex, const FVaRestTransportResult& Result, const FDispatchTag& Tag, bool bCurrent);
 		/**
 		 * IN-5, before any callback. Non-const: an announced decode excerpt that never reached the decode task resolves
 		 * first (Excerpts::ResolveDiscarded, Task 21 review M-1).

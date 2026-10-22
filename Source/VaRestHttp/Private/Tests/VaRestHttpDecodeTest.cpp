@@ -555,6 +555,80 @@ bool FVaRestHttpSaveToReissueTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpSaveToStaleCallTest, "VaRest.Http.Decode.SaveToStaleCallFile",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpSaveToStaleCallTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::DecodeTestPrivate;
+	// M4a final review A1, review A I-1 row R6 (VaRest-tqt): a PerAttempt stage proceeds again while its first trip's call
+	// still runs (a hedge, one attempt number). The second start deletes the first trip's temp file name, which does not
+	// exist yet -- the file sink creates it at the first byte -- and the request is saved from the second call. The first
+	// call then delivers a body late: its file is written after every delete that named it, and its stale end deletes it.
+	IFileManager::Get().DeleteDirectory(*DownloadDir(), false, true);
+	FTestRig Rig;
+	Rig.Fake->bCompleteOnWorker = false;
+	struct FTrips
+	{
+		TOptional<FVaRestStageNext> Next;
+		TWeakPtr<FVaRestExchange, ESPMode::ThreadSafe> Exchange;
+		FVaRestOutcomeCallback Done;
+		int32 FirstEnds = 0;
+	};
+	const TSharedRef<FTrips, ESPMode::ThreadSafe> Trips = MakeShared<FTrips, ESPMode::ThreadSafe>();
+	Rig.Client.Use(MakeStage([Trips](const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome)
+	{
+		Trips->Next.Emplace(Next);
+		Trips->Exchange = Exchange;
+		Trips->Done = MoveTemp(OnOutcome);
+		Next.Proceed(Exchange, [Trips](FVaRestAttemptOutcome&&) { ++Trips->FirstEnds; });
+	}, true), EVaRestStageSlot::PerAttempt);
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest&) { return FVaRestFakeResponse::Manual(); });
+	const FString File = DownloadDir() / TEXT("hedged.bin");
+	auto Saved = MakeOutcome<void>();
+	Observe(Rig.Client.Get<void>(TEXT("/hedged")).SaveTo(File), Saved).Send();
+	const TSharedPtr<FVaRestExchange, ESPMode::ThreadSafe> Pinned = Trips->Exchange.Pin();
+	if (Pinned.IsValid() && Trips->Next.IsSet())
+	{
+		Trips->Next.GetValue().Proceed(Pinned.ToSharedRef(), [Trips](FVaRestAttemptOutcome&& Outcome)
+		{
+			FVaRestOutcomeCallback Last = MoveTemp(Trips->Done);
+			Trips->Done.Reset();
+			if (Last)
+			{
+				Last(MoveTemp(Outcome));
+			}
+		});
+	}
+	const auto Release = [&Trips]
+	{
+		Trips->Done.Reset();
+		Trips->Next.Reset();
+	};
+	if (!TestEqual(TEXT("two transport starts under one attempt"), Rig.Fake->NumCalls(), 2))
+	{
+		Release();
+		Rig.Client.CancelAll();
+		PumpUntil([&Rig] { return Rig.Client.GetInFlightCount() == 0; });
+		return false;
+	}
+	const FString FirstFile = Rig.Fake->GetCall(0).Request.ResponseFile;
+	Rig.Fake->Complete(1, FVaRestFakeResponse::Bytes(200, { 2, 2, 2, 2 }));
+	const bool bSaved = TestTrue(TEXT("the second call's download is saved"), Rig.Wait(Saved) && Saved->SuccessCalls.load() == 1);
+	Release();
+	Rig.Drain();
+	TestTrue(TEXT("... the destination holds its bytes"), bSaved && ReadBytes(File) == TArray<uint8>({ 2, 2, 2, 2 }));
+	TestTrue(TEXT("every temp file is gone before the first call ends"), PumpUntil([] { return CountPartFiles() == 0; }, 2.0));
+	// The first call's body arrives now: the fake's file sink writes its own temp file, as the HTTP transport's does
+	Rig.Fake->Complete(0, FVaRestFakeResponse::Bytes(200, { 1, 1, 1 }));
+	TestTrue(TEXT("... after every delete that named it"), !FirstFile.IsEmpty() && IFileManager::Get().FileExists(*FirstFile));
+	TestTrue(TEXT("its late end reached only the stage"), PumpUntil([&Trips] { return Trips->FirstEnds == 1; }));
+	TestTrue(TEXT("its own temp file is deleted"), PumpUntil([] { return CountPartFiles() == 0; }, 2.0));
+	TestTrue(TEXT("the destination is untouched"), ReadBytes(File) == TArray<uint8>({ 2, 2, 2, 2 }));
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpSaveToLostFileTest, "VaRest.Http.Decode.SaveToLostTempFile",
 	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
 

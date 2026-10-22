@@ -197,12 +197,16 @@ void VaRest::Http::TracePoints::AttemptDispatched(const FExchangeState& Ex)
 	FVaRestTrace::Emit(EVaRestTraceKind::AttemptDispatched, Ex.Config->Clock->Now(), FVaRestTracePayload(TInPlaceType<FVaRestTraceAttemptDispatched>(), MoveTemp(Payload)));
 }
 
-void VaRest::Http::TracePoints::AttemptEnded(FExchangeState& Ex, const FVaRestTransportResult& Result)
+void VaRest::Http::TracePoints::AttemptEnded(FExchangeState& Ex, const FVaRestTransportResult& Result, const FDispatchTag& Tag, bool bCurrent)
 {
-	// Task 21 review M-1: an earlier attempt's decode excerpt that never reached the decode task (a custom stage replaced its
-	// 2xx and the request was re-issued) resolves before this attempt's event; checked whatever the mask, so the marker
-	// never outlives its attempt
-	Excerpts::ResolveDiscarded(Ex);
+	if (bCurrent)
+	{
+		// Task 21 review M-1: an earlier attempt's decode excerpt that never reached the decode task (a custom stage replaced
+		// its 2xx and the request was re-issued) resolves before this attempt's event; checked whatever the mask, so the
+		// marker never outlives its attempt. M4a final review A1: only at the current dispatch's end -- a stale end
+		// arrives while the marker belongs to a later dispatch, whose own end resolves it.
+		Excerpts::ResolveDiscarded(Ex);
+	}
 	if (FVaRestTrace::Detail() == EVaRestTraceDetail::None)
 	{
 		return;
@@ -213,7 +217,9 @@ void VaRest::Http::TracePoints::AttemptEnded(FExchangeState& Ex, const FVaRestTr
 	const FVaRestRedactor& Redactor = *Held;
 	FVaRestTraceAttemptEnded Payload;
 	Payload.RequestId = Ex.RequestId;
-	Payload.Attempt = Ex.Attempt;
+	// M4a final review A1 (ruling: relabel, not drop): the dispatch's own attempt, which a stale end no longer shares with
+	// the exchange (Retry dispatched the next one), so its AttemptDispatched stays paired with it
+	Payload.Attempt = Tag.Attempt;
 	Payload.Status = Result.Status;
 	if (FVaRestTrace::Wants(EVaRestTraceDetail::Headers))
 	{
@@ -226,25 +232,28 @@ void VaRest::Http::TracePoints::AttemptEnded(FExchangeState& Ex, const FVaRestTr
 	Payload.BytesDown = Result.BytesDown;
 	Payload.Failure = Result.Failure;
 	Payload.FailureDetail = Result.FailureDetail;
-	if (Ex.Probe.IsValid())
+	if (Tag.Probe.IsValid())
 	{
-		// Written on the HTTP thread by the delegates bound for this attempt (IN-3); -1 when they were not bound
-		Payload.UploadDoneAt = Ex.Probe->UploadDoneAt.load();
-		Payload.StatusAt = Ex.Probe->StatusAt.load();
+		// Written on the HTTP thread by the delegates bound for this dispatch (IN-3); -1 when they were not bound. Its own
+		// probe, not Ex.Probe, which a later dispatch replaced (A1).
+		Payload.UploadDoneAt = Tag.Probe->UploadDoneAt.load();
+		Payload.StatusAt = Tag.Probe->StatusAt.load();
 	}
 	Payload.TransportDoneAt = Result.TransportDoneAt;
 	// IN-14: a 2xx a decoder parses is excerpted on the decode task from the body itself, before the in-situ parse (zero
-	// copies); any other response has its prefix copied here and redacted on the pipe, launched after the event as in Started
+	// copies); any other response has its prefix copied here and redacted on the pipe, launched after the event as in Started.
+	// A1: a stale end's response reaches no decoder and is not the request's answer: no excerpt (bExcerptPending false), so
+	// one dispatch announces at most one Response excerpt and a stale one never takes the live dispatch's.
 	Excerpts::FJob Job;
-	if (Excerpts::WillExcerptOnDecode(Ex, Result))
+	if (bCurrent && Excerpts::WillExcerptOnDecode(Ex, Result))
 	{
-		Ex.ExcerptOnDecodeAttempt = Ex.Attempt;
+		Ex.ExcerptOnDecodeAttempt = Tag.Attempt;
 		Ex.ExcerptOnDecodeBytes = Result.Body.Num();
 		Payload.bExcerptPending = true;
 	}
-	else
+	else if (bCurrent)
 	{
-		Job = Excerpts::PrepareResponse(Ex, Result);
+		Job = Excerpts::PrepareResponse(Ex, Result, Tag.Attempt);
 		Payload.bExcerptPending = Job.IsSet();
 	}
 	FVaRestTrace::Emit(EVaRestTraceKind::AttemptEnded, Ex.Config->Clock->Now(), FVaRestTracePayload(TInPlaceType<FVaRestTraceAttemptEnded>(), MoveTemp(Payload)));

@@ -109,8 +109,8 @@ namespace VaRest::Http
 		FJob PrepareRequest(const FExchangeState& Ex);
 		/** At AttemptEnded: the decode task will excerpt this response from the body itself (a 2xx a decoder parses) */
 		bool WillExcerptOnDecode(const FExchangeState& Ex, const FVaRestTransportResult& Result);
-		/** At AttemptEnded, every other response: its prefix copied here, redacted on the pipe */
-		FJob PrepareResponse(const FExchangeState& Ex, const FVaRestTransportResult& Result);
+		/** At AttemptEnded, every other response of the current dispatch (of Attempt): its prefix copied here, redacted on the pipe */
+		FJob PrepareResponse(const FExchangeState& Ex, const FVaRestTransportResult& Result, int32 Attempt);
 		/**
 		 * On the decode task, before the parse rewrites the body in place: no copy (IN-14). Nothing when no sink wants
 		 * Bodies any more, as the pipe's path (Task 21 review M-2).

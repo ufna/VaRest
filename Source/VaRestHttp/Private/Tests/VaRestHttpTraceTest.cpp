@@ -115,22 +115,35 @@ namespace VaRest::Http::TraceTestPrivate
 	};
 
 	/**
-	 * Task 15 review m3: a PerAttempt stage that answers its attempt itself while the transport still runs, so the
-	 * transport's answer comes back after Completed. It counts the late answers it swallows.
+	 * Task 15 review m3: a PerAttempt stage that proceeds and keeps its attempt's answer until AnswerNow() answers 204
+	 * itself, while the transport still runs; what the transport reports afterwards is counted in LateAnswers and goes no
+	 * further. A held answer captures the exchange: answer it before the test ends.
 	 */
-	class FEarlyAnswerStage final : public IVaRestStage
+	class FHeldAnswerStage final : public IVaRestStage
 	{
 	public:
-		virtual FName GetStageName() const override { return TEXT("EarlyAnswer"); }
+		virtual FName GetStageName() const override { return TEXT("HeldAnswer"); }
 
 		virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) override
 		{
+			Held = MoveTemp(OnOutcome);
 			Next.Proceed(Exchange, [Swallowed = LateAnswers](FVaRestAttemptOutcome&&) { ++*Swallowed; });
-			FVaRestAttemptOutcome Early;
-			Early.Status = 204;
-			OnOutcome(MoveTemp(Early));
 		}
 
+		void AnswerNow()
+		{
+			if (!Held)
+			{
+				return;
+			}
+			FVaRestOutcomeCallback Answer = MoveTemp(Held);
+			Held.Reset();
+			FVaRestAttemptOutcome Early;
+			Early.Status = 204;
+			Answer(MoveTemp(Early));
+		}
+
+		FVaRestOutcomeCallback Held;
 		TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> LateAnswers = MakeShared<std::atomic<int32>, ESPMode::ThreadSafe>(0);
 	};
 
@@ -667,18 +680,21 @@ bool FVaRestHttpTraceLateAttemptTest::RunTest(const FString& Parameters)
 	using namespace VaRest::Http::TraceTestPrivate;
 	// Decision 24 (task 15 review m3): an attempt whose answer comes back after Completed is not reported -- the record is
 	// sealed (Inspector 2.3). A stage answers the attempt itself while the transport still runs; the transport answers later.
+	// M4a final review A1 (c): the answer cancels the call at the attempt's end, and the request completes inside the same
+	// call (the stage answers from the test body, not inside Send(), so Complete does not defer), so the call's Canceled end
+	// always comes after Completed.
 	FVaRestTrace::FScopedSinkIsolation Isolation;
 	const FSinkRef Sink = MakeSink(EVaRestTraceDetail::Metadata);
 	FVaRestTrace::AddSink(Sink);
 	FTestRig Rig;
-	const TSharedRef<FEarlyAnswerStage, ESPMode::ThreadSafe> Stage = MakeShared<FEarlyAnswerStage, ESPMode::ThreadSafe>();
+	const TSharedRef<FHeldAnswerStage, ESPMode::ThreadSafe> Stage = MakeShared<FHeldAnswerStage, ESPMode::ThreadSafe>();
 	Rig.Client.Use(Stage, EVaRestStageSlot::PerAttempt);
 	Rig.Fake->Enqueue(FVaRestFakeResponse::Manual());
 	auto Outcome = MakeOutcome<FVaRestJson>();
 	const FVaRestRequestHandle Handle = Observe(Rig.Client.Get(TEXT("/early")), Outcome).Send();
+	Stage->AnswerNow();
 	TestTrue(TEXT("the stage's answer completes the request"), Rig.Wait(Outcome));
-	TestEqual(TEXT("... while the transport call still runs"), Rig.Fake->NumInFlight(), 1);
-	Rig.Fake->Complete(0, FVaRestFakeResponse::Json(200, FUtf8StringView(UTF8TEXT("{}"))));
+	TestTrue(TEXT("... and cancels the transport call it left"), Rig.Fake->NumCalls() == 1 && Rig.Fake->GetCall(0).bCanceled);
 	const TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> Late = Stage->LateAnswers;
 	TestTrue(TEXT("the transport's answer comes back after Completed"), PumpUntil([Late] { return Late->load() == 1; }));
 	FVaRestTrace::RemoveSink(Sink);

@@ -16,6 +16,23 @@ class FVaRestRedactor;
 namespace VaRest::Http
 {
 	/**
+	 * M4a final review A1 (VaRest-tqt): one transport dispatch's identity, made by the transport stage at each start and
+	 * carried by its completion guard into FClientState::OnAttemptDone -- a parameter of its own, never a field of
+	 * FVaRestTransportResult, so a transport cannot spoof it. The attempt number alone does not name a dispatch: a
+	 * PerAttempt stage that proceeds twice starts two under one number (Decode.SaveToReissue), so the serial does. Probe
+	 * and ResponseFile are that dispatch's own (the probe is made per FVaRestTransportRequest), so a stale end is stamped
+	 * with its own transport times and deletes its own SaveTo file.
+	 */
+	struct FDispatchTag
+	{
+		int32 Attempt = 0;
+		/** Per exchange, from 1 (FExchangeState::DispatchCount); 0 = no dispatch */
+		uint32 Serial = 0;
+		TSharedPtr<FVaRestTransportProbe, ESPMode::ThreadSafe> Probe;
+		FString ResponseFile;
+	};
+
+	/**
 	 * FVaRestExchange's own state: everything a stage may not touch (final review I1). Defined here, in a Private header, so
 	 * a module outside VaRestHttp -- a game, a custom stage -- cannot name a field even by mistake; the exchange holds it by
 	 * TUniquePtr, never null between its constructor and its destructor. Reach it with Internals().
@@ -96,6 +113,16 @@ namespace VaRest::Http
 		FVaRestHeaders AttemptHeaders;
 		FString TempFile;
 		TSharedPtr<IVaRestTransportCall, ESPMode::ThreadSafe> TransportCall;
+		/** A1: transport starts so far; each FDispatchTag takes the next serial */
+		uint32 DispatchCount = 0;
+		/**
+		 * A1: the dispatch whose call TransportCall holds -- its serial (0 = none, exactly when TransportCall is null) and
+		 * attempt. Only that dispatch's end is the current one: it alone resets TransportCall, clears the progress timer,
+		 * delivers the final progress and touches the excerpt marker (OnAttemptDone).
+		 */
+		uint32 LiveDispatch = 0;
+		int32 LiveDispatchAttempt = 0;
+		/** The latest dispatch's probe (DeliverProgress reads it while that dispatch is live) */
 		TSharedPtr<FVaRestTransportProbe, ESPMode::ThreadSafe> Probe;
 		FVaRestTimerHandle ProgressTimer;
 		FVaRestProgress LastProgress;
@@ -149,7 +176,8 @@ namespace VaRest::Http
 
 		/**
 		 * IN-14, game thread: the attempt whose 2xx response the decode task excerpts (0 = none), and that response's size.
-		 * AttemptEnded sets it when it announces that excerpt; OnChainDone hands it to the decode task, and clears it, only
+		 * AttemptEnded sets it when it announces that excerpt, at the current dispatch's end only (M4a final review A1: a
+		 * stale end never touches it); OnChainDone hands it to the decode task, and clears it, only
 		 * for the outcome of that same attempt. One still set at the next AttemptEnded or at Completed was never handed
 		 * over: Excerpts::ResolveDiscarded resolves it (Task 21 review M-1).
 		 */

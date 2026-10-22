@@ -261,6 +261,148 @@ namespace VaRest::Http::ExcerptTestPrivate
 		TSharedRef<bool, ESPMode::ThreadSafe> Turned = MakeShared<bool, ESPMode::ThreadSafe>(false);
 	};
 
+	/**
+	 * M4a final review A1: a PerAttempt stage that holds the first attempt of a request tagged OnlyTag (any request when it
+	 * is none). It proceeds, and AnswerNow() answers that attempt itself while its call may still run (a user's own
+	 * timeout); what the call reports afterwards is counted in LateAnswers and goes no further. Every other pass goes
+	 * through. A held answer captures the exchange: answer it, or reset Held, before the test ends.
+	 */
+	class FHoldFirstAttempt final : public IVaRestStage
+	{
+	public:
+		virtual FName GetStageName() const override { return TEXT("HoldFirstAttempt"); }
+		virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) override
+		{
+			if ((!OnlyTag.IsNone() && Exchange->GetTag() != OnlyTag) || Exchange->GetAttempt() != 1 || Held)
+			{
+				Next.Proceed(Exchange, MoveTemp(OnOutcome));
+				return;
+			}
+			Held = MoveTemp(OnOutcome);
+			Next.Proceed(Exchange, [Late = LateAnswers](FVaRestAttemptOutcome&&) { ++*Late; });
+		}
+
+		void AnswerNow(int32 Code)
+		{
+			if (!Held)
+			{
+				return;
+			}
+			FVaRestOutcomeCallback Answer = MoveTemp(Held);
+			Held.Reset();
+			FVaRestAttemptOutcome Early;
+			Early.Status = Code;
+			Answer(MoveTemp(Early));
+		}
+
+		FName OnlyTag;
+		FVaRestOutcomeCallback Held;
+		TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> LateAnswers = MakeShared<std::atomic<int32>, ESPMode::ThreadSafe>(0);
+	};
+
+	/**
+	 * M4a final review A1 (review C M-2): a PerAttempt stage that proceeds a second time while its first trip's call still
+	 * runs (a hedge), under the same attempt number. Its answer is the second trip's outcome -- at once, or, with
+	 * bHoldSecond, when AnswerHeld() is called; the first trip's is counted in FirstEnds and goes no further. Release() at
+	 * the end of a test: the kept answer holds the exchange.
+	 */
+	class FProceedTwice final : public IVaRestStage
+	{
+	public:
+		virtual FName GetStageName() const override { return TEXT("ProceedTwice"); }
+		virtual bool MayReissue() const override { return true; }
+		virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) override
+		{
+			Kept = Exchange;
+			KeptNext.Emplace(Next);
+			Done = MakeShared<FVaRestOutcomeCallback, ESPMode::ThreadSafe>(MoveTemp(OnOutcome));
+			Next.Proceed(Exchange, [First = FirstEnds](FVaRestAttemptOutcome&&) { ++*First; });
+		}
+
+		void ProceedAgain()
+		{
+			const TSharedPtr<FVaRestExchange, ESPMode::ThreadSafe> Pinned = Kept.Pin();
+			if (!Pinned.IsValid() || !KeptNext.IsSet())
+			{
+				return;
+			}
+			KeptNext.GetValue().Proceed(Pinned.ToSharedRef(), [Up = Done, Hold = bHoldSecond, Into = HeldSecond](FVaRestAttemptOutcome&& Outcome)
+			{
+				if (Hold)
+				{
+					Into->Emplace(MoveTemp(Outcome));
+					return;
+				}
+				if (Up.IsValid() && *Up)
+				{
+					FVaRestOutcomeCallback Last = MoveTemp(*Up);
+					Up->Reset();
+					Last(MoveTemp(Outcome));
+				}
+			});
+		}
+
+		/** bHoldSecond: answers with the second trip's outcome, kept since it came back */
+		void AnswerHeld()
+		{
+			if (!HeldSecond->IsSet() || !Done.IsValid() || !*Done)
+			{
+				return;
+			}
+			FVaRestAttemptOutcome Outcome = MoveTemp(HeldSecond->GetValue());
+			HeldSecond->Reset();
+			FVaRestOutcomeCallback Last = MoveTemp(*Done);
+			Done->Reset();
+			Last(MoveTemp(Outcome));
+		}
+
+		bool HasHeldSecond() const { return HeldSecond->IsSet(); }
+
+		void Release()
+		{
+			Done.Reset();
+			KeptNext.Reset();
+			HeldSecond->Reset();
+		}
+
+		bool bHoldSecond = false;
+		TSharedRef<TOptional<FVaRestAttemptOutcome>, ESPMode::ThreadSafe> HeldSecond = MakeShared<TOptional<FVaRestAttemptOutcome>, ESPMode::ThreadSafe>();
+
+		TWeakPtr<FVaRestExchange, ESPMode::ThreadSafe> Kept;
+		TOptional<FVaRestStageNext> KeptNext;
+		TSharedPtr<FVaRestOutcomeCallback, ESPMode::ThreadSafe> Done;
+		TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> FirstEnds = MakeShared<std::atomic<int32>, ESPMode::ThreadSafe>(0);
+	};
+
+	/** Request Id's AttemptEnded payloads, in order */
+	TArray<FVaRestTraceAttemptEnded> EndsOf(const VaRest::Http::Testing::FTraceRecorder& Recorder, uint64 Id)
+	{
+		TArray<FVaRestTraceAttemptEnded> Out;
+		for (const FVaRestTraceEvent& Event : Recorder.For(Id))
+		{
+			if (Event.Kind == EVaRestTraceKind::AttemptEnded)
+			{
+				Out.Add(Event.Payload.Get<FVaRestTraceAttemptEnded>());
+			}
+		}
+		return Out;
+	}
+
+	/** How many of request Id's excerpts are its responses' (any attempt), and how many of those are Skipped: Discarded */
+	int32 CountResponseExcerpts(const VaRest::Http::Testing::FTraceRecorder& Recorder, uint64 Id, bool bOnlyDiscarded)
+	{
+		int32 Count = 0;
+		for (const FVaRestTraceExcerptEvent& One : Recorder.ExcerptsOf(Id))
+		{
+			if (One.Owner == EVaRestTraceExcerptOwner::Response
+				&& (!bOnlyDiscarded || (One.Excerpt.Kind == EVaRestExcerptKind::Skipped && One.Excerpt.SkipReason == EVaRestExcerptSkip::Discarded)))
+			{
+				++Count;
+			}
+		}
+		return Count;
+	}
+
 	/** Holds a test-owned gate's pipe busy until Release is set (or 10 s pass): what is launched behind it waits */
 	void HoldPipe(VaRest::Http::FRedactionGate& Gate, const TSharedRef<std::atomic<bool>, ESPMode::ThreadSafe>& Release)
 	{
@@ -933,6 +1075,246 @@ bool FVaRestHttpExcerptMultipartAdmissionTest::RunTest(const FString& Parameters
 	TestTrue(TEXT("under it: the parts"), Admitted.IsSet() && Admitted->Excerpt.Kind == EVaRestExcerptKind::Multipart && Admitted->Excerpt.ToText().Contains(TEXT("neo")));
 	TestEqual(TEXT("... its field's bytes copied, once"), CopiedForSmall, static_cast<int64>(3));
 	TestEqual(TEXT("the counter is back at 0"), VaRest::Http::Excerpts::PendingBytes(), static_cast<int64>(0));
+	return true;
+}
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpGoldenStaleEndTest, "VaRest.Http.Trace.Golden.StaleAttemptEnd",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpGoldenStaleEndTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::ExcerptTestPrivate;
+	// M4a final review A1, review A I-1 row R3 (VaRest-tqt; ruling: relabel, not drop): attempt 1's transport call finished
+	// (a 2xx) while a PerAttempt stage timed the attempt out with its own 503; Retry dispatched attempt 2 before attempt 1's
+	// end reached the game thread. That stale end is reported under its own attempt, after attempt 2's dispatch, announcing
+	// no excerpt; attempt 2's response gets the one decode excerpt, with no Discarded for it. Inspector 3.3 holds.
+	FTestRig Rig;
+	Rig.Fake->bCompleteOnWorker = false;
+	const TSharedRef<FHoldFirstAttempt, ESPMode::ThreadSafe> Early = MakeShared<FHoldFirstAttempt, ESPMode::ThreadSafe>();
+	FVaRestRetryPolicy Retry = FVaRestRetryPolicy::Exponential(3);
+	Retry.Backoff.Jitter = EVaRestJitter::None;
+	Rig.Client.Use(Early, EVaRestStageSlot::PerAttempt).WithRetry(Retry);
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest&) { return FVaRestFakeResponse::Manual(); });
+	FScopedTraceRecorder Scoped(EVaRestTraceDetail::Metadata | EVaRestTraceDetail::Bodies, 1024);
+	const FTraceRecorder& Recorder = *Scoped.Recorder;
+	auto Outcome = MakeOutcome<FVaRestJson>();
+	const uint64 Id = Observe(Rig.Client.Get(TEXT("/stale")), Outcome).Send().GetId();
+	if (!TestEqual(TEXT("attempt 1 is on the wire"), Rig.Fake->NumCalls(), 1))
+	{
+		Early->Held.Reset();
+		Abandon(Rig);
+		return false;
+	}
+	// The transport finished while the stage timed out: the end is queued for the game thread, the stage answers first
+	Rig.Fake->Complete(0, Json(200, R"({"n":1})"));
+	Early->AnswerNow(503);
+	Rig.Clock->Advance(0.5);
+	if (!TestEqual(TEXT("attempt 2 dispatched before attempt 1's end ran"), Rig.Fake->NumCalls(), 2))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	const TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> Late = Early->LateAnswers;
+	if (!TestTrue(TEXT("attempt 1's end arrives"), PumpUntil([Late] { return Late->load() == 1; })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Fake->Complete(1, Json(200, R"({"n":2})"));
+	if (!TestTrue(TEXT("attempt 2's 200 is the answer"), Rig.Wait(Outcome) && Outcome->SuccessCalls.load() == 1 && Outcome->Response.Attempts == 2))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Drain();
+	FlushRedactionPipe();
+	TestEqualSensitive(TEXT("the sequence: the stale end after attempt 2's dispatch, paired, not dropped"), Recorder.KindsOf(Id),
+		FString(TEXT("Started,Dispatched,Note,Dispatched,Ended,Ended,Completed")));
+	const TArray<FVaRestTraceAttemptEnded> Ends = EndsOf(Recorder, Id);
+	if (!TestEqual(TEXT("two ends"), Ends.Num(), 2))
+	{
+		return false;
+	}
+	TestTrue(TEXT("the stale end: attempt 1, its own 200, no excerpt announced"), Ends[0].Attempt == 1 && Ends[0].Status == 200 && !Ends[0].bExcerptPending);
+	TestTrue(TEXT("attempt 2's end: exactly one, announcing the decode excerpt"), Ends[1].Attempt == 2 && Ends[1].bExcerptPending);
+	const TArray<FVaRestTraceEvent> Second = ResponseExcerpts(Recorder, Id, 2);
+	TestTrue(TEXT("one Response excerpt for attempt 2, the decode task's"), Second.Num() == 1
+		&& Second[0].Payload.Get<FVaRestTraceExcerptEvent>().Excerpt.Kind == EVaRestExcerptKind::Json);
+	TestEqual(TEXT("... none for attempt 1"), ResponseExcerpts(Recorder, Id, 1).Num(), 0);
+	TestEqual(TEXT("... and no Discarded"), CountResponseExcerpts(Recorder, Id, /*bOnlyDiscarded*/ true), 0);
+	TestEqualSensitive(TEXT("every announced excerpt resolved"), Unresolved(Recorder, Id), FString());
+	FString Why;
+	TestTrue(TEXT("Inspector 3.3: the phases hold"), PhasesHold(Recorder, Id, Why));
+	TestEqualSensitive(TEXT("... (why not)"), Why, FString());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpGoldenStaleEndQueuedTest, "VaRest.Http.Trace.Golden.StaleAttemptEndQueued",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpGoldenStaleEndQueuedTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::ExcerptTestPrivate;
+	// M4a final review A1, review A I-1 row R4: as Golden.StaleAttemptEnd, but attempt 2 waits in the limiter's queue
+	// behind a blocker when attempt 1's end lands -- the attempt boundary has already numbered it 2. The end is attempt 1's.
+	FTestRig Rig;
+	Rig.Fake->bCompleteOnWorker = false;
+	const TSharedRef<FHoldFirstAttempt, ESPMode::ThreadSafe> Early = MakeShared<FHoldFirstAttempt, ESPMode::ThreadSafe>();
+	Early->OnlyTag = TEXT("Held");
+	FVaRestRetryPolicy Retry = FVaRestRetryPolicy::Exponential(3);
+	Retry.Backoff.Jitter = EVaRestJitter::None;
+	Rig.Client.Use(Early, EVaRestStageSlot::PerAttempt).WithRetry(Retry).WithMaxConcurrent(1);
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest& Request)
+	{
+		return Request.Url.EndsWith(TEXT("/stale")) && Request.Attempt == 2 ? Json(200, R"({"n":2})") : FVaRestFakeResponse::Manual();
+	});
+	const VaRest::Http::FLimiter& Slots = VaRest::Http::FClientAccess::State(Rig.Client)->GetLimiter();
+	FScopedTraceRecorder Scoped(EVaRestTraceDetail::Metadata);
+	const FTraceRecorder& Recorder = *Scoped.Recorder;
+	auto Outcome = MakeOutcome<FVaRestJson>();
+	auto Blocker = MakeOutcome<FVaRestJson>();
+	const uint64 Id = Observe(Rig.Client.Get(TEXT("/stale")).Tag(TEXT("Held")), Outcome).Send().GetId();
+	Observe(Rig.Client.Get(TEXT("/blocker")), Blocker).Send();
+	if (!TestTrue(TEXT("attempt 1 holds the slot, the blocker waits"), Rig.Fake->NumCalls() == 1 && Slots.NumQueued() == 1))
+	{
+		Early->Held.Reset();
+		Abandon(Rig);
+		return false;
+	}
+	// The stage's answer frees the slot: the blocker takes it before Retry's backoff ends
+	Early->AnswerNow(503);
+	Rig.Clock->Advance(0.5);
+	if (!TestTrue(TEXT("the blocker runs; attempt 2 waits in the queue"), Rig.Fake->NumCalls() == 2 && Slots.NumQueued() == 1))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	const TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> Late = Early->LateAnswers;
+	if (!TestTrue(TEXT("attempt 1's end arrives while attempt 2 is queued"), PumpUntil([Late] { return Late->load() == 1; })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	const TArray<FVaRestTraceAttemptEnded> Ends = EndsOf(Recorder, Id);
+	TestTrue(TEXT("it is attempt 1's end, not attempt 2's"), Ends.Num() == 1 && Ends[0].Attempt == 1 && Ends[0].Failure == EVaRestTransportFailure::Canceled);
+	Rig.Fake->Complete(1, Json(200, "{}"));
+	if (!TestTrue(TEXT("both complete"), PumpUntil([Outcome, Blocker] { return Outcome->IsDone() && Blocker->IsDone(); })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Drain();
+	TestTrue(TEXT("attempt 2's 200 is the answer"), Outcome->SuccessCalls.load() == 1 && Outcome->Response.Attempts == 2);
+	TestEqualSensitive(TEXT("the sequence"), Recorder.KindsOf(Id), FString(TEXT("Started,Dispatched,Note,Ended,Dispatched,Ended,Completed")));
+	FString Why;
+	TestTrue(TEXT("Inspector 3.3: the phases hold"), PhasesHold(Recorder, Id, Why));
+	TestEqualSensitive(TEXT("... (why not)"), Why, FString());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpExcerptPerDispatchTest, "VaRest.Http.Trace.ExcerptOnePerDispatch",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpExcerptPerDispatchTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::ExcerptTestPrivate;
+	// M4a final review A1, review C M-2: a PerAttempt stage proceeds again while its first call runs, so two dispatches share
+	// attempt 1. Both are reported (two pairs under one number, Inspector IN-2/IN-6); only the live dispatch's end may carry
+	// an excerpt, so the first call's late 2xx -- not the request's answer -- announces none, and the request has one
+	// Response excerpt, the decode task's, with no Discarded.
+	FTestRig Rig;
+	Rig.Fake->bCompleteOnWorker = false;
+	const TSharedRef<FProceedTwice, ESPMode::ThreadSafe> Hedge = MakeShared<FProceedTwice, ESPMode::ThreadSafe>();
+	Rig.Client.Use(Hedge, EVaRestStageSlot::PerAttempt);
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest&) { return FVaRestFakeResponse::Manual(); });
+	FScopedTraceRecorder Scoped(EVaRestTraceDetail::Metadata | EVaRestTraceDetail::Bodies, 1024);
+	const FTraceRecorder& Recorder = *Scoped.Recorder;
+	auto Outcome = MakeOutcome<FVaRestJson>();
+	const uint64 Id = Observe(Rig.Client.Get(TEXT("/hedged")), Outcome).Send().GetId();
+	Hedge->ProceedAgain();
+	if (!TestTrue(TEXT("two calls under attempt 1"), Rig.Fake->NumCalls() == 2 && Rig.Fake->GetCall(1).Request.Attempt == 1))
+	{
+		Hedge->Release();
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Fake->Complete(0, Json(200, R"({"n":1})"));
+	const TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> First = Hedge->FirstEnds;
+	if (!TestTrue(TEXT("the first call's end arrives"), PumpUntil([First] { return First->load() == 1; })))
+	{
+		Hedge->Release();
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Fake->Complete(1, Json(200, R"({"n":2})"));
+	const bool bDone = TestTrue(TEXT("the second call's 200 is the answer"), Rig.Wait(Outcome) && Outcome->SuccessCalls.load() == 1);
+	Hedge->Release();
+	if (!bDone)
+	{
+		Abandon(Rig);
+		return false;
+	}
+	Rig.Drain();
+	FlushRedactionPipe();
+	TestTrue(TEXT("... decoded from the second call"), Outcome->Value.IsSet() && Outcome->Value->Get(TEXT("n")).AsInt64() == 2);
+	TestEqualSensitive(TEXT("two pairs under one attempt number"), Recorder.KindsOf(Id), FString(TEXT("Started,Dispatched,Dispatched,Ended,Ended,Completed")));
+	const TArray<FVaRestTraceAttemptEnded> Ends = EndsOf(Recorder, Id);
+	TestTrue(TEXT("the first (stale) end announces no excerpt; the live one does"), Ends.Num() == 2 && Ends[0].Attempt == 1 && Ends[1].Attempt == 1
+		&& !Ends[0].bExcerptPending && Ends[1].bExcerptPending);
+	TestEqual(TEXT("one Response excerpt for the request"), CountResponseExcerpts(Recorder, Id, /*bOnlyDiscarded*/ false), 1);
+	TestEqual(TEXT("... no Discarded"), CountResponseExcerpts(Recorder, Id, /*bOnlyDiscarded*/ true), 0);
+	TestEqualSensitive(TEXT("every announced excerpt resolved"), Unresolved(Recorder, Id), FString());
+
+	// The other order: the live call's 2xx comes back first and the stage keeps it a while; the stale call's end arrives
+	// before the stage answers. That end must not resolve the live one's pending excerpt (Excerpts::ResolveDiscarded): the
+	// response still reaches the decoder, which excerpts it.
+	const TSharedRef<FProceedTwice, ESPMode::ThreadSafe> Keeper = MakeShared<FProceedTwice, ESPMode::ThreadSafe>();
+	Keeper->bHoldSecond = true;
+	FTestRig Later;
+	Later.Fake->bCompleteOnWorker = false;
+	Later.Client.Use(Keeper, EVaRestStageSlot::PerAttempt);
+	Later.Fake->SetResponder([](const FVaRestTransportRequest&) { return FVaRestFakeResponse::Manual(); });
+	auto Kept = MakeOutcome<FVaRestJson>();
+	const uint64 KeptId = Observe(Later.Client.Get(TEXT("/kept")), Kept).Send().GetId();
+	Keeper->ProceedAgain();
+	if (!TestEqual(TEXT("two calls under attempt 1, again"), Later.Fake->NumCalls(), 2))
+	{
+		Keeper->Release();
+		Abandon(Later);
+		return false;
+	}
+	Later.Fake->Complete(1, Json(200, R"({"n":2})"));
+	const TSharedRef<FProceedTwice, ESPMode::ThreadSafe> Waiting = Keeper;
+	if (!TestTrue(TEXT("the live call's 200 is back, kept by the stage"), PumpUntil([Waiting] { return Waiting->HasHeldSecond(); })))
+	{
+		Keeper->Release();
+		Abandon(Later);
+		return false;
+	}
+	Later.Fake->Complete(0, Json(200, R"({"n":1})"));
+	const TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> Stale = Keeper->FirstEnds;
+	if (!TestTrue(TEXT("then the stale call's end arrives"), PumpUntil([Stale] { return Stale->load() == 1; })))
+	{
+		Keeper->Release();
+		Abandon(Later);
+		return false;
+	}
+	Keeper->AnswerHeld();
+	const bool bKept = TestTrue(TEXT("the kept 200 is the answer"), Later.Wait(Kept) && Kept->SuccessCalls.load() == 1);
+	Keeper->Release();
+	if (!bKept)
+	{
+		Abandon(Later);
+		return false;
+	}
+	Later.Drain();
+	FlushRedactionPipe();
+	const TArray<FVaRestTraceEvent> KeptExcerpts = ResponseExcerpts(Recorder, KeptId, 1);
+	TestTrue(TEXT("the live response's one excerpt is the decode task's, not Discarded"), KeptExcerpts.Num() == 1
+		&& KeptExcerpts[0].Payload.Get<FVaRestTraceExcerptEvent>().Excerpt.Kind == EVaRestExcerptKind::Json);
+	TestEqualSensitive(TEXT("... and every announced excerpt resolved"), Unresolved(Recorder, KeptId), FString());
 	return true;
 }
 #endif // VAREST_WITH_TRACE_EXCERPTS

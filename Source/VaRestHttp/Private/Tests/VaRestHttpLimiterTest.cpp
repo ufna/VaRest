@@ -895,7 +895,8 @@ bool FVaRestHttpLimiterHoldsSlotTest::RunTest(const FString& Parameters)
 	using namespace VaRest::Http::LimiterTestPrivate;
 	// Ruling I-3, task 4 review I-1 and minor 2 (VaRestClient.h WithMaxConcurrent, EVaRestStageSlot::PerAttempt): a
 	// PerAttempt stage holds a slot from the limiter's grant until it proceeds or answers; one that answers its attempt
-	// itself while the transport call still runs gives the slot back with its answer, and the call runs on, uncounted
+	// itself while the transport call still runs gives the slot back with its answer, and the call is canceled at the
+	// attempt's end (M4a final review A1 (c); until then it ran on, uncounted)
 	FTestRig Rig;
 	Rig.Client.WithMaxConcurrent(1);
 	const TSharedRef<FHoldingStage, ESPMode::ThreadSafe> Stage = MakeShared<FHoldingStage, ESPMode::ThreadSafe>();
@@ -935,12 +936,11 @@ bool FVaRestHttpLimiterHoldsSlotTest::RunTest(const FString& Parameters)
 	{
 		return Bail();
 	}
-	TestEqual(TEXT("... while A's call runs on, uncounted"), Rig.Fake->NumInFlight(), 2);
-	Rig.Fake->Complete(0, Ok()); // A's late answer: only counted by the stage
+	TestTrue(TEXT("... and A's call is canceled with the stage's answer: B's alone runs"), Rig.Fake->GetCall(0).bCanceled && Rig.Fake->NumInFlight() == 1);
 	Rig.Fake->Complete(1, Ok());
 	TestTrue(TEXT("B finishes"), Rig.Wait(B) && B->SuccessCalls.load() == 1);
 	const TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> Late = Stage->LateAnswers;
-	TestTrue(TEXT("A's late answer came back to the stage"), PumpUntil([Late] { return Late->load() == 1; }));
+	TestTrue(TEXT("A's canceled call's end came back to the stage"), PumpUntil([Late] { return Late->load() == 1; }));
 	TestTrue(TEXT("drained"), Rig.Drain());
 	TestEqual(TEXT("A's callbacks ran once"), A->CompleteCalls.load(), 1);
 	TestTrue(TEXT("every slot came back"), Slots.NumActive() == 0 && Slots.NumQueued() == 0);

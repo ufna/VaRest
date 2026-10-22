@@ -696,7 +696,8 @@ public:
 	 *   when it leaves the queue, and so are an auth's credentials and the session headers (AuthApply). Headers set with
 	 *   WithHeader() are still the ones the request snapshotted at Send() (spec 3.1). A PerAttempt stage holds the slot
 	 *   while it works; one that answers its attempt itself while the transport call still runs gives the slot back with
-	 *   its answer, and the call it left runs on, uncounted, until the engine ends it.
+	 *   its answer, and the call it left is canceled. So is a call still running when an Outer stage's answer for the
+	 *   request is accepted; its slot comes back with that call's Canceled end (M4a final review A1).
 	 * - An auth's refresh request (FVaRestAuthRefreshContext::Request) skips the queue and takes no slot: during a refresh
 	 *   one more connection is out per refresh request the auth sends (BearerRefresh sends one), so a client whose slots
 	 *   all hold long polls can still refresh (ruling M-8).

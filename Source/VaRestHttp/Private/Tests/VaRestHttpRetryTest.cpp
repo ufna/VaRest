@@ -110,7 +110,7 @@ namespace VaRest::Http::RetryTestPrivate
 		virtual FName GetStageName() const override { return TEXT("HoldingOuter"); }
 		virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) override
 		{
-			if (!OnlyTag.IsNone() && Exchange->GetTag() != OnlyTag)
+			if ((!OnlyTag.IsNone() && Exchange->GetTag() != OnlyTag) || ++Passes > HoldPasses)
 			{
 				Next.Proceed(Exchange, MoveTemp(OnOutcome));
 				return;
@@ -145,6 +145,9 @@ namespace VaRest::Http::RetryTestPrivate
 		const bool bProceed;
 		/** Set: only requests with this tag are held; the others pass through */
 		FName OnlyTag;
+		/** How many passes are held (in the PerAttempt slot: attempts); later ones pass through, their outcomes going up */
+		int32 HoldPasses = MAX_int32;
+		int32 Passes = 0;
 		FVaRestOutcomeCallback Held;
 		TWeakPtr<FVaRestExchange, ESPMode::ThreadSafe> Kept;
 		/** What reached this stage from behind it after it had answered */
@@ -2042,6 +2045,193 @@ bool FVaRestHttpRetryQueueDeadlineEarlyTest::RunTest(const FString& Parameters)
 	Rig.Drain();
 	TestEqual(TEXT("the late one never reached the transport"), Rig.Fake->NumCalls(), 1);
 	TestEqual(TEXT("nothing left armed"), Rig.Clock->NumPendingTimers(), 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpRetryStaleEndLiveCallTest, "VaRest.Http.Retry.StaleEndKeepsLiveCall",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpRetryStaleEndLiveCallTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::RetryTestPrivate;
+	// M4a final review A1, review A I-1 row R1 (VaRest-tqt): a PerAttempt stage answers attempt 1 itself while its call runs
+	// (a user's own timeout), Retry re-issues, and attempt 1's call reports back while attempt 2's runs. That end is not the
+	// live dispatch's: Cancel() must still reach attempt 2's call, whose Canceled end gives its limiter slot back.
+	FTestRig Rig;
+	Rig.Fake->bCompleteOnWorker = false;
+	const TSharedRef<FHoldingOuter, ESPMode::ThreadSafe> Early = MakeShared<FHoldingOuter, ESPMode::ThreadSafe>(true);
+	Early->HoldPasses = 1;
+	Rig.Client.Use(Early, EVaRestStageSlot::PerAttempt).WithRetry(Exact(3));
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest&) { return FVaRestFakeResponse::Manual(); });
+	const VaRest::Http::FLimiter& Slots = VaRest::Http::FClientAccess::State(Rig.Client)->GetLimiter();
+	auto Outcome = MakeOutcome<FVaRestJson>();
+	const FVaRestRequestHandle Handle = Observe(Rig.Client.Get(TEXT("/stale")), Outcome).Send();
+	if (!TestEqual(TEXT("attempt 1 is on the wire"), Rig.Fake->NumCalls(), 1))
+	{
+		Early->Held.Reset();
+		Abandon(Rig);
+		return false;
+	}
+	Early->AnswerNow(503);
+	// Before any pump: attempt 1's end waits in the game thread's queue while the backoff dispatches attempt 2
+	Rig.Clock->Advance(0.5);
+	if (!TestEqual(TEXT("attempt 2 is on the wire"), Rig.Fake->NumCalls(), 2))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	const TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> Late = Early->LateAnswers;
+	if (!TestTrue(TEXT("attempt 1's end arrives while attempt 2 runs"), PumpUntil([Late] { return Late->load() == 1; })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	TestTrue(TEXT("... attempt 2's call runs on, holding the one slot"), !Rig.Fake->GetCall(1).bCompleted && Slots.NumActive() == 1);
+	Handle.Cancel();
+	TestTrue(TEXT("Cancel() reaches attempt 2's call"), Rig.Fake->GetCall(1).bCanceled);
+	const bool bEnded = TestTrue(TEXT("the request ends"), Rig.Wait(Outcome));
+	Rig.Drain();
+	TestTrue(TEXT("... with one OnError(Canceled)"), bEnded && Outcome->ErrorCalls.load() == 1 && Outcome->CompleteCalls.load() == 1
+		&& Outcome->Error.Kind == EVaRestErrorKind::Canceled);
+	TestEqual(TEXT("its slot came back, attempt 2's call completed by nobody but the cancel"), Slots.NumActive(), 0);
+	TestEqual(TEXT("... and no call runs on"), Rig.Fake->NumInFlight(), 0);
+	if (!Rig.Fake->GetCall(1).bCompleted)
+	{
+		// Only on the failure path: the call the cancel missed is finished here, so nothing outlives the test
+		Rig.Fake->Complete(1, Json(200));
+		Abandon(Rig);
+		Rig.Drain();
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpRetryStaleEndProgressTest, "VaRest.Http.Retry.StaleEndKeepsProgress",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpRetryStaleEndProgressTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::RetryTestPrivate;
+	// M4a final review A1, review A I-1 row R2: as StaleEndKeepsLiveCall, with OnProgress bound. Attempt 1's late end must
+	// not clear attempt 2's progress timer: the live download keeps reporting (and its owner-gone check keeps running).
+	FTestRig Rig;
+	Rig.Fake->bCompleteOnWorker = false;
+	const TSharedRef<FHoldingOuter, ESPMode::ThreadSafe> Early = MakeShared<FHoldingOuter, ESPMode::ThreadSafe>(true);
+	Early->HoldPasses = 1;
+	Rig.Client.Use(Early, EVaRestStageSlot::PerAttempt).WithRetry(Exact(3));
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest&) { return FVaRestFakeResponse::Manual(); });
+	const TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> Calls = MakeShared<std::atomic<int32>, ESPMode::ThreadSafe>(0);
+	auto Outcome = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/stale")).OnProgress([Calls](const FVaRestProgress&) { ++*Calls; }), Outcome).Send();
+	if (!TestEqual(TEXT("attempt 1 is on the wire"), Rig.Fake->NumCalls(), 1))
+	{
+		Early->Held.Reset();
+		Abandon(Rig);
+		return false;
+	}
+	Early->AnswerNow(503);
+	Rig.Clock->Advance(0.5);
+	const TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> Late = Early->LateAnswers;
+	if (!TestTrue(TEXT("attempt 2 runs when attempt 1's end arrives"), Rig.Fake->NumCalls() == 2 && PumpUntil([Late] { return Late->load() == 1; })))
+	{
+		Abandon(Rig);
+		return false;
+	}
+	const int32 Before = Calls->load();
+	Rig.Fake->ReportProgress(1, 0, 10, 100);
+	Rig.Clock->Advance(0.1);
+	TestEqual(TEXT("attempt 2's progress still reaches OnProgress after attempt 1's late end"), Calls->load(), Before + 1);
+	Rig.Fake->Complete(1, Json(200));
+	TestTrue(TEXT("attempt 2 succeeds"), Rig.Wait(Outcome) && Outcome->SuccessCalls.load() == 1 && Outcome->Response.Attempts == 2);
+	Rig.Drain();
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpRetryOrphanCanceledTest, "VaRest.Http.Retry.OrphanEndsWithItsAttempt",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpRetryOrphanCanceledTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::RetryTestPrivate;
+	// M4a final review A1 (c), review A I-1 row R5: when a PerAttempt stage's own answer for an attempt passes the attempt
+	// boundary while that attempt's call still runs, the call is canceled there, with its progress timer -- inside the
+	// answer, before Retry's backoff. Only the stage that answered hears its Canceled end.
+	FTestRig Rig;
+	const TSharedRef<FHoldingOuter, ESPMode::ThreadSafe> Early = MakeShared<FHoldingOuter, ESPMode::ThreadSafe>(true);
+	Early->HoldPasses = 1;
+	Rig.Client.Use(Early, EVaRestStageSlot::PerAttempt).WithRetry(Exact(3));
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest& Request) { return Request.Attempt == 1 ? FVaRestFakeResponse::Manual() : Json(200); });
+	auto Outcome = MakeOutcome<FVaRestJson>();
+	const int32 TimersBefore = Rig.Clock->NumPendingTimers();
+	Observe(Rig.Client.Get(TEXT("/orphan")).OnProgress([](const FVaRestProgress&) {}), Outcome).Send();
+	if (!TestTrue(TEXT("attempt 1 on the wire, its progress tick armed"), Rig.Fake->NumCalls() == 1 && Rig.Clock->NumPendingTimers() == TimersBefore + 1))
+	{
+		Early->Held.Reset();
+		Abandon(Rig);
+		return false;
+	}
+	Early->AnswerNow(503);
+	// Inside the answer, before any pump
+	TestTrue(TEXT("attempt 1's call is canceled at its attempt's end"), Rig.Fake->GetCall(0).bCanceled && Rig.Fake->NumInFlight() == 0);
+	TestEqual(TEXT("... its progress tick gone: only the backoff is armed"), Rig.Clock->NumPendingTimers(), TimersBefore + 1);
+	Rig.Clock->Advance(0.5);
+	TestTrue(TEXT("attempt 2 succeeds"), Rig.Wait(Outcome) && Outcome->SuccessCalls.load() == 1 && Outcome->Response.Attempts == 2);
+	const TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> Late = Early->LateAnswers;
+	TestTrue(TEXT("the canceled call's end reached only the stage that answered"), PumpUntil([Late] { return Late->load() == 1; }));
+	Rig.Drain();
+	TestEqual(TEXT("one delivery"), Outcome->CompleteCalls.load(), 1);
+	if (!Rig.Fake->GetCall(0).bCompleted)
+	{
+		// Only on the failure path: the call nothing canceled is finished here, so nothing outlives the test
+		Rig.Fake->Complete(0, Json(200));
+		Rig.Drain();
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpRetryOuterAnswerFreesSlotTest, "VaRest.Http.Retry.OuterAnswerFreesTheSlot",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpRetryOuterAnswerFreesSlotTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::RetryTestPrivate;
+	// M4a final review A1 (d), review A M-1 row R7: an Outer stage answers its request (504) while the attempt is on the
+	// wire. Accepting that answer cancels the call, so its limiter slot comes back with its Canceled end: with one slot, the
+	// next request reaches the transport without anyone completing the orphaned call.
+	FTestRig Rig;
+	const TSharedRef<FHoldingOuter, ESPMode::ThreadSafe> Outer = MakeShared<FHoldingOuter, ESPMode::ThreadSafe>(true);
+	Outer->OnlyTag = TEXT("Held");
+	Rig.Client.Use(Outer, EVaRestStageSlot::Outer).WithRetry(Exact(3)).WithMaxConcurrent(1);
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest& Request) { return Request.Url.EndsWith(TEXT("/held")) ? FVaRestFakeResponse::Manual() : Json(200); });
+	const VaRest::Http::FLimiter& Slots = VaRest::Http::FClientAccess::State(Rig.Client)->GetLimiter();
+	auto Answered = MakeOutcome<FVaRestJson>();
+	auto Next = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/held")).Tag(TEXT("Held")), Answered).Send();
+	Observe(Rig.Client.Get(TEXT("/next")), Next).Send();
+	if (!TestTrue(TEXT("the held request's call holds the one slot; the next one waits"), Rig.Fake->NumCalls() == 1 && Slots.NumQueued() == 1))
+	{
+		Outer->Held.Reset();
+		Abandon(Rig);
+		return false;
+	}
+	Outer->AnswerNow(504);
+	TestTrue(TEXT("the Outer stage's answer is delivered"), Rig.Wait(Answered) && Answered->Error.HttpStatus == 504);
+	TestTrue(TEXT("... and the call it left is canceled"), Rig.Fake->GetCall(0).bCanceled);
+	const bool bNext = TestTrue(TEXT("the freed slot sends the next request"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 2; }));
+	TestTrue(TEXT("... which succeeds"), bNext && Rig.Wait(Next) && Next->SuccessCalls.load() == 1);
+	if (!bNext)
+	{
+		// Only on the failure path: the orphan that kept the slot is finished here
+		Rig.Fake->Complete(0, Json(200));
+		Abandon(Rig);
+	}
+	const TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> Late = Outer->LateAnswers;
+	TestTrue(TEXT("the orphan's Canceled end reached only the stage that answered"), PumpUntil([Late] { return Late->load() == 1; }));
+	Rig.Drain();
+	TestTrue(TEXT("every slot came back"), Slots.NumActive() == 0 && Slots.NumQueued() == 0);
 	return true;
 }
 

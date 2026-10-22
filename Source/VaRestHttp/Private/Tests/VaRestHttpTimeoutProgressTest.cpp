@@ -235,7 +235,8 @@ bool FVaRestHttpProgressAfterFinishTest::RunTest(const FString& Parameters)
 	using namespace VaRest::Http::Testing;
 	using namespace VaRest::Http::TimeoutProgressTestPrivate;
 	// Task 13 review minor 5 (P13.5): a request finished while its transport call is still live must not keep its progress
-	// tick re-arming until that call ends. Timers are counted against the clock's count before the Send (P13.6).
+	// tick re-arming until that call ends. M4a final review A1 (c): the stage's answer ends the call at the attempt's end,
+	// and its tick with it, so none is left to re-arm. Timers are counted against the clock's count before the Send (P13.6).
 	FTestRig Rig;
 	TSharedRef<FEarlyAnswerStage, ESPMode::ThreadSafe> Stage = MakeShared<FEarlyAnswerStage, ESPMode::ThreadSafe>();
 	Rig.Client.Use(Stage, EVaRestStageSlot::PerAttempt);
@@ -245,15 +246,13 @@ bool FVaRestHttpProgressAfterFinishTest::RunTest(const FString& Parameters)
 	const int32 TimersBefore = Rig.Clock->NumPendingTimers();
 	Observe(Rig.Client.Get(TEXT("/early")).OnProgress([Calls](const FVaRestProgress&) { ++*Calls; }), Outcome).Send();
 	TestTrue(TEXT("the stage's answer completes the request"), Rig.Wait(Outcome));
-	TestEqual(TEXT("... while the transport call still runs"), Rig.Fake->NumInFlight(), 1);
-	TestEqual(TEXT("the progress tick was armed at dispatch"), Rig.Clock->NumPendingTimers(), TimersBefore + 1);
-	Rig.Fake->ReportProgress(0, 0, 10, 100);
+	TestTrue(TEXT("... and its transport call was canceled"), Rig.Fake->NumCalls() == 1 && Rig.Fake->GetCall(0).bCanceled && Rig.Fake->NumInFlight() == 0);
+	TestEqual(TEXT("the progress tick armed at dispatch went with it"), Rig.Clock->NumPendingTimers(), TimersBefore);
 	Rig.Clock->Advance(0.1);
-	TestEqual(TEXT("the tick of a finished request does not re-arm"), Rig.Clock->NumPendingTimers(), TimersBefore);
-	TestEqual(TEXT("... and delivers nothing (Complete took the handler)"), Calls->load(), 0);
-	Rig.Fake->Complete(0, FVaRestFakeResponse::Json(200, FUtf8StringView(UTF8TEXT("{}"))));
+	TestEqual(TEXT("nothing re-arms"), Rig.Clock->NumPendingTimers(), TimersBefore);
+	TestEqual(TEXT("... and nothing is delivered (Complete took the handler)"), Calls->load(), 0);
 	const TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> Late = Stage->LateAnswers;
-	TestTrue(TEXT("the transport's late answer is drained"), PumpUntil([Late] { return Late->load() == 1; }));
+	TestTrue(TEXT("the canceled call's end is drained"), PumpUntil([Late] { return Late->load() == 1; }));
 	TestEqual(TEXT("... and the request was delivered once"), Outcome->CompleteCalls.load(), 1);
 	return true;
 }

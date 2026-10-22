@@ -13,7 +13,8 @@
  * virtual clock, so a change in either is a deliberate one; a golden that fails names the task whose trace point moved
  * (M4a Task 5: the Note payload; Task 8: the retry stage, its note and gap; Task 11: the envelope on the decode task; M3:
  * cancel and the attach snapshot). Every golden also checks Inspector 3.3's invariant (PhasesHold, spec review I-1). The
- * auth goldens are in VaRestHttpAuthTest.cpp, beside FHandAuth; the decode-warning one is in VaRestTests (it needs a USTRUCT).
+ * auth goldens are in VaRestHttpAuthTest.cpp, beside FHandAuth; the decode-warning one is in VaRestTests (it needs a USTRUCT);
+ * the stale-dispatch ones (M4a final review A1) are in VaRestHttpExcerptTest.cpp, beside the excerpt helpers they use.
  */
 namespace VaRest::Http::GoldenTestPrivate
 {

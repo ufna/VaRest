@@ -83,8 +83,11 @@ namespace VaRest::Http
 
 		/** Game thread: a sent exchange enters the pipeline */
 		void Enter(const FVaRestExchangeRef& Exchange);
-		/** Game thread: the transport's result, brought over from the thread that completed it */
-		void OnAttemptDone(const FVaRestExchangeRef& Exchange, FVaRestTransportResult&& Result, FVaRestOutcomeCallback&& OnOutcome);
+		/**
+		 * Game thread: the transport's result, brought over from the thread that completed it, with the tag of the dispatch
+		 * that produced it (M4a final review A1)
+		 */
+		void OnAttemptDone(const FVaRestExchangeRef& Exchange, FDispatchTag&& Tag, FVaRestTransportResult&& Result, FVaRestOutcomeCallback&& OnOutcome);
 		/** Game thread */
 		int32 NumInFlight() const { return InFlight.Num(); }
 		/** Game thread */

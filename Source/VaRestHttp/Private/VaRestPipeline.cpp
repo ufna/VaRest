@@ -84,13 +84,15 @@ namespace VaRest::Http::PipelinePrivate
 	 * copied, into the game-thread continuation (review I-1: the last reference is dropped on the game thread). If the
 	 * transport destroys it uncalled -- the engine does at HTTP module shutdown and with NullHttp -- its destructor
 	 * reports TransportDropped through the same path, so the request still finishes once. A moved-from guard holds
-	 * nothing and reports nothing.
+	 * nothing and reports nothing. M4a final review A1: it carries its dispatch's tag, so OnAttemptDone can tell this
+	 * call's end from the current dispatch's.
 	 */
 	class FCompletionGuard
 	{
 	public:
-		FCompletionGuard(const FVaRestExchangeRef& InExchange, FVaRestOutcomeCallback&& InOutcome)
+		FCompletionGuard(const FVaRestExchangeRef& InExchange, FDispatchTag&& InDispatch, FVaRestOutcomeCallback&& InOutcome)
 			: Held(InExchange)
+			, Dispatch(MoveTemp(InDispatch))
 			, Outcome(MoveTemp(InOutcome))
 		{
 		}
@@ -115,14 +117,15 @@ namespace VaRest::Http::PipelinePrivate
 			{
 				return;
 			}
-			OnGameThread(TEXT("VaRest.AttemptDone"), [Target = MoveTemp(Held), Callback = MoveTemp(Outcome), Moved = MoveTemp(Result)]() mutable
+			OnGameThread(TEXT("VaRest.AttemptDone"), [Target = MoveTemp(Held), Tag = MoveTemp(Dispatch), Callback = MoveTemp(Outcome), Moved = MoveTemp(Result)]() mutable
 			{
-				Internals(*Target).State->OnAttemptDone(Target.ToSharedRef(), MoveTemp(Moved), MoveTemp(Callback));
+				Internals(*Target).State->OnAttemptDone(Target.ToSharedRef(), MoveTemp(Tag), MoveTemp(Moved), MoveTemp(Callback));
 			});
 		}
 
 	private:
 		TSharedPtr<FVaRestExchange, ESPMode::ThreadSafe> Held;
+		FDispatchTag Dispatch;
 		FVaRestOutcomeCallback Outcome;
 	};
 
@@ -159,22 +162,23 @@ namespace VaRest::Http::PipelinePrivate
 		Ex.Handler->Progress(Current);
 	}
 
-	void ScheduleProgress(const FVaRestExchangeRef& Exchange)
+	/** Serial: the dispatch this chain polls for (M4a final review A1); it stops once that dispatch is not the live one */
+	void ScheduleProgress(const FVaRestExchangeRef& Exchange, uint32 Serial)
 	{
 		FExchangeState& Ex = Internals(*Exchange);
-		if (!Ex.TransportCall.IsValid() || Exchange->IsCancelRequested() || Ex.bFinished)
+		if (!Ex.TransportCall.IsValid() || Ex.LiveDispatch != Serial || Exchange->IsCancelRequested() || Ex.bFinished)
 		{
 			// Review M-3: the timer stops once the attempt is canceled -- an OnProgress that called Cancel() included; the
 			// transport's Canceled answer is on its way, and OnAttemptDone delivers nothing for it. Task 13 review minor 5
-			// (P13.5): and once the request is finished -- a stage that answered while its inner transport call still runs
-			// leaves that call live, and Complete took the handler, so a tick could only re-arm itself until the call ends.
+			// (P13.5): and once the request is finished. A1: and once another dispatch is the live one (a PerAttempt stage
+			// that proceeded again while this call ran), so two chains never poll one probe.
 			return;
 		}
 		const TWeakPtr<FVaRestExchange, ESPMode::ThreadSafe> Weak = Exchange;
-		Ex.ProgressTimer = Ex.Config->Clock->SetTimer(ProgressInterval, [Weak]
+		Ex.ProgressTimer = Ex.Config->Clock->SetTimer(ProgressInterval, [Weak, Serial]
 		{
 			const TSharedPtr<FVaRestExchange, ESPMode::ThreadSafe> Pinned = Weak.Pin();
-			if (!Pinned.IsValid() || !Internals(*Pinned).TransportCall.IsValid())
+			if (!Pinned.IsValid() || !Internals(*Pinned).TransportCall.IsValid() || Internals(*Pinned).LiveDispatch != Serial)
 			{
 				return;
 			}
@@ -185,8 +189,30 @@ namespace VaRest::Http::PipelinePrivate
 				return;
 			}
 			DeliverProgress(Internals(*Pinned));
-			ScheduleProgress(Pinned.ToSharedRef());
+			ScheduleProgress(Pinned.ToSharedRef(), Serial);
 		});
+	}
+
+	/**
+	 * Game thread. M4a final review A1 (c, d; review A M-1): the call TransportCall holds is an orphan -- a stage answered
+	 * its attempt while it ran (the attempt boundary sees that attempt's outcome come back), or the request's answer was
+	 * accepted (FClientState::EndWaits) -- and nothing will use its result. It is canceled now, so it stops moving bytes
+	 * and the limiter slot it holds (if its outcome has not passed the grant yet) comes back with its Canceled end; its
+	 * progress timer goes. The slot is cleared first: the end arrives later (FCompletionGuard always hops) as a stale one.
+	 * A call already finished ignores the cancel (IVaRestTransportCall::Cancel); the engine's CancelRequest is once-only
+	 * (HttpRequestCommon.cpp:394-400).
+	 */
+	void CancelHeldCall(FExchangeState& Ex)
+	{
+		if (!Ex.TransportCall.IsValid())
+		{
+			return;
+		}
+		Ex.Config->Clock->ClearTimer(Ex.ProgressTimer);
+		const TSharedPtr<IVaRestTransportCall, ESPMode::ThreadSafe> Orphan = MoveTemp(Ex.TransportCall);
+		Ex.TransportCall.Reset();
+		Ex.LiveDispatch = 0;
+		Orphan->Cancel();
 	}
 
 	/**
@@ -265,7 +291,21 @@ namespace VaRest::Http::PipelinePrivate
 			// Plan decision 19: each attempt starts from the request's URL; AuthApply appends an auth's query pairs to it
 			Ex.AttemptUrl = Ex.Url;
 			Ex.LimiterWait = 0.0;
-			Next.Proceed(Exchange, MoveTemp(OnOutcome));
+			// M4a final review A1 (c): the attempt ends with its outcome. On the normal path OnAttemptDone cleared the slot
+			// before this runs; a call of this attempt still held here is one a stage answered while it ran (the stage
+			// contract allows it, VaRestStage.h:89-90). It would otherwise run on -- after Retry backs off or the gate
+			// replays -- holding its connection, writing a SaveTo file and polling progress. A held call of another attempt
+			// (an Outer stage that proceeded twice) is that attempt's own and is left alone.
+			const int32 ThisAttempt = Ex.Attempt;
+			Next.Proceed(Exchange, [Exchange, ThisAttempt, Done = MoveTemp(OnOutcome)](FVaRestAttemptOutcome&& Outcome) mutable
+			{
+				FExchangeState& Back = Internals(*Exchange);
+				if (Back.TransportCall.IsValid() && Back.LiveDispatchAttempt == ThisAttempt)
+				{
+					CancelHeldCall(Back);
+				}
+				Done(MoveTemp(Outcome));
+			});
 		}
 	};
 
@@ -508,6 +548,12 @@ namespace VaRest::Http::PipelinePrivate
 				Request.bReportStatusTime = true;
 				Request.bReportProgress = true;
 			}
+			// M4a final review A1: this dispatch's identity, which its completion carries back (FDispatchTag)
+			FDispatchTag ThisDispatch;
+			ThisDispatch.Attempt = Ex.Attempt;
+			ThisDispatch.Serial = ++Ex.DispatchCount;
+			ThisDispatch.Probe = Request.Probe;
+			ThisDispatch.ResponseFile = Ex.TempFile;
 			// IN-2: on the game thread, immediately before the transport starts
 			TracePoints::AttemptDispatched(Ex);
 			// The gap was this attempt's; the next one reports its own (IN-2), and so its own wait behind a refresh
@@ -515,13 +561,19 @@ namespace VaRest::Http::PipelinePrivate
 			Ex.NextGapSeconds = 0.0;
 			Ex.AuthWait = 0.0;
 			Ex.AuthRefreshId = 0;
-			Ex.TransportCall = Cfg.Transport->Start(MoveTemp(Request), [Guard = FCompletionGuard(Exchange, MoveTemp(OnOutcome))](FVaRestTransportResult&& Result) mutable
+			// A call still held here belongs to a PerAttempt stage that proceeded again while it ran (a hedge; the stage
+			// contract does not promise concurrent trips): this dispatch becomes the live one, and the other's progress chain
+			// stops (ScheduleProgress), its end arriving as a stale one
+			Ex.Config->Clock->ClearTimer(Ex.ProgressTimer);
+			Ex.LiveDispatch = ThisDispatch.Serial;
+			Ex.LiveDispatchAttempt = ThisDispatch.Attempt;
+			Ex.TransportCall = Cfg.Transport->Start(MoveTemp(Request), [Guard = FCompletionGuard(Exchange, MoveTemp(ThisDispatch), MoveTemp(OnOutcome))](FVaRestTransportResult&& Result) mutable
 			{
 				Guard.Deliver(MoveTemp(Result));
 			});
 			if (bWantsProgress)
 			{
-				ScheduleProgress(Exchange);
+				ScheduleProgress(Exchange, Ex.LiveDispatch);
 			}
 		}
 	};
@@ -832,15 +884,24 @@ void VaRest::Http::FClientState::Enter(const FVaRestExchangeRef& Exchange)
 	});
 }
 
-void VaRest::Http::FClientState::OnAttemptDone(const FVaRestExchangeRef& Exchange, FVaRestTransportResult&& Result, FVaRestOutcomeCallback&& OnOutcome)
+void VaRest::Http::FClientState::OnAttemptDone(const FVaRestExchangeRef& Exchange, FDispatchTag&& Tag, FVaRestTransportResult&& Result, FVaRestOutcomeCallback&& OnOutcome)
 {
 	using namespace PipelinePrivate;
 	check(IsInGameThread());
 	LLM_SCOPE_BYTAG(VaRest);
 	FExchangeState& Ex = Internals(*Exchange);
-	Ex.TransportCall.Reset();
+	// M4a final review A1 (VaRest-tqt): only the end of the dispatch TransportCall holds touches the exchange's one-call
+	// slots. Any other is stale: a call a stage answered for, which the attempt boundary or EndWaits canceled, or one a
+	// PerAttempt stage's second trip replaced. Its slots now name another call (or none), so resetting them would leave
+	// Cancel() unable to reach the live call, its limiter slot held and its progress stopped (review A I-1).
+	const bool bCurrent = Tag.Serial != 0 && Tag.Serial == Ex.LiveDispatch;
+	if (bCurrent)
+	{
+		Ex.TransportCall.Reset();
+		Ex.LiveDispatch = 0;
+	}
 	// Spec 4.8: every attempt that reached a transport, as the transport counted it -- a retried or replayed attempt each
-	// time, and a late one whose request a cancel already finished (its bytes moved all the same)
+	// time, a late one whose request a cancel already finished, and a stale one (their bytes moved all the same)
 	FHttpStats::Transferred(Counters, Result.BytesUp, Result.BytesDown);
 	if (IsOwnerGone(Ex))
 	{
@@ -850,12 +911,26 @@ void VaRest::Http::FClientState::OnAttemptDone(const FVaRestExchangeRef& Exchang
 	if (!Ex.bFinished)
 	{
 		// IN-3, "when the outcome re-enters the stage chain". After Completed (a cancel finished the request while the
-		// answer was queued) the record is sealed (Inspector 2.3), so a late attempt is not reported.
-		TracePoints::AttemptEnded(Ex, Result);
+		// answer was queued) the record is sealed (Inspector 2.3), so a late attempt is not reported. A1 (ruling: relabel,
+		// not drop): a stale end is still reported, under its own dispatch's attempt and transport times, so its
+		// AttemptDispatched stays paired; it announces no excerpt and leaves the decode marker alone.
+		TracePoints::AttemptEnded(Ex, Result, Tag, bCurrent);
 	}
-	Ex.Config->Clock->ClearTimer(Ex.ProgressTimer);
-	// The final counts, so a caller sees 100% even when the transfer was quicker than one tick (decision 8)
-	DeliverProgress(Ex);
+	if (bCurrent)
+	{
+		Ex.Config->Clock->ClearTimer(Ex.ProgressTimer);
+		// The final counts, so a caller sees 100% even when the transfer was quicker than one tick (decision 8)
+		DeliverProgress(Ex);
+	}
+	else if (!Tag.ResponseFile.IsEmpty() && (Tag.ResponseFile != Ex.TempFile || Ex.bFinished || Ex.bCompletionQueued))
+	{
+		// A1: a stale call's own SaveTo file, which it may have created after the next dispatch deleted that name (the file
+		// sink creates it at the first byte, VaRestBodySink.cpp:48), or which a Windows delete could not remove while the
+		// call held it open. The call has ended, so this cannot race it; off the game thread (spec 1). Ex.TempFile while the
+		// request is in the chain or decoding is its later owner's: the next dispatch deletes it, or the decode task renames
+		// or deletes it (RunDecode); once the answer is accepted without a decode, nothing else will.
+		UE::Tasks::Launch(TEXT("VaRest.DeleteTemp"), [Stale = MoveTemp(Tag.ResponseFile)] { IFileManager::Get().Delete(*Stale, false, false, true); });
+	}
 	FVaRestAttemptOutcome Outcome;
 	Outcome.Status = Result.Status;
 	Outcome.Headers = MoveTemp(Result.Headers);
@@ -1165,17 +1240,19 @@ void VaRest::Http::FClientState::Cancel(const FVaRestExchangeRef& Exchange, EVaR
 	}
 	if (Ex.TransportCall.IsValid())
 	{
-		// Review M-3: no progress tick after Cancel() returns (ScheduleProgress re-arms nothing once the flag is set)
-		Ex.Config->Clock->ClearTimer(Ex.ProgressTimer);
-		// The transport answers Canceled through the normal path, which releases what the attempt holds
-		Ex.TransportCall->Cancel();
 		if (!Ex.Interrupt)
 		{
+			// Review M-3: no progress tick after Cancel() returns (ScheduleProgress re-arms nothing once the flag is set)
+			Ex.Config->Clock->ClearTimer(Ex.ProgressTimer);
+			// The transport answers Canceled through the normal path, which releases what the attempt holds
+			Ex.TransportCall->Cancel();
 			return;
 		}
 		// Task 8 review I-1: a PerAttempt stage answered this call's attempt itself while the call ran (its own timeout), and
 		// a stage now waits (Retry's backoff): the call is stale -- its Canceled reaches only the stage that answered it --
-		// and the wait holds the request, so the wait is ended below as well
+		// and the wait holds the request, so the wait is ended below as well. Defence in depth since M4a final review A1:
+		// the attempt boundary cancels such a call when the stage's answer passes it, so a wait never starts with one held.
+		CancelHeldCall(Ex);
 	}
 	if (Ex.Interrupt)
 	{
@@ -1200,6 +1277,11 @@ void VaRest::Http::FClientState::Cancel(const FVaRestExchangeRef& Exchange, EVaR
 void VaRest::Http::FClientState::EndWaits(FExchangeState& Ex)
 {
 	check(IsInGameThread());
+	// M4a final review A1 (d), review A M-1: an Outer stage's answer accepted while its attempt is on the wire (a user's own
+	// timeout stage). Nothing uses that call's result any more; canceled, it stops holding its limiter slot -- its Canceled
+	// end passes the grant's release -- and writing a SaveTo file the decode task is about to finish. On the normal path
+	// OnAttemptDone cleared the slot before OnChainDone runs, so this does nothing there.
+	PipelinePrivate::CancelHeldCall(Ex);
 	if (Ex.bInLimiterQueue)
 	{
 		// Its abort answers Canceled up the chain (FLimiterStage), and no slot was held

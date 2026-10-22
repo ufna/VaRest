@@ -222,7 +222,7 @@ bool VaRest::Http::Excerpts::WillExcerptOnDecode(const FExchangeState& Ex, const
 		&& Result.Body.Num() > 0 && Ex.Handler.IsValid() && Ex.Handler->DecodesBody();
 }
 
-VaRest::Http::Excerpts::FJob VaRest::Http::Excerpts::PrepareResponse(const FExchangeState& Ex, const FVaRestTransportResult& Result)
+VaRest::Http::Excerpts::FJob VaRest::Http::Excerpts::PrepareResponse(const FExchangeState& Ex, const FVaRestTransportResult& Result, int32 Attempt)
 {
 	using namespace ExcerptsPrivate;
 	FJob Job;
@@ -233,7 +233,8 @@ VaRest::Http::Excerpts::FJob VaRest::Http::Excerpts::PrepareResponse(const FExch
 	LLM_SCOPE_BYTAG(VaRest_Trace);
 	Job.Owner = EVaRestTraceExcerptOwner::Response;
 	Job.RequestId = Ex.RequestId;
-	Job.Attempt = Ex.Attempt;
+	// The dispatch's own attempt (M4a final review A1), as its AttemptEnded carries it
+	Job.Attempt = Attempt;
 	Job.TotalBytes = Result.bBodyInFile ? Result.BytesDown : Result.Body.Num();
 	Job.Time = Ex.Config->Clock->Now();
 	// Read as the result is back, like the log stage's (VaRestLogStage.cpp:141): with what AuthApply joined in for this
