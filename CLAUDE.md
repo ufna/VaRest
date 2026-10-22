@@ -72,6 +72,9 @@ Tools/run_tests.sh                    # filter "VaRest"
 Tools/run_tests.sh VaRest.Json        # narrower filter
 Tools/run_tests.sh --no-build VaRest  # skip the build
 python3 -I Tools/testserver/selftest.py   # the HTTP test server's own tests (stdlib only)
+python3 -I Tools/testserver/ws_selftest.py  # the WebSocket test server's own tests (ws.py, the TLS listener; stdlib only)
+Tools/run_tests.sh Probe.VaRest.Lws         # LWS 3.0 probe (WS W0): minutes long, host-dependent, outside the default ^VaRest filter
+Tools/run_tests.sh --no-build Probe.VaRest.Risky.Lws.StatusInConnectionError.Refused  # may crash: one case per run; also ConnectRefused, DnsFailure, NoUpgrade, TlsVerifyFailure, KilledPending
 
 # Build only (editor target)
 /w/Unreal/UnrealEngine/Engine/Build/BatchFiles/Linux/Build.sh \
