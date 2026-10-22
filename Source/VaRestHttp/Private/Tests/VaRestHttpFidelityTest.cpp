@@ -147,6 +147,32 @@ bool FVaRestHttpFidelityBodyVerbTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpFidelityEngineBodyVerbTest, "VaRest.Http.Fidelity.BodyOnVerbEngineTransport",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpFidelityEngineBodyVerbTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	// Task 2 review minor 1: FVaRestClient::Request's promise rests on the HTTP transport's own SendsBodyFor, not on the fake's
+	// mirror. Resolve refuses before the stage chain, so nothing reaches the network: a closed loopback port is enough (a
+	// request that went out would fail there as a retryable Connection error instead).
+	const TSharedRef<IVaRestTransport, ESPMode::ThreadSafe> Engine = VaRest::Http::GetDefaultTransport();
+	TestFalse(TEXT("the HTTP transport sends no body with OPTIONS"), Engine->SendsBodyFor(TEXTVIEW("OPTIONS")));
+	TestTrue(TEXT("... and one with post, any case"), Engine->SendsBodyFor(TEXTVIEW("post")));
+	FVaRestClient Client = FVaRestClient::Make(TEXT("http://127.0.0.1:1"));
+	Client.WithLogLevel(EVaRestLogLevel::None);
+	auto Outcome = MakeOutcome<FVaRestJson>();
+	Observe(Client.Request(TEXT("OPTIONS"), TEXT("/b")).Body(TEXT("x")), Outcome).Send();
+	if (!TestTrue(TEXT("completes"), PumpUntil([Outcome] { return Outcome->IsDone(); }, 10.0, true)))
+	{
+		return false;
+	}
+	TestTrue(TEXT("OPTIONS with a body on the HTTP transport: Kind Config, not retryable, naming the verb"),
+		Outcome->Error.Kind == EVaRestErrorKind::Config && !Outcome->Error.bRetryable && Outcome->Error.Message.Contains(TEXT("OPTIONS")));
+	TestEqual(TEXT("... nothing went up"), Outcome->Response.BytesUp, static_cast<int64>(0));
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpFidelityPreCheckTest, "VaRest.Http.Fidelity.PreCheckRefusal",
 	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
 
@@ -195,6 +221,33 @@ bool FVaRestHttpFidelityPreCheckTest::RunTest(const FString& Parameters)
 		}
 		TestTrue(TEXT("a domain the filter does not allow: Kind Config, not retryable"), Outcome->Error.Kind == EVaRestErrorKind::Config && !Outcome->Error.bRetryable);
 		TestTrue(TEXT("... naming why"), Outcome->Error.Message.Contains(TEXT("DomainNotAllowed")));
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpFidelityDomainFilterInputTest, "VaRest.Http.Fidelity.DomainFilterInput",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpFidelityDomainFilterInputTest::RunTest(const FString& Parameters)
+{
+	using VaRest::Http::DomainFilterInput;
+	// Task 2 review minor 3: the mirror hands the domain filter scheme://authority, which never holds a second "://"
+	TestEqualSensitive(TEXT("the path and an absolute URL in the query go"), DomainFilterInput(TEXT("https://api.test:8443/v1/x?next=http://other/y&key=k")),
+		FString(TEXT("https://api.test:8443")));
+	TestEqualSensitive(TEXT("a query right after the host goes"), DomainFilterInput(TEXT("http://h?u=https://x")), FString(TEXT("http://h")));
+	TestEqualSensitive(TEXT("a fragment right after the host goes"), DomainFilterInput(TEXT("http://h#f")), FString(TEXT("http://h")));
+	TestEqualSensitive(TEXT("an IPv6 host and its port stay"), DomainFilterInput(TEXT("http://[::1]:8080/p")), FString(TEXT("http://[::1]:8080")));
+	TestEqualSensitive(TEXT("a bare authority is the whole URL"), DomainFilterInput(TEXT("http://h")), FString(TEXT("http://h")));
+	TestEqualSensitive(TEXT("no \"://\": the whole URL, as the engine would see it"), DomainFilterInput(TEXT("h/p")), FString(TEXT("h/p")));
+	// Same decision as the full URL, through the engine's own filter (URLRequestFilter.cpp:95-160)
+	UE::Core::FURLRequestFilter::FRequestMap Allowed;
+	Allowed.Add(TEXT("https"), TArray<FString>{ TEXT(".example.com") });
+	const UE::Core::FURLRequestFilter Filter(MoveTemp(Allowed));
+	const TCHAR* Urls[] = { TEXT("https://api.example.com/x?next=http://evil.test/"), TEXT("https://evil.test/x?next=https://api.example.com/"),
+		TEXT("http://api.example.com/x"), TEXT("https://api.example.com:8443"), TEXT("https://user@api.example.com/x") };
+	for (const TCHAR* Url : Urls)
+	{
+		TestEqual(FString::Printf(TEXT("the filter's answer for %s"), Url), Filter.IsRequestAllowed(DomainFilterInput(Url)), Filter.IsRequestAllowed(Url));
 	}
 	return true;
 }

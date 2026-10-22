@@ -122,9 +122,13 @@ public:
 	void Add(FStringView Name, FStringView Value);
 	/** Removes every header of that name; false when there was none */
 	bool Remove(FStringView Name);
-	/** The first value of Name, or null */
+	/**
+	 * The first value of Name, or null. A response has one entry per header line (plan decision 14), so for a repeated or
+	 * list-valued field (Set-Cookie, Cache-Control or Vary sent on two lines) this is its first line only: iterate (or
+	 * GetPairs()) for every line; joining list values with ", " (RFC 9110 5.3) is the caller's job, and never for Set-Cookie.
+	 */
 	const FString* Find(FStringView Name) const;
-	/** The first value of Name, or "" */
+	/** The first value of Name, or "": the first line only, as Find */
 	FString Get(FStringView Name) const;
 	bool Contains(FStringView Name) const { return Find(Name) != nullptr; }
 	int32 Num() const { return Pairs.Num(); }

@@ -104,12 +104,14 @@ What M3 knows but could not run, in the order the release pass should check it.
 
 **Every platform**
 
-1. **A URL with `://` twice warns twice, unredacted.** In non-Shipping builds `FHttpManager::IsDomainAllowed` runs
+1. **A URL with `://` twice warns once, unredacted.** In non-Shipping builds `FHttpManager::IsDomainAllowed` runs
    `CheckNoDuplicatedProtocol` (`HttpManager.cpp:279-297`), which logs the whole URL as a `LogHttp` Warning when `://`
-   appears twice (an absolute URL in a query parameter, `:286`). VaRest's PreCheck mirror calls `IsDomainAllowed` before
-   the engine's own `PreCheck` does (`HttpRequestCommon.cpp:109`), so such a request logs that Warning twice, with the raw
-   URL -- an ApiKey in the query included. It is the engine's line: the redactor never sees it. A test that sends such a
-   URL and counts expected messages counts 2.
+   appears twice (`:286`): an absolute URL written into a path's query (a `Query()` value is percent-encoded and has
+   none). The engine's own `PreCheck` makes that call once per request (`HttpRequestCommon.cpp:109`, from `PreProcess`,
+   `:184`), with the raw URL -- an ApiKey in the query included. It is the engine's line: the redactor never sees it.
+   VaRest's PreCheck mirror hands the filter only `scheme://authority` (`DomainFilterInput`; the filter decides on the
+   scheme and the domain alone, `URLRequestFilter.cpp:95-160`), so it adds no second line (task 2 review minor 3).
+   `VaRest.Integration.Http.DuplicatedProtocolWarnsOnce` counts 1 per request.
 
 ## Verified
 

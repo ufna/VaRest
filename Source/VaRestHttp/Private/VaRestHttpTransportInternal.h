@@ -45,6 +45,17 @@ namespace VaRest::Http
 	bool CurlMayRewindBodies();
 
 	/**
+	 * Task 2 review minor 3: what the PreCheck mirror hands FHttpManager::IsDomainAllowed -- the URL up to the end of its
+	 * authority (scheme://host[:port]), or the whole URL when it has no "://". The filter splits at the first "://" and
+	 * decides on the scheme and on the domain up to the first of "/?:#" after it (URLRequestFilter.cpp:95-128, :131-160),
+	 * so the prefix gets the full URL's answer. IsDomainAllowed also logs the whole URL as a Warning when "://" appears
+	 * twice (CheckNoDuplicatedProtocol, HttpManager.cpp:279-297); the engine's own PreCheck does that once per request
+	 * (HttpRequestCommon.cpp:109), and the prefix, which ends at the first '/' after the first "://", cannot hold a second
+	 * one: the mirror adds no second raw-URL line (an ApiKey in the query included).
+	 */
+	FString DomainFilterInput(const FString& Url);
+
+	/**
 	 * Decision 29, task 7 review I-1: whether the engine's progress delegate stamps UploadDoneAt (IN-3). Only for a request
 	 * with a body -- with UploadTotal 0 the first progress call qualifies, and curl's first one comes with the first response
 	 * bytes (CurlHttp.cpp:453-467), after StatusAt, which would make the Inspector's Wait phase negative -- and only where

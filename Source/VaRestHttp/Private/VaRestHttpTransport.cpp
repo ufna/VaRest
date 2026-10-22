@@ -176,13 +176,13 @@ namespace VaRest::Http::HttpTransportPrivate
 				return FailBeforeConnect(Http, Completion, TEXT("UploadReadFailed"));
 			}
 		}
-		// Plan decision 15 (final review M9): the engine's PreCheck refuses these (HttpRequestCommon.cpp:83-87, :109-113) and
-		// reports EHttpFailureReason::Other, which reads as a retryable network failure; they are the configuration's
+		// Plan decision 15 (final review M9): the engine's PreCheck refuses these (HttpRequestCommon.cpp:83-87, :109-113) as
+		// EHttpFailureReason::Other, a retryable-looking network failure; they are the configuration's (DomainFilterInput: why)
 		if (!FHttpModule::Get().IsHttpEnabled())
 		{
 			return FailBeforeConnect(Http, Completion, TEXT("HttpDisabled"));
 		}
-		if (!FHttpModule::Get().GetHttpManager().IsDomainAllowed(Request.Url))
+		if (!FHttpModule::Get().GetHttpManager().IsDomainAllowed(DomainFilterInput(Request.Url)))
 		{
 			return FailBeforeConnect(Http, Completion, TEXT("DomainNotAllowed"));
 		}
@@ -572,6 +572,21 @@ void VaRest::Http::FCountingUpload::Count(int64 Length)
 	{
 		Probe->UploadDoneAt = Clock.IsValid() ? Clock->Now() : FPlatformTime::Seconds();
 	}
+}
+
+FString VaRest::Http::DomainFilterInput(const FString& Url)
+{
+	const int32 SchemeEnd = Url.Find(TEXT("://"), ESearchCase::CaseSensitive);
+	if (SchemeEnd == INDEX_NONE)
+	{
+		return Url;
+	}
+	int32 AuthorityEnd = SchemeEnd + 3;
+	while (AuthorityEnd < Url.Len() && Url[AuthorityEnd] != TEXT('/') && Url[AuthorityEnd] != TEXT('?') && Url[AuthorityEnd] != TEXT('#'))
+	{
+		++AuthorityEnd;
+	}
+	return Url.Left(AuthorityEnd);
 }
 
 bool VaRest::Http::IsBodyVerb(FStringView Verb)

@@ -857,4 +857,34 @@ bool FVaRestIntegrationRepeatedHeadersTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestIntegrationDuplicatedProtocolTest, "VaRest.Integration.Http.DuplicatedProtocolWarnsOnce",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestIntegrationDuplicatedProtocolTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRestTestsIntegrationPrivate;
+	FString BaseUrl;
+	if (!ServerUrl(*this, BaseUrl))
+	{
+		return false;
+	}
+	// Task 2 review minor 3: outside Shipping, IsDomainAllowed logs the whole URL as a Warning when "://" appears twice
+	// (CheckNoDuplicatedProtocol, HttpManager.cpp:279-297, the line at :286). The engine's own PreCheck calls it once per
+	// request (HttpRequestCommon.cpp:109, from PreProcess at :184); VaRest's PreCheck mirror hands the filter only
+	// scheme://authority (DomainFilterInput), so it adds no second raw-URL line. A Query() value is percent-encoded and has
+	// no "://": the absolute URL is written into the path's query, which goes out as written.
+	AddExpectedMessagePlain(TEXT("Duplicated delimiter '://' found in url"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
+	FVaRestClient Client = MakeClient(BaseUrl);
+	auto Outcome = MakeOutcome<FVaRestJson>();
+	Observe(Client.Get(TEXT("/echo?next=https://example.invalid/after")), Outcome).Send();
+	if (!TestTrue(TEXT("completes"), Wait(Outcome)) || !Succeeded(*this, TEXT("the request"), Outcome))
+	{
+		return false;
+	}
+	TestEqualSensitive(TEXT("the absolute URL in the query went out as written"), Outcome->Value.GetValue()[TEXT("query")][TEXT("next")][0].AsString(),
+		FString(TEXT("https://example.invalid/after")));
+	return true;
+}
+
 #endif
