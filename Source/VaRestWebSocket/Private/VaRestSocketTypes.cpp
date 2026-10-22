@@ -6,7 +6,21 @@
 
 namespace VaRest::WebSocket::VaRestSocketTypesPrivate
 {
-	/** A frame of Size payload bytes with zeroed headroom; Size must fit an int32 with the headroom */
+	/** Size payload bytes and the headroom fit one TArray<uint8> (an int32 count): past it, FrameHeadroom + Size overflows */
+	bool FitsFrame(int64 Size)
+	{
+		return Size <= MAX_int32 - VaRest::WebSocket::FrameHeadroom;
+	}
+
+	/** What a payload past FitsFrame becomes: invalid (Length -1), so Send refuses it */
+	FVaRestSocketFrame MakeOversizedFrame()
+	{
+		FVaRestSocketFrame Out;
+		Out.Length = -1;
+		return Out;
+	}
+
+	/** A frame of Size payload bytes with zeroed headroom; Size must pass FitsFrame */
 	FVaRestSocketFrame Allocate(EVaRestSocketFrameKind Kind, int32 Size)
 	{
 		FVaRestSocketFrame Out;
@@ -26,6 +40,11 @@ namespace VaRest::WebSocket::VaRestSocketTypesPrivate
 FVaRestSocketFrame FVaRestSocketFrame::Text(FUtf8StringView InText)
 {
 	using namespace VaRest::WebSocket::VaRestSocketTypesPrivate;
+	if (!FitsFrame(InText.Len()))
+	{
+		// As the FStringView overload: past what a TArray holds, an invalid frame, which Send refuses
+		return MakeOversizedFrame();
+	}
 	FVaRestSocketFrame Out = Allocate(EVaRestSocketFrameKind::Text, InText.Len());
 	if (InText.Len() > 0)
 	{
@@ -38,12 +57,10 @@ FVaRestSocketFrame FVaRestSocketFrame::Text(FStringView InText)
 {
 	using namespace VaRest::WebSocket::VaRestSocketTypesPrivate;
 	const int64 Bytes = VaRest::Json::Utf8Length(InText);
-	if (Bytes > MAX_int32 - VaRest::WebSocket::FrameHeadroom)
+	if (!FitsFrame(Bytes))
 	{
 		// Past what a TArray holds: an invalid frame, which Send refuses
-		FVaRestSocketFrame Invalid;
-		Invalid.Length = -1;
-		return Invalid;
+		return MakeOversizedFrame();
 	}
 	FVaRestSocketFrame Out = Allocate(EVaRestSocketFrameKind::Text, static_cast<int32>(Bytes));
 	int32 Replaced = 0;
@@ -58,6 +75,10 @@ FVaRestSocketFrame FVaRestSocketFrame::Text(FStringView InText)
 FVaRestSocketFrame FVaRestSocketFrame::Binary(TConstArrayView<uint8> InBytes)
 {
 	using namespace VaRest::WebSocket::VaRestSocketTypesPrivate;
+	if (!FitsFrame(InBytes.Num()))
+	{
+		return MakeOversizedFrame();
+	}
 	FVaRestSocketFrame Out = Allocate(EVaRestSocketFrameKind::Binary, InBytes.Num());
 	if (InBytes.Num() > 0)
 	{

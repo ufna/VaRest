@@ -105,10 +105,11 @@ struct VARESTWEBSOCKET_API FVaRestSocketFrame
 	int32 Offset = VaRest::WebSocket::FrameHeadroom;
 	int32 Length = 0;
 
-	/** UTF-8 text, copied once after FrameHeadroom; not validated (the caller's bytes are the caller's) */
+	/** UTF-8 text, copied once after FrameHeadroom; not validated (the caller's bytes are the caller's). Past 2 GiB: an invalid frame */
 	static FVaRestSocketFrame Text(FUtf8StringView InText);
 	/** Text as UTF-8; an unpaired surrogate becomes U+FFFD (VaRest::Json::WriteUtf8). Past 2 GiB: an invalid frame */
 	static FVaRestSocketFrame Text(FStringView InText);
+	/** The bytes, copied once after FrameHeadroom. Past 2 GiB: an invalid frame */
 	static FVaRestSocketFrame Binary(TConstArrayView<uint8> InBytes);
 	/** An encoder's buffer as it is: unset unless InOffset >= FrameHeadroom and InOffset + InLength <= its size */
 	static TOptional<FVaRestSocketFrame> FromStorage(EVaRestSocketFrameKind InKind, TArray<uint8>&& InStorage, int32 InOffset, int32 InLength);

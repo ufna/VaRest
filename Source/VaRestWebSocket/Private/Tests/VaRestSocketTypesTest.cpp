@@ -65,6 +65,14 @@ bool FVaRestSocketTypesFrameTest::RunTest(const FString& Parameters)
 	Over.SetNumZeroed(20);
 	TestFalse(TEXT("a length past the storage is refused"), FVaRestSocketFrame::FromStorage(EVaRestSocketFrameKind::Text, MoveTemp(Over), 16, 5).IsSet());
 	TestFalse(TEXT("a default frame has no storage and is not valid"), FVaRestSocketFrame().IsValid());
+
+	// Task 2 review carry: a payload that overflows FrameHeadroom + its size in int32 is an invalid frame, as the FStringView
+	// overload already made it. The views only name a length past their one real byte: the guard returns before any read
+	static const uint8 OneByte = 0;
+	const FVaRestSocketFrame HugeText = FVaRestSocketFrame::Text(FUtf8StringView(reinterpret_cast<const UTF8CHAR*>(&OneByte), MAX_int32));
+	TestTrue(TEXT("UTF-8 text past MAX_int32 - FrameHeadroom is an invalid frame"), !HugeText.IsValid() && HugeText.Length == -1 && HugeText.Storage.Num() == 0);
+	const FVaRestSocketFrame HugeBinary = FVaRestSocketFrame::Binary(TConstArrayView<uint8>(&OneByte, MAX_int32 - FrameHeadroom + 1));
+	TestTrue(TEXT("binary one byte past MAX_int32 - FrameHeadroom is an invalid frame"), !HugeBinary.IsValid() && HugeBinary.Length == -1 && HugeBinary.Storage.Num() == 0);
 	return true;
 }
 
@@ -88,6 +96,14 @@ bool FVaRestSocketTypesCloseCodesTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("... unchanged"), bReplaced);
 	TestEqual(TEXT("1006 becomes 1000 (spec 3.5)"), SanitizeCloseCode(1006, bReplaced), 1000);
 	TestTrue(TEXT("... replaced"), bReplaced);
+	// Task 2 review carry: the codes VaRest itself sends -- a normal close, a release or shutdown, a bad text message, a
+	// message too big -- pass unchanged and unflagged
+	for (const int32 Code : { 1000, 1001, 1007, 1009 })
+	{
+		bReplaced = true;
+		TestEqual(FString::Printf(TEXT("VaRest's own %d is sent as given"), Code), SanitizeCloseCode(Code, bReplaced), Code);
+		TestFalse(FString::Printf(TEXT("... %d not flagged replaced"), Code), bReplaced);
+	}
 	return true;
 }
 
@@ -115,6 +131,30 @@ bool FVaRestSocketTypesCloseReasonTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("a cut never splits a code point"), Cyrillic.Num(), 122);
 	TestTrue(TEXT("... so the reason stays UTF-8"), IsUtf8(Cyrillic));
 	TestTrue(TEXT("... and is reported cut"), bTruncated);
+	// Task 2 review carries: three-byte code points (U+20AC) at the limit and past it, and a surrogate pair across it
+	const TCHAR Euro = static_cast<TCHAR>(0x20AC);
+	const TArray<uint8> FortyOne = CloseReasonBytes(FString::ChrN(41, Euro), bTruncated);
+	TestEqual(TEXT("41 x U+20AC is 123 bytes, kept whole"), FortyOne.Num(), MaxCloseReasonBytes);
+	TestFalse(TEXT("... 41 x U+20AC not reported cut"), bTruncated);
+	// 126 bytes: byte 123 starts the 42nd code point, so the cut at 123 is already on a boundary and the first 41 stay
+	const TArray<uint8> FortyTwo = CloseReasonBytes(FString::ChrN(42, Euro), bTruncated);
+	TestEqual(TEXT("42 x U+20AC is cut to 41 of them, 123 bytes"), FortyTwo.Num(), MaxCloseReasonBytes);
+	TestTrue(TEXT("... 42 x U+20AC reported cut"), bTruncated);
+	TestTrue(TEXT("... 41 x U+20AC left, still UTF-8"), IsUtf8(FortyTwo));
+	// U+1F600 as its UTF-16 surrogate pair, D83D DE00; in UTF-8 it is four bytes, F0 9F 98 80
+	const TCHAR Smile[] = { static_cast<TCHAR>(0xD83D), static_cast<TCHAR>(0xDE00), 0 };
+	// 40 x U+20AC and U+1F600 are 124 bytes: byte 123 is the last byte of the four, so the cut goes back to 120
+	const FString FourByteTail = FString::ChrN(40, Euro) + Smile;
+	const TArray<uint8> Back = CloseReasonBytes(FourByteTail, bTruncated);
+	TestEqual(TEXT("a cut inside a four-byte code point goes back to its start, 120 bytes"), Back.Num(), 120);
+	TestTrue(TEXT("... the four-byte tail reported cut"), bTruncated);
+	TestTrue(TEXT("... 40 x U+20AC left, still UTF-8"), IsUtf8(Back));
+	// 122 'a' and a surrogate pair (U+1F600, 4 bytes) are 126 bytes: the pair is dropped whole, 122 bytes stay
+	const FString PairTail = FString::ChrN(122, TEXT('a')) + Smile;
+	const TArray<uint8> Pair = CloseReasonBytes(PairTail, bTruncated);
+	TestEqual(TEXT("122 'a' and a surrogate pair are cut to 122 bytes"), Pair.Num(), 122);
+	TestTrue(TEXT("... the pair's tail reported cut"), bTruncated);
+	TestTrue(TEXT("... 122 'a' left, still UTF-8"), IsUtf8(Pair));
 	return true;
 }
 
@@ -149,6 +189,16 @@ bool FVaRestSocketTypesPeerCloseTest::RunTest(const FString& Parameters)
 	const FPeerClose Repaired = ParsePeerClose(Bad);
 	TestEqualSensitive(TEXT("ill-formed reason bytes become U+FFFD"), Repaired.Reason, FString(TEXT("�(")));
 	TestTrue(TEXT("... repaired"), Repaired.bReasonRepaired);
+	// Task 2 review carry: every code a peer must not send (the ones never on the wire, a reserved one, one past 4999) is
+	// reported as 1005, the two bytes received kept
+	for (const int32 Code : { 1004, 1006, 1015, 2999, 5000 })
+	{
+		const uint8 Wire[] = { static_cast<uint8>(Code >> 8), static_cast<uint8>(Code & 0xFF) };
+		const FPeerClose Parsed = ParsePeerClose(Wire);
+		TestEqual(FString::Printf(TEXT("a peer's %d is reported as 1005"), Code), Parsed.Code, 1005);
+		TestEqual(FString::Printf(TEXT("... %d kept as received"), Code), Parsed.ReceivedCode, Code);
+		TestTrue(FString::Printf(TEXT("... %d flagged normalised"), Code), Parsed.bCodeNormalised);
+	}
 	return true;
 }
 
