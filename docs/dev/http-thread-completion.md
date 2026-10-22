@@ -91,7 +91,10 @@ What M3 knows but could not run, in the order the release pass should check it.
    multipart POST to `/status/307?location=/echo`.
    VaRest's own re-issues -- a retry (M4a Task 8) and a session replay after a refresh (Task 17) -- are new engine requests
    with a new stream (M4a plan decision 24), so they are not affected; only a resend NSURLSession attempts by itself is.
-   Check `VaRest.Http.Auth.ReplayBodies` and `VaRest.Http.Retry.BodiesResent` on the device.
+   Check `VaRest.Integration.Http.RetryResendsStreamBody` on the device: a multipart `.Idempotent()` POST with a file part
+   through `/retry-after/1`, whose second attempt must bring the whole body again -- the route's 200 echoes the bytes it
+   received. (`VaRest.Http.Auth.ReplayBodies` and `VaRest.Http.Retry.BodiesResent` run on the fake transport, so they
+   cannot see NSURLSession re-read a stream; M4a final review A8.)
 
 **Win64**
 

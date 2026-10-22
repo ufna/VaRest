@@ -989,6 +989,50 @@ bool FVaRestIntegrationRetryTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestIntegrationRetryStreamTest, "VaRest.Integration.Http.RetryResendsStreamBody",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestIntegrationRetryStreamTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRestTestsIntegrationPrivate;
+	// M4a final review A8 (review C M-6; docs/dev/http-thread-completion.md, Apple 5): a multipart body with a file part goes
+	// to the engine as a stream (SetContentFromStream). An Idempotent() POST is retried after the server's 503, and the
+	// retry is a new engine request with a new stream; the server's 200 echoes the bytes the second attempt brought, so a
+	// transport that did not send the whole stream again (NSURLSession re-reading a spent stream) fails this on a device.
+	FString BaseUrl;
+	if (!ServerUrl(*this, BaseUrl))
+	{
+		return false;
+	}
+	FVaRestClient Client = MakeClient(BaseUrl);
+	const FString Dir = MakeTempDir();
+	const FString FilePath = Dir / TEXT("resent.bin");
+	FFileHelper::SaveArrayToFile(Pattern(256 * 1024), *FilePath);
+	FVaRestMultipart Streamed;
+	Streamed.AddField(TEXT("note"), TEXT("again"));
+	Streamed.AddFile(TEXT("doc"), FilePath);
+	const TValueOrError<FVaRestRequestBody, FString> Built = FVaRestRequestBody::FromMultipart(Streamed);
+	if (!TestTrue(TEXT("the body builds, streamed"), Built.HasValue() && Built.GetValue().IsStreamed()))
+	{
+		IFileManager::Get().DeleteDirectory(*Dir, false, true);
+		return false;
+	}
+	const int64 Size = Built.GetValue().ContentLength;
+	const FString Key = FGuid::NewGuid().ToString(EGuidFormats::Digits);
+	auto Resent = MakeOutcome<FVaRestJson>();
+	Observe(Client.Post(TEXT("/retry-after/1")).Query(TEXT("key"), Key).Query(TEXT("seconds"), TEXT("0")).Body(Streamed).Idempotent().Retry(QuickRetry(3)), Resent).Send();
+	const bool bDone = TestTrue(TEXT("the retried upload completes"), Wait(Resent));
+	if (bDone && Succeeded(*this, TEXT("the retried upload"), Resent))
+	{
+		TestEqual(TEXT("... on the server's second call"), Resent->Value.GetValue()[TEXT("attempt")].AsInt(), 2);
+		TestEqual(TEXT("... after one VaRest retry"), Resent->Response.Attempts, 2);
+		TestEqual(TEXT("... whose attempt sent the whole streamed body again"), Resent->Value.GetValue()[TEXT("received")].AsInt64(), Size);
+	}
+	IFileManager::Get().DeleteDirectory(*Dir, false, true);
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestIntegrationAuthTest, "VaRest.Integration.Http.AuthRefresh",
 	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
 

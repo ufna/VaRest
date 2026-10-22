@@ -43,6 +43,7 @@ not an integer or is out of its range 400 ({"error", "name", ...}); each closes 
                             absolute name, a symlink or anything whose real path is not directly in that directory
   For M4's stage tests (core spec 7.1):
   ANY  /retry-after/<n>?key=<k>&seconds=<s>   the first n calls per key: 503 with Retry-After: s; then 200
+                            {"attempt", "received": the request body's byte count, as read (chunked included)}
   GET  /etag?tag=<t>        ETag "t"; a matching If-None-Match gets 304
   POST /login {"user": "neo", "password": "trinity"} -> {"accessToken", "refreshToken", "expiresIn"}
   POST /refresh {"refreshToken"} -> new tokens; the old refresh token is spent
@@ -395,7 +396,9 @@ def route_retry_after(h, match):
     if seen < failures:
         h.send_json(503, {"attempt": seen + 1}, [("Retry-After", h.query.get("seconds", ["1"])[0])])
     else:
-        h.send_json(200, {"attempt": seen + 1})
+        # M4a final review A8: the bytes this call's body brought, so a client can check that a retried attempt sent its
+        # whole (streamed) body again
+        h.send_json(200, {"attempt": seen + 1, "received": len(h.body or b"")})
 
 
 def route_etag(h, match):

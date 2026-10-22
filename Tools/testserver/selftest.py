@@ -270,7 +270,14 @@ class ServerTest(unittest.TestCase):
         status, headers, _ = self.call("GET", "/retry-after/2?seconds=3&key=" + key)
         self.assertEqual((status, headers["Retry-After"]), (503, "3"))
         self.assertEqual(self.call("GET", "/retry-after/2?key=" + key)[0], 503)
-        self.assertEqual(self.call_json("GET", "/retry-after/2?key=" + key)[2], {"attempt": 3})
+        self.assertEqual(self.call_json("GET", "/retry-after/2?key=" + key)[2], {"attempt": 3, "received": 0})
+
+    def test_retry_after_echoes_body_size(self):
+        # M4a final review A8: the 200 says how many body bytes the call brought, plain or chunked
+        key = uuid.uuid4().hex
+        self.assertEqual(self.call("POST", "/retry-after/1?key=" + key, b"x" * 1000)[0], 503)
+        self.assertEqual(self.call_json("POST", "/retry-after/1?key=" + key, b"y" * 1234)[2], {"attempt": 2, "received": 1234})
+        self.assertEqual(self.call_json("POST", "/retry-after/0?key=" + uuid.uuid4().hex, b"z" * 777, chunked=True)[2], {"attempt": 1, "received": 777})
 
     def test_etag(self):
         status, headers, _ = self.call("GET", "/etag?tag=v7")
