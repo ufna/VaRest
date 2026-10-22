@@ -483,6 +483,14 @@ void FVaRestClient::ClearSecretValues()
 	}
 }
 
+TSharedRef<const FVaRestRedactor, ESPMode::ThreadSafe> FVaRestClient::GetRedactor() const
+{
+	check(IsInGameThread());
+	// The published one, as every line about the client's requests starts from (FClientState::GetRedactor); an empty client
+	// has none to give, and a fresh one with nothing in it redacts what the default rules do
+	return State.IsValid() ? State->GetRedactor() : MakeShared<const FVaRestRedactor, ESPMode::ThreadSafe>();
+}
+
 void FVaRestClient::SetBearerToken(FStringView AccessToken, bool bSameIdentity)
 {
 	check(IsInGameThread());

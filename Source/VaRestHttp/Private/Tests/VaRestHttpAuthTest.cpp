@@ -719,6 +719,53 @@ bool FVaRestHttpAuthApplyTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthGetRedactorTest, "VaRest.Http.Auth.GetRedactorCoversApplyAuth",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthGetRedactorTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	// M4a final review B8 (review B m-8): a socket (W5, VaRest-81s) must keep what ApplyAuth wrote redacted, and the keys
+	// for it live only in the client's redactor. GetRedactor() is the one the client publishes now: it masks every value
+	// ApplyAuth wrote and every name it wrote one under -- names chosen outside the built-in key list (layer 1), so only the
+	// client's own keys can mask them -- and the game's own secret. One taken before a logout still knows the old token;
+	// the client's current one forgets it at once (Inspector 12). An empty client gives one that knows no client's values.
+	FTestRig Rig;
+	Rig.Client.WithAuth(FVaRestAuth::ApiKey(EVaRestApiKeyPlacement::Query, TEXT("studio_key"), TEXT("studio-key-value-123456")));
+	Rig.Client.SetSession(TEXT("session-access-123456"), TEXT("session-refresh-123456"));
+	Rig.Client.SetSessionHeader(TEXT("X-Player-Ticket"), TEXT("player-ticket-123456"));
+	Rig.Client.SetSecretValue(TEXT("Game"), TEXT("game-secret-123456"));
+	FVaRestHeaders Headers;
+	TArray<TPair<FString, FString>> Query;
+	if (!TestTrue(TEXT("ApplyAuth writes the key into the query and the session header"), Rig.Client.ApplyAuth(Headers, Query)
+		&& Query.Num() == 1 && Headers.Contains(TEXT("X-Player-Ticket"))))
+	{
+		return false;
+	}
+	const TSharedRef<const FVaRestRedactor, ESPMode::ThreadSafe> Taken = Rig.Client.GetRedactor();
+	const TSharedPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> State = VaRest::Http::FClientAccess::State(Rig.Client);
+	TestTrue(TEXT("the client's published redactor itself"), State.IsValid() && &Taken.Get() == &State->GetRedactor().Get());
+	FString Written = FString::Printf(TEXT("%s %s game-secret-123456 session-refresh-123456"), *Query[0].Value, *Headers.Get(TEXT("X-Player-Ticket")));
+	const FString Scrubbed = Taken->ScrubText(Written);
+	for (const TCHAR* Value : { TEXT("studio-key-value-123456"), TEXT("player-ticket-123456"), TEXT("game-secret-123456"), TEXT("session-refresh-123456") })
+	{
+		TestFalse(FString::Printf(TEXT("value %s scrubbed"), Value), Scrubbed.Contains(Value));
+	}
+	TestEqualSensitive(TEXT("the auth's query name is a key (a short value too)"), Taken->RedactUrl(TEXT("wss://api.test/ws?studio_key=short&page=2")),
+		FString(TEXT("wss://api.test/ws?studio_key=***&page=2")));
+	FVaRestHeaders Short;
+	Short.Set(TEXT("X-Player-Ticket"), TEXT("short"));
+	TestEqualSensitive(TEXT("the session header's name is a key"), Taken->RedactHeaders(Short).Get(TEXT("X-Player-Ticket")), FString(TEXT("***")));
+	Rig.Client.ClearSession();
+	TestFalse(TEXT("taken before a logout, it still scrubs the old token"), Taken->ScrubText(TEXT("session-access-123456")).Contains(TEXT("session-access-123456")));
+	TestTrue(TEXT("... the client's current one forgot it"), Rig.Client.GetRedactor()->ScrubText(TEXT("session-access-123456")).Contains(TEXT("session-access-123456")));
+	const FVaRestClient Empty;
+	TestEqualSensitive(TEXT("an empty client: a redactor that knows no client's values"), Empty.GetRedactor()->ScrubText(TEXT("game-secret-123456")),
+		FString(TEXT("game-secret-123456")));
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthInvalidBuiltinTest, "VaRest.Http.Auth.InvalidBuiltinAuth",
 	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
 

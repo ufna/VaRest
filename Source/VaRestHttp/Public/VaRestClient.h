@@ -11,6 +11,7 @@
 #include "VaRestEnvelope.h"
 #include "VaRestHttpTypes.h"
 #include "VaRestJsonConvert.h"
+#include "VaRestRedactor.h"
 #include "VaRestResultHandler.h"
 #include "VaRestRetry.h"
 #include "VaRestUrl.h"
@@ -737,6 +738,17 @@ public:
 	 * known while they are in use: a logout is ClearSession().
 	 */
 	void ClearSecretValues();
+	/**
+	 * Game thread: the redactor this client publishes now (Inspector IN-13, M4a final review B8) -- layer 2's keys (the
+	 * project's, WithRedactedKeys(), the auth's key and token-path names, the session headers' names) and layer 3's values
+	 * (the session's tokens and header values, the auth's secrets, SetSecretValue()'s). Immutable: any thread may use it once
+	 * taken. A later one may know less: a rotated value is forgotten after 10 minutes, a logout's at once, and past
+	 * FVaRestSecretSet::MaxPrevious previous values the oldest goes. So a caller that must keep what it sent redacted for
+	 * longer -- the socket, for what ApplyAuth() wrote (W5, VaRest-81s) -- keeps the redactor it took when it sent and scrubs
+	 * with it and with the current one, as the core does for a request (RedactorFor). An empty client gives one with no
+	 * secret values and the default rules.
+	 */
+	TSharedRef<const FVaRestRedactor, ESPMode::ThreadSafe> GetRedactor() const;
 	/** A custom stage (spec 4): Outer sees each logical request once; PerAttempt every attempt, after the limiter's grant, with its final headers */
 	FVaRestClient& Use(FVaRestStageRef Stage, EVaRestStageSlot Slot);
 
@@ -828,7 +840,8 @@ public:
 	 * misconfigured (ruling Q7): then OutConfigError, when given, says why (scrubbed of this client's known secrets), and the
 	 * socket fails Kind=Config. True with no auth at all. OutConfigError is emptied first.
 	 * Every value this writes is a secret and every name a redaction key (credentials and session-header values): the core
-	 * records nothing for the caller, so the caller (the socket, W5) keeps them redacted in its own lines and traces.
+	 * records nothing for the caller, so the caller (the socket, W5) keeps them redacted in its own lines and traces --
+	 * with the redactor GetRedactor() gives at this call, which knows them all.
 	 * A false for missing credentials may leave the session headers in OutHeaders already.
 	 */
 	bool ApplyAuth(FVaRestHeaders& OutHeaders, TArray<TPair<FString, FString>>& OutQuery, FString* OutConfigError = nullptr) const;
