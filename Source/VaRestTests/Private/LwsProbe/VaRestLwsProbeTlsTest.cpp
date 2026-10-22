@@ -11,8 +11,10 @@
 #include "Engine/Engine.h"
 #include "IWebSocket.h"
 #include "Misc/AutomationTest.h"
+#include "Misc/CommandLine.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/CoreDelegates.h"
+#include "Misc/Parse.h"
 #include "Misc/Paths.h"
 #include "Misc/ScopeExit.h"
 #include "Misc/StringOutputDevice.h"
@@ -184,6 +186,11 @@ namespace VaRest::LwsProbe::VaRestLwsProbeTlsTestPrivate
 	{
 		FString Out;
 #if UE_ALLOW_EXEC_COMMANDS
+		if (!GEngine)
+		{
+			// The caller warns: an empty result means the verbosity is neither raised nor restored
+			return Out;
+		}
 		FStringOutputDevice Listing;
 		Listing.SetAutoEmitLineTerminator(true);
 		GEngine->Exec(nullptr, *FString::Printf(TEXT("Log list %s"), Category), Listing);
@@ -236,11 +243,13 @@ bool FVaRestLwsProbeTlsEnginePathTest::RunTest(const FString& Parameters)
 	{
 		return false;
 	}
+	// Observed is what the rig measured (whether a context came from the SSL module and was provided); why it did not is
+	// the source's, so it goes in the evidence (review minor 2)
 	Fact(*this, TEXT("tls.ssl_module_ctx"), AgreesIf(Rig.UsedSslModuleContext()),
 		Rig.UsedSslModuleContext() ? FString(TEXT("the SSL module's SSL_CTX (ISslManager::CreateSslContext) was provided"))
-			: FString::Printf(TEXT("no SSL module context in this %s build: InitializeSsl() is false, CreateSslContext null (SslManager.cpp:26-55, :76-131); LWS made its own (DO_SSL_GLOBAL_INIT)"), IS_MONOLITHIC ? TEXT("monolithic") : TEXT("modular")),
+			: FString::Printf(TEXT("the SSL module's SSL_CTX was not used in this %s build: no context came from ISslManager, so the rig fell back to DO_SSL_GLOBAL_INIT"), IS_MONOLITHIC ? TEXT("monolithic") : TEXT("modular")),
 		TEXT("WebSocket spec 2.1: SSL_CTX from ISslManager::CreateSslContext (ISslManager.h:64-81)"),
-		TEXT("FRigOptions::Tls = SslModule: the engine's order, LwsWebSocketsManager.cpp:205-225"));
+		TEXT("FRigOptions::Tls = SslModule: the engine's order, LwsWebSocketsManager.cpp:205-225; InitializeSsl() succeeds only when IS_MONOLITHIC || UE_MERGED_MODULES (SslManager.cpp:26-55) and CreateSslContext returns null otherwise (:76-131)"));
 	Fact(*this, TEXT("tls.load_extra_fired"), AgreesIf(LoadExtraFired(Rig)), YesNo(LoadExtraFired(Rig)),
 		TEXT("WebSocket spec 2.2: LOAD_EXTRA_CLIENT_VERIFY_CERTS -> AddCertificatesToSslContext"),
 		TEXT("the context's callbacks during lws_create_context"));
@@ -475,11 +484,21 @@ bool FVaRestLwsProbeCoexistTest::RunTest(const FString& Parameters)
 #endif
 
 	// 1b. Review I-3: does creating a context re-allocate the OpenSSL ex-data index this LWS copy's verify callback reads?
-	// Rigs made one after another, no TLS connection in flight (decision 16)
+	// A first context allocates it (in a fresh process it is 0 until then), so only the contexts after that one can show a
+	// re-allocation (review minor 1). Rigs made one after another, no TLS connection in flight (decision 16)
 #if PLATFORM_LINUX
 	const int32 IndexBefore = openssl_websocket_private_data_index;
+	int32 IndexAfterFirst = IndexBefore;
 	int32 IndexAfterPlain = IndexBefore;
 	int32 IndexAfterTls = IndexBefore;
+	{
+		FRig FirstRig(Site);
+		if (!TestTrue(TEXT("the first probe context exists"), FirstRig.IsReady()))
+		{
+			return false;
+		}
+		IndexAfterFirst = openssl_websocket_private_data_index;
+	}
 	{
 		FRig PlainRig(Site);
 		if (!TestTrue(TEXT("the plain probe context exists"), PlainRig.IsReady()))
@@ -501,11 +520,12 @@ bool FVaRestLwsProbeCoexistTest::RunTest(const FString& Parameters)
 	Dl_info IndexInfo = {};
 	const FString IndexFile = dladdr(reinterpret_cast<void*>(&openssl_websocket_private_data_index), &IndexInfo) != 0 && IndexInfo.dli_fname
 		? FPaths::GetCleanFilename(UTF8_TO_TCHAR(IndexInfo.dli_fname)) : FString(TEXT("(unknown)"));
-	Fact(*this, TEXT("coexist.context_create_reallocates_ssl_index"), AgreesIf(IndexBefore == IndexAfterPlain && IndexAfterPlain == IndexAfterTls),
-		FString::Printf(TEXT("openssl_websocket_private_data_index (in %s) was %d, %d after a plain context, %d after a TLS context (DO_SSL_GLOBAL_INIT)"),
-			*IndexFile, IndexBefore, IndexAfterPlain, IndexAfterTls),
+	// Differs only when a later creation changed the index the first one had already allocated
+	Fact(*this, TEXT("coexist.context_create_reallocates_ssl_index"), AgreesIf(IndexAfterFirst == IndexAfterPlain && IndexAfterPlain == IndexAfterTls),
+		FString::Printf(TEXT("openssl_websocket_private_data_index (in %s) was %d before this test's contexts, %d after a first plain context (allocated), then %d after a second plain context and %d after a TLS context (DO_SSL_GLOBAL_INIT)"),
+			*IndexFile, IndexBefore, IndexAfterFirst, IndexAfterPlain, IndexAfterTls),
 		TEXT("WebSocket spec 1.2: \"Contexts are independent. All connection state lives in the lws_context\""),
-		TEXT("the global read around two lws_create_context calls in VaRestTests' copy; statically, lws_context_init_ssl_library stores a new CRYPTO_get_ex_new_index on both paths (ssl.c.o 0x1f4, 0x23a) and OpenSSL_client_verify_callback dereferences SSL_get_ex_data under it without a null check (openssl-client.c.o 0x1c8-0x1d6): a TLS handshake in flight across a context creation in the same copy reads NULL"));
+		TEXT("the global read around three lws_create_context calls in VaRestTests' copy, the verdict from the second and third; statically, lws_context_init_ssl_library stores a new CRYPTO_get_ex_new_index on both paths (ssl.c.o 0x1f4, 0x23a) and OpenSSL_client_verify_callback dereferences SSL_get_ex_data under it without a null check (openssl-client.c.o 0x1c8-0x1d6): a TLS handshake in flight across a context creation in the same copy reads NULL"));
 #else
 	Fact(*this, TEXT("coexist.context_create_reallocates_ssl_index"), EVerdict::Unverified,
 		TEXT("unverified here (static evidence only); release-pass item (Win64, Mac): the global is read on Linux only"),
@@ -539,8 +559,15 @@ bool FVaRestLwsProbeCoexistTest::RunTest(const FString& Parameters)
 #if UE_ALLOW_EXEC_COMMANDS
 			if (!OldVerbosity.IsEmpty())
 			{
-				// The verbosity read above, not LogWebSockets' declared one
-				GEngine->Exec(nullptr, *FString::Printf(TEXT("Log LogWebSockets %s"), *OldVerbosity));
+				if (GEngine)
+				{
+					// The verbosity read above, not LogWebSockets' declared one
+					GEngine->Exec(nullptr, *FString::Printf(TEXT("Log LogWebSockets %s"), *OldVerbosity));
+				}
+				else
+				{
+					AddWarning(FString::Printf(TEXT("GEngine is null at the restore: LogWebSockets is not put back to %s"), *OldVerbosity));
+				}
 			}
 #endif
 		};
@@ -550,7 +577,11 @@ bool FVaRestLwsProbeCoexistTest::RunTest(const FString& Parameters)
 		// UEngine::Exec exists where exec commands are allowed (Engine.h:2434-2438, Misc/Exec.h:11-15); "Log" is handled by
 		// the log suppression's Exec_Runtime (LogSuppressionInterface.cpp:589-591). Only when the old verbosity was read,
 		// so that the restore can put it back
-		if (!OldVerbosity.IsEmpty())
+		if (!GEngine)
+		{
+			AddWarning(TEXT("GEngine is null: LogWebSockets' verbosity is neither read, raised nor restored (no UEngine::Exec)"));
+		}
+		else if (!OldVerbosity.IsEmpty())
 		{
 			GEngine->Exec(nullptr, TEXT("Log LogWebSockets Verbose"));
 		}
@@ -617,18 +648,34 @@ bool FVaRestLwsProbeCoexistTest::RunTest(const FString& Parameters)
 
 	// 5. Harness (ruling Q4): the restore took. The engine's flag is private (LwsWebSocketsManager.h:138), so it is read from
 	// what the engine does: with its check on again, a wss to the test server is refused (the test CA is not among the
-	// engine's roots, and LWS fails 127.0.0.1's host-name check, tls.insecure_ip_host); with the flag left on, it opens
-	const TSharedRef<FEngineSide> Checked = MakeShared<FEngineSide>();
-	const TSharedRef<IWebSocket> CheckedSocket = OpenEngineSocket(Module, FString::Printf(TEXT("wss://%s:%d/ws/echo?key=%s"), *Site.Host, Site.TlsPort, *NewKey()), Checked);
-	VaRest::Http::Testing::PumpUntil([Checked] { return Checked->bConnected || Checked->bEnded; }, 20.0, true);
-	const bool bCheckOpened = Checked->bConnected;
-	if (Checked->bConnected && !Checked->bEnded)
+	// engine's roots, and LWS fails 127.0.0.1's host-name check, tls.insecure_ip_host); with the flag left on, it opens.
+	// -lws-insecure= on the command line overrides the ini on every re-read outside Shipping (LwsWebSocketsManager.cpp:95-98,
+	// FParse::Bool as here): then the flag is the command line's before, during and after this test, and an engine wss
+	// cannot show whether the restore took, so the check is skipped and says why (review minor 5)
+	bool bInsecureArg = false;
+	bool bHasInsecureArg = false;
+#if !UE_BUILD_SHIPPING
+	bHasInsecureArg = FParse::Bool(FCommandLine::Get(), TEXT("lws-insecure="), bInsecureArg);
+#endif
+	if (bHasInsecureArg)
 	{
-		CheckedSocket->Close(1000, TEXT("done"));
+		AddWarning(FString::Printf(TEXT("the restore check is skipped: -lws-insecure=%s on the command line sets the engine's flag on every config re-read (LwsWebSocketsManager.cpp:95-98), so an engine wss cannot show whether the restore took"),
+			bInsecureArg ? TEXT("true") : TEXT("false")));
 	}
-	const bool bCheckEnded = VaRest::Http::Testing::PumpUntil([Checked] { return Checked->bEnded; }, 20.0, true);
-	TestTrue(FString::Printf(TEXT("the engine's certificate check is on again after the restore: its wss to the test server is refused (connected=%s ended=%s error=\"%s\")"),
-		YesNo(bCheckOpened), YesNo(bCheckEnded), *Checked->Error), !bCheckOpened && bCheckEnded);
+	else
+	{
+		const TSharedRef<FEngineSide> Checked = MakeShared<FEngineSide>();
+		const TSharedRef<IWebSocket> CheckedSocket = OpenEngineSocket(Module, FString::Printf(TEXT("wss://%s:%d/ws/echo?key=%s"), *Site.Host, Site.TlsPort, *NewKey()), Checked);
+		VaRest::Http::Testing::PumpUntil([Checked] { return Checked->bConnected || Checked->bEnded; }, 20.0, true);
+		const bool bCheckOpened = Checked->bConnected;
+		if (Checked->bConnected && !Checked->bEnded)
+		{
+			CheckedSocket->Close(1000, TEXT("done"));
+		}
+		const bool bCheckEnded = VaRest::Http::Testing::PumpUntil([Checked] { return Checked->bEnded; }, 20.0, true);
+		TestTrue(FString::Printf(TEXT("the engine's certificate check is on again after the restore: its wss to the test server is refused (connected=%s ended=%s error=\"%s\")"),
+			YesNo(bCheckOpened), YesNo(bCheckEnded), *Checked->Error), !bCheckOpened && bCheckEnded);
+	}
 	// A leg that did not echo is a fact (coexist.both_ws / both_wss say which side), not a failure (review M-2)
 	return true;
 #else
