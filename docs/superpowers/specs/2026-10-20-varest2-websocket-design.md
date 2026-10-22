@@ -330,10 +330,16 @@ Per attempt, from a `Connect` command:
   attempt ends 10049.6 ms after the kill with a 10 s wait, at most about 1 s with 100 ms
   (CONNECTION_ERROR > WSI_DESTROY)
   [timeout.kill_pending_ms, timeout.kill_pending_ms_short_wait, timeout.kill_pending_sequence]. The
-  context's `timeout_secs` is set to the default `ConnectTimeout` as a backstop
-  [timeout.configured_secs]: it is the vhost's, so context-wide for VaRest's one context ("various
-  processes involving network roundtrips", `libwebsockets.h:2791-2795`), and it backs only the
-  default; a socket with its own `ConnectTimeout` relies on the kill.
+  context's `timeout_secs` is the vhost's, so context-wide for VaRest's one context ("various
+  processes involving network roundtrips", `libwebsockets.h:2791-2795`), and LWS enforces it per
+  handshake stage: with 3 s, an unanswered upgrade ended at 3.8 s [timeout.configured_secs]. A value
+  at a socket's default would cut every socket whose own `ConnectTimeout` is longer. So
+  `timeout_secs` is set to the largest `ConnectTimeout` VaRest accepts (a W1 constant), as a backstop
+  for every socket; a socket's `ConnectTimeout` above that maximum is clamped to it with a Warning,
+  and each socket's own, shorter deadline is enforced by VaRest's kill. LWS's cut and VaRest's kill
+  both end in `CONNECTION_ERROR` with an empty string
+  [timeout.configured_secs, hs.status_in_connection_error.killed_pending], so VaRest records which
+  one fired.
 * **Upgrade refusal**: the status comes from the error string (T7: "not 101, was N";
   "unauthorized" = 401; "forbidden" = 403), and from `lws_http_client_http_response(wsi)` only when
   the error comes from the status-line parser (the strings `HS: ws upgrade …`)
@@ -365,14 +371,13 @@ Per attempt, from a `Connect` command:
   `APPEND_HANDSHAKE_HEADER` of an attempt marks (in the vetoed run a second `WSI_CREATE` for the
   connection came just before it), and the socket fails the connection with a redirect error at
   the first callback that can, `APPEND_HANDSHAKE_HEADER`, else `FILTER_PRE_ESTABLISH`; the W1 plan
-  names the error kind. A
-  non-zero return in `APPEND_HANDSHAKE_HEADER` gives a refused client with no `CONNECTION_ERROR`
-  (WSI_CREATE > connect< > APPEND_HANDSHAKE_HEADER > WSI_CREATE > APPEND_HANDSHAKE_HEADER >
-  CLOSED_CLIENT_HTTP > WSI_DESTROY) and no second request at the server, so the transport reports
-  the failure itself; vetoing there is the primary guard, since the second request never goes out.
-  In `FILTER_PRE_ESTABLISH` it gives "HS: Rejected by filter cb", after the second request reached
-  the server [hs.redirect_veto]. A redirect from wss to ws is not followed: the client refuses it
-  with "HS: Redirect attempted SSL downgrade" [hs.redirect_downgrade].
+  names the error kind. A non-zero return in `APPEND_HANDSHAKE_HEADER` gives a refused client with
+  no `CONNECTION_ERROR` (WSI_CREATE > connect< > APPEND_HANDSHAKE_HEADER > WSI_CREATE >
+  APPEND_HANDSHAKE_HEADER > CLOSED_CLIENT_HTTP > WSI_DESTROY) and no second request at the server, so
+  the transport reports the failure itself; vetoing there is the primary guard, since the second
+  request never goes out. In `FILTER_PRE_ESTABLISH` it gives "HS: Rejected by filter cb", after the
+  second request reached the server [hs.redirect_veto]. A redirect from wss to ws is not followed:
+  the client refuses it with "HS: Redirect attempted SSL downgrade" [hs.redirect_downgrade].
 
 ### 2.3 Receive
 
@@ -408,6 +413,10 @@ Per attempt, from a `Connect` command:
 * **One `lws_write` per WRITEABLE**, whatever the frame: LWS 3.0 refuses a second write in the same
   callback (a PING, then a text: the second returns -1 and the text is lost)
   [tx.two_writes_one_writeable], so the transport writes one frame and asks for WRITEABLE again.
+* **A WRITEABLE request made during the handshake is dropped** by LWS 3.0: no WRITEABLE follows the
+  open. So the transport requests WRITEABLE again at `LWS_CALLBACK_CLIENT_ESTABLISHED` when anything
+  is queued (a send, a close). A rig finding, not a passport row: `Probe.VaRest.Lws.Rig.WriteBeforeOpen`
+  fails without the re-request (b41b89a; `Source/VaRestTests/Private/LwsProbe/VaRestLwsProbe.cpp:606-613`).
 * **Buffered amount** (bytes accepted by `Send` and not yet handed to the socket) is exact and
   published to the game thread; it is the basis of backpressure (§6.3). `Drained` fires when it
   returns to zero after crossing the high-water mark.

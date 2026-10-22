@@ -75,6 +75,7 @@ python3 -I Tools/testserver/selftest.py   # the HTTP test server's own tests (st
 python3 -I Tools/testserver/ws_selftest.py  # the WebSocket test server's own tests (ws.py, the TLS listener; stdlib only)
 Tools/run_tests.sh Probe.VaRest.Lws         # LWS 3.0 probe (WS W0): minutes long, host-dependent, outside the default ^VaRest filter
 Tools/run_tests.sh --no-build Probe.VaRest.Risky.Lws.StatusInConnectionError.Refused  # may crash: one case per run; also ConnectRefused, DnsFailure, NoUpgrade, TlsVerifyFailure, KilledPending
+# probe passport: every run deletes and rewrites <Host>/Saved/Logs/VaRestTests.log, so copy it after each probe run, then python3 -I Tools/lws_probe_passport.py --log <the copies> --out docs/passport/<date>-lws30-probe.md (full sequence: "Re-run" in docs/passport/2026-10-22-lws30-probe.md)
 
 # Build only (editor target)
 /w/Unreal/UnrealEngine/Engine/Build/BatchFiles/Linux/Build.sh \

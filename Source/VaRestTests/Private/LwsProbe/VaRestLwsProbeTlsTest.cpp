@@ -27,8 +27,11 @@
 #include <dlfcn.h>
 
 // libwebsockets.a's ssl.c.o defines this as a common symbol (nm: C) and declares it in no header; lws_context_init_ssl_library
-// stores a fresh CRYPTO_get_ex_new_index into it on every lws_create_context (WS W0 decision 16, review I-3)
-extern "C" int openssl_websocket_private_data_index;
+// stores a fresh CRYPTO_get_ex_new_index into it on every lws_create_context (WS W0 decision 16, review I-3). Weak (W0 final
+// review M-2): it is LWS-private, and a bundled LWS that renames it or makes it static must not break this module's link,
+// which also holds the default suite. Absent, its address is null and the fact reads unverified. ssl.c.o is still linked:
+// lws_create_context reaches lws_context_init_ssl_library, which lives there, so the weak reference binds to it
+extern "C" __attribute__((weak)) int openssl_websocket_private_data_index;
 #endif
 
 namespace VaRest::LwsProbe::VaRestLwsProbeTlsTestPrivate
@@ -487,45 +490,57 @@ bool FVaRestLwsProbeCoexistTest::RunTest(const FString& Parameters)
 	// A first context allocates it (in a fresh process it is 0 until then), so only the contexts after that one can show a
 	// re-allocation (review minor 1). Rigs made one after another, no TLS connection in flight (decision 16)
 #if PLATFORM_LINUX
-	const int32 IndexBefore = openssl_websocket_private_data_index;
-	int32 IndexAfterFirst = IndexBefore;
-	int32 IndexAfterPlain = IndexBefore;
-	int32 IndexAfterTls = IndexBefore;
+	// W0 final review M-2: the weak reference is null when this LWS copy has no such global (a renamed or static symbol in a
+	// later bundled LWS): nothing to read, so the fact says so instead of the link failing
+	if (&openssl_websocket_private_data_index == nullptr)
 	{
-		FRig FirstRig(Site);
-		if (!TestTrue(TEXT("the first probe context exists"), FirstRig.IsReady()))
-		{
-			return false;
-		}
-		IndexAfterFirst = openssl_websocket_private_data_index;
+		Fact(*this, TEXT("coexist.context_create_reallocates_ssl_index"), EVerdict::Unverified,
+			TEXT("unverified here: symbol not present in this LWS copy (the weak reference to openssl_websocket_private_data_index is null)"),
+			TEXT("WebSocket spec 1.2: \"Contexts are independent. All connection state lives in the lws_context\""),
+			TEXT("a weak reference to LWS's private index global; for LWS 3.0 the static evidence is ssl.c.o 0x1f4, 0x23a and openssl-client.c.o 0x1c8-0x1d6 (review I-3)"));
 	}
+	else
 	{
-		FRig PlainRig(Site);
-		if (!TestTrue(TEXT("the plain probe context exists"), PlainRig.IsReady()))
+		const int32 IndexBefore = openssl_websocket_private_data_index;
+		int32 IndexAfterFirst = IndexBefore;
+		int32 IndexAfterPlain = IndexBefore;
+		int32 IndexAfterTls = IndexBefore;
 		{
-			return false;
+			FRig FirstRig(Site);
+			if (!TestTrue(TEXT("the first probe context exists"), FirstRig.IsReady()))
+			{
+				return false;
+			}
+			IndexAfterFirst = openssl_websocket_private_data_index;
 		}
-		IndexAfterPlain = openssl_websocket_private_data_index;
-	}
-	{
-		FRigOptions TlsOptions;
-		TlsOptions.Tls = ETls::LwsGlobalInit;
-		FRig TlsRig(Site, MoveTemp(TlsOptions));
-		if (!TestTrue(TEXT("the TLS probe context exists"), TlsRig.IsReady()))
 		{
-			return false;
+			FRig PlainRig(Site);
+			if (!TestTrue(TEXT("the plain probe context exists"), PlainRig.IsReady()))
+			{
+				return false;
+			}
+			IndexAfterPlain = openssl_websocket_private_data_index;
 		}
-		IndexAfterTls = openssl_websocket_private_data_index;
+		{
+			FRigOptions TlsOptions;
+			TlsOptions.Tls = ETls::LwsGlobalInit;
+			FRig TlsRig(Site, MoveTemp(TlsOptions));
+			if (!TestTrue(TEXT("the TLS probe context exists"), TlsRig.IsReady()))
+			{
+				return false;
+			}
+			IndexAfterTls = openssl_websocket_private_data_index;
+		}
+		Dl_info IndexInfo = {};
+		const FString IndexFile = dladdr(reinterpret_cast<void*>(&openssl_websocket_private_data_index), &IndexInfo) != 0 && IndexInfo.dli_fname
+			? FPaths::GetCleanFilename(UTF8_TO_TCHAR(IndexInfo.dli_fname)) : FString(TEXT("(unknown)"));
+		// Differs only when a later creation changed the index the first one had already allocated
+		Fact(*this, TEXT("coexist.context_create_reallocates_ssl_index"), AgreesIf(IndexAfterFirst == IndexAfterPlain && IndexAfterPlain == IndexAfterTls),
+			FString::Printf(TEXT("openssl_websocket_private_data_index (in %s) was %d before this test's contexts, %d after a first plain context (allocated), then %d after a second plain context and %d after a TLS context (DO_SSL_GLOBAL_INIT)"),
+				*IndexFile, IndexBefore, IndexAfterFirst, IndexAfterPlain, IndexAfterTls),
+			TEXT("WebSocket spec 1.2: \"Contexts are independent. All connection state lives in the lws_context\""),
+			TEXT("the global read around three lws_create_context calls in VaRestTests' copy, the verdict from the second and third; statically, lws_context_init_ssl_library stores a new CRYPTO_get_ex_new_index on both paths (ssl.c.o 0x1f4, 0x23a) and OpenSSL_client_verify_callback dereferences SSL_get_ex_data under it without a null check (openssl-client.c.o 0x1c8-0x1d6): a TLS handshake in flight across a context creation in the same copy reads NULL"));
 	}
-	Dl_info IndexInfo = {};
-	const FString IndexFile = dladdr(reinterpret_cast<void*>(&openssl_websocket_private_data_index), &IndexInfo) != 0 && IndexInfo.dli_fname
-		? FPaths::GetCleanFilename(UTF8_TO_TCHAR(IndexInfo.dli_fname)) : FString(TEXT("(unknown)"));
-	// Differs only when a later creation changed the index the first one had already allocated
-	Fact(*this, TEXT("coexist.context_create_reallocates_ssl_index"), AgreesIf(IndexAfterFirst == IndexAfterPlain && IndexAfterPlain == IndexAfterTls),
-		FString::Printf(TEXT("openssl_websocket_private_data_index (in %s) was %d before this test's contexts, %d after a first plain context (allocated), then %d after a second plain context and %d after a TLS context (DO_SSL_GLOBAL_INIT)"),
-			*IndexFile, IndexBefore, IndexAfterFirst, IndexAfterPlain, IndexAfterTls),
-		TEXT("WebSocket spec 1.2: \"Contexts are independent. All connection state lives in the lws_context\""),
-		TEXT("the global read around three lws_create_context calls in VaRestTests' copy, the verdict from the second and third; statically, lws_context_init_ssl_library stores a new CRYPTO_get_ex_new_index on both paths (ssl.c.o 0x1f4, 0x23a) and OpenSSL_client_verify_callback dereferences SSL_get_ex_data under it without a null check (openssl-client.c.o 0x1c8-0x1d6): a TLS handshake in flight across a context creation in the same copy reads NULL"));
 #else
 	Fact(*this, TEXT("coexist.context_create_reallocates_ssl_index"), EVerdict::Unverified,
 		TEXT("unverified here (static evidence only); release-pass item (Win64, Mac): the global is read on Linux only"),

@@ -398,6 +398,12 @@ bool FVaRestLwsProbeTimerAndKillTest::RunTest(const FString& Parameters)
 	// (the shape) and the short one (the control that shows how much of the delay is the wait, review C-1)
 	const FKill Long = Kill(Site, TEXT("/ws/echo"), LongWaitMs, true);
 	const FKill Short = Kill(Site, TEXT("/ws/echo"), ShortWaitMs, true);
+	// W0 final review M-1: the rigs and their precondition connections are harness invariants (decision 3, as RoundTrip's
+	// and Hang's): a broken harness turns the test red instead of recording "not measured" and silently skipping E3
+	if (!TestTrue(TEXT("both kill rigs exist and their echo connections opened"), Long.bReady && Short.bReady))
+	{
+		return false;
+	}
 	const FString KillSpec = TEXT("T14: forced close with lws_set_timeout(..., LWS_TO_KILL_ASYNC); WebSocket spec 2.1 loops lws_service(ctx, NextDeadline)");
 	Fact(*this, TEXT("svc.kill_async_ms"), EVerdict::Recorded, Describe(Long, LongWaitMs), KillSpec, TEXT("a kill from a command on an open echo connection"));
 	Fact(*this, TEXT("svc.kill_async_ms_short_wait"), EVerdict::Recorded, Describe(Short, ShortWaitMs), KillSpec,
@@ -495,6 +501,12 @@ bool FVaRestLwsProbeKillPendingTest::RunTest(const FString& Parameters)
 	// answers, timeout_secs left at LWS's default, with the long wait (the shape) and the short one (the control)
 	const FKill Long = Kill(Site, TEXT("/ws/hang?ms=60000"), LongWaitMs, false);
 	const FKill Short = Kill(Site, TEXT("/ws/hang?ms=60000"), ShortWaitMs, false);
+	// W0 final review M-1: as for the open-connection kills (Service.TimerAndKill), a rig or an attempt that never started
+	// is a harness failure
+	if (!TestTrue(TEXT("both kill rigs exist and their /ws/hang attempts started"), Long.bReady && Short.bReady))
+	{
+		return false;
+	}
 	const FString KillSpec = TEXT("WebSocket spec 2.2: ConnectTimeout enforced with lws_set_timeout(..., LWS_TO_KILL_ASYNC) (T14)");
 	Fact(*this, TEXT("timeout.kill_pending_ms"), EVerdict::Recorded, Describe(Long, LongWaitMs), KillSpec, TEXT("a pending attempt to /ws/hang, killed from a command"));
 	Fact(*this, TEXT("timeout.kill_pending_ms_short_wait"), EVerdict::Recorded, Describe(Short, ShortWaitMs), KillSpec,

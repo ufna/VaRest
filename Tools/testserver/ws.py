@@ -95,6 +95,9 @@ MAX_KEYS = 256
 MAX_CONNECTIONS = MAX_KEYS
 # Ample for every probe (the busiest, Data.AutoReplyBoundary, journals about 70 frames); 256 keys x 2000 bounds memory
 MAX_EVENTS = 2000
+# /ws/status's Location: visible ASCII (0x21-0x7e) only, at most this long; ample for a test URL with a key
+MAX_LOCATION = 2048
+LOCATION = re.compile(r"[\x21-\x7e]{1,%d}" % MAX_LOCATION)
 # Payloads up to this many bytes are journaled whole (base64), longer ones as a SHA-256
 INLINE = 256
 # The longest a connection waits on its peer (silent, hang, noecho)
@@ -450,7 +453,12 @@ def ws_status(h, match, journal):
         raise server.Refused(400, "out of range", name="code", value=code, min=200, max=599)
     headers = [("Connection", "close")]
     if "location" in h.query:
-        headers.append(("Location", h.query["location"][0]))
+        location = h.query["location"][0]
+        # Written into a response header: a CR/LF would inject headers and a non-latin-1 character raises in send_header,
+        # so only visible ASCII of a bounded length goes through (W0 final review M-8, as ws_protocol's token check)
+        if not LOCATION.fullmatch(location):
+            raise server.Refused(400, "location is not 1-%d visible ASCII characters" % MAX_LOCATION, name="location")
+        headers.append(("Location", location))
     if code == 401:
         headers.append(("WWW-Authenticate", "Bearer"))
     journal.add("response", status=code)

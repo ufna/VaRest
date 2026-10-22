@@ -567,6 +567,16 @@ class ScenarioTest(WsTestBase):
         finally:
             ws.MAX_KEYS = saved
 
+    def test_status_location_must_be_visible_ascii(self):
+        # W0 final review M-8: no header injection, no non-latin-1, no unbounded value; the probes' locations still pass
+        for bad in ("a%0D%0AX-Injected:%201", "%0A", "%E2%82%AC", "a%20b", "%09", "", "a" * (ws.MAX_LOCATION + 1)):
+            refused = self.connect("/ws/status/302?location=" + bad)
+            self.assertEqual(refused.status, 400, bad[:40])
+            self.assertNotIn("x-injected", refused.headers)
+        for good in ("/ws/echo?key=k1", "ws://127.0.0.1:1/ws/echo?key=k2", "wss://localhost:2/ws/echo", "a" * ws.MAX_LOCATION):
+            moved = self.connect("/ws/status/302?location=" + urllib.parse.quote(good, safe=""))
+            self.assertEqual((moved.status, moved.headers.get("location")), (302, good), good[:40])
+
     def test_protocol_select_must_be_a_token(self):
         for bad in ("%E2%82%AC", "a%20b", "a%2Cb", "a%0D%0Ab"):
             self.assertEqual(self.connect("/ws/protocol?select=" + bad).status, 400, bad)
