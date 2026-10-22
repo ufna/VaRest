@@ -26,6 +26,45 @@ namespace VaRest::Http::ClientStatePrivate
 		return *Registry;
 	}
 
+	/** Case-sensitive: FString's operator== ignores case, and a secret or key differing only in case is another one */
+	bool ContainsExactly(const TArray<FString>& Texts, const FString& Text)
+	{
+		return Texts.ContainsByPredicate([&Text](const FString& Known) { return Known.Equals(Text, ESearchCase::CaseSensitive); });
+	}
+
+	/**
+	 * Review I-1: Now's redactor with what Sent's knew and Now's does not -- its known values, and its keys, which only
+	 * grow today (WithRedactedKeys appends) but are joined all the same. Now's own redactor when Sent adds nothing.
+	 */
+	TSharedRef<const FVaRestRedactor, ESPMode::ThreadSafe> MakeUnionRedactor(const FClientConfig& Sent, const FClientConfig& Now)
+	{
+		const TSharedRef<const FVaRestRedactor, ESPMode::ThreadSafe> Current = Now.Redactor.ToSharedRef();
+		TArray<FString> Values = Current->GetSecrets();
+		FVaRestRedactRules Rules = Current->GetRules();
+		bool bWider = false;
+		for (const FString& Value : Sent.Redactor->GetSecrets())
+		{
+			if (!ContainsExactly(Values, Value))
+			{
+				Values.Add(Value);
+				bWider = true;
+			}
+		}
+		for (const FString& Key : Sent.RedactedKeys)
+		{
+			if (!ContainsExactly(Now.RedactedKeys, Key))
+			{
+				Rules.AddKey(Key);
+				bWider = true;
+			}
+		}
+		if (!bWider)
+		{
+			return Current;
+		}
+		return MakeShared<FVaRestRedactor, ESPMode::ThreadSafe>(MoveTemp(Rules), MoveTemp(Values));
+	}
+
 	/** IN-8's name comes from WithName, or, without one, from the base URL: a new base renames an unnamed client (review M5) */
 	bool TraceNameChanged(const FClientConfig& Before, const FClientConfig& After)
 	{
@@ -81,6 +120,24 @@ TSharedRef<const VaRest::Http::FClientConfig, ESPMode::ThreadSafe> VaRest::Http:
 {
 	FReadScopeLock ReadLock(ConfigLock);
 	return Config.ToSharedRef();
+}
+
+TSharedRef<const FVaRestRedactor, ESPMode::ThreadSafe> VaRest::Http::RedactorFor(const FExchangeState& Ex)
+{
+	check(IsInGameThread());
+	const TSharedRef<const FClientConfig, ESPMode::ThreadSafe> Now = Ex.State->GetConfig();
+	const TSharedRef<const FVaRestRedactor, ESPMode::ThreadSafe> Current = Now->Redactor.ToSharedRef();
+	if (!Ex.Config.IsValid() || Ex.Config->Redactor.Get() == &Current.Get())
+	{
+		// The usual case, nothing changed while the request ran: one redactor, one pass
+		return Current;
+	}
+	if (Ex.UnionBuiltFrom.Get() != &Current.Get())
+	{
+		Ex.UnionRedactor = ClientStatePrivate::MakeUnionRedactor(*Ex.Config, *Now);
+		Ex.UnionBuiltFrom = Current;
+	}
+	return Ex.UnionRedactor.ToSharedRef();
 }
 
 void VaRest::Http::FClientState::EditConfig(TFunctionRef<void(FClientConfig&)> Edit)

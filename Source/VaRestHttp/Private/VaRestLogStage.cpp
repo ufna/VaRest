@@ -136,8 +136,9 @@ namespace VaRest::Http::LogStagePrivate
 
 	void LogOutcome(const FExchangeState& Ex, EVaRestLogLevel Level, double StartedAt, const FVaRestAttemptOutcome& Outcome)
 	{
-		// Plan decision 17: the redactor of now -- a secret set while the attempt ran (an auth refresh) is known
-		const FRedactorRef Redactor = Ex.State->GetRedactor();
+		// Plan decision 17, review I-1: read when the outcome is back -- a secret set while the attempt ran (an auth refresh)
+		// is known, and one the client forgot meanwhile (a logout) still is, from the Send() snapshot
+		const FRedactorRef Redactor = RedactorFor(Ex);
 		// Review M5: the attempt's own time, from the limiter's grant; a wait in the queue (IN-2's LimiterWait, measured on
 		// this exchange's clock) is shown apart, and only when it rounds to a millisecond or more
 		const double QueuedMs = Ex.LimiterWait * 1000.0;
@@ -148,7 +149,7 @@ namespace VaRest::Http::LogStagePrivate
 		// Review M2: a line the category drops is not built; a Warning line can be active when Log is not
 		if (bWarning ? UE_LOG_ACTIVE(LogVaRestHttp, Warning) : UE_LOG_ACTIVE(LogVaRestHttp, Log))
 		{
-			// Built here, only for a line that is written, and with the redactor of now: not the request line's
+			// Built here, only for a line that is written, with this redactor: not the request line's
 			const FString Url = ShownUrl(Redactor, Ex.Url);
 			const FString ShownVerb = EscapeForLog(Ex.Verb);
 			if (bCanceled)
@@ -219,7 +220,7 @@ namespace VaRest::Http::LogStagePrivate
 			}
 			// URLs and headers are redacted here, on the game thread; bodies only on the redaction pipe (Inspector 7). Every
 			// value is escaped after it is redacted (review C1).
-			const FRedactorRef Redactor = Ex.State->GetRedactor();
+			const FRedactorRef Redactor = RedactorFor(Ex);
 			if (bLogActive && Level >= EVaRestLogLevel::Headers)
 			{
 				const FString Shown = ShownUrl(Redactor, Ex.Url);
@@ -312,7 +313,7 @@ void VaRest::Http::LogConfigError(const FExchangeState& Ex, FStringView Message)
 	{
 		return;
 	}
-	const FString Url = LogStagePrivate::ShownUrl(Ex.State->GetRedactor(), Ex.Url.IsEmpty() ? JoinUrl(Cfg.BaseUrl, Ex.RawPath) : Ex.Url);
+	const FString Url = LogStagePrivate::ShownUrl(RedactorFor(Ex), Ex.Url.IsEmpty() ? JoinUrl(Cfg.BaseUrl, Ex.RawPath) : Ex.Url);
 	UE_LOG(LogVaRestHttp, Warning, TEXT("#%llu %s %s -> Config error: %s"), Ex.RequestId, *EscapeForLog(Ex.Verb), *Url, *EscapeControlsForLog(Message));
 }
 

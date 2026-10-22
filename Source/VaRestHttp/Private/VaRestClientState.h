@@ -51,9 +51,8 @@ namespace VaRest::Http
 		/** Any thread */
 		TSharedRef<const FClientConfig, ESPMode::ThreadSafe> GetConfig() const;
 		/**
-		 * Any thread: the redactor of the configuration published now, with every secret set so far and the rotated ones
-		 * still within their 10 minutes (plan decision 17, carry (b)). Logs, traces and FVaRestError::Url use it, not the
-		 * Send() snapshot's, so a token refreshed while a request is out is scrubbed from that request's later lines.
+		 * Any thread: the redactor of the configuration published now. It forgets values (ClearSecretValues, a rotated
+		 * value's 10 minutes, the cap of FVaRestSecretSet::MaxPrevious), so an exchange's lines use RedactorFor (review I-1).
 		 */
 		TSharedRef<const FVaRestRedactor, ESPMode::ThreadSafe> GetRedactor() const { return GetConfig()->Redactor.ToSharedRef(); }
 		/** Game thread: copy, edit, rebuild the chain and the redactor, swap */
@@ -138,6 +137,17 @@ namespace VaRest::Http
 	{
 		static TSharedPtr<FClientState, ESPMode::ThreadSafe> State(const FVaRestClient& Client) { return Client.GetStateInternal(); }
 	};
+
+	/**
+	 * Game thread: the redactor of Ex's logs, traces and FVaRestError::Url (plan decision 17, carry (b); review I-1) --
+	 * what Ex's Send() snapshot knew and what the client knows now, both: a secret set while the request is out (an auth
+	 * refresh) is scrubbed from its later lines, and its own token stays scrubbed after the client forgets it (a logout, a
+	 * rotated value's 10 minutes, the cap of MaxPrevious). The current redactor itself when it is the snapshot's (nothing
+	 * changed while the request ran) or knows all the snapshot did; else a union, built once per change and cached on Ex.
+	 * Cost: after ClearSession (ClearSecretValues today) an in-flight request's later lines still scrub the old token --
+	 * the snapshot keeps it in memory until the request ends, as it did before decision 17.
+	 */
+	TSharedRef<const FVaRestRedactor, ESPMode::ThreadSafe> RedactorFor(const FExchangeState& Ex);
 
 	/** The chain's built-in stages (VaRestPipeline.cpp) */
 	FVaRestStageRef MakeAttemptBoundaryStage();

@@ -35,8 +35,8 @@ namespace VaRest::Http::TracePointsPrivate
 	FVaRestTraceStarted Describe(const FExchangeState& Ex)
 	{
 		const FClientConfig& Cfg = *Ex.Config;
-		// Plan decision 17: the redactor of now, not the Send() snapshot's
-		const TSharedRef<const FVaRestRedactor, ESPMode::ThreadSafe> Held = Ex.State->GetRedactor();
+		// Plan decision 17, review I-1: the Send() snapshot's secrets and the client's current ones
+		const TSharedRef<const FVaRestRedactor, ESPMode::ThreadSafe> Held = RedactorFor(Ex);
 		const FVaRestRedactor& Redactor = *Held;
 		FVaRestTraceStarted Out;
 		Out.RequestId = Ex.RequestId;
@@ -125,7 +125,7 @@ void VaRest::Http::TracePoints::Started(FExchangeState& Ex)
 		return;
 	}
 	FVaRestTrace::FScopedCycles Cycles;
-	const TSharedRef<const FVaRestRedactor, ESPMode::ThreadSafe> Held = Ex.State->GetRedactor();
+	const TSharedRef<const FVaRestRedactor, ESPMode::ThreadSafe> Held = RedactorFor(Ex);
 	const FVaRestRedactor& Redactor = *Held;
 	// IN-10: clock reads and the initiator follow the mask
 	Ex.StartUtc = FDateTime::UtcNow();
@@ -167,7 +167,7 @@ void VaRest::Http::TracePoints::AttemptDispatched(const FExchangeState& Ex)
 	Payload.LimiterWait = Ex.LimiterWait;
 	if (FVaRestTrace::Wants(EVaRestTraceDetail::Headers))
 	{
-		Payload.Headers = Ex.State->GetRedactor()->RedactHeaders(Ex.AttemptHeaders);
+		Payload.Headers = RedactorFor(Ex)->RedactHeaders(Ex.AttemptHeaders);
 	}
 	FVaRestTrace::Emit(EVaRestTraceKind::AttemptDispatched, Ex.Config->Clock->Now(), FVaRestTracePayload(TInPlaceType<FVaRestTraceAttemptDispatched>(), MoveTemp(Payload)));
 }
@@ -179,7 +179,7 @@ void VaRest::Http::TracePoints::AttemptEnded(const FExchangeState& Ex, const FVa
 		return;
 	}
 	FVaRestTrace::FScopedCycles Cycles;
-	const TSharedRef<const FVaRestRedactor, ESPMode::ThreadSafe> Held = Ex.State->GetRedactor();
+	const TSharedRef<const FVaRestRedactor, ESPMode::ThreadSafe> Held = RedactorFor(Ex);
 	const FVaRestRedactor& Redactor = *Held;
 	FVaRestTraceAttemptEnded Payload;
 	Payload.RequestId = Ex.RequestId;
@@ -213,7 +213,7 @@ void VaRest::Http::TracePoints::Completed(const FExchangeState& Ex, const FFinis
 		return;
 	}
 	FVaRestTrace::FScopedCycles Cycles;
-	const TSharedRef<const FVaRestRedactor, ESPMode::ThreadSafe> Held = Ex.State->GetRedactor();
+	const TSharedRef<const FVaRestRedactor, ESPMode::ThreadSafe> Held = RedactorFor(Ex);
 	const FVaRestRedactor& Redactor = *Held;
 	FVaRestTraceCompleted Payload;
 	Payload.RequestId = Ex.RequestId;

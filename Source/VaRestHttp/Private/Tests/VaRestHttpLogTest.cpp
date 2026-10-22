@@ -7,13 +7,52 @@
 #include "Misc/AutomationTest.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "Misc/ScopeLock.h"
 #include "VaRestClient.h"
 #include "VaRestClientState.h"
 #include "VaRestHttpLog.h"
 #include "VaRestHttpTesting.h"
+#include "VaRestTrace.h"
 
 namespace VaRest::Http::LogTestPrivate
 {
+	/** Review I-1: the events a Metadata and Headers sink is handed, for the test to read */
+	class FHeadersSink final : public IVaRestTraceSink
+	{
+	public:
+		virtual FVaRestTraceDetailSettings GetDetail() const override
+		{
+			FVaRestTraceDetailSettings Settings;
+			Settings.Flags = EVaRestTraceDetail::Metadata | EVaRestTraceDetail::Headers;
+			return Settings;
+		}
+		virtual void OnAttached(const FVaRestTraceSnapshot&) override {}
+		virtual void OnEvent(const FVaRestTraceEvent& Event) override
+		{
+			FScopeLock Lock(&Mutex);
+			Events.Add(Event);
+		}
+
+		/** One request's AttemptEnded payloads */
+		TArray<FVaRestTraceAttemptEnded> AttemptsEnded(uint64 RequestId) const
+		{
+			FScopeLock Lock(&Mutex);
+			TArray<FVaRestTraceAttemptEnded> Out;
+			for (const FVaRestTraceEvent& Event : Events)
+			{
+				if (Event.Kind == EVaRestTraceKind::AttemptEnded && Event.Payload.Get<FVaRestTraceAttemptEnded>().RequestId == RequestId)
+				{
+					Out.Add(Event.Payload.Get<FVaRestTraceAttemptEnded>());
+				}
+			}
+			return Out;
+		}
+
+	private:
+		mutable FCriticalSection Mutex;
+		TArray<FVaRestTraceEvent> Events;
+	};
+
 	FVaRestFakeResponse Json(int32 Status, const char* Text)
 	{
 		return FVaRestFakeResponse::Json(Status, FUtf8StringView(reinterpret_cast<const UTF8CHAR*>(Text)));
@@ -658,6 +697,67 @@ bool FVaRestHttpLogCurrentRedactorTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("no line written after the secret was set holds it"), bLeaked);
 	TestTrue(TEXT("... the echoed header shows ***"), bScrubbedHeader);
 	TestFalse(TEXT("the error's URL is redacted with the current secrets"), Failed->Error.Url.Contains(Late));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpLogOwnSecretAfterLogoutTest, "VaRest.Http.Log.OwnSecretAfterLogout",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpLogOwnSecretAfterLogoutTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::LogTestPrivate;
+	// Review I-1 (plan decision 17): the client forgets a secret while a request that carries it is out -- a logout -- and
+	// that request's later lines, its error's URL and its trace still scrub it, because its Send() snapshot knew it
+	FLevelIsolation Isolation;
+	FVaRestTrace::FScopedSinkIsolation SinkIsolation;
+	const TSharedRef<FHeadersSink, ESPMode::ThreadSafe> Sink = MakeShared<FHeadersSink, ESPMode::ThreadSafe>();
+	FVaRestTrace::AddSink(Sink);
+	FTestRig Rig;
+	Rig.Client.WithLogLevel(EVaRestLogLevel::Headers);
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest&) { return FVaRestFakeResponse::Manual(); });
+	FLogCapture Capture;
+	AddExpectedMessagePlain(TEXT("GET https://api.test/p/*** -> 404"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
+	const FString Own = TEXT("zz-own-token-7654321");
+	Rig.Client.SetSecretValue(TEXT("bearer"), Own);
+	auto Failed = MakeOutcome<FVaRestJson>();
+	const FVaRestRequestHandle Handle = Observe(Rig.Client.Get(TEXT("/p/") + Own), Failed).Send();
+	if (!TestTrue(TEXT("dispatched"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 1; })))
+	{
+		Rig.Client.CancelAll();
+		PumpUntil([Failed] { return Failed->IsDone(); });
+		FVaRestTrace::RemoveSink(Sink);
+		return false;
+	}
+	const int32 Mark = Capture.GetLines().Num();
+	Rig.Client.ClearSecretValues();
+	FVaRestFakeResponse Echo = FVaRestFakeResponse::Json(404, FUtf8StringView(UTF8TEXT("{}")));
+	Echo.Headers.Set(TEXT("X-Echo"), Own);
+	Rig.Fake->Complete(0, MoveTemp(Echo));
+	const bool bDone = PumpUntil([Failed] { return Failed->IsDone(); });
+	FVaRestTrace::RemoveSink(Sink);
+	if (!TestTrue(TEXT("it completes"), bDone))
+	{
+		return false;
+	}
+	const TArray<FString> Lines = Capture.GetLines();
+	bool bLeaked = false;
+	bool bScrubbedHeader = false;
+	for (int32 Index = Mark; Index < Lines.Num(); ++Index)
+	{
+		bLeaked |= Lines[Index].Contains(Own);
+		bScrubbedHeader |= Lines[Index].Contains(TEXT("<   X-Echo: ***"));
+	}
+	TestFalse(TEXT("no line written after the logout holds the request's own token"), bLeaked);
+	TestTrue(TEXT("... the echoed header shows ***"), bScrubbedHeader);
+	TestFalse(TEXT("the error's URL still scrubs it"), Failed->Error.Url.Contains(Own));
+	const TArray<FVaRestTraceAttemptEnded> Ended = Sink->AttemptsEnded(Handle.GetId());
+	if (TestEqual(TEXT("one attempt traced"), Ended.Num(), 1))
+	{
+		const FString* Echoed = Ended[0].Headers.Find(TEXT("X-Echo"));
+		TestTrue(TEXT("the trace's echoed header shows ***"), Echoed && Echoed->Equals(TEXT("***")));
+		TestFalse(TEXT("... and its effective URL holds no token"), Ended[0].EffectiveUrl.Contains(Own));
+	}
 	return true;
 }
 

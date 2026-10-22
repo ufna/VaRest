@@ -58,7 +58,7 @@ namespace VaRest::Http::Testing
 	 */
 	VARESTHTTP_API bool PumpUntil(TFunctionRef<bool()> Done, double TimeoutSeconds = 5.0, bool bTickCoreTicker = false);
 
-	/** Waits until the core redaction pipe is idle: body log lines are written there */
+	/** Game thread (it checks): waits until the core redaction pipe is idle; body log lines are written there */
 	VARESTHTTP_API void FlushRedactionPipe();
 
 	/** -VaRestTestServer=<url>, which Tools/run_tests.sh passes; empty when absent */

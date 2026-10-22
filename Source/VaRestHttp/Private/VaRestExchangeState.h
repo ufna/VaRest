@@ -7,6 +7,8 @@
 
 #include <atomic>
 
+class FVaRestRedactor;
+
 namespace VaRest::Http
 {
 	/**
@@ -51,6 +53,13 @@ namespace VaRest::Http
 		TUniquePtr<IResultHandler> Handler;
 		/** Spec 3.1, decision 27: the configuration snapshot, taken by Send on the sending thread (Enter fills it only for an exchange made another way) */
 		TSharedPtr<const FClientConfig, ESPMode::ThreadSafe> Config;
+		/**
+		 * Game thread, RedactorFor's cache (review I-1): the union of Config's redactor and a later current one, and the
+		 * current one it was built from -- held, so a new redactor at a freed one's address is never taken for it. Both
+		 * go when the exchange completes.
+		 */
+		mutable TSharedPtr<const FVaRestRedactor, ESPMode::ThreadSafe> UnionRedactor;
+		mutable TSharedPtr<const FVaRestRedactor, ESPMode::ThreadSafe> UnionBuiltFrom;
 
 		// Resolved on entry (game thread):
 		FString Url;

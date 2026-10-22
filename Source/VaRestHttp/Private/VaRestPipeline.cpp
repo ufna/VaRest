@@ -520,7 +520,7 @@ bool VaRest::Http::FClientState::Resolve(FExchangeState& Exchange, FString& OutE
 	if (Cfg.BaseUrl.Contains(TEXT("#")))
 	{
 		// Decision 33 (review M22): a base URL may carry a query (kept, before the request's own pairs), not a fragment
-		OutError = FString::Printf(TEXT("the base URL \"%s\" has a fragment; a base URL may carry a query but not a fragment"), *GetRedactor()->RedactUrl(Cfg.BaseUrl));
+		OutError = FString::Printf(TEXT("the base URL \"%s\" has a fragment; a base URL may carry a query but not a fragment"), *RedactorFor(Exchange)->RedactUrl(Cfg.BaseUrl));
 		return false;
 	}
 	int32 QueryAt = INDEX_NONE;
@@ -535,13 +535,13 @@ bool VaRest::Http::FClientState::Resolve(FExchangeState& Exchange, FString& OutE
 		// Final review M8: ExpandPathTemplate has no redactor, so its message names no template; an absolute Path may carry
 		// userinfo ("https://u:pw@h/{x"), and this text becomes Error.Message, the Basic Warning (LogConfigError escapes,
 		// it does not redact) and the trace (ScrubText only). The template is shown here, redacted like every URL.
-		OutError = FString::Printf(TEXT("%s (path template \"%s\")"), *Expanded.GetError(), *GetRedactor()->RedactUrl(Exchange.PathTemplate));
+		OutError = FString::Printf(TEXT("%s (path template \"%s\")"), *Expanded.GetError(), *RedactorFor(Exchange)->RedactUrl(Exchange.PathTemplate));
 		return false;
 	}
 	FString Resolved = JoinUrl(Cfg.BaseUrl, bHasQuery ? Expanded.GetValue() + Exchange.RawPath.Mid(QueryAt) : Expanded.GetValue());
 	if (!IsAbsoluteHttpUrl(Resolved))
 	{
-		OutError = FString::Printf(TEXT("\"%s\" is not an absolute http(s) URL (base URL \"%s\")"), *GetRedactor()->RedactUrl(Resolved), *GetRedactor()->RedactUrl(Cfg.BaseUrl));
+		OutError = FString::Printf(TEXT("\"%s\" is not an absolute http(s) URL (base URL \"%s\")"), *RedactorFor(Exchange)->RedactUrl(Resolved), *RedactorFor(Exchange)->RedactUrl(Cfg.BaseUrl));
 		return false;
 	}
 	if (HasNonAsciiHost(Resolved))
@@ -549,7 +549,7 @@ bool VaRest::Http::FClientState::Resolve(FExchangeState& Exchange, FString& OutE
 		// Task 3 review I2: JoinUrl encodes a non-ASCII path, but a host would need punycode (IDNA), which is out of scope,
 		// and curl takes the URL through TCHAR_TO_ANSI (CurlHttp.cpp:926), so every such character would go out as '?'
 		OutError = FString::Printf(TEXT("the host of \"%s\" is not ASCII; an internationalised domain name must be given in its punycode (xn--) form"),
-			*GetRedactor()->RedactUrl(Resolved));
+			*RedactorFor(Exchange)->RedactUrl(Resolved));
 		return false;
 	}
 	if (HasControlInAuthority(Resolved))
@@ -574,7 +574,7 @@ bool VaRest::Http::FClientState::Resolve(FExchangeState& Exchange, FString& OutE
 	{
 		// Spec 3.2: "A body on GET is dropped with a warning (v1 rule)"; the engine would refuse the request
 		// (HttpRequestCommon.cpp:764-768: "An HTTP Get request cannot contain a payload")
-		UE_LOG(LogVaRestHttp, Warning, TEXT("#%llu VaRest: GET %s has a body; it is dropped (spec 3.2)"), Exchange.RequestId, *EscapeForLog(GetRedactor()->RedactUrl(Exchange.Url)));
+		UE_LOG(LogVaRestHttp, Warning, TEXT("#%llu VaRest: GET %s has a body; it is dropped (spec 3.2)"), Exchange.RequestId, *EscapeForLog(RedactorFor(Exchange)->RedactUrl(Exchange.Url)));
 		Exchange.Body = FVaRestRequestBody();
 	}
 	if (!Exchange.Body.IsEmpty() && Cfg.Transport.IsValid() && !Cfg.Transport->SendsBodyFor(Exchange.Verb))
@@ -855,7 +855,7 @@ void VaRest::Http::FClientState::Complete(const FVaRestExchangeRef& Exchange, FF
 		Finish.Error.Attempts = Ex.Attempt;
 		Finish.Error.Tag = Ex.Tag;
 		// Spec 3.3: "Url (redacted)"
-		Finish.Error.Url = GetRedactor()->RedactUrl(Ex.Url.IsEmpty() ? JoinUrl(Cfg.BaseUrl, Ex.RawPath) : Ex.Url);
+		Finish.Error.Url = RedactorFor(Ex)->RedactUrl(Ex.Url.IsEmpty() ? JoinUrl(Cfg.BaseUrl, Ex.RawPath) : Ex.Url);
 		if (Finish.Error.Message.IsEmpty())
 		{
 			Finish.Error.Message = FVaRestError::DefaultMessage(Finish.Error.Kind, Finish.Error.HttpStatus);
@@ -866,6 +866,9 @@ void VaRest::Http::FClientState::Complete(const FVaRestExchangeRef& Exchange, FF
 	InFlight.Remove(Ex.RequestId);
 	// IN-5: before any callback, OnHttpThread ones included, and also when none will run (owner gone, shutdown)
 	TracePoints::Completed(Ex, Finish);
+	// The request has ended: nothing redacts for it again, so it keeps no redactor beyond its snapshot
+	Ex.UnionRedactor.Reset();
+	Ex.UnionBuiltFrom.Reset();
 	TUniquePtr<IResultHandler> Handler = MoveTemp(Ex.Handler);
 	// Spec 3.2: owner gone -> no callbacks; nor at engine exit (decision 2)
 	const bool bSilent = Ex.CancelReason == EVaRestCancelReason::OwnerGone || Ex.CancelReason == EVaRestCancelReason::Shutdown;

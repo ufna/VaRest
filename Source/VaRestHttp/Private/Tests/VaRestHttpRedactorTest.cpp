@@ -3,7 +3,9 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "Misc/AutomationTest.h"
+#include "HAL/Event.h"
 #include "HAL/PlatformTime.h"
+#include "HAL/Thread.h"
 #include "Misc/Paths.h"
 #include "Tasks/Task.h"
 #include "VaRestHttpTesting.h"
@@ -528,8 +530,9 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpRedactorLaunchTest, "VaRest.Http.Red
 
 bool FVaRestHttpRedactorLaunchTest::RunTest(const FString& Parameters)
 {
-	// Plan decision 16 (carry (a), review M-10): workers launch while the game thread stops and restarts the pipe. A
-	// launch either runs its body or reports false; none is lost and none runs into a deleted pipe.
+	// Plan decision 16 (carry (a), review M-10), a smoke test: workers launch while the game thread stops the pipe; a launch
+	// either runs its body or reports false, none is lost. The stop drains the queued bodies for longer than the workers
+	// take to finish, so no launch meets the restart (review I-2): the Gate.* tests below force the interleavings.
 	struct FCounts
 	{
 		std::atomic<int32> Ran{ 0 };
@@ -572,6 +575,135 @@ bool FVaRestHttpRedactorLaunchTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("the restarted pipe takes work"), VaRest::Http::LaunchRedaction(TEXT("VaRest.Test.After"), [bAfter] { *bAfter = true; }));
 	VaRest::Http::WaitForRedactionPipe();
 	TestTrue(TEXT("... and runs it"), bAfter->load());
+	return true;
+}
+
+namespace VaRest::Http::RedactorTestPrivate
+{
+	/**
+	 * Review I-2: one launcher W on its own thread and the game thread's Stop, on a gate of the test's own, in an order
+	 * the gate's test hook forces. Every wait is bounded, and a broken gate is made to fail an assertion without ever
+	 * reaching a deleted pipe: Stop's last hook lets W's launch return before the pipe is taken out.
+	 */
+	struct FGateScript
+	{
+		enum class EOrder : uint8
+		{
+			/** W read the flag clear; the stop begins and drains before W counts itself in */
+			StopBetweenReads,
+			/** W counted itself in and holds the pipe; the stop begins */
+			StopWhileHolding,
+		};
+
+		explicit FGateScript(EOrder InOrder)
+			: Order(InOrder)
+		{
+		}
+
+		static constexpr uint32 WaitMs = 5000;
+
+		static void OnHook(void* Context, FRedactionGate::EHookPoint Point)
+		{
+			FGateScript& Script = *static_cast<FGateScript*>(Context);
+			switch (Point)
+			{
+			case FRedactionGate::EHookPoint::AfterUncountedRead: // W
+				if (Script.Order == EOrder::StopBetweenReads)
+				{
+					Script.Reached->Trigger();
+					Script.Release->Wait(WaitMs);
+				}
+				break;
+			case FRedactionGate::EHookPoint::HoldingPipe: // W
+				Script.bHeldPastDrain = Script.bDrained.load();
+				if (Script.Order == EOrder::StopWhileHolding)
+				{
+					Script.Reached->Trigger();
+					Script.Release->Wait(WaitMs);
+				}
+				break;
+			case FRedactionGate::EHookPoint::StopWaitingForCount: // the game thread, inside Stop
+				// Released only by a stop that waits for it; the stop reads the count again after W's launch returned
+				Script.bStopWaited = true;
+				Script.Release->Trigger();
+				Script.Returned->Wait(WaitMs);
+				break;
+			case FRedactionGate::EHookPoint::StopAfterDrain: // the game thread, inside Stop
+				Script.bDrained = true;
+				Script.bReturnedAtDrain = Script.bLaunchReturned.load();
+				Script.Release->Trigger();
+				Script.Returned->Wait(WaitMs);
+				break;
+			}
+		}
+
+		const EOrder Order;
+		FRedactionGate Gate;
+		FEventRef Reached{ EEventMode::ManualReset };
+		FEventRef Release{ EEventMode::ManualReset };
+		FEventRef Returned{ EEventMode::ManualReset };
+		std::atomic<bool> bDrained{ false };
+		std::atomic<bool> bHeldPastDrain{ false };
+		std::atomic<bool> bStopWaited{ false };
+		std::atomic<bool> bReturnedAtDrain{ false };
+		std::atomic<bool> bLaunchReturned{ false };
+		std::atomic<bool> bAccepted{ false };
+		std::atomic<int32> Ran{ 0 };
+	};
+
+	using FGateScriptRef = TSharedRef<FGateScript, ESPMode::ThreadSafe>;
+
+	/** Starts the gate, runs W's one launch against the game thread's Stop in Script's order, joins W; false when W never reached its point */
+	bool RunGateScript(const FGateScriptRef& Script)
+	{
+		Script->Gate.SetTestHook(&FGateScript::OnHook, &Script.Get());
+		Script->Gate.Start();
+		FThread Launcher(TEXT("VaRest.Test.GateLauncher"), [Script]
+		{
+			Script->bAccepted = Script->Gate.Launch(TEXT("VaRest.Test.GateBody"), [Script] { ++Script->Ran; });
+			Script->bLaunchReturned = true;
+			Script->Returned->Trigger();
+		});
+		const bool bReached = Script->Reached->Wait(FGateScript::WaitMs);
+		Script->Gate.Stop();
+		Launcher.Join();
+		Script->Gate.SetTestHook(nullptr, nullptr);
+		return bReached;
+	}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpRedactorGateBetweenReadsTest, "VaRest.Http.Redactor.Gate.StopBetweenReads",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpRedactorGateBetweenReadsTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::RedactorTestPrivate;
+	// Review I-2, plan decision 16: a launch that read the flag clear just before a stop, and counts itself in only after
+	// the stop has seen no launch inside, must be refused by its second read -- it must not take the pipe being deleted
+	const FGateScriptRef Script = MakeShared<FGateScript, ESPMode::ThreadSafe>(FGateScript::EOrder::StopBetweenReads);
+	TestTrue(TEXT("W read the flag clear before the stop began"), RunGateScript(Script));
+	TestFalse(TEXT("the stop had no launch inside to wait for"), Script->bStopWaited.load());
+	TestFalse(TEXT("the launch is refused"), Script->bAccepted.load());
+	TestFalse(TEXT("... and never held the pipe past the stop's drain"), Script->bHeldPastDrain.load());
+	TestEqual(TEXT("... nor ran its body"), Script->Ran.load(), 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpRedactorGateWhileHoldingTest, "VaRest.Http.Redactor.Gate.StopWhileHolding",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpRedactorGateWhileHoldingTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::RedactorTestPrivate;
+	// Review I-2, plan decision 16: a stop that begins while a launch holds the pipe must wait for that launch to return
+	// before it takes the pipe out, and the launched body runs before the delete
+	const FGateScriptRef Script = MakeShared<FGateScript, ESPMode::ThreadSafe>(FGateScript::EOrder::StopWhileHolding);
+	TestTrue(TEXT("W held the pipe before the stop began"), RunGateScript(Script));
+	TestTrue(TEXT("the stop waited for the launch inside"), Script->bStopWaited.load());
+	TestTrue(TEXT("... and drained only after it returned"), Script->bReturnedAtDrain.load());
+	TestTrue(TEXT("the launch is accepted"), Script->bAccepted.load());
+	TestFalse(TEXT("... and held the pipe before the drain"), Script->bHeldPastDrain.load());
+	TestEqual(TEXT("its body ran before the pipe went"), Script->Ran.load(), 1);
 	return true;
 }
 
