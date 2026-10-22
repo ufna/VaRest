@@ -85,6 +85,10 @@ public:
 	 * Game thread. Pass the exchange on with Next.Proceed (now or later; each call is another trip through the stages after
 	 * this one), or answer it yourself through OnOutcome (a cache hit). Call OnOutcome exactly once. A PerAttempt stage may
 	 * edit Exchange->GetAttemptHeaders() before proceeding (request signing).
+	 * A PerAttempt stage holds one of the client's MaxConcurrent slots from the limiter's grant until it proceeds or answers,
+	 * and Cancel() does not return it sooner (ruling I-3: the limiter opens the attempt). Work that waits on another request
+	 * through the same client belongs in an Outer stage or on another client: the request it waits on could queue forever
+	 * behind the slot the stage holds (task 4 review I-1).
 	 */
 	virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) = 0;
 };

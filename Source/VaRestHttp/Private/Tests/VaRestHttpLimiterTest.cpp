@@ -114,6 +114,60 @@ namespace VaRest::Http::LimiterTestPrivate
 		}
 	};
 
+	/**
+	 * A PerAttempt stage that holds a request to .../held until the test lets it go (an asynchronous signer); every other
+	 * request passes. ProceedHeld sends the held attempt to the transport with a callback that only counts its answer;
+	 * AnswerHeld answers the attempt itself (an early answer) and lets go of everything: the held exchange holds the
+	 * configuration, which holds this stage.
+	 */
+	class FHoldingStage final : public IVaRestStage
+	{
+	public:
+		virtual FName GetStageName() const override { return TEXT("Hold"); }
+		virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) override
+		{
+			if (!Exchange->GetUrl().EndsWith(TEXT("/held")))
+			{
+				Next.Proceed(Exchange, MoveTemp(OnOutcome));
+				return;
+			}
+			HeldExchange = Exchange;
+			HeldNext.Emplace(Next);
+			HeldOutcome = MoveTemp(OnOutcome);
+		}
+
+		bool IsHolding() const { return HeldExchange.IsValid(); }
+
+		void ProceedHeld()
+		{
+			if (HeldExchange.IsValid() && HeldNext.IsSet())
+			{
+				HeldNext->Proceed(HeldExchange.ToSharedRef(), [Late = LateAnswers](FVaRestAttemptOutcome&&) { ++*Late; });
+			}
+		}
+
+		/** Nothing when nothing is held */
+		void AnswerHeld()
+		{
+			// Moved out first, so the stage keeps nothing once the answer runs
+			FVaRestOutcomeCallback Done = MoveTemp(HeldOutcome);
+			const bool bWasHolding = HeldExchange.IsValid();
+			HeldExchange.Reset();
+			HeldNext.Reset();
+			if (bWasHolding && Done)
+			{
+				FVaRestAttemptOutcome Early;
+				Early.Status = 204;
+				Done(MoveTemp(Early));
+			}
+		}
+
+		TSharedPtr<FVaRestExchange, ESPMode::ThreadSafe> HeldExchange;
+		TOptional<FVaRestStageNext> HeldNext;
+		FVaRestOutcomeCallback HeldOutcome;
+		TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> LateAnswers = MakeShared<std::atomic<int32>, ESPMode::ThreadSafe>(0);
+	};
+
 	/** A limiter under test and what its grants saw */
 	struct FReentryProbe
 	{
@@ -779,6 +833,10 @@ bool FVaRestHttpLimiterReportsTwiceTest::RunTest(const FString& Parameters)
 	// C-3: the second report is ignored) must release once: a second release frees another attempt's slot, and the client
 	// runs more than MaxConcurrent at once. A double release is also an ensureAlways (FLimiter::Release), counted here.
 	TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> Ensured = MakeShared<std::atomic<int32>, ESPMode::ThreadSafe>(0);
+#if DO_ENSURE
+	// Task 4 review minor 3: SetEnsureHandler and GetEnsureHandler are declared always (AssertionMacros.h:60-61) but defined
+	// only under DO_CHECK || DO_GUARD_SLOW || DO_ENSURE (AssertionMacros.cpp:450, :475-485, :799), so a target with
+	// automation tests and checks off would not link. Without ensures the call counts below catch the bug on their own.
 	const TFunction<bool(const FEnsureHandlerArgs&)> Previous = GetEnsureHandler();
 	SetEnsureHandler([Ensured, Previous](const FEnsureHandlerArgs& Args)
 	{
@@ -790,6 +848,7 @@ bool FVaRestHttpLimiterReportsTwiceTest::RunTest(const FString& Parameters)
 		return Previous ? Previous(Args) : false;
 	});
 	ON_SCOPE_EXIT { SetEnsureHandler(Previous); };
+#endif
 	FTestRig Rig;
 	Rig.Client.WithMaxConcurrent(1);
 	Rig.Client.Use(MakeShared<FTwiceStage, ESPMode::ThreadSafe>(), EVaRestStageSlot::PerAttempt);
@@ -824,6 +883,67 @@ bool FVaRestHttpLimiterReportsTwiceTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("nothing is left in flight"), PumpUntil([&Rig] { return Rig.Client.GetInFlightCount() == 0; }));
 	TestTrue(TEXT("every slot came back"), Slots.NumActive() == 0 && Slots.NumQueued() == 0);
 	TestEqual(TEXT("no release without a grant"), Ensured->load(), 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpLimiterHoldsSlotTest, "VaRest.Http.Limiter.PerAttemptHoldsSlot",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpLimiterHoldsSlotTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::LimiterTestPrivate;
+	// Ruling I-3, task 4 review I-1 and minor 2 (VaRestClient.h WithMaxConcurrent, EVaRestStageSlot::PerAttempt): a
+	// PerAttempt stage holds a slot from the limiter's grant until it proceeds or answers; one that answers its attempt
+	// itself while the transport call still runs gives the slot back with its answer, and the call runs on, uncounted
+	FTestRig Rig;
+	Rig.Client.WithMaxConcurrent(1);
+	const TSharedRef<FHoldingStage, ESPMode::ThreadSafe> Stage = MakeShared<FHoldingStage, ESPMode::ThreadSafe>();
+	Rig.Client.Use(Stage, EVaRestStageSlot::PerAttempt);
+	Rig.Fake->SetResponder([](const FVaRestTransportRequest&) { return FVaRestFakeResponse::Manual(); });
+	const VaRest::Http::FLimiter& Slots = VaRest::Http::FClientAccess::State(Rig.Client)->GetLimiter();
+	auto Bail = [this, &Rig, &Stage]
+	{
+		Rig.Client.CancelAll();
+		Stage->AnswerHeld();
+		while (CompleteOldest(Rig))
+		{
+		}
+		TestTrue(TEXT("drained after a failure"), PumpUntil([&Rig] { return Rig.Client.GetInFlightCount() == 0; }) && Rig.Drain());
+		return false;
+	};
+
+	auto A = MakeOutcome<FVaRestJson>();
+	auto B = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Get(TEXT("/held")), A).Send();
+	Observe(Rig.Client.Get(TEXT("/b")), B).Send();
+	TestTrue(TEXT("drained"), Rig.Drain());
+	if (!TestTrue(TEXT("the stage holds A and the one slot; B waits"),
+		Stage->IsHolding() && Slots.NumActive() == 1 && Slots.NumQueued() == 1 && Rig.Fake->NumCalls() == 0))
+	{
+		return Bail();
+	}
+	Stage->ProceedHeld(); // A's transport call starts; the stage keeps A's answer
+	TestTrue(TEXT("drained"), Rig.Drain());
+	if (!TestTrue(TEXT("proceeding into a call is not answering: A's call runs, B still waits"), Rig.Fake->NumCalls() == 1 && Slots.NumQueued() == 1))
+	{
+		return Bail();
+	}
+	Stage->AnswerHeld(); // the early answer, while A's transport call still runs
+	TestTrue(TEXT("A finishes with the stage's answer"), Rig.Wait(A) && A->SuccessCalls.load() == 1 && A->Response.Status == 204);
+	if (!TestTrue(TEXT("the early answer gave the slot back: B is granted"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 2; })))
+	{
+		return Bail();
+	}
+	TestEqual(TEXT("... while A's call runs on, uncounted"), Rig.Fake->NumInFlight(), 2);
+	Rig.Fake->Complete(0, Ok()); // A's late answer: only counted by the stage
+	Rig.Fake->Complete(1, Ok());
+	TestTrue(TEXT("B finishes"), Rig.Wait(B) && B->SuccessCalls.load() == 1);
+	const TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> Late = Stage->LateAnswers;
+	TestTrue(TEXT("A's late answer came back to the stage"), PumpUntil([Late] { return Late->load() == 1; }));
+	TestTrue(TEXT("drained"), Rig.Drain());
+	TestEqual(TEXT("A's callbacks ran once"), A->CompleteCalls.load(), 1);
+	TestTrue(TEXT("every slot came back"), Slots.NumActive() == 0 && Slots.NumQueued() == 0);
 	return true;
 }
 

@@ -76,7 +76,12 @@ enum class EVaRestStageSlot : uint8
 {
 	/** Sees each logical request once, before the attempt boundary */
 	Outer,
-	/** Sees every attempt and its final headers (request signing), when the attempt leaves the limiter's queue */
+	/**
+	 * Sees every attempt and its final headers (request signing), when the attempt leaves the limiter's queue. It holds one
+	 * of the client's MaxConcurrent slots from the limiter's grant until it proceeds or answers, and Cancel() does not
+	 * return it sooner: work that waits on another request through the same client belongs in an Outer stage or on another
+	 * client (task 4 review I-1).
+	 */
 	PerAttempt
 };
 

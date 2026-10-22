@@ -555,10 +555,11 @@ public:
 	 * - A queued request whose Owner() is gone leaves the queue only when a slot reaches it, and then ends silently; until
 	 *   then it keeps its callbacks, everything they capture and this client alive. Cancel() takes a request out of the
 	 *   queue at once.
-	 * - The queue opens each attempt (ruling I-3): credentials, a PerAttempt stage's signature and the request's log lines
-	 *   are written when it leaves the queue. A PerAttempt stage holds the slot while it works; one that answers its
-	 *   attempt itself while the transport call still runs gives the slot back with its answer, and the call it left runs
-	 *   on, uncounted, until the engine ends it.
+	 * - The queue opens each attempt (ruling I-3): a PerAttempt stage's signature and the request's log lines are written
+	 *   when it leaves the queue; an auth's credentials join them with AuthApply (M4a Task 14). Headers set with
+	 *   WithHeader() are still the ones the request snapshotted at Send() (spec 3.1). A PerAttempt stage holds the slot
+	 *   while it works; one that answers its attempt itself while the transport call still runs gives the slot back with
+	 *   its answer, and the call it left runs on, uncounted, until the engine ends it.
 	 */
 	FVaRestClient& WithMaxConcurrent(int32 MaxConcurrent);
 	/**

@@ -172,9 +172,9 @@ void VaRest::Http::FClientState::Publish(const TSharedRef<FClientConfig, ESPMode
 		}
 	}
 	NewChain->Add(MakeAttemptBoundaryStage());
-	// Ruling I-3 (spec 4.6 as amended): the first stage of every attempt. Credentials (Task 14), a custom PerAttempt stage's
-	// signature and the log lines are written when the request leaves the queue, so none of them goes stale while it
-	// waits; a queued retry still waits its turn.
+	// Ruling I-3 (spec 4.6 as amended): the first stage of every attempt. A custom PerAttempt stage's signature, the log
+	// lines and, once Task 14's AuthApply follows the limiter, an auth's credentials are written when the request leaves
+	// the queue, so none of them goes stale while it waits; a queued retry still waits its turn.
 	NewChain->Add(MakeLimiterStage());
 	for (const TPair<FVaRestStageRef, EVaRestStageSlot>& Entry : Next->CustomStages)
 	{
