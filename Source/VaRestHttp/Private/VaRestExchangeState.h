@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "VaRestAuthTypes.h"
 #include "VaRestEnvelope.h"
 #include "VaRestRetry.h"
 #include "VaRestStage.h"
@@ -62,6 +63,16 @@ namespace VaRest::Http
 		 */
 		mutable TSharedPtr<const FVaRestRedactor, ESPMode::ThreadSafe> UnionRedactor;
 		mutable TSharedPtr<const FVaRestRedactor, ESPMode::ThreadSafe> UnionBuiltFrom;
+		/**
+		 * Game thread (Task 12 review M-7): what this exchange's attempts carried beyond the Send() snapshot. AuthApply writes
+		 * the session as it is when an attempt leaves the limiter's queue, so a token or session header set after Send() goes
+		 * out, and a logout before the outcome makes the client forget it while the request still runs. When AuthApply finds
+		 * the client's redactor is not the one this exchange knows, it joins it in here: Config's redactor and every such one,
+		 * across attempts. Null while every attempt applied under Config's. AppliedKeys are its layer-2 keys (FVaRestRedactor
+		 * does not list them). Kept until the exchange dies: a late outcome after Complete is still logged (RedactorFor).
+		 */
+		TSharedPtr<const FVaRestRedactor, ESPMode::ThreadSafe> AppliedRedactor;
+		TArray<FString> AppliedKeys;
 
 		// Resolved on entry (game thread):
 		FString Url;
@@ -111,6 +122,16 @@ namespace VaRest::Http
 		bool bNoEnvelope = false;
 		/** Spec 3.4, set by Resolve: the request's, else the client's; null with NoEnvelope() or none configured */
 		TSharedPtr<const FVaRestEnvelope, ESPMode::ThreadSafe> Envelope;
+
+		// Auth (Tasks 14-17): AuthMode from Send, the rest per attempt (game thread)
+		EVaRestAuthMode AuthMode = EVaRestAuthMode::Required;
+		/** The URL of the current attempt: Url (the attempt boundary) plus the auth's query pairs (AuthApply) */
+		FString AttemptUrl;
+		/**
+		 * FVaRestSessionData::CredentialGeneration when AuthApply wrote this attempt's credentials: the auth gate's "newer
+		 * credentials" replay compares it (Task 17). Not Generation: a session header must not use up the replay (M-6).
+		 */
+		uint32 AppliedCredentialGeneration = 0;
 
 		/**
 		 * Plan decision 7. Game thread. Set by a stage while it holds this exchange waiting (a backoff, a park behind a

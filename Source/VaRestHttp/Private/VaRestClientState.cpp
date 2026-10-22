@@ -5,6 +5,7 @@
 #include "HAL/PlatformTime.h"
 #include "Misc/ScopeLock.h"
 #include "Tasks/Task.h"
+#include "VaRestAuthInternal.h"
 #include "VaRestHttpTesting.h"
 #include "VaRestRetryInternal.h"
 #include "VaRestTracePoints.h"
@@ -35,16 +36,22 @@ namespace VaRest::Http::ClientStatePrivate
 	}
 
 	/**
-	 * Review I-1: Now's redactor with what Sent's knew and Now's does not -- its known values, and its keys, which only
-	 * grow today (WithRedactedKeys appends) but are joined all the same. Now's own redactor when Sent adds nothing.
+	 * Review I-1: Now's redactor with what Known knew and Now's does not -- its known values, and its keys (KnownKeys:
+	 * FVaRestRedactRules does not list its own), which only grow today (WithRedactedKeys appends) but are joined all the
+	 * same. Now's own redactor when Known adds nothing. OutKeys, when given, gets the union's keys.
 	 */
-	TSharedRef<const FVaRestRedactor, ESPMode::ThreadSafe> MakeUnionRedactor(const FClientConfig& Sent, const FClientConfig& Now)
+	TSharedRef<const FVaRestRedactor, ESPMode::ThreadSafe> MakeUnionRedactor(const FVaRestRedactor& Known, TConstArrayView<FString> KnownKeys,
+		const FClientConfig& Now, TArray<FString>* OutKeys = nullptr)
 	{
 		const TSharedRef<const FVaRestRedactor, ESPMode::ThreadSafe> Current = Now.Redactor.ToSharedRef();
 		TArray<FString> Values = Current->GetSecrets();
 		FVaRestRedactRules Rules = Current->GetRules();
+		if (OutKeys)
+		{
+			*OutKeys = Now.RedactedKeys;
+		}
 		bool bWider = false;
-		for (const FString& Value : Sent.Redactor->GetSecrets())
+		for (const FString& Value : Known.GetSecrets())
 		{
 			if (!ContainsExactly(Values, Value))
 			{
@@ -52,12 +59,16 @@ namespace VaRest::Http::ClientStatePrivate
 				bWider = true;
 			}
 		}
-		for (const FString& Key : Sent.RedactedKeys)
+		for (const FString& Key : KnownKeys)
 		{
 			if (!ContainsExactly(Now.RedactedKeys, Key))
 			{
 				Rules.AddKey(Key);
 				bWider = true;
+				if (OutKeys)
+				{
+					OutKeys->Add(Key);
+				}
 			}
 		}
 		if (!bWider)
@@ -65,6 +76,17 @@ namespace VaRest::Http::ClientStatePrivate
 			return Current;
 		}
 		return MakeShared<FVaRestRedactor, ESPMode::ThreadSafe>(MoveTemp(Rules), MoveTemp(Values));
+	}
+
+	/** What Ex's redactor has known so far: its attempts' join (Task 12 review M-7) once there is one, else the Send() snapshot's */
+	const FVaRestRedactor& KnownRedactor(const FExchangeState& Ex)
+	{
+		return Ex.AppliedRedactor.IsValid() ? *Ex.AppliedRedactor : *Ex.Config->Redactor;
+	}
+
+	TConstArrayView<FString> KnownKeys(const FExchangeState& Ex)
+	{
+		return Ex.AppliedRedactor.IsValid() ? TConstArrayView<FString>(Ex.AppliedKeys) : TConstArrayView<FString>(Ex.Config->RedactedKeys);
 	}
 
 	/** IN-8's name comes from WithName, or, without one, from the base URL: a new base renames an unnamed client (review M5) */
@@ -131,17 +153,41 @@ TSharedRef<const FVaRestRedactor, ESPMode::ThreadSafe> VaRest::Http::RedactorFor
 	check(IsInGameThread());
 	const TSharedRef<const FClientConfig, ESPMode::ThreadSafe> Now = Ex.State->GetConfig();
 	const TSharedRef<const FVaRestRedactor, ESPMode::ThreadSafe> Current = Now->Redactor.ToSharedRef();
-	if (!Ex.Config.IsValid() || Ex.Config->Redactor.Get() == &Current.Get())
+	if (!Ex.Config.IsValid() || &ClientStatePrivate::KnownRedactor(Ex) == &Current.Get())
 	{
 		// The usual case, nothing changed while the request ran: one redactor, one pass
 		return Current;
 	}
 	if (Ex.UnionBuiltFrom.Get() != &Current.Get())
 	{
-		Ex.UnionRedactor = ClientStatePrivate::MakeUnionRedactor(*Ex.Config, *Now);
+		// Snapshot, applied and current (Task 12 review M-7): KnownRedactor is the first two joined already
+		Ex.UnionRedactor = ClientStatePrivate::MakeUnionRedactor(ClientStatePrivate::KnownRedactor(Ex), ClientStatePrivate::KnownKeys(Ex), *Now);
 		Ex.UnionBuiltFrom = Current;
 	}
 	return Ex.UnionRedactor.ToSharedRef();
+}
+
+void VaRest::Http::RememberAppliedRedactor(FExchangeState& Ex)
+{
+	check(IsInGameThread());
+	const TSharedRef<const FClientConfig, ESPMode::ThreadSafe> Now = Ex.State->GetConfig();
+	const FVaRestRedactor& Known = ClientStatePrivate::KnownRedactor(Ex);
+	if (&Known == Now->Redactor.Get())
+	{
+		// The usual case: the client's redactor is the one this exchange already knows -- nothing set or forgotten since
+		// Send() or the last attempt
+		return;
+	}
+	// The client changed while the request waited (a login while it queued, a refresh before a replay): what this attempt
+	// carries is in Now's redactor, and the request's later lines must keep it after the client forgets it. MakeUnionRedactor
+	// returns Now's own redactor when it knows all Known did, so RedactorFor's one comparison holds again until the next change.
+	TArray<FString> Keys;
+	const TSharedRef<const FVaRestRedactor, ESPMode::ThreadSafe> Joined = ClientStatePrivate::MakeUnionRedactor(Known, ClientStatePrivate::KnownKeys(Ex), *Now, &Keys);
+	Ex.AppliedRedactor = Joined;
+	Ex.AppliedKeys = MoveTemp(Keys);
+	// RedactorFor's cached union was built from the old Known
+	Ex.UnionRedactor.Reset();
+	Ex.UnionBuiltFrom.Reset();
 }
 
 void VaRest::Http::FClientState::EditConfig(TFunctionRef<void(FClientConfig&)> Edit)
@@ -179,9 +225,12 @@ void VaRest::Http::FClientState::Publish(const TSharedRef<FClientConfig, ESPMode
 	NewChain->Add(MakeRetryStage());
 	NewChain->Add(MakeAttemptBoundaryStage());
 	// Ruling I-3 (spec 4.6 as amended): the first stage of every attempt. A custom PerAttempt stage's signature, the log
-	// lines and, once Task 14's AuthApply follows the limiter, an auth's credentials are written when the request leaves
-	// the queue, so none of them goes stale while it waits; a queued retry still waits its turn.
+	// lines and an auth's credentials are written when the request leaves the queue, so none of them goes stale while it
+	// waits; a queued retry still waits its turn.
 	NewChain->Add(MakeLimiterStage());
+	// Spec 4.2: credentials per attempt, when the attempt leaves the queue (ruling I-3), before the custom PerAttempt stages,
+	// which then sign the final headers
+	NewChain->Add(MakeAuthApplyStage());
 	for (const TPair<FVaRestStageRef, EVaRestStageSlot>& Entry : Next->CustomStages)
 	{
 		if (Entry.Value == EVaRestStageSlot::PerAttempt)
@@ -289,6 +338,45 @@ void VaRest::Http::FClientState::ClearSecrets()
 	Secrets.ClearSlots([](FName Slot) { return IsGameSecretSlot(Slot); });
 	EditConfig([](FClientConfig&) {});
 	ScheduleSecretExpiry();
+}
+
+void VaRest::Http::FClientState::SetAuth(const TSharedPtr<IVaRestAuth, ESPMode::ThreadSafe>& InAuth)
+{
+	check(IsInGameThread());
+	TArray<FString> Keys;
+	TArray<TPair<FName, FString>> Given;
+	if (InAuth.IsValid())
+	{
+		InAuth->GetRedactedKeys(Keys);
+		InAuth->GetSecretValues(Given);
+	}
+	TArray<TPair<FName, FString>> Values;
+	TArray<FName> NewSlots;
+	for (const TPair<FName, FString>& Value : Given)
+	{
+		// Task 14 carry: a custom auth names its slots freely; stored under the auth's prefix, "VaRest.Session.AccessToken"
+		// from one is not the session's token slot, so it cannot rotate the live token out or be forgotten by ClearSession
+		const FName Slot = AuthSecretSlot(Value.Key);
+		Values.Emplace(Slot, Value.Value);
+		NewSlots.AddUnique(Slot);
+	}
+	for (const FName Old : AuthSlots)
+	{
+		if (!NewSlots.Contains(Old))
+		{
+			// Task 14 carry: retired, as ImportSession retires a header it drops (VaRestSession.cpp) -- an empty value moves the
+			// old one to the previous values (FVaRestSecretSet::Set), scrubbed for 10 minutes, then forgotten (Inspector D21).
+			// Kept current, an auth replaced long ago would stay a known secret forever.
+			Values.Emplace(Old, FString());
+		}
+	}
+	AuthSlots = MoveTemp(NewSlots);
+	// IN-13 layers 2 and 3 in the auth's own republish: its key names are checked once where they enter (task 14 review M4)
+	SetSecrets(Values, [&InAuth, &Keys](FClientConfig& Edited)
+	{
+		Edited.Auth = InAuth;
+		AppendRedactKeys(Edited.RedactedKeys, Keys);
+	});
 }
 
 void VaRest::Http::FClientState::SetClock(const TSharedRef<IVaRestClock, ESPMode::ThreadSafe>& NewClock)

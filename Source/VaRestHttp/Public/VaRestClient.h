@@ -20,6 +20,7 @@
 
 class FVaRestClient;
 class FVaRestRequestHandle;
+class IVaRestAuth;
 /** Declared here for FRequestSpec's friendship; the definition below carries [[nodiscard]] (allowed on a later declaration) */
 template <typename T>
 class TVaRestRequest;
@@ -82,6 +83,8 @@ namespace VaRest::Http
 		TOptional<FVaRestEnvelope> Envelope;
 		/** NoEnvelope() */
 		bool bNoEnvelope = false;
+		/** AuthMode() / NoAuth() (plan decision 4) */
+		EVaRestAuthMode AuthMode = EVaRestAuthMode::Required;
 		/** The current body is a struct, encoded with Naming: Naming() now fails. A later Body() or BodyFile() clears it. */
 		bool bStructBodySet = false;
 		TUniquePtr<IResultHandler> Handler;
@@ -470,6 +473,19 @@ public:
 		return MoveTemp(*this);
 	}
 
+	/** Spec 4.2 / OpenAPI N15 (plan decision 4): Required (the default), IfAvailable, or None */
+	TVaRestRequest AuthMode(EVaRestAuthMode InMode) &&
+	{
+		Spec->AuthMode = InMode;
+		return MoveTemp(*this);
+	}
+
+	/** Spec 3.2: no credentials, no session headers, no refresh -- a login request */
+	TVaRestRequest NoAuth() &&
+	{
+		return MoveTemp(*this).AuthMode(EVaRestAuthMode::None);
+	}
+
 	/**
 	 * Spec 3.2: weak. Once the owner is gone there are no callbacks and no further attempts. An owner that goes while the
 	 * request waits -- backing off before a retry, or parked behind a session refresh (Task 17) -- is noticed when that
@@ -623,7 +639,7 @@ public:
 	 *   then it keeps its callbacks, everything they capture and this client alive. Cancel() takes a request out of the
 	 *   queue at once.
 	 * - The queue opens each attempt (ruling I-3): a PerAttempt stage's signature and the request's log lines are written
-	 *   when it leaves the queue; an auth's credentials join them with AuthApply (M4a Task 14). Headers set with
+	 *   when it leaves the queue, and so are an auth's credentials and the session headers (AuthApply). Headers set with
 	 *   WithHeader() are still the ones the request snapshotted at Send() (spec 3.1). A PerAttempt stage holds the slot
 	 *   while it works; one that answers its attempt itself while the transport call still runs gives the slot back with
 	 *   its answer, and the call it left runs on, uncounted, until the engine ends it.
@@ -704,6 +720,26 @@ public:
 	/** Game thread. An empty client returns a delegate that never fires. */
 	FVaRestSessionChangedEvent& OnSessionChanged();
 	FVaRestSessionExpiredEvent& OnSessionExpired();
+
+	// ---- auth (spec 4.2; game thread)
+	/**
+	 * This client's auth: FVaRestAuth::Bearer(), ApiKey(), Basic(), BearerRefresh(), or an IVaRestAuth of your own. Requests
+	 * already sent keep the auth they started with (spec 3.1); the session they apply is the live one (plan decision 6). The
+	 * secret values the auth it replaces held and this one does not are retired: still scrubbed for 10 minutes, then
+	 * forgotten (Inspector D21). ClearSession() and ClearSecretValues() leave an auth's values alone.
+	 */
+	FVaRestClient& WithAuth(TSharedRef<IVaRestAuth, ESPMode::ThreadSafe> InAuth);
+	/** No auth: requests carry the session headers only. The auth's secret values are retired, as WithAuth retires them. */
+	FVaRestClient& WithoutAuth();
+	/** Spec 3.1: WithAuth(FVaRestAuth::Bearer()) and SetBearerToken(InToken) */
+	FVaRestClient& WithBearer(FStringView InToken);
+	/**
+	 * WebSocket spec 19 item 2: the session headers, then this client's auth, into OutHeaders and OutQuery (a socket
+	 * handshake). False when the client has an auth and it has no credentials (a socket's Kind=Auth), or when the auth is
+	 * misconfigured (ruling Q7): then OutConfigError, when given, says why, and the socket fails Kind=Config. True with no
+	 * auth at all.
+	 */
+	bool ApplyAuth(FVaRestHeaders& OutHeaders, TArray<TPair<FString, FString>>& OutQuery, FString* OutConfigError = nullptr) const;
 
 	// ---- requests (any thread)
 	template <typename T = FVaRestJson>

@@ -251,6 +251,8 @@ namespace VaRest::Http::PipelinePrivate
 				Ex.NextGapSeconds = FMath::Max(0.0, Ex.AttemptStartedAt - Ex.LastAttemptEndedAt);
 			}
 			Ex.AttemptHeaders = Ex.RequestHeaders;
+			// Plan decision 19: each attempt starts from the request's URL; AuthApply appends an auth's query pairs to it
+			Ex.AttemptUrl = Ex.Url;
 			Ex.LimiterWait = 0.0;
 			Next.Proceed(Exchange, MoveTemp(OnOutcome));
 		}
@@ -450,7 +452,8 @@ namespace VaRest::Http::PipelinePrivate
 			Request.RequestId = Ex.RequestId;
 			Request.Attempt = Ex.Attempt;
 			Request.Verb = Ex.Verb;
-			Request.Url = Ex.Url;
+			// The attempt's own URL: an API key in the query is per attempt (AuthApply), as the credential headers are
+			Request.Url = Ex.AttemptUrl;
 			Request.Headers = Ex.AttemptHeaders;
 			if (!Ex.Body.FilePath.IsEmpty())
 			{
@@ -546,6 +549,7 @@ uint64 FVaRestExchange::GetRequestId() const { return Impl->RequestId; }
 uint64 FVaRestExchange::GetClientId() const { return Impl->ClientId; }
 const FString& FVaRestExchange::GetVerb() const { return Impl->Verb; }
 const FString& FVaRestExchange::GetUrl() const { return Impl->Url; }
+const FString& FVaRestExchange::GetAttemptUrl() const { return Impl->AttemptUrl; }
 const FString& FVaRestExchange::GetPathTemplate() const { return Impl->PathTemplate; }
 FName FVaRestExchange::GetTag() const { return Impl->Tag; }
 EVaRestPriority FVaRestExchange::GetPriority() const { return Impl->Priority; }
@@ -1016,7 +1020,8 @@ void VaRest::Http::FClientState::Complete(const FVaRestExchangeRef& Exchange, FF
 	InFlight.Remove(Ex.RequestId);
 	// IN-5: before any callback, OnHttpThread ones included, and also when none will run (owner gone, shutdown)
 	TracePoints::Completed(Ex, Finish);
-	// The request has ended: nothing redacts for it again, so it keeps no redactor beyond its snapshot
+	// The request has ended: its cached union goes (a late outcome's line rebuilds one). What its attempts applied
+	// (AppliedRedactor, Task 12 review M-7) stays with the exchange, as its snapshot does.
 	Ex.UnionRedactor.Reset();
 	Ex.UnionBuiltFrom.Reset();
 	TUniquePtr<IResultHandler> Handler = MoveTemp(Ex.Handler);

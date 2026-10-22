@@ -4,6 +4,8 @@
 
 #include "Tasks/Task.h"
 #include "UObject/StrongObjectPtr.h"
+#include "VaRestAuth.h"
+#include "VaRestAuthInternal.h"
 #include "VaRestClientState.h"
 #include "VaRestHttpLog.h"
 #include "VaRestHttpSettings.h"
@@ -187,6 +189,7 @@ FVaRestRequestHandle VaRest::Http::FRequestSpecAccess::Send(TUniquePtr<FRequestS
 	Ex.RetryOverride = MoveTemp(Spec->Retry);
 	Ex.EnvelopeOverride = MoveTemp(Spec->Envelope);
 	Ex.bNoEnvelope = Spec->bNoEnvelope;
+	Ex.AuthMode = Spec->AuthMode;
 	Ex.Owner = Spec->Owner;
 	Ex.bHasOwner = Spec->bHasOwner;
 	Ex.SourceFile = SourceFile;
@@ -615,6 +618,60 @@ FVaRestSessionExpiredEvent& FVaRestClient::OnSessionExpired()
 		return *Never;
 	}
 	return State->OnSessionExpired();
+}
+
+FVaRestClient& FVaRestClient::WithAuth(TSharedRef<IVaRestAuth, ESPMode::ThreadSafe> InAuth)
+{
+	check(IsInGameThread());
+	if (State.IsValid())
+	{
+		State->SetAuth(InAuth);
+	}
+	return *this;
+}
+
+FVaRestClient& FVaRestClient::WithoutAuth()
+{
+	check(IsInGameThread());
+	if (State.IsValid())
+	{
+		State->SetAuth(nullptr);
+	}
+	return *this;
+}
+
+FVaRestClient& FVaRestClient::WithBearer(FStringView InToken)
+{
+	WithAuth(FVaRestAuth::Bearer());
+	SetBearerToken(InToken);
+	return *this;
+}
+
+bool FVaRestClient::ApplyAuth(FVaRestHeaders& OutHeaders, TArray<TPair<FString, FString>>& OutQuery, FString* OutConfigError) const
+{
+	check(IsInGameThread());
+	if (!State.IsValid())
+	{
+		return true;
+	}
+	// Held for the call: an auth's Apply is game code, and a WithAuth() it made would otherwise release the auth under it
+	const TSharedRef<const VaRest::Http::FClientConfig, ESPMode::ThreadSafe> Current = State->GetConfig();
+	const IVaRestAuth* Auth = Current->Auth.Get();
+	if (Auth)
+	{
+		// Ruling Q7 for sockets (spec review C-1): a typo is Kind=Config there too, not a login screen
+		const FString Invalid = Auth->GetConfigError();
+		if (!Invalid.IsEmpty())
+		{
+			if (OutConfigError)
+			{
+				*OutConfigError = Invalid;
+			}
+			return false;
+		}
+	}
+	FVaRestAuthTarget Target(OutHeaders, OutQuery, State->GetSessionData());
+	return VaRest::Http::ApplyCredentials(Auth, Target);
 }
 
 FVaRestClient& FVaRestClient::Use(FVaRestStageRef Stage, EVaRestStageSlot Slot)

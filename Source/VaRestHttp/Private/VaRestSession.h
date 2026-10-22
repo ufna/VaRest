@@ -54,4 +54,16 @@ namespace VaRest::Http
 	// FName text keeps the casing it was first made with, so the prefixes compare ignoring case
 	inline bool IsSessionSecretSlot(FName Slot) { return Slot.ToString().StartsWith(SessionSecretPrefix(), ESearchCase::IgnoreCase); }
 	inline bool IsGameSecretSlot(FName Slot) { return Slot.ToString().StartsWith(GameSecretPrefix(), ESearchCase::IgnoreCase); }
+	/** Every slot an auth's values take (FClientState::SetAuth); neither ClearSession nor ClearSecretValues forgets them */
+	inline const TCHAR* AuthSecretPrefix() { return TEXT("VaRest.Auth."); }
+	/**
+	 * Task 14 carry: the slot an IVaRestAuth::GetSecretValues name is stored as. A custom auth may return any name; under
+	 * this prefix it can never be a session's (VaRest.Session.*) or a game's (VaRest.Game.*) slot, as GameSecretSlot keeps
+	 * a game from the others. A name already under it (any case: FName text keeps its first casing) is kept as it is.
+	 */
+	inline FName AuthSecretSlot(FName Slot)
+	{
+		const FString Name = Slot.ToString();
+		return Name.StartsWith(AuthSecretPrefix(), ESearchCase::IgnoreCase) ? Slot : FName(*(FString(AuthSecretPrefix()) + Name));
+	}
 }

@@ -135,6 +135,8 @@ public:
 	const FString& GetVerb() const;
 	/** Base URL + expanded path + query */
 	const FString& GetUrl() const;
+	/** The current attempt's URL: GetUrl() plus an auth's query pairs (an API key), from the auth stage on (plan decision 19) */
+	const FString& GetAttemptUrl() const;
 	/** The path before {param} substitution, without the query (Inspector IN-1) */
 	const FString& GetPathTemplate() const;
 	FName GetTag() const;

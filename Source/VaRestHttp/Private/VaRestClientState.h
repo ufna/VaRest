@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "Math/RandomStream.h"
 #include "Misc/ScopeRWLock.h"
+#include "VaRestAuth.h"
 #include "VaRestClient.h"
 #include "VaRestEnvelope.h"
 #include "VaRestExchangeState.h"
@@ -35,6 +36,8 @@ namespace VaRest::Http
 		TSharedPtr<const FVaRestEnvelope, ESPMode::ThreadSafe> Envelope;
 		/** The project's (UVaRestHttpSettings::RedactedKeys) and this client's additions (WithRedactedKeys) */
 		TArray<FString> RedactedKeys;
+		/** Spec 4.2, WithAuth: null = none (session headers only). Shared, immutable to the core: AuthApply reads it per attempt. */
+		TSharedPtr<IVaRestAuth, ESPMode::ThreadSafe> Auth;
 		TArray<TPair<FVaRestStageRef, EVaRestStageSlot>> CustomStages;
 		TSharedPtr<IVaRestTransport, ESPMode::ThreadSafe> Transport;
 		TSharedPtr<IVaRestClock, ESPMode::ThreadSafe> Clock;
@@ -99,6 +102,13 @@ namespace VaRest::Http
 		void SetSecrets(TConstArrayView<TPair<FName, FString>> Values, TFunctionRef<void(FClientConfig&)> AlsoEdit);
 		/** Game thread, ClearSecretValues: forgets the game's slots only, the rotated ones too (review I-1) */
 		void ClearSecrets();
+		/**
+		 * Game thread: WithAuth (InAuth valid) and WithoutAuth (null). One republish: the auth, its layer-2 keys and its
+		 * layer-3 values, each under AuthSecretSlot (Task 14 carry: a custom auth's name never reaches a session or game
+		 * slot). The previous auth's slots the new one does not set are retired (Task 14 carry, as ImportSession retires a
+		 * dropped header): known for 10 minutes, then forgotten (Inspector D21).
+		 */
+		void SetAuth(const TSharedPtr<IVaRestAuth, ESPMode::ThreadSafe>& InAuth);
 		/** Game thread: WithClock. Pending secret expiries move to the new clock's time, and their timer with them (review M6). */
 		void SetClock(const TSharedRef<IVaRestClock, ESPMode::ThreadSafe>& NewClock);
 
@@ -209,6 +219,8 @@ namespace VaRest::Http
 		/** Game thread; Publish copies its active values into each redactor */
 		FVaRestSecretSet Secrets;
 		FVaRestTimerHandle SecretExpiryTimer;
+		/** Game thread: the slots the current auth's values are in (SetAuth), so the next SetAuth knows what to retire */
+		TArray<FName> AuthSlots;
 		/**
 		 * Spec 4.2: the live session (plan decision 6). Game thread. Its listeners and (Task 16) refresh waiters are game code,
 		 * so ~FClientState off the game thread sends it there with the configuration (concurrency review M-9).
@@ -227,14 +239,22 @@ namespace VaRest::Http
 
 	/**
 	 * Game thread: the redactor of Ex's logs, traces and FVaRestError::Url (plan decision 17, carry (b); review I-1) --
-	 * what Ex's Send() snapshot knew and what the client knows now, both: a secret set while the request is out (an auth
-	 * refresh) is scrubbed from its later lines, and its own token stays scrubbed after the client forgets it (a logout, a
-	 * rotated value's 10 minutes, the cap of MaxPrevious). The current redactor itself when it is the snapshot's (nothing
-	 * changed while the request ran) or knows all the snapshot did; else a union, built once per change and cached on Ex.
+	 * what Ex's Send() snapshot knew, what its attempts applied (Ex.AppliedRedactor, Task 12 review M-7) and what the
+	 * client knows now, all three: a secret set while the request is out (an auth refresh) is scrubbed from its later
+	 * lines, and a token the request carried stays scrubbed after the client forgets it (a logout, a rotated value's 10
+	 * minutes, the cap of MaxPrevious) -- the one it had at Send() and one AuthApply wrote later alike. The current
+	 * redactor itself when it is the one Ex knows (nothing changed while the request ran) or knows all that one did; else
+	 * a union, built once per change and cached on Ex.
 	 * Cost: after ClearSession (ClearSecretValues today) an in-flight request's later lines still scrub the old token --
-	 * the snapshot keeps it in memory until the request ends, as it did before decision 17.
+	 * the exchange keeps it in memory until it dies, as the snapshot did before decision 17.
 	 */
 	TSharedRef<const FVaRestRedactor, ESPMode::ThreadSafe> RedactorFor(const FExchangeState& Ex);
+	/**
+	 * Game thread, AuthApply (Task 12 review M-7): when the client's redactor now is not the one Ex knows (Config's, or
+	 * AppliedRedactor once set), joins it into Ex.AppliedRedactor, so what this attempt carries stays scrubbed for Ex's
+	 * life. One pointer comparison when nothing changed since Send() or the last attempt.
+	 */
+	void RememberAppliedRedactor(FExchangeState& Ex);
 
 	/** The chain's built-in stages (VaRestPipeline.cpp) */
 	FVaRestStageRef MakeAttemptBoundaryStage();

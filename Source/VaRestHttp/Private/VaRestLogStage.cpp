@@ -151,7 +151,8 @@ namespace VaRest::Http::LogStagePrivate
 		if (bWarning ? UE_LOG_ACTIVE(LogVaRestHttp, Warning) : UE_LOG_ACTIVE(LogVaRestHttp, Log))
 		{
 			// Built here, only for a line that is written, with this redactor: not the request line's
-			const FString Url = ShownUrl(Redactor, Ex.Url);
+			// The URL the attempt went to: an auth's query pair is redacted by its key (plan decision 19)
+			const FString Url = ShownUrl(Redactor, Ex.AttemptUrl);
 			const FString ShownVerb = EscapeForLog(Ex.Verb);
 			if (bCanceled)
 			{
@@ -224,7 +225,7 @@ namespace VaRest::Http::LogStagePrivate
 			const FRedactorRef Redactor = RedactorFor(Ex);
 			if (bLogActive && Level >= EVaRestLogLevel::Headers)
 			{
-				const FString Shown = ShownUrl(Redactor, Ex.Url);
+				const FString Shown = ShownUrl(Redactor, Ex.AttemptUrl);
 				UE_LOG(LogVaRestHttp, Log, TEXT("#%llu > %s %s (attempt %d)"), Ex.RequestId, *EscapeForLog(Ex.Verb), *Shown, Ex.Attempt);
 				LogHeaders(Ex.RequestId, TEXT(">"), Redactor->RedactHeaders(Ex.AttemptHeaders));
 			}
