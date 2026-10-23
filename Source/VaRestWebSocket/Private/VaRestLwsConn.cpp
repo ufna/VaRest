@@ -175,6 +175,10 @@ int32 VaRest::WebSocket::Lws::FConn::OnCallback(FService& Service, lws* InWsi, i
 		return OnWriteable(InWsi);
 	case LWS_CALLBACK_WS_PEER_INITIATED_CLOSE:
 		return OnPeerClose(In, Len);
+	case LWS_CALLBACK_OPENSSL_PERFORM_SERVER_CERT_VERIFICATION:
+		// user is the X509_STORE_CTX, len preverify_ok (libwebsockets.h:1015-1044); the service found this connection by
+		// lws_wsi_user, as the engine does (LwsWebSocketsManager.cpp:447-456)
+		return OnVerifyServerCertificate(Service, static_cast<X509_STORE_CTX*>(User), static_cast<int32>(Len));
 	case LWS_CALLBACK_CLIENT_CLOSED:
 	case LWS_CALLBACK_CLOSED_CLIENT_HTTP:
 		// A client ends with CLIENT_CLOSED, never CLOSED (T29, close.peer_sequence); a handshake VaRest refused, with
@@ -199,6 +203,16 @@ int32 VaRest::WebSocket::Lws::FConn::OnAppendHeaders(void* In, size_t Len)
 		return -1;
 	}
 	++AppendCalls;
+	if (AppendCalls > 1)
+	{
+		// A second APPEND_HANDSHAKE_HEADER in one attempt: LWS followed a 3xx and builds the request to the new target
+		// [hs.redirect_relative, hs.redirect_absolute, hs.redirect_target_visible]. Ruling Q2: nothing is appended -- no auth and
+		// no header reaches another target -- and the attempt fails here, before the second request goes out; LWS then gives no
+		// CONNECTION_ERROR [hs.redirect_veto], so OnEnded reports it (plan decision 10)
+		PendingFailure = EVaRestSocketFailure::Redirect;
+		PendingDetail = TEXT("the server answered the upgrade with a redirect, which VaRest does not follow (ruling Q2)");
+		return -1;
+	}
 	if (Target.HeaderBlock.Num() == 0)
 	{
 		return 0;
@@ -223,6 +237,13 @@ int32 VaRest::WebSocket::Lws::FConn::OnFilterPreEstablish(lws* InWsi)
 	if (State == EConnState::Ended)
 	{
 		// Review conc I-1: an ended attempt never opens ("HS: Rejected by filter cb")
+		return -1;
+	}
+	if (AppendCalls > 1)
+	{
+		// The response to a second request: a second guard behind the APPEND veto ("HS: Rejected by filter cb", hs.redirect_veto)
+		PendingFailure = EVaRestSocketFailure::Redirect;
+		PendingDetail = TEXT("the server answered the upgrade with a redirect, which VaRest does not follow (ruling Q2)");
 		return -1;
 	}
 	// The last point the response headers exist (T6, libwebsockets.h:1301-1307): the subprotocol the server selected (T17)

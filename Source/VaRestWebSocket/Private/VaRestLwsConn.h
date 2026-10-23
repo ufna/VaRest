@@ -79,6 +79,8 @@ namespace VaRest::WebSocket::Lws
 		int32 OnWriteable(lws* InWsi);
 		/** PEER_INITIATED_CLOSE: the peer's close read by spec 2.5's rules (ParsePeerClose); 0, so LWS echoes it */
 		int32 OnPeerClose(const void* In, size_t Len);
+		/** PERFORM_SERVER_CERT_VERIFICATION: 0 accepts, 1 refuses (libwebsockets.h:1015-1044) */
+		int32 OnVerifyServerCertificate(FService& Service, X509_STORE_CTX* Store, int32 PreverifyOk);
 		void OnConnectionError(const void* In, size_t Len);
 		/** CLIENT_CLOSED, CLOSED_CLIENT_HTTP, and WSI_DESTROY for what did not end before it */
 		void OnEnded();
