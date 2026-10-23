@@ -40,7 +40,7 @@ The checkboxes below are execution instructions. Beads owns actual task status; 
 
 The preceding W1a constraints are copied verbatim except the explicitly corrected authorship rule. Their W1a task numbers describe historical ownership. For B1 the existing raw rig continues to use its private `VaRestLwsProbeLws.h` include wrapper and namespace `VaRest::LwsProbe`; this does not add a production include path or dependency. Raw-probe tests use `Probe.VaRest.Lws.*`. No production source under `Source/VaRestWebSocket` changes. Local implementation commits remain root-coordinated; acquire the controller's exclusive index lease before a task's listed git commands when other agents share this checkout.
 
-B1-specific constraints supersede stale W1a runbook assumptions: inspect a normal-target `-WriteOutdatedActions` result before every build and stop on engine actions. A dry run may invoke UHT and invalidate generated engine artifacts; `-Module`/`-UsePrecompiled` are not isolation guarantees. Never fix engine files, generated includes, timestamps or caches from this plan. No NoPCH gate, cooked run, native Windows/macOS/mobile claim, flow-control/ping/DNS/reply change, or whole-W1 completion belongs to B1.
+B1-specific constraints supersede stale W1a runbook assumptions: inspect a normal-target `-WriteOutdatedActions` result before every build and stop on engine actions. A dry run may invoke UHT and invalidate generated engine artifacts; `-Module`/`-UsePrecompiled` are not isolation guarantees. Never fix engine files, generated includes, timestamps or caches from this plan. No new NoPCH gate, cooked run, native Windows/macOS/mobile claim, flow-control/ping/DNS/reply change, or whole-W1 completion belongs to B1.
 
 ## Review Focus
 
@@ -61,7 +61,7 @@ B1-specific constraints supersede stale W1a runbook assumptions: inspect a norma
 5. **Evidence format.** Each case produces `trace.json`, `proxy-a.json`, `proxy-b.json`, `source.json`, `target.json`, `editor.log`, `runner.txt` and `case.json`. Every callback record includes sequence, resolved connection ID, WSI token, reason/name, time, raw len, error pointer presence, bounded error hex, certificate depth/error/preverify, and bounded receive bytes. Full journals contain only fixture-generated data and the synthetic marker `Bearer b1-probe-marker`.
 6. **Redirect observation.** The rig appends the synthetic marker at every APPEND, deliberately matching its existing default behavior. Therefore a target marker proves what this raw probe sent, not library header replay. B2 retains no-follow policy; the existing `RedirectReplay` probe remains the distinct test for library replay. B1 does not weaken the production veto.
 7. **Routing selection.** Null proxy option means null `http_proxy_address` (environment fallback possible). Explicit option uses the same `host:port` string form as the engine configuration path. Environment rows include cleared `no_proxy` and a separate `no_proxy=*` observation; no bypass behavior is presumed. An explicit proxy and a different environment proxy use distinct successful listeners so journals identify precedence without conflating routing and denial.
-8. **Limits.** At most 16 concurrent proxy handlers, 8192 header bytes, 128 header lines, 512 journal events per listener, two-second header deadline, twelve-second connection lifetime, 50 ms polling, one-second upstream connect/write bounds. Limits are assertions, not silent evidence loss: any dropped journal or trace event invalidates measurement. Silent handlers watch EOF and the fixture stop event; shutdown joins them rather than leaving a 30-second sleeper.
+8. **Limits.** At most 16 concurrent proxy handlers, 8192 header bytes, 128 header lines, 512 journal events per listener, two-second header deadline, 40-second silent-mode lifetime and twelve-second lifetime for other modes, 50 ms polling, one-second upstream connect/write bounds. Limits are assertions, not silent evidence loss: any dropped journal or trace event invalidates measurement. Silent handlers watch EOF and the fixture stop event; shutdown joins them rather than leaving a 30-second sleeper.
 
 ## File structure and interfaces
 
@@ -97,7 +97,7 @@ Every Compile/Link source and output must belong to the plugin (including its ho
 Tools/run_tests.sh --no-build Probe.VaRest.Lws.Rig
 ```
 
-Use the same guarded normal build before each C++ test run after edits, including restored mutations. Never let `Tools/run_tests.sh` implicitly build during B1. Existing normal links and the unexecuted NoPCH-link gate are separate; B1 cannot close hqx.2. If the normal build remains blocked, Python tasks can finish, but live B1 evidence and B2 remain blocked.
+Use the same guarded normal build before each C++ test run after edits, including restored mutations. Never let `Tools/run_tests.sh` implicitly build during B1. The build ledger now records hqx.2 closed: the sole executor validated the NoPCH-linked configuration with the full 572/0 suite, restored both module rules exactly, then completed the normal four-action plugin rebuild and Module 1/0 smoke. The retry itself reported up-to-date and reused the preserved queued link work; this is not a claim of 49 fresh compiles/two fresh links in that retry. See the accepted completion in `release-2.0-program.md`, the final section of `ws-build-consistency-audit.md`, and passport addendum commit `da8efd6`. These are attributed audit results, not runs by this plan author or B1. Future builds remain strictly guarded. If a fresh normal gate blocks, Python tasks can finish, but live B1 evidence and B2 remain blocked.
 
 ### Task 1: Bounded loopback CONNECT fixture
 
@@ -208,6 +208,12 @@ class ProxyTest(unittest.TestCase):
                     proxy.__exit__(None, None, None)
                     self.assertLess(time.monotonic() - before, 1)
                     self.assertTrue(proxy.wait_idle(0))
+                    state = proxy.snapshot()
+                    self.assertEqual(state['lifetime_seconds'], 40.0 if mode == 'silent' else 12.0)
+                    witness = {'deny': 'denied', 'close': 'closed_without_response', 'silent': 'silent'}[mode]
+                    self.assertTrue(any(e['ev'] == witness for e in state['events']))
+                    if mode == 'deny':
+                        self.assertTrue(any(e['ev'] == 'denied' and e['status'] == 403 for e in state['events']))
                     self.assertFalse(any(e['ev'] == 'upstream' for e in proxy.snapshot()['events']))
                 finally:
                     sock.close()
@@ -276,6 +282,7 @@ class Proxy:
         if mode not in ('tunnel', 'deny', 'close', 'silent'):
             raise ValueError('invalid proxy mode')
         self.mode = mode
+        self.lifetime_seconds = 40.0 if mode == 'silent' else 12.0
         self.ports = frozenset(int(p) for p in ports)
         if not self.ports or any(p <= 0 or p > 65535 for p in self.ports):
             raise ValueError('invalid target ports')
@@ -346,7 +353,7 @@ class Proxy:
 
     def snapshot(self):
         with self.lock:
-            return dict(mode=self.mode, address=self.address, events=list(self.events),
+            return dict(mode=self.mode, address=self.address, lifetime_seconds=self.lifetime_seconds, events=list(self.events),
                         dropped=self.dropped, active=self.active, accepted=self.accepted, rejected=self.rejected)
 
     def wait_idle(self, seconds):
@@ -417,7 +424,7 @@ class Proxy:
         with self.lock:
             self.next_id += 1
             ident = self.next_id
-        deadline = time.monotonic() + 12
+        deadline = time.monotonic() + self.lifetime_seconds
         sock.settimeout(1)
         try:
             try:
@@ -432,13 +439,15 @@ class Proxy:
                 self.add(ident, 'denied', status=403)
                 return
             if self.mode == 'close':
+                sock.shutdown(socket.SHUT_RDWR)
                 self.add(ident, 'closed_without_response')
                 return
             if self.mode == 'silent':
-                self.add(ident, 'silent')
+                self.add(ident, 'silent', lifetime_seconds=self.lifetime_seconds)
                 while not self.stopping.is_set() and time.monotonic() < deadline:
                     ready, _, _ = select.select([sock], [], [], .05)
                     if ready and not sock.recv(4096):
+                        self.add(ident, 'peer_eof')
                         return
                 self.add(ident, 'hold_deadline' if not self.stopping.is_set() else 'stopped')
                 return
@@ -700,7 +709,7 @@ git commit -m "test: record proxy callback identity and raw error input" -m "Co-
 
 **Files:** Create `Source/VaRestTests/Private/LwsProbe/VaRestLwsProbeProxyTest.cpp`.
 
-**Interfaces:** Automation `Probe.VaRest.Lws.Proxy.Attempt`; inputs `-VaRestProxyCase`, `-VaRestProxyTrace`, `-VaRestProxyCa`, `-VaRestProxyPath`, optional `-VaRestTestProxy`, flags `-VaRestProxyTls`, `-VaRestProxyUntrusted`. Existing runner server flags remain required. Output schema 1 below; no HTTP requests and no environment writes. Options use 100 ms service wait, 2 s LWS stage timeout, 8 s primary attempt deadline, bounded close wait then forced context shutdown explicitly marked in output.
+**Interfaces:** Automation `Probe.VaRest.Lws.Proxy.Attempt`; inputs `-VaRestProxyCase`, `-VaRestProxyTrace`, `-VaRestProxyCa`, `-VaRestProxyPath`, optional `-VaRestTestProxy`, required `-VaRestProxyMode`, flags `-VaRestProxyTls`, `-VaRestProxyUntrusted`. Existing runner server flags remain required. Output schema 1 below; no HTTP requests and no environment writes. Options use 100 ms service wait, 2 s general LWS stage timeout, 30 s primary budget only for silent mode and 8 s for fast rows, bounded close wait then forced context shutdown explicitly marked in output. The proxy stage has a fixed native 20 s backstop independent of `timeout_secs` (binding WS spec §2.2 and the accepted I1 archive inspection); the 40 s silent fixture outlives that observation window. Duration is recorded, never used as a proxy-status classifier.
 
 - [ ] **Step 1: Register the test with a deliberate failure**:
 
@@ -757,9 +766,10 @@ bool FVaRestLwsProxyAttemptTest::RunTest(const FString& Parameters)
     using namespace VaRest::LwsProbe;
     using VaRest::LwsProbe::FEvent;
     VaRest::WsTest::ExpectLwsLines(*this);
-    FString CaseId, TraceFile, CaFile, RequestPath, ExplicitProxy;
+    FString CaseId, Mode, TraceFile, CaFile, RequestPath, ExplicitProxy;
     const TCHAR* Command = FCommandLine::Get();
     const bool bInputs = FParse::Value(Command, TEXT("VaRestProxyCase="), CaseId)
+        && FParse::Value(Command, TEXT("VaRestProxyMode="), Mode)
         && FParse::Value(Command, TEXT("VaRestProxyTrace="), TraceFile)
         && FParse::Value(Command, TEXT("VaRestProxyCa="), CaFile)
         && FParse::Value(Command, TEXT("VaRestProxyPath="), RequestPath);
@@ -795,6 +805,7 @@ bool FVaRestLwsProxyAttemptTest::RunTest(const FString& Parameters)
     Spec.Host = FString::Printf(TEXT("localhost:%d"), bTls ? Site.TlsPort : Site.Port);
     Spec.Path = RequestPath;
     Spec.AppendHeaders.Add(TEXT("Authorization: Bearer b1-probe-marker"));
+    const double PrimaryBudget = Mode.Equals(TEXT("silent"), ESearchCase::CaseSensitive) ? 30.0 : 8.0;
     const double Begin = FPlatformTime::Seconds();
     const int32 ConnectionId = Rig.Connect(MoveTemp(Spec));
     const bool bPrimaryCompleted = Rig.WaitFor([ConnectionId](const TArray<FEvent>& All)
@@ -804,7 +815,8 @@ bool FVaRestLwsProxyAttemptTest::RunTest(const FString& Parameters)
             return Item.Conn == ConnectionId && (Item.Reason == LWS_CALLBACK_CLIENT_ESTABLISHED
                 || Item.Reason == LWS_CALLBACK_CLIENT_CONNECTION_ERROR || Item.Reason == LWS_CALLBACK_WSI_DESTROY);
         });
-    }, 8.0);
+    }, PrimaryBudget);
+    Rig.Record(ConnectionId, Marker, bPrimaryCompleted ? 1 : 0, TEXT("proxy-primary-finished"));
     const double PrimarySeconds = FPlatformTime::Seconds() - Begin;
     const bool bOpened = Opened(Rig.Events(ConnectionId));
     bool bEchoed = false;
@@ -821,9 +833,21 @@ bool FVaRestLwsProxyAttemptTest::RunTest(const FString& Parameters)
         }, 2.0);
         Rig.Close(ConnectionId, 1000, TEXT("b1-done"));
     }
-    const bool bDestroyedBeforeShutdown = Rig.WaitReason(ConnectionId, LWS_CALLBACK_WSI_DESTROY, 3.0);
+    const bool bDestroyWaitCompleted = Rig.WaitReason(ConnectionId, LWS_CALLBACK_WSI_DESTROY, 3.0);
+    Rig.Record(ConnectionId, Marker, 0, TEXT("proxy-shutdown-begin"));
     Rig.Shutdown(); // thread joined, context destroyed; only now collect final callbacks
+    Rig.Record(ConnectionId, Marker, 0, TEXT("proxy-shutdown-end"));
     const auto Seen = Rig.Events(); // include context callbacks and unresolved conn=0 evidence
+    const FEvent* ShutdownMarker = Seen.FindByPredicate([ConnectionId](const FEvent& Item)
+    {
+        return Item.Conn == ConnectionId && Item.Reason == Marker
+            && Item.Note.Equals(TEXT("proxy-shutdown-begin"), ESearchCase::CaseSensitive);
+    });
+    const int64 ShutdownSequence = ShutdownMarker ? ShutdownMarker->Sequence : 0;
+    const bool bDestroyedBeforeShutdown = Seen.ContainsByPredicate([ConnectionId, ShutdownSequence](const FEvent& Item)
+    {
+        return Item.Conn == ConnectionId && Item.Reason == LWS_CALLBACK_WSI_DESTROY && Item.Sequence < ShutdownSequence;
+    });
     FVaRestJson Rows = FVaRestJson::Array();
     for (const FEvent& Item : Seen) { Rows.Add(VaRestLwsProbeProxyTestPrivate::Encode(Item)); }
     const bool bDestroyed = Seen.ContainsByPredicate([ConnectionId](const FEvent& Item)
@@ -831,12 +855,14 @@ bool FVaRestLwsProxyAttemptTest::RunTest(const FString& Parameters)
         return Item.Conn == ConnectionId && Item.Reason == LWS_CALLBACK_WSI_DESTROY;
     });
     const FVaRestJson Trace = FVaRestJson::Object()
-        .Set(TEXT("schema"), 1).Set(TEXT("case"), CaseId).Set(TEXT("connection"), ConnectionId)
+        .Set(TEXT("schema"), 1).Set(TEXT("case"), CaseId).Set(TEXT("mode"), Mode).Set(TEXT("connection"), ConnectionId)
         .Set(TEXT("configured_proxy_absent"), ConfiguredProxy.IsEmpty())
         .Set(TEXT("explicit_proxy"), bExplicit ? ExplicitProxy : FString())
-        .Set(TEXT("tls"), bTls).Set(TEXT("primary_completed"), bPrimaryCompleted)
+        .Set(TEXT("tls"), bTls).Set(TEXT("untrusted"), bUntrusted)
+        .Set(TEXT("primary_budget_seconds"), PrimaryBudget).Set(TEXT("primary_completed"), bPrimaryCompleted)
         .Set(TEXT("primary_seconds"), PrimarySeconds).Set(TEXT("opened"), bOpened)
-        .Set(TEXT("echoed"), bEchoed).Set(TEXT("destroyed_before_shutdown"), bDestroyedBeforeShutdown)
+        .Set(TEXT("echoed"), bEchoed).Set(TEXT("destroy_wait_completed"), bDestroyWaitCompleted)
+        .Set(TEXT("destroyed_before_shutdown"), bDestroyedBeforeShutdown)
         .Set(TEXT("destroyed"), bDestroyed).Set(TEXT("shutdown_completed"), true)
         .Set(TEXT("dropped_events"), Rig.DroppedEventCount())
         .Set(TEXT("lws_version"), UTF8_TO_TCHAR(lws_get_library_version()))
@@ -859,8 +885,8 @@ The engine config absence field is deliberately a boolean: an unrelated configur
 - [ ] **Step 4: Guarded build, then GREEN direct controls**. These use the existing runner's own targets, local CA and a fresh output file; no proxy is involved yet:
 
 ```bash
-VAREST_EXTRA_ARGS='-VaRestProxyCase=direct-ws -VaRestProxyTrace=/w/Unreal/VaRestHost/Saved/B1Proxy/direct-ws.json -VaRestProxyCa=/w/Unreal/VaRest/Tools/testserver/certs/test-ca.pem -VaRestProxyPath=/ws/echo?key=b1-direct-ws' Tools/run_tests.sh --no-build Probe.VaRest.Lws.Proxy.Attempt
-VAREST_EXTRA_ARGS='-VaRestProxyCase=direct-wss -VaRestProxyTrace=/w/Unreal/VaRestHost/Saved/B1Proxy/direct-wss.json -VaRestProxyCa=/w/Unreal/VaRest/Tools/testserver/certs/test-ca.pem -VaRestProxyPath=/ws/echo?key=b1-direct-wss -VaRestProxyTls' Tools/run_tests.sh --no-build Probe.VaRest.Lws.Proxy.Attempt
+VAREST_EXTRA_ARGS='-VaRestProxyCase=direct-ws -VaRestProxyMode=direct -VaRestProxyTrace=/w/Unreal/VaRestHost/Saved/B1Proxy/direct-ws.json -VaRestProxyCa=/w/Unreal/VaRest/Tools/testserver/certs/test-ca.pem -VaRestProxyPath=/ws/echo?key=b1-direct-ws' Tools/run_tests.sh --no-build Probe.VaRest.Lws.Proxy.Attempt
+VAREST_EXTRA_ARGS='-VaRestProxyCase=direct-wss -VaRestProxyMode=direct -VaRestProxyTrace=/w/Unreal/VaRestHost/Saved/B1Proxy/direct-wss.json -VaRestProxyCa=/w/Unreal/VaRest/Tools/testserver/certs/test-ca.pem -VaRestProxyPath=/ws/echo?key=b1-direct-wss -VaRestProxyTls' Tools/run_tests.sh --no-build Probe.VaRest.Lws.Proxy.Attempt
 python3 -I - <<'PY'
 import json
 from pathlib import Path
@@ -966,6 +992,19 @@ CASES = tuple((mode + '-' + scheme, mode, scheme == 'wss')
                   ('untrusted-wss', 'untrusted', True),
                   ('upgrade403-ws', 'upgrade403', False),
                   ('upgrade403-wss', 'upgrade403', True))
+
+
+def case_definition(case_id):
+    # Expected semantics come only from the code's fixed CASES tuple, never collected labels.
+    for known_id, mode, use_tls in CASES:
+        if case_id == known_id:
+            return dict(mode=mode, tls=use_tls, untrusted=mode == 'untrusted',
+                        redirect_hostname_skip=mode.startswith('redirect'),
+                        primary_budget_seconds=30.0 if mode == 'silent' else 8.0,
+                        explicit_proxy=mode not in ('direct', 'env', 'env-noproxy'),
+                        fixture_mode=mode if mode in ('deny', 'close', 'silent') else 'tunnel',
+                        fixture_lifetime_seconds=40.0 if mode == 'silent' else 12.0)
+    raise ValueError('unknown immutable case: ' + str(case_id))
 
 
 def write_json(path, value):
@@ -1108,6 +1147,7 @@ def target_server(directory):
 
 def run_case(directory, case, plain, tls):
     case_id, mode, use_tls = case
+    definition = case_definition(case_id)
     directory.mkdir()
     source_key = 'b1-' + uuid.uuid4().hex
     target_key = 'b1-' + uuid.uuid4().hex
@@ -1125,12 +1165,13 @@ def run_case(directory, case, plain, tls):
     elif mode == 'upgrade403':
         source_path = '/ws/status/403?key=' + source_key
     errors = []
-    result = dict(case=case_id, mode=mode, tls=use_tls, source_key=source_key,
+    result = dict(case=case_id, mode=mode, tls=use_tls, untrusted=definition['untrusted'],
+                  redirect_hostname_skip=definition['redirect_hostname_skip'], source_key=source_key,
                   target_key=target_key, target_port=ports[1] if use_tls else ports[0], control_access='parent-http.client-direct', harness_errors=errors)
     fixture_mode = mode if mode in ('deny', 'close', 'silent') else 'tunnel'
     with Proxy(fixture_mode, ports) as proxy_a, Proxy('tunnel', ports) as proxy_b:
         extra = ['-VaRestTestServer=' + plain, '-VaRestTestServerTls=' + tls,
-                 '-VaRestProxyCase=' + case_id, '-VaRestProxyTrace=' + str(directory / 'trace.json'),
+                 '-VaRestProxyCase=' + case_id, '-VaRestProxyMode=' + mode, '-VaRestProxyTrace=' + str(directory / 'trace.json'),
                  '-VaRestProxyCa=' + str(ROOT / 'Tools/testserver/certs/test-ca.pem'),
                  '-VaRestProxyPath=' + source_path]
         if use_tls:
@@ -1319,9 +1360,10 @@ if (FParse::Param(Command, TEXT("VaRestProxyRedirectControl")))
 {
     Spec.SslFlags |= LCCSCF_SKIP_SERVER_CERT_HOSTNAME_CHECK;
 }
+const bool bRedirectHostnameSkip = (Spec.SslFlags & LCCSCF_SKIP_SERVER_CERT_HOSTNAME_CHECK) != 0;
 ```
 
-Also add `.Set(TEXT("redirect_hostname_skip"), FParse::Param(Command, TEXT("VaRestProxyRedirectControl")))` to the root trace object before `.Set(TEXT("events"), Rows)`. Record this flag in the passport so nobody confuses redirect ordering with full TLS policy proof. Raw redirects use numeric loopback addresses because the final W1a source still resolves synchronously and tries its first address; B9 is out of scope. The certificate chain still uses the test CA, and B2 must exercise the production IP check/no-follow logic separately.
+Also add `.Set(TEXT("redirect_hostname_skip"), bRedirectHostnameSkip)` to the root trace object before `.Set(TEXT("events"), Rows)`. Record this flag in the passport so nobody confuses redirect ordering with full TLS policy proof. Raw redirects use numeric loopback addresses because the final W1a source still resolves synchronously and tries its first address; B9 is out of scope. The certificate chain still uses the test CA, and B2 must exercise the production IP check/no-follow logic separately.
 
 - [ ] **Step 4: GREEN selftests and shell guard**:
 
@@ -1377,9 +1419,9 @@ git commit -m "test: collect isolated proxy matrix and direct control journals" 
 
 **Files:** Create `Tools/lws_proxy_passport.py`; generate `docs/passport/2026-10-23-lws30-proxy-probe.md`. Read existing `docs/passport/2026-10-22-lws30-probe.md`, final production `VaRestLwsConn.cpp`, `VaRestLwsConnTls.cpp`, `VaRestLwsErrors.cpp`; do not edit them.
 
-**Interfaces:** `python3 -I Tools/lws_proxy_passport.py --run <matrix-directory> --out <passport.md>` returns 0 only for a full, integrity-checked, usable matrix. `--selftest` uses synthetic in-memory rows clearly separated from measurements. The passport holds exact observed counts and an uncollapsed ordered callback list for every attempt; case directories retain complete raw bytes and journals. Callback comparisons use public enum numeric values read from the pinned header: error 1, established 3, APPEND 24, WSI_CREATE 29, WSI_DESTROY 30, certificate 58.
+**Interfaces:** `python3 -I Tools/lws_proxy_passport.py --run <matrix-directory> --out <passport.md>` returns 0 only for a full, integrity-checked, usable matrix. `lifecycle(trace) -> dict` derives lifecycle evidence; `summarize(case, trace, a, b, source, target, *, expected_case_id=None) -> dict` binds case semantics to the fixed matrix (the generator always supplies the manifest ID). `--selftest` uses synthetic in-memory rows clearly separated from measurements. `--check-case <case-directory>` checks one row without producing a passport or certifying a complete matrix. The passport holds exact observed counts and an uncollapsed ordered callback list for every attempt; case directories retain complete raw bytes and journals. Callback comparisons use public enum numeric values read from the pinned header: error 1, established 3, APPEND 24, WSI_CREATE 29, WSI_DESTROY 30, certificate 58.
 
-- [ ] **Step 1: Add validator tests first**. Create the imports, `PassportTests` and selftest/main dispatch from Step 3 without `summarize`, `check_cases` or `render`. Run `python3 -I Tools/lws_proxy_passport.py --selftest`; expected failures name the missing functions. No real measurement is asserted by these fabricated test rows.
+- [ ] **Step 1: Add validator tests first**. Create the imports, `PassportTests` and selftest/main dispatch from Step 3 without `lifecycle`, `fixture_witness`, `summarize`, `check_cases` or `render`. Run `python3 -I Tools/lws_proxy_passport.py --selftest`; expected failures name the missing functions. No real measurement is asserted by these fabricated test rows.
 
 - [ ] **Step 2: Pin the B2 input table before collecting data**. The generated document must answer all these questions from the rows, with root's policy conclusion kept separate:
 
@@ -1424,13 +1466,95 @@ def events_of(journal, kind):
     return [event for event in journal.get('events', []) if event.get('ev') == kind]
 
 
-def summarize(case, trace, a, b, source, target):
+def lifecycle(trace):
+    errors = []
+    connection = trace.get('connection')
+    if not isinstance(connection, int) or connection <= 0:
+        errors.append('invalid attempt connection identity')
+    events = [e for e in trace['events'] if e.get('conn') == connection]
+    def marker(label):
+        found = [e for e in events if e['reason'] == -7 and e.get('note') == label]
+        if len(found) != 1:
+            errors.append('missing/duplicate lifecycle marker: ' + label)
+            return dict(seq=0, len=-1)
+        return found[0]
+    primary = marker('proxy-primary-finished')
+    shutdown = marker('proxy-shutdown-begin')
+    stopped = marker('proxy-shutdown-end')
+    if not 0 < primary['seq'] < shutdown['seq'] < stopped['seq']:
+        errors.append('lifecycle marker order')
+    opens = [e for e in events if e['reason'] == 3]
+    destroys = [e for e in events if e['reason'] == 30 and e.get('wsi', 0) > 0]
+    terminals = [e for e in events if e['reason'] in (1, 4, 45, 75)]
+    certs = [e for e in events if e['reason'] == 58]
+    creates = [e for e in events if e['reason'] == 29 and e.get('wsi', 0) > 0]
+    for event in events:
+        if event['reason'] in (1, 3, 4, 8, 24, 30, 45, 58, 75):
+            if event.get('wsi', 0) <= 0 or not any(
+                    c['wsi'] == event['wsi'] and c['seq'] < event['seq'] for c in creates):
+                errors.append('callback lacks associated create/token')
+            if any(d['wsi'] == event.get('wsi') and d['seq'] < event['seq'] for d in destroys):
+                errors.append('callback follows token destruction')
+    observed_primary = any(e['reason'] in (1, 3, 30) and e['seq'] < primary['seq'] for e in events)
+    observed_destroyed = bool(destroys) and all(d['seq'] < stopped['seq'] for d in destroys)
+    observed_before = any(d['seq'] < shutdown['seq'] for d in destroys)
+    observed_echo = any(e['reason'] == 8 and bytes.fromhex(e.get('hex', '')) == b'b1-echo' for e in events)
+    derived = dict(primary_completed=observed_primary, opened=bool(opens), echoed=observed_echo,
+                   destroyed=observed_destroyed, destroyed_before_shutdown=observed_before,
+                   shutdown_completed=stopped['seq'] > shutdown['seq'] > 0)
+    for name, observed in derived.items():
+        if not isinstance(trace.get(name), bool) or trace[name] != observed:
+            errors.append('contradictory lifecycle summary: ' + name)
+    if primary['len'] not in (0, 1) or bool(primary['len']) != observed_primary:
+        errors.append('primary completion marker contradicts callbacks')
+    if not observed_primary or not observed_destroyed:
+        errors.append('missing primary/destruction callback')
+    if not any(t.get('wsi', 0) > 0 and any(d['wsi'] == t['wsi'] and t['seq'] < d['seq'] for d in destroys)
+               for t in terminals):
+        errors.append('missing terminal callback before matching destruction')
+    return dict(errors=errors, events=events, opens=opens, certs=certs, terminals=terminals,
+                destroys=destroys, shutdown_seq=shutdown['seq'], derived=derived)
+
+
+def fixture_witness(journal, connect, witness, status=None):
+    # Fixture IDs are local to this listener, not client connection IDs.
+    flow = [e for e in journal['events'] if e.get('id') == connect.get('id')]
+    starts = [i for i, e in enumerate(flow) if e['ev'] == 'connect']
+    seen = [i for i, e in enumerate(flow) if e['ev'] == witness and (status is None or e.get('status') == status)]
+    ends = [i for i, e in enumerate(flow) if e['ev'] == 'end']
+    return bool(len(starts) == 1 and len(seen) == 1 and len(ends) == 1
+                and starts[0] < seen[0] < ends[0])
+
+
+def summarize(case, trace, a, b, source, target, *, expected_case_id=None):
+    bound_id = case['case'] if expected_case_id is None else expected_case_id
+    expected = controller.case_definition(bound_id)
+    mode = expected['mode']
     harness_errors = list(case.get('harness_errors', []))
     harness_errors.extend(controller.check_trace(trace, case['case']))
     if not case.get('group_drained'):
         harness_errors.append('owned editor process group not drained')
-    errors = []  # control failures are distinct from collection/cleanup failures
-    mode = case['mode']
+    errors = []
+    if case.get('case') != bound_id or trace.get('case') != bound_id:
+        errors.append('immutable case directory identity')
+    for field in ('mode', 'tls', 'untrusted', 'redirect_hostname_skip'):
+        if case.get(field) != expected[field] or trace.get(field) != expected[field]:
+            errors.append('immutable case binding: ' + field)
+    if trace.get('explicit_proxy') != (case.get('proxy_a') if expected['explicit_proxy'] else ''):
+        errors.append('immutable explicit proxy option')
+    if mode in ('env', 'precedence', 'env-noproxy') and trace.get('configured_proxy_absent') is not True:
+        errors.append('engine configured proxy not absent')
+    if trace.get('primary_budget_seconds') != expected['primary_budget_seconds']:
+        errors.append('immutable primary observation budget')
+    if a.get('mode') != expected['fixture_mode'] or b.get('mode') != 'tunnel':
+        errors.append('immutable fixture mode')
+    if a.get('lifetime_seconds') != expected['fixture_lifetime_seconds'] or b.get('lifetime_seconds') != 12.0:
+        errors.append('immutable fixture lifetime')
+    for journal in (a, b):
+        if journal.get('active') != 0:
+            harness_errors.append('fixture handlers not drained')
+    life = lifecycle(trace)
+    errors.extend(life['errors'])
     a_connect = events_of(a, 'connect')
     b_connect = events_of(b, 'connect')
     connects = a_connect + b_connect
@@ -1439,6 +1563,11 @@ def summarize(case, trace, a, b, source, target):
     for journal in (a, b, source, target):
         if journal.get('dropped', 0):
             errors.append('journal loss')
+    for journal in (source, target):
+        if journal.get('connections') != len(events_of(journal, 'request')):
+            errors.append('target journal request count contradicts connections')
+        if journal.get('connections', 0) and journal.get('ended') is not True:
+            errors.append('target journal did not end')
     for connect in connects:
         if not mode.startswith('redirect') and connect['authority'] not in (
                 '127.0.0.1:%d' % case['target_port'], 'localhost:%d' % case['target_port']):
@@ -1447,30 +1576,83 @@ def summarize(case, trace, a, b, source, target):
             errors.append('target Authorization present in CONNECT')
     positive = mode in ('direct', 'explicit', 'env', 'precedence', 'env-noproxy')
     if positive:
-        if not trace.get('opened') or not trace.get('echoed') or len(requests) != 1:
+        if not life['derived']['opened'] or not life['derived']['echoed'] or len(requests) != 1:
             errors.append('positive open/echo/Upgrade control failed')
-        if requests and ['Authorization', 'Bearer b1-probe-marker'] not in requests[0]['headers']:
-            # Header names are case-insensitive, values are not.
-            if not any(n.lower() == 'authorization' and v == 'Bearer b1-probe-marker'
-                       for n, v in requests[0]['headers']):
-                errors.append('positive synthetic-header control failed')
+        if requests and not any(n.lower() == 'authorization' and v == 'Bearer b1-probe-marker'
+                                for n, v in requests[0]['headers']):
+            errors.append('positive synthetic-header control failed')
+        if expected['tls']:
+            trusted = [c for c in life['certs'] if c.get('preverify') == 1 and c.get('x509_error') == 0
+                       and isinstance(c.get('depth'), int) and c['depth'] >= 0
+                       and c.get('wsi', 0) > 0 and any(o['wsi'] == c['wsi'] and c['seq'] < o['seq']
+                                                      for o in life['opens'])]
+            if not trusted or any(c.get('preverify') != 1 or c.get('x509_error') != 0 for c in life['certs']):
+                errors.append('trusted wss lacks associated successful certificate evidence')
     if mode == 'direct' and connects:
         errors.append('direct control used proxy')
     if mode == 'explicit' and (len(a_connect) != 1 or b_connect):
         errors.append('explicit control did not use one A tunnel')
     if mode in ('deny', 'close', 'silent'):
-        if len(a_connect) != 1 or b_connect or requests or targets or trace.get('opened'):
+        if len(a_connect) != 1 or b_connect or requests or targets or life['derived']['opened']:
             errors.append('negative proxy control reached wrong stage')
+        if any(e['ev'] in ('invalid', 'io_error', 'hold_deadline', 'relay_deadline', 'stopped', 'upstream', 'tunnel')
+               for e in a['events']):
+            errors.append('proxy stimulus substituted by IO/deadline/stop/upstream')
+        witness = {'deny': 'denied', 'close': 'closed_without_response', 'silent': 'silent'}[mode]
+        if len(a_connect) != 1 or not fixture_witness(a, a_connect[0], witness, 403 if mode == 'deny' else None):
+            errors.append('missing successful fixture witness: ' + witness)
+        if not any(t['seq'] < life['shutdown_seq'] and any(
+                d['wsi'] == t['wsi'] and t['seq'] < d['seq'] < life['shutdown_seq'] for d in life['destroys'])
+                   for t in life['terminals']):
+            errors.append('negative control did not end before context shutdown')
+        if mode == 'silent':
+            if len(a_connect) != 1 or not fixture_witness(a, a_connect[0], 'peer_eof'):
+                errors.append('silent fixture lacks client EOF before teardown')
+            flow = [e for e in a['events'] if a_connect and e.get('id') == a_connect[0].get('id')]
+            silent_positions = [i for i, e in enumerate(flow) if e['ev'] == 'silent' and e.get('lifetime_seconds') == 40.0]
+            eof_positions = [i for i, e in enumerate(flow) if e['ev'] == 'peer_eof']
+            if len(silent_positions) != 1 or len(eof_positions) != 1 or silent_positions[0] >= eof_positions[0]:
+                errors.append('silent lifetime/EOF witness order')
+            # No clock comparison between Python and UE: callbacks precede UE shutdown, and
+            # the fixture ends only on client EOF with neither its deadline nor stop firing.
+            if not life['derived']['destroyed_before_shutdown']:
+                errors.append('silent attempt required forced context destruction')
+    # A tunnel witness must follow CONNECT and upstream connect and precede fixture end.
+    for journal, connections in ((a, a_connect), (b, b_connect)):
+        if journal.get('mode') == 'tunnel':
+            for connect in connections:
+                if not fixture_witness(journal, connect, 'upstream') or not fixture_witness(journal, connect, 'tunnel'):
+                    errors.append('missing successful tunnel/upstream witness')
+                flow = [e for e in journal['events'] if e.get('id') == connect.get('id')]
+                tunnel_index = next((i for i, e in enumerate(flow) if e['ev'] == 'tunnel'), len(flow))
+                upstream_index = next((i for i, e in enumerate(flow) if e['ev'] == 'upstream'), len(flow))
+                if upstream_index >= tunnel_index:
+                    errors.append('tunnel witness precedes upstream connection')
+                if any(e['ev'] in ('io_error', 'invalid', 'stopped', 'relay_deadline') for e in flow[:tunnel_index]):
+                    errors.append('tunnel stimulus substituted by fixture failure')
     if mode.startswith('redirect'):
         if not any(e.get('status') == 302 for e in events_of(source, 'response')):
             errors.append('source redirect response unobserved')
     if mode in ('untrusted', 'upgrade403'):
-        if len(a_connect) != 1 or not events_of(a, 'tunnel') or trace.get('opened'):
+        if len(a_connect) != 1 or not events_of(a, 'tunnel') or life['derived']['opened']:
             errors.append('post-tunnel negative control invalid')
+        if any(e['ev'] in ('hold_deadline', 'relay_deadline', 'stopped') for e in a['events']):
+            errors.append('post-tunnel control substituted by fixture deadline/stop')
         if mode == 'upgrade403' and not any(e.get('status') == 403 for e in events_of(source, 'response')):
             errors.append('target upgrade refusal unobserved')
-        if mode == 'untrusted' and requests:
-            errors.append('untrusted target received upgrade')
+        if mode == 'untrusted':
+            if requests:
+                errors.append('untrusted target received upgrade')
+            failed = [c for c in life['certs'] if c.get('preverify') == 0 and c.get('x509_error', 0) > 0
+                      and isinstance(c.get('depth'), int) and c['depth'] >= 0
+                      and c.get('wsi', 0) > 0 and any(t['wsi'] == c['wsi'] and c['seq'] < t['seq']
+                          and any(d['wsi'] == c['wsi'] and t['seq'] < d['seq'] < life['shutdown_seq']
+                                  for d in life['destroys']) for t in life['terminals'])
+                      and not any(t['wsi'] == c['wsi'] and t['seq'] < c['seq'] for t in life['terminals'])]
+            if not failed:
+                errors.append('untrusted wss lacks associated failed certificate before terminal/destruction')
+            # A relay close/reset after genuine cert rejection can be teardown. It cannot
+            # replace this required client certificate witness; no-cert EOF/IO always fails.
     event_rows = trace['events']
     callback_errors = [dict(seq=e['seq'], conn=e['conn'], wsi=e['wsi'],
                             input_present=e['input_present'], length=e['len'], hex=e['hex'])
@@ -1483,17 +1665,18 @@ def summarize(case, trace, a, b, source, target):
     routing = 'A+B' if a_connect and b_connect else 'A' if a_connect else 'B' if b_connect else 'direct'
     ordered = [dict(seq=e['seq'], name=e['name'], reason=e['reason'], conn=e['conn'], wsi=e['wsi'])
                for e in event_rows]
-    return dict(case=case['case'], opened=trace['opened'], echoed=trace['echoed'],
+    return dict(case=case['case'], opened=life['derived']['opened'], echoed=life['derived']['echoed'],
                 route=routing, connect_a=len(a_connect), connect_b=len(b_connect),
                 counts=counts, certificates=certs, errors=callback_errors, ordered=ordered,
-                primary_seconds=trace['primary_seconds'], destroyed=trace['destroyed'],
-                destroyed_before_shutdown=trace['destroyed_before_shutdown'],
+                primary_seconds=trace['primary_seconds'], primary_budget_seconds=trace['primary_budget_seconds'],
+                destroyed=life['derived']['destroyed'], destroyed_before_shutdown=life['derived']['destroyed_before_shutdown'],
                 source_requests=len(requests), target_requests=len(targets),
-                redirect_hostname_skip=trace.get('redirect_hostname_skip', False),
+                redirect_hostname_skip=trace['redirect_hostname_skip'],
+                fixture_witnesses=[e for e in a['events'] if e['ev'] in (
+                    'denied', 'closed_without_response', 'silent', 'peer_eof', 'hold_deadline', 'stopped', 'io_error', 'end')],
                 source_authorization=[[v for n, v in e['headers'] if n.lower() == 'authorization'] for e in requests],
                 target_authorization=[[v for n, v in e['headers'] if n.lower() == 'authorization'] for e in targets],
                 harness_errors=harness_errors, control_errors=errors)
-
 
 def render(manifest, rows, run):
     lines = ['# libwebsockets 3.0 — B1 proxy passport', '',
@@ -1514,6 +1697,8 @@ def render(manifest, rows, run):
               'Each ordered list includes context/unresolved callbacks (conn=0), pseudo-events and repeated callbacks.',
               'Certificate callbacks are per verification operation/depth. A count is not a connection count.',
               'Error hex is bounded to 256 bytes; length is raw callback len, and pointer presence is independent.',
+              'Silent rows require native terminal/destruction before UE shutdown, with client EOF and no fixture deadline/stop.',
+              'Case mode/TLS/hostname flags are checked against the fixed matrix, and TLS controls require associated certificates.',
               'Redirect rows explicitly record hostname-check skipping for numeric loopback targets; chain checks remain.',
               'Synthetic Authorization is appended on every raw APPEND; target presence is not proof of automatic replay.', '']
     for row in rows:
@@ -1530,7 +1715,9 @@ def render(manifest, rows, run):
               'B2 must prove successful production ws/wss proxying and no redirected target request or credential forwarding.', '',
               '## Remaining release gates', '',
               'Native Windows, macOS, Android/iOS and cooked/shared-copy runtime measurements were not run by this Linux editor matrix.',
-              'VaRest-rti residual and NoPCH linking remain separate gates; B1 does not close them or the WebSocket parent epic.', '']
+              'The independent W1a audit completed NoPCH link/runtime validation (572/0) and normal restoration (Module 1/0);',
+              'hqx.2 was closed by root. Those attributed results are not B1 execution evidence. Future build guards remain.',
+              'VaRest-rti residual and the WebSocket parent epic remain outside B1 completion.', '']
     return '\n'.join(lines)
 
 
@@ -1557,7 +1744,7 @@ def generate(run, out):
         directory = run / case_id
         values = [json.loads((directory / (name + '.json')).read_text())
                   for name in ('case', 'trace', 'proxy-a', 'proxy-b', 'source', 'target')]
-        row = summarize(*values)
+        row = summarize(*values, expected_case_id=case_id)
         rows.append(row)
         problems.extend(case_id + ': harness: ' + error for error in row['harness_errors'])
         problems.extend(case_id + ': control: ' + error for error in row['control_errors'])
@@ -1569,20 +1756,84 @@ def generate(run, out):
 
 
 class PassportTests(unittest.TestCase):
-    def fixture(self):
-        event = dict(seq=1, conn=1, wsi=1, reason=1, name='CONNECTION_ERROR',
-                     input_present=False, len=0, hex='', depth=-1, preverify=-1, x509_error=-1)
-        trace = dict(schema=1, case='deny-ws', connection=1, events=[event], dropped_events=0,
-                     primary_completed=True, shutdown_completed=True, opened=False, echoed=False,
-                     primary_seconds=.1, destroyed=True, destroyed_before_shutdown=True)
-        case = dict(case='deny-ws', mode='deny', target_port=1234, group_drained=True, harness_errors=[])
-        a = dict(events=[dict(ev='connect', headers=[], authority='127.0.0.1:1234')], dropped=0)
-        empty = dict(events=[], dropped=0)
-        return case, trace, a, copy.deepcopy(empty), copy.deepcopy(empty), copy.deepcopy(empty)
+    # All numbers/events here are synthetic acceptance fixtures, never measurements.
+    def fixture(self, case_id='deny-ws'):
+        expected = controller.case_definition(case_id)
+        mode = expected['mode']
+        opened = mode in ('direct', 'explicit', 'env', 'precedence', 'env-noproxy') or mode.startswith('redirect')
+        case = dict(case=case_id, target_port=1234, proxy_a='127.0.0.1:4321', proxy_b='127.0.0.1:4322',
+                    group_drained=True, harness_errors=[],
+                    **{key: expected[key] for key in ('mode', 'tls', 'untrusted', 'redirect_hostname_skip')})
+        rows = []
+        def event(reason, note='', **values):
+            row = dict(seq=len(rows) + 1, time=.01 * (len(rows) + 1), conn=1, wsi=0 if reason == -7 else 1,
+                       reason=reason, name='synthetic-' + str(reason), note=note,
+                       input_present=False, len=0, hex='', depth=-1, preverify=-1, x509_error=-1)
+            row.update(values)
+            rows.append(row)
+        event(29)
+        if mode not in ('deny', 'close', 'silent') and (expected['tls'] or mode == 'redirect-cross'):
+            event(58, depth=0, preverify=0 if mode == 'untrusted' else 1,
+                  x509_error=19 if mode == 'untrusted' else 0)
+        if opened:
+            event(24)
+            event(3)
+        else:
+            event(1)
+        event(-7, 'proxy-primary-finished', len=1)
+        if opened:
+            event(8, hex=b'b1-echo'.hex(), len=7)
+            event(75)
+        event(30)
+        event(-7, 'proxy-shutdown-begin')
+        event(-7, 'proxy-shutdown-end')
+        trace = dict(schema=1, case=case_id, connection=1, events=rows, dropped_events=0,
+                     primary_completed=True, shutdown_completed=True, opened=opened, echoed=opened,
+                     primary_seconds=21.0 if mode == 'silent' else .1,
+                     primary_budget_seconds=expected['primary_budget_seconds'],
+                     destroyed=True, destroyed_before_shutdown=True, configured_proxy_absent=True,
+                     explicit_proxy=case['proxy_a'] if expected['explicit_proxy'] else '',
+                     **{key: expected[key] for key in ('mode', 'tls', 'untrusted', 'redirect_hostname_skip')})
+        def proxy(fixture_mode):
+            return dict(mode=fixture_mode, lifetime_seconds=40.0 if fixture_mode == 'silent' else 12.0,
+                        active=0, events=[], dropped=0)
+        a, b = proxy(expected['fixture_mode']), proxy('tunnel')
+        selected = b if mode == 'env' else None if mode in ('direct', 'env-noproxy') else a
+        if selected is not None:
+            flow = [dict(id=1, ev='connect', headers=[], authority='127.0.0.1:1234')]
+            if mode == 'deny':
+                flow.append(dict(id=1, ev='denied', status=403))
+            elif mode == 'close':
+                flow.append(dict(id=1, ev='closed_without_response'))
+            elif mode == 'silent':
+                flow.extend([dict(id=1, ev='silent', lifetime_seconds=40.0), dict(id=1, ev='peer_eof')])
+            else:
+                flow.extend([dict(id=1, ev='upstream', port=1234), dict(id=1, ev='tunnel')])
+            flow.append(dict(id=1, ev='end'))
+            selected['events'] = flow
+        def journal(status=None):
+            events = [] if status is None else [
+                dict(ev='request', conn=1, headers=[['Authorization', 'Bearer b1-probe-marker']]),
+                dict(ev='response', conn=1, status=status)]
+            return dict(events=events, connections=0 if status is None else 1,
+                        ended=status is not None, dropped=0)
+        source = journal(302 if mode.startswith('redirect') else 403 if mode == 'upgrade403'
+                         else 101 if opened else None)
+        target = journal(101 if mode.startswith('redirect') else None)
+        return case, trace, a, b, source, target
+
+    def reject(self, data, message):
+        self.assertIn(message, summarize(*data)['control_errors'])
+
+    def test_all_named_reference_cases_pass(self):
+        for case_id in EXPECTED:
+            with self.subTest(case=case_id):
+                row = summarize(*self.fixture(case_id))
+                self.assertEqual(row['harness_errors'], [])
+                self.assertEqual(row['control_errors'], [])
 
     def test_empty_error_is_measurement_not_403_text(self):
         row = summarize(*self.fixture())
-        self.assertEqual(row['harness_errors'], [])
         self.assertEqual(row['errors'][0]['input_present'], False)
         self.assertEqual(row['errors'][0]['length'], 0)
         self.assertNotIn('403', json.dumps(row['errors']))
@@ -1596,47 +1847,155 @@ class PassportTests(unittest.TestCase):
         self.assertTrue(check_cases(list(EXPECTED[:-1])))
         self.assertTrue(check_cases(list(EXPECTED) + [EXPECTED[0]]))
 
+    def test_denial_send_failure_is_not_denial(self):
+        data = self.fixture()
+        data[2]['events'][1] = dict(id=1, ev='io_error', errno=32)
+        self.reject(data, 'missing successful fixture witness: denied')
+        self.reject(data, 'proxy stimulus substituted by IO/deadline/stop/upstream')
+        data = self.fixture()
+        data[2]['events'][1]['status'] = 401
+        self.reject(data, 'missing successful fixture witness: denied')
+
+    def test_close_and_silent_need_their_own_witnesses(self):
+        for case_id, witness in (('close-ws', 'closed_without_response'), ('silent-wss', 'silent')):
+            with self.subTest(case=case_id):
+                data = self.fixture(case_id)
+                data[2]['events'] = [e for e in data[2]['events'] if e['ev'] != witness]
+                data[2]['events'].insert(1, dict(id=1, ev='io_error', errno=104))
+                self.reject(data, 'missing successful fixture witness: ' + witness)
+                self.reject(data, 'proxy stimulus substituted by IO/deadline/stop/upstream')
+
+    def test_tunnel_eof_without_failed_certificate_is_not_untrusted(self):
+        data = self.fixture('untrusted-wss')
+        for event in data[1]['events']:
+            if event['reason'] == 58:
+                event['reason'] = -7
+                event['note'] = 'removed-cert'
+        data[2]['events'].insert(-1, dict(id=1, ev='io_error', errno=104))
+        self.reject(data, 'untrusted wss lacks associated failed certificate before terminal/destruction')
+
+    def test_certificate_witness_must_belong_to_attempt_and_token(self):
+        for field, value in (('conn', 2), ('wsi', 2), ('preverify', 1), ('x509_error', 0), ('depth', -1)):
+            with self.subTest(field=field):
+                data = self.fixture('untrusted-wss')
+                next(e for e in data[1]['events'] if e['reason'] == 58)[field] = value
+                self.reject(data, 'untrusted wss lacks associated failed certificate before terminal/destruction')
+        data = self.fixture('untrusted-wss')
+        cert = next(e for e in data[1]['events'] if e['reason'] == 58)
+        terminal = next(e for e in data[1]['events'] if e['reason'] == 1)
+        cert['seq'], terminal['seq'] = terminal['seq'], cert['seq']
+        self.reject(data, 'untrusted wss lacks associated failed certificate before terminal/destruction')
+
+    def test_manifest_directory_and_proxy_option_binding(self):
+        data = self.fixture('explicit-wss')
+        row = summarize(*data, expected_case_id='env-wss')
+        self.assertIn('immutable case directory identity', row['control_errors'])
+        data[1]['explicit_proxy'] = ''
+        self.reject(data, 'immutable explicit proxy option')
+        data = self.fixture('env-wss')
+        data[1]['configured_proxy_absent'] = False
+        self.reject(data, 'engine configured proxy not absent')
+
+    def test_wss_cannot_be_relabelled_ws_or_skip_hostname(self):
+        for field, value in (('tls', False), ('redirect_hostname_skip', True), ('mode', 'direct'), ('untrusted', True)):
+            with self.subTest(field=field):
+                data = self.fixture('explicit-wss')
+                data[0][field] = value
+                data[1][field] = value
+                self.reject(data, 'immutable case binding: ' + field)
+        data = self.fixture('explicit-wss')
+        for event in data[1]['events']:
+            if event['reason'] == 58:
+                event['conn'] = 2
+        self.reject(data, 'trusted wss lacks associated successful certificate evidence')
+
+    def test_silent_short_budget_or_lifetime_or_fixture_end_is_refused(self):
+        data = self.fixture('silent-ws')
+        data[1]['primary_budget_seconds'] = 8.0
+        self.reject(data, 'immutable primary observation budget')
+        data = self.fixture('silent-wss')
+        data[2]['lifetime_seconds'] = 12.0
+        self.reject(data, 'immutable fixture lifetime')
+        for replacement in ('hold_deadline', 'stopped', 'io_error'):
+            with self.subTest(replacement=replacement):
+                data = self.fixture('silent-ws')
+                next(e for e in data[2]['events'] if e['ev'] == 'peer_eof')['ev'] = replacement
+                self.reject(data, 'proxy stimulus substituted by IO/deadline/stop/upstream')
+                self.reject(data, 'silent fixture lacks client EOF before teardown')
+
+    def test_missing_or_contradictory_terminal_lifecycle_is_refused(self):
+        data = self.fixture()
+        next(e for e in data[1]['events'] if e['reason'] == 1)['reason'] = -7
+        self.reject(data, 'missing terminal callback before matching destruction')
+        data = self.fixture()
+        next(e for e in data[1]['events'] if e['reason'] == 30)['reason'] = -7
+        self.reject(data, 'contradictory lifecycle summary: destroyed')
+        for field in ('primary_completed', 'destroyed', 'destroyed_before_shutdown', 'shutdown_completed'):
+            with self.subTest(field=field):
+                data = self.fixture()
+                data[1][field] = False
+                self.reject(data, 'contradictory lifecycle summary: ' + field)
+        for field in ('opened', 'echoed'):
+            with self.subTest(field=field):
+                data = self.fixture('explicit-wss')
+                data[1][field] = False
+                self.reject(data, 'contradictory lifecycle summary: ' + field)
+        data = self.fixture('silent-ws')
+        destroy = next(e for e in data[1]['events'] if e['reason'] == 30)
+        shutdown = next(e for e in data[1]['events'] if e.get('note') == 'proxy-shutdown-begin')
+        destroy['seq'], shutdown['seq'] = shutdown['seq'], destroy['seq']
+        data[1]['destroyed_before_shutdown'] = False
+        self.reject(data, 'silent attempt required forced context destruction')
+
     def test_header_leak_and_false_negative_are_rejected(self):
         data = self.fixture()
         data[2]['events'][0]['headers'] = [['authorization', 'Bearer b1-probe-marker']]
-        self.assertIn('target Authorization present in CONNECT', summarize(*data)['control_errors'])
+        self.reject(data, 'target Authorization present in CONNECT')
         data[1]['opened'] = True
-        self.assertIn('negative proxy control reached wrong stage', summarize(*data)['control_errors'])
+        self.reject(data, 'contradictory lifecycle summary: opened')
 
-    def test_positive_control_and_route_measurement(self):
-        data = self.fixture()
-        data[0].update(case='explicit-ws', mode='explicit')
-        data[1]['case'] = 'explicit-ws'
-        self.assertIn('positive open/echo/Upgrade control failed', summarize(*data)['control_errors'])
-        data[0].update(case='env-ws', mode='env')
-        data[1].update(case='env-ws', opened=True, echoed=True)
-        data[4]['events'] = [dict(ev='request', headers=[['Authorization', 'Bearer b1-probe-marker']])]
+    def test_positive_control_and_environment_route_remain_distinct(self):
+        data = self.fixture('explicit-ws')
+        for event in data[1]['events']:
+            if event['reason'] in (3, 8):
+                event['reason'] = -7
+        data[1].update(opened=False, echoed=False)
+        self.reject(data, 'positive open/echo/Upgrade control failed')
+        data = self.fixture('env-wss')
         before = summarize(*data)
-        data[2]['events'].clear()
+        data[3]['events'].clear()
         after = summarize(*data)
-        self.assertEqual(before['route'], 'A')
+        self.assertEqual(before['route'], 'B')
         self.assertEqual(after['route'], 'direct')
         self.assertEqual(after['harness_errors'], [])
-        self.assertEqual(after['control_errors'], [])  # valid routing difference, not lost evidence
+        self.assertEqual(after['control_errors'], [])
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--run', type=pathlib.Path)
     parser.add_argument('--out', type=pathlib.Path)
+    parser.add_argument('--check-case', type=pathlib.Path)
     parser.add_argument('--selftest', action='store_true')
     args = parser.parse_args()
     if args.selftest:
         suite = unittest.defaultTestLoader.loadTestsFromTestCase(PassportTests)
         return 0 if unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful() else 1
-    if args.run is None or args.out is None:
-        parser.error('--run and --out are required')
+    if args.check_case is None and (args.run is None or args.out is None):
+        parser.error('--run and --out, or --check-case, are required')
     try:
+        if args.check_case is not None:
+            folder = args.check_case.resolve()
+            values = [json.loads((folder / (name + '.json')).read_text())
+                      for name in ('case', 'trace', 'proxy-a', 'proxy-b', 'source', 'target')]
+            row = summarize(*values, expected_case_id=folder.name)
+            errors = row['harness_errors'] + row['control_errors']
+            print(json.dumps({'case': folder.name, 'errors': errors, 'complete_matrix': False}, indent=2))
+            return 1 if errors else 0
         return generate(args.run.resolve(), args.out)
     except (OSError, ValueError, KeyError, TypeError) as error:
         print('invalid evidence: ' + str(error), file=sys.stderr)
         return 1
-
 
 if __name__ == '__main__':
     sys.exit(main())
@@ -1648,7 +2007,7 @@ if __name__ == '__main__':
 python3 -I Tools/lws_proxy_passport.py --selftest
 ```
 
-Temporarily change `check_cases` to `return []`; require `test_missing_or_duplicate_rows_fail` to fail. Restore and rerun. Temporarily remove the authorization-leak append in `summarize`; require `test_header_leak_and_false_negative_are_rejected` to fail, restore, rerun. No fabricated row may be copied into the real passport.
+Temporarily change `check_cases` to `return []`; require `test_missing_or_duplicate_rows_fail` to fail. Restore and rerun. Temporarily remove the authorization-leak append in `summarize`; require `test_header_leak_and_false_negative_are_rejected` to fail, restore, rerun. The named stage/binding/lifecycle rejection tests must all fail under their corresponding omitted predicate, with the valid synthetic trusted-wss and failed-certificate rows still passing; no exact real callback count is assumed. No fabricated row may be copied into the real passport.
 
 - [ ] **Step 5: Collect the full matrix with validated binaries** after a guarded normal build and Task 4 review:
 
@@ -1660,7 +2019,7 @@ python3 -I Tools/run_lws_proxy_probe.py --out /w/Unreal/VaRestHost/Saved/B1Proxy
 python3 -I Tools/lws_proxy_passport.py --run /w/Unreal/VaRestHost/Saved/B1Proxy/full-1 --out docs/passport/2026-10-23-lws30-proxy-probe.md
 ```
 
-Expected: fixture/controller/validator tests pass; 22 cases produce complete artifacts and zero harness errors; generator exits 0 only after all positive controls and negative-stage controls pass. No expected APPEND/cert count, proxy-error string, environmental route or redirect target count is prescribed. If a valid raw outcome differs from anticipated behavior, record it; if a control fails, retain its artifacts and do not generate a “complete” passport.
+Expected: fixture/controller/validator tests pass; 22 cases produce complete artifacts and zero harness errors; generator exits 0 only after all positive controls and negative-stage controls pass. No expected APPEND/cert count, proxy-error string, environmental route or redirect target count is prescribed. Case identity and flags, actual denial/close/silence actions, associated trusted/failed certificate verification and matching terminal/destruction callbacks are mandatory stage evidence. A relay EOF/IO failure without the required failed certificate is not an untrusted-TLS control. A relay close/reset after an associated certificate rejection may be teardown; the complete trace and fixture events retain that distinction. If a valid raw outcome differs from anticipated behavior, record it; if a control fails, retain its artifacts and do not generate a “complete” passport.
 
 Run existing regression coverage without modifying production:
 
@@ -1675,7 +2034,47 @@ python3 -I Tools/lws_probe_passport.py --selftest
 
 The ordinary runner must still scrub ambient proxies. Full VaRest/M4, cooked runtime and platform gates remain their existing milestone owners, not additional B1 gates.
 
-- [ ] **Step 6: Validate artifact refusal and preservation**. Copy the evidence directory to a fresh mutation directory, remove one error trace or set one `dropped_events` to 1 without changing its hash, and run the generator to a temporary passport. It must exit 1 and leave the existing real passport unchanged. The exact commands below mutate only the copied evidence:
+- [ ] **Step 6: Prove the silent measurement cannot be replaced by fixture EOF or forced shutdown**. The 20 s proxy backstop is independently documented in spec §2.2 and the accepted review I1; `timeout_secs=2` does not shorten it. In the successful full run, inspect both silent rows: 30 s primary budget, 40 s fixture lifetime, terminal/destruction before `proxy-shutdown-begin`, `silent → peer_eof → end`, and no `hold_deadline`, `stopped` or `io_error`. This proves ordering without comparing Python and UE clock epochs.
+
+Use the implemented `--check-case` entry point for restoration runs. It validates one case's stage semantics only, including immutable case binding; it does not verify full-matrix hashes, write a passport or certify completeness:
+
+```bash
+python3 -I Tools/lws_proxy_passport.py --check-case /w/Unreal/VaRestHost/Saved/B1Proxy/full-1/silent-ws
+python3 -I Tools/lws_proxy_passport.py --check-case /w/Unreal/VaRestHost/Saved/B1Proxy/full-1/silent-wss
+```
+
+First change only the child `PrimaryBudget` expression's silent arm from `30.0` to `8.0`, preserving the 40 s fixture. After the guarded normal build, run:
+
+```bash
+python3 -I Tools/run_lws_proxy_probe.py --out /w/Unreal/VaRestHost/Saved/B1Proxy/silent-budget-mutation --only silent-ws
+python3 -I Tools/lws_proxy_passport.py --check-case /w/Unreal/VaRestHost/Saved/B1Proxy/silent-budget-mutation/silent-ws
+```
+
+Require runner/automation failure (`bounded primary attempt`), `primary_completed=false`, and the case check's observation-budget/lifecycle failure. Preserve the failed trace and fixture journal; forced teardown is not a native-timeout result. Restore `30.0`, run the guarded normal build, then require both commands to pass:
+
+```bash
+python3 -I Tools/run_lws_proxy_probe.py --out /w/Unreal/VaRestHost/Saved/B1Proxy/silent-budget-restored --only silent-ws
+python3 -I Tools/lws_proxy_passport.py --check-case /w/Unreal/VaRestHost/Saved/B1Proxy/silent-budget-restored/silent-ws
+```
+
+Next change only `Proxy.__init__`'s silent lifetime from `40.0` to `12.0`, keeping the restored 30 s child. Python needs no UE rebuild. Run:
+
+```bash
+python3 -I Tools/run_lws_proxy_probe.py --out /w/Unreal/VaRestHost/Saved/B1Proxy/silent-fixture-mutation --only silent-wss
+python3 -I Tools/lws_proxy_passport.py --check-case /w/Unreal/VaRestHost/Saved/B1Proxy/silent-fixture-mutation/silent-wss
+```
+
+The child may complete successfully after fixture EOF; the case checker must still fail for the shortened lifetime and `hold_deadline`/missing client-EOF witness. Restore `40.0`, then require all three commands to pass (the selftest includes prompt shutdown during silence):
+
+```bash
+python3 -I Tools/testserver/proxy_selftest.py -v
+python3 -I Tools/run_lws_proxy_probe.py --out /w/Unreal/VaRestHost/Saved/B1Proxy/silent-fixture-restored --only silent-wss
+python3 -I Tools/lws_proxy_passport.py --check-case /w/Unreal/VaRestHost/Saved/B1Proxy/silent-fixture-restored/silent-wss
+```
+
+Never replace the original full-run evidence with either mutation. Run each expected-failure command separately and record its status; a failing runner must not prevent inspection of its retained trace.
+
+- [ ] **Step 7: Validate artifact refusal and preservation**. Copy the evidence directory to a fresh mutation directory, remove one error trace or set one `dropped_events` to 1 without changing its hash, and run the generator to a temporary passport. It must exit 1 and leave the existing real passport unchanged. The exact commands below mutate only the copied evidence:
 
 ```bash
 cp -rf /w/Unreal/VaRestHost/Saved/B1Proxy/full-1 /w/Unreal/VaRestHost/Saved/B1Proxy/full-mutation
@@ -1692,7 +2091,7 @@ python3 -I Tools/lws_proxy_passport.py --run /w/Unreal/VaRestHost/Saved/B1Proxy/
 
 Expected exit 1 names hash mismatch and dropped trace events. Verify no `refused-passport.md` was created. Re-run the generator on untouched `full-1` to show the original evidence still passes. Do not update the original hashes to conceal the mutation.
 
-- [ ] **Step 7: Write the B2 decision handoff and commit**. Append to the generated passport a short manually reviewed “Controller handoff” that cites the actual case IDs and sequence positions for: direct-vs-proxy APPEND/WSI_CREATE/cert deltas; denial/close/silence pointer/len behavior; post-tunnel negative controls; environment precedence; redirect source and target journals. For each proposed discriminator name the supported public observation, its counterexamples and limits. If no supported signal distinguishes tunnel denial from another empty failure, state that explicitly and request root's policy ruling before B2 code. Do not classify by duration, read internal offsets or infer HTTP403 from null/0.
+- [ ] **Step 8: Write the B2 decision handoff and commit**. Append to the generated passport a short manually reviewed “Controller handoff” that cites the actual case IDs and sequence positions for: direct-vs-proxy APPEND/WSI_CREATE/cert deltas; denial/close/silence pointer/len behavior; post-tunnel negative controls; environment precedence; redirect source and target journals. For each proposed discriminator name the supported public observation, its counterexamples and limits. If no supported signal distinguishes tunnel denial from another empty failure, state that explicitly and request root's policy ruling before B2 code. Do not classify by duration, read internal offsets or infer HTTP403 from null/0.
 
 This is the only content in the plan intentionally dependent on new measurements. The code above deterministically produces every source datum; the handoff is interpretation of those data, not an unspecified implementation step. Root independently reviews this interpretation and then commissions the complete B2–B9 plan. Preserve production TLS/redirect/cancel/deadline precedence, Q7 engine-following semantics, and no-follow credential isolation as acceptance obligations.
 
@@ -1707,5 +2106,5 @@ git commit -m "docs: record measured LWS proxy prerequisite evidence" -m "Co-Aut
 - Review Focus conditions are pinned to named tests/tasks above. No guessed callback count or production classification is an assertion.
 - Existing public APIs are unchanged. Every new callable used in a later task is fully defined in an earlier task or in that task's code. Changes use final `9884b5b` anchors, not the old W1a plan's pseudocode.
 - The future full W1b plan must carry the preflight's private queue high4096/low2048, finite PopEvents, W3 single admitted batch and independent reply-pressure rulings. They are context, with no implementation here.
-- A successful B1 handoff is reviewed fixture/rig/controller code, passing relevant gates, complete archived artifacts, and a truthful passport with root's B2 inputs. It is not W1b/W1 completion, production proxy support, a native-platform result or a cooked shared-copy runtime result. VaRest-81s stays open; root controls all issue changes.
-- Execution method is already delegated by the user. Root and an independent plan reviewer review this document before execution; there is no new human approval menu. Build audit rulings must be incorporated before any compiler invocation.
+- A successful B1 handoff is reviewed fixture/rig/controller code, passing relevant gates, complete archived artifacts, and a truthful passport with root's B2 inputs. It is not W1b/W1 completion, production proxy support, a native-platform result or a cooked shared-copy runtime result. The separately completed W1a NoPCH gate is attributed to its audit, not B1. VaRest-81s stays open; root controls all issue changes.
+- Execution method is already delegated by the user. Root and an independent plan reviewer review this document before execution; there is no new human approval menu. Current normal/NoPCH audit completion is incorporated above; fresh action guards still apply before every compiler invocation.
