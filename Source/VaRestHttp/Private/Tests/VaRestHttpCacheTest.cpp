@@ -957,4 +957,65 @@ bool FVaRestCacheRaw304NoStoreTest::RunTest(const FString& Parameters)
     return TestTrue(TEXT("drain"),Disk.Drain() && Rig.Drain());
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestCacheAgeAcross304Test,"VaRest.Http.Cache.AgeAcross304",
+ EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+bool FVaRestCacheAgeAcross304Test::RunTest(const FString& Parameters)
+{
+    using namespace VaRest::Http; using namespace VaRest::Http::Testing; using namespace VaRest::Http::CacheTestPrivate;
+    // Malformed alone, either ordering of mixed duplicate Age, and valid explicit replacement.
+    for (int32 Mode=0;Mode<4;++Mode)
+    {
+        FTestRig Rig; FCleanup Cleanup(Rig); FScopedTraceRecorder Trace;
+        auto Policy=FVaRestCachePolicy::Memory(); Policy.DefaultTtlSeconds=60; Rig.Client.WithCache(Policy);
+        auto Capture=MakeShared<FCapture,ESPMode::ThreadSafe>(); Rig.Client.Use(Capture,EVaRestStageSlot::Outer);
+        const auto State=FClientAccess::State(Rig.Client);
+        auto Seed=Response(200,TEXT("aged-original")); Seed.Headers.Set(TEXT("Age"),TEXT("120"));
+        Rig.Fake->Enqueue(MoveTemp(Seed)); auto A=MakeOutcome<FString>(); Observe(Rig.Client.Get<FString>(TEXT("/age-chain")),A).Send();
+        auto SeedEx=Capture->Seen.Pin(); if (!TestTrue(TEXT("seed exchange"),SeedEx.IsValid()) || !TestTrue(TEXT("seed completes"),Rig.Wait(A))) return false;
+        const FString Key=Internals(*SeedEx).LookupKey;
+        auto Stored=State->GetMemoryCache().Find(Key); if (!TestTrue(TEXT("actual seed retained"),Stored.IsValid())) return false;
+        TestEqual(TEXT("seed lifetime"),Stored->Metadata.Lifetime,60.0); TestEqual(TEXT("seed age floor"),Stored->Metadata.InitialAge,120.0);
+        auto First304=Response(304,TEXT("")); First304.Headers.Set(TEXT("Date"),FDateTime::UtcNow().ToHttpDate());
+        First304.Headers.Add(TEXT("Age"),Mode==1 || Mode==3 ? TEXT("0") : TEXT("invalid"));
+        if (Mode==1 || Mode==2) First304.Headers.Add(TEXT("Age"),Mode==1 ? TEXT("invalid") : TEXT("0"));
+        Rig.Fake->Enqueue(MoveTemp(First304)); auto B=MakeOutcome<FString>(); auto BHandle=Observe(Rig.Client.Get<FString>(TEXT("/age-chain")),B).Send();
+        auto FirstEx=Capture->Seen.Pin(); if (!TestTrue(TEXT("first304 exchange"),FirstEx.IsValid()) || !TestTrue(TEXT("first304 completes"),Rig.Wait(B))) return false;
+        TestEqual(TEXT("first304 same key"),Internals(*FirstEx).LookupKey,Key);
+        if (!TestEqual(TEXT("first304 actually dispatched"),Rig.Fake->NumCalls(),2)) return false;
+        TestEqual(TEXT("first304 validator"),Rig.Fake->GetCall(1).Request.Headers.Get(TEXT("If-None-Match")),FString(TEXT("\"one\"")));
+        TestTrue(TEXT("first304 captured provenance"),B->Response.bFromCache);
+        if (!TestTrue(TEXT("first304 captured value"),B->Value.IsSet())) return false;
+        TestEqual(TEXT("first304 captured bytes"),B->Value.GetValue(),FString(TEXT("aged-original")));
+        TestEqual(TEXT("first304 captured note"),Notes(*Trace.Recorder,BHandle.GetId(),EVaRestTraceNoteKind::CacheRevalidated),1);
+        Stored=State->GetMemoryCache().Find(Key); if (!TestTrue(TEXT("first304 metadata retained"),Stored.IsValid())) return false;
+        TestEqual(TEXT("malformed Age immediately stale"),Stored->Metadata.Lifetime,Mode==3 ? 60.0 : 0.0);
+        TestEqual(TEXT("only valid explicit Age replaces inherited floor"),Stored->Metadata.InitialAge>=120.0,Mode!=3);
+        if (Mode!=3)
+        {
+            Rig.Fake->Enqueue(Response(304,TEXT(""))); auto C=MakeOutcome<FString>(); auto CHandle=Observe(Rig.Client.Get<FString>(TEXT("/age-chain")),C).Send();
+            auto SecondEx=Capture->Seen.Pin(); if (!TestTrue(TEXT("second304 exchange"),SecondEx.IsValid()) || !TestTrue(TEXT("second304 completes"),Rig.Wait(C))) return false;
+            TestEqual(TEXT("second304 same key"),Internals(*SecondEx).LookupKey,Key);
+            if (!TestEqual(TEXT("second304 actually dispatched"),Rig.Fake->NumCalls(),3)) return false;
+            TestEqual(TEXT("second304 validator"),Rig.Fake->GetCall(2).Request.Headers.Get(TEXT("If-None-Match")),FString(TEXT("\"one\"")));
+            TestTrue(TEXT("second304 captured provenance"),C->Response.bFromCache);
+            if (!TestTrue(TEXT("second304 captured value"),C->Value.IsSet())) return false;
+            TestEqual(TEXT("second304 captured bytes"),C->Value.GetValue(),FString(TEXT("aged-original")));
+            TestEqual(TEXT("second304 captured note"),Notes(*Trace.Recorder,CHandle.GetId(),EVaRestTraceNoteKind::CacheRevalidated),1);
+            Stored=State->GetMemoryCache().Find(Key); if (!TestTrue(TEXT("second304 metadata retained"),Stored.IsValid())) return false;
+            TestEqual(TEXT("second304 restores lifetime"),Stored->Metadata.Lifetime,60.0);
+            TestTrue(TEXT("second304 preserves inherited floor"),Stored->Metadata.InitialAge>=120.0);
+            Rig.Fake->Enqueue(Response(200,TEXT("age-own-wire")));
+        }
+        auto D=MakeOutcome<FString>(); Observe(Rig.Client.Get<FString>(TEXT("/age-chain")),D).Send();
+        auto LastEx=Capture->Seen.Pin(); if (!TestTrue(TEXT("last exchange"),LastEx.IsValid()) || !TestTrue(TEXT("last completes"),Rig.Wait(D))) return false;
+        TestEqual(TEXT("last same key"),Internals(*LastEx).LookupKey,Key);
+        TestEqual(TEXT("only valid Age permits fresh provenance"),D->Response.bFromCache,Mode==3);
+        TestEqual(TEXT("invalid Age chain needs own wire"),Rig.Fake->NumCalls(),Mode==3 ? 2 : 4);
+        if (!TestTrue(TEXT("last value"),D->Value.IsSet())) return false;
+        TestEqual(TEXT("invalid Age chain returns own bytes"),D->Value.GetValue(),FString(Mode==3 ? TEXT("aged-original") : TEXT("age-own-wire")));
+        TestTrue(TEXT("drain"),Rig.Drain());
+    }
+    return true;
+}
+
 #endif

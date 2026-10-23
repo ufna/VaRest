@@ -55,11 +55,20 @@ FCacheMetadata RevalidatedPolicy(const FCacheEntry& Stored,const FVaRestHeaders&
     if (Fresh.Lifetime!=ReadCacheMetadata(Raw,1,Now,Utc).Lifetime && !Fresh.bNoCache) Result.bNoStore=true;
     Result.Lifetime=Fresh.Lifetime;
     Result.StoredAt=Now; Result.StoredUtc=Utc; Result.InitialAge=Fresh.InitialAge;
+    // Only an entirely valid explicit Age can replace the inherited floor. A
+    // malformed duplicate must not erase it merely because another value parses.
+    bool bValidAge=Raw.Contains(TEXT("Age"));
+    for (const auto& Pair : Raw)
+    {
+        if (!Pair.Key.Equals(TEXT("Age"),ESearchCase::IgnoreCase)) continue;
+        double ParsedAge=0.0;
+        if (!ReadDeltaSeconds(Pair.Value.TrimStartAndEnd(),ParsedAge)) bValidAge=false;
+    }
     // A new lifetime or a malformed Date cannot erase an inherited age anchor.
     FDateTime FreshDate;
     if (!FDateTime::ParseHttpDate(Raw.Get(TEXT("Date")),FreshDate))
         Result.InitialAge=FMath::Max(Result.InitialAge,Stored.Metadata.InitialAge+FMath::Max(0.0,Now-Stored.Metadata.StoredAt));
-    else if (!Raw.Contains(TEXT("Age"))) Result.InitialAge=FMath::Max(Result.InitialAge,Stored.Metadata.InitialAge);
+    else if (!bValidAge) Result.InitialAge=FMath::Max(Result.InitialAge,Stored.Metadata.InitialAge);
     return Result;
 }
 
