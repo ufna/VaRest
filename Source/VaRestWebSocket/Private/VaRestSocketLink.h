@@ -54,7 +54,7 @@ namespace VaRest::WebSocket
 		int32 PopAll(TArray<FVaRestSocketEvent>& Out);
 
 		/**
-		 * Producer, for one Send: BufferedAfterSend is the count that Send's own add produced (the value fetch_add returned,
+		 * Producer, for one positive-length Send (empty frames must not call this): BufferedAfterSend is the count that Send's own add produced (the value fetch_add returned,
 		 * plus the frame's length), which is what GetBufferedAmount showed the app. The mark is decided on it, never on a
 		 * re-read: by the time the producer handles the Send, earlier frames' bytes may have left (review I-1), and a re-read
 		 * below HighWater would lose a crossing the app saw, and with it the Drained (spec 2.4, 6.3). The Send's own bytes stay

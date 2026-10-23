@@ -304,4 +304,73 @@ bool FVaRestSocketFakeReleaseTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestSocketFakeDiscardTest, "VaRest.WebSocket.Fake.TerminalDiscard",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestSocketFakeDiscardTest::RunTest(const FString& Parameters)
+{
+	struct FObservation
+	{
+		TWeakPtr<IVaRestSocketConnection, ESPMode::ThreadSafe> WeakConnection;
+		int32 TerminalNotifications = 0;
+		int64 BufferedAtEnd = -1;
+	};
+	// Cancel/fail pending; drop/server-close/client-close open; release pending/open uses the same central End.
+	for (int32 Row = 0; Row < 7; ++Row)
+	{
+		FVaRestFakeSocketTransport Fake;
+		const TSharedRef<FObservation, ESPMode::ThreadSafe> Seen = MakeShared<FObservation, ESPMode::ThreadSafe>();
+		FVaRestSocketConnectRequest Req;
+		Req.SendHighWater = 5;
+		TSharedPtr<IVaRestSocketConnection, ESPMode::ThreadSafe> Connection = Fake.Connect(MoveTemp(Req), [Seen]
+		{
+			const TSharedPtr<IVaRestSocketConnection, ESPMode::ThreadSafe> Pinned = Seen->WeakConnection.Pin();
+			if (Pinned.IsValid() && Pinned->HasEnded())
+			{
+				++Seen->TerminalNotifications;
+				Seen->BufferedAtEnd = Pinned->GetBufferedAmount();
+			}
+		});
+		Seen->WeakConnection = Connection;
+		FVaRestFakeSocketAttempt& Attempt = Fake.GetLast();
+		if (Row >= 2 && Row != 5) { Attempt.Open(); }
+		TestTrue(TEXT("send accepted"), Connection->Send(FVaRestSocketFrame::Text(FStringView(TEXT("early")))));
+		if (Row >= 2 && Row != 5)
+		{
+			Attempt.Flush(2);
+			TestEqual(TEXT("nonterminal partial flush keeps remainder"), Connection->GetBufferedAmount(), static_cast<int64>(3));
+		}
+		if (Row == 0 || Row == 4) { Connection->Close(1000, TEXT("done")); }
+		else if (Row == 1) { Attempt.Fail(EVaRestSocketFailure::ConnectFailed); }
+		else if (Row == 2) { Attempt.Drop(); }
+		else if (Row == 3) { Attempt.ServerClose(4001); }
+		else { Connection.Reset(); }
+		if (Connection.IsValid())
+		{
+			TestTrue(TEXT("terminal notification completed"), VaRest::Http::Testing::PumpUntil([Seen] { return Seen->TerminalNotifications == 1; }));
+			TestEqual(TEXT("discard is visible from terminal notification"), Seen->BufferedAtEnd, static_cast<int64>(0));
+			TArray<FVaRestSocketEvent> Events;
+			Connection->PopEvents(Events);
+			int32 Ends = 0;
+			int32 Drains = 0;
+			for (const FVaRestSocketEvent& Each : Events)
+			{
+				Ends += Each.IsTerminal() ? 1 : 0;
+				Drains += Each.Type == EVaRestSocketEventType::Drained ? 1 : 0;
+			}
+			TestEqual(TEXT("exactly one terminal event"), Ends, 1);
+			TestEqual(TEXT("discard emits no Drained"), Drains, 0);
+			TestEqual(TEXT("zero buffered after popping end"), Connection->GetBufferedAmount(), static_cast<int64>(0));
+			TestFalse(TEXT("later send refused"), Connection->Send(FVaRestSocketFrame::Text(FStringView(TEXT("late")))));
+		}
+		else
+		{
+			TestTrue(TEXT("release ended the attempt"), Attempt.HasEnded());
+			TestEqual(TEXT("release never notifies"), Seen->TerminalNotifications, 0);
+		}
+		TestEqual(TEXT("Sent remains accepted-send history"), Attempt.GetSent().Num(), 1);
+	}
+	return true;
+}
+
 #endif

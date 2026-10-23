@@ -21,6 +21,7 @@ namespace VaRest::WsTest::VaRestWsConnectTestPrivate
 	{
 		std::atomic<int32> Calls{ 0 };
 		std::atomic<int32> OnGameThread{ 0 };
+		std::atomic<bool> bComplete{ false };
 	};
 
 	/**
@@ -236,8 +237,20 @@ bool FVaRestWsConnectBadRequestTest::RunTest(const FString& Parameters)
 	const TSharedRef<FSinkLog, ESPMode::ThreadSafe> Log = MakeShared<FSinkLog, ESPMode::ThreadSafe>();
 	FVaRestSocketConnectRequest Bad;
 	Bad.Url = TEXT("ftp://127.0.0.1/");
-	FEvents Events(Transport->Connect(MoveTemp(Bad), [Log] { ++Log->Calls; Log->OnGameThread += IsInGameThread() ? 1 : 0; }));
-	TestTrue(TEXT("a bad URL ends"), Events.WaitEnd());
+	const TSharedRef<FCallbackGate, ESPMode::ThreadSafe> Gate = MakeShared<FCallbackGate, ESPMode::ThreadSafe>();
+	ON_SCOPE_EXIT { Gate->bRelease = true; };
+	FEvents Events(Transport->Connect(MoveTemp(Bad), [Log, Gate]
+	{
+		Gate->Hold();
+		++Log->Calls;
+		Log->OnGameThread += IsInGameThread() ? 1 : 0;
+		Log->bComplete = true;
+	}));
+	TestTrue(TEXT("notification entered its bounded gate"), Gate->WaitEntered());
+	TestTrue(TEXT("a bad URL ends while its notification is held"), Events.WaitEnd());
+	TestEqual(TEXT("the queued event is visible before notification observations"), Log->Calls.load(), 0);
+	TestTrue(TEXT("notification gate released normally"), Gate->ReleaseAndWait());
+	TestTrue(TEXT("notification observations completed"), VaRest::Http::Testing::PumpUntil([Log] { return Log->bComplete.load(); }, 5.0, true));
 	TestTrue(FString::Printf(TEXT("... as Error BadUrl (%s)"), *Events.Describe()), IsError(Events, EVaRestSocketFailure::BadUrl));
 	TestTrue(TEXT("the sink ran"), Log->Calls.load() >= 1);
 	// E7: queued like any other event, from the service thread -- so never inside Connect

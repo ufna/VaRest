@@ -9,11 +9,27 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
+#include <atomic>
+
 class FAutomationTestBase;
 
 /** Helpers for VaRest.Integration.WebSocket.Transport.* (WebSocket spec 16.2) against Tools/testserver/ws.py */
 namespace VaRest::WsTest
 {
+	/** Test-only OnEvents hold: deliberately blocks its producer until released, at most 10 seconds. Shared captures only. */
+	struct FCallbackGate
+	{
+		std::atomic<bool> bEntered{ false };
+		std::atomic<bool> bRelease{ false };
+		std::atomic<bool> bCompleted{ false };
+		std::atomic<bool> bTimedOut{ false };
+		/** Producer thread. */
+		void Hold();
+		/** Game thread: bounded waits, pumping callbacks. */
+		bool WaitEntered();
+		bool ReleaseAndWait();
+	};
+
 	/** The runner's test server: -VaRestTestServer=http://127.0.0.1:<port>, -VaRestTestServerTls=https://127.0.0.1:<port> */
 	struct FSite
 	{

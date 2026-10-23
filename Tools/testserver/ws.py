@@ -557,6 +557,7 @@ def drop_before_status(h, journal):
 
 
 def ws_close(h, match, journal):
+    wait_for_message = server.query_int(h, "wait_for_message", 0, 1)
     what = match.group(1)
     if what == "none":
         payload = b""
@@ -569,6 +570,27 @@ def ws_close(h, match, journal):
     conn = accept(h, journal)
     if "msg" in h.query:
         conn.send_message("text", h.query["msg"][0].encode("utf-8"))
+    if wait_for_message:
+        # An absolute cap also bounds peers that keep sending control frames without releasing the gate.
+        def expire():
+            journal.add("close_gate_timeout")
+            try:
+                conn.sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        def release(connection, kind, data):
+            raise StopServing()
+        timer = threading.Timer(5.0, expire)
+        timer.daemon = True
+        timer.start()
+        try:
+            conn.serve(on_message=release)
+            return
+        except StopServing:
+            journal.add("close_gate_released")
+        finally:
+            timer.cancel()
+            timer.join()
     conn.send_close(payload)
     conn.wait_close(CLOSE_WAIT)
 

@@ -15,10 +15,13 @@ void VaRest::WebSocket::Lws::FConn::Send(FService& Service, FVaRestSocketFrame&&
 		Link->BufferedBytes.fetch_sub(Frame.Length);
 		return;
 	}
+	// Keep the captured count for positive payloads: their bytes prevent a return to zero before this note. An empty
+	// frame can arrive after the captured cycle drained, so must not re-arm that spent byte observation (final B-M1).
+	if (Frame.Length > 0)
+	{
+		Link->NoteBuffered(BufferedAfterSend, Request.SendHighWater);
+	}
 	Outbox.Add(MoveTemp(Frame));
-	// The sender's own count (Task 3 review I-1): earlier frames may have left since, and a re-read here would miss a
-	// crossing the app saw. This frame's bytes stay counted until it is released, so the note comes before any return to 0
-	Link->NoteBuffered(BufferedAfterSend, Request.SendHighWater);
 	// Before the open LWS would drop the request (spec 2.4): OnEstablished asks for what is queued (plan decision 18)
 	if (State == EConnState::Open)
 	{

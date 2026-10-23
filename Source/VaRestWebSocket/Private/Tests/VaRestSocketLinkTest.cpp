@@ -312,6 +312,19 @@ bool FVaRestSocketLinkDrainedTest::RunTest(const FString& Parameters)
 	Events.Reset();
 	TestTrue(TEXT("a crossing seen by the sender is Drained, even when bytes left before the producer noted it"), Link.PopAll(Events) == 1 && Events.Num() == 1
 		&& Events[0].Type == EVaRestSocketEventType::Drained);
+	// B-M1: an empty send's stale observation is deliberately not noted: only positive sends call NoteBuffered.
+	Link.NoteBuffered(AddBuffered(Link, 8), 8);
+	const int64 EmptyObservation = AddBuffered(Link, 0);
+	TestEqual(TEXT("empty send captured the active cycle"), EmptyObservation, static_cast<int64>(8));
+	Link.ReleaseBuffered(8);
+	Events.Reset();
+	TestEqual(TEXT("the positive cycle drained once"), Link.PopAll(Events), 1);
+	Link.ReleaseBuffered(0);
+	Events.Reset();
+	TestEqual(TEXT("processing the empty send without a note cannot drain again"), Link.PopAll(Events), 0);
+	Link.NoteBuffered(AddBuffered(Link, 8), 8);
+	Link.ReleaseBuffered(8);
+	TestEqual(TEXT("another positive cycle emits another Drained"), Link.PopAll(Events), 1);
 	// Nothing after the terminal event, Drained included -- and without an Error line: ReleaseBuffered checks first
 	Link.NoteBuffered(AddBuffered(Link, 9), 8);
 	FVaRestSocketEvent Final;

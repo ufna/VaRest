@@ -71,6 +71,28 @@ bool FVaRestLwsConnSendTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("... and the amount is 0"), Link->BufferedBytes.load(), static_cast<int64>(0));
 	}
 	{
+		const TSharedRef<FSocketLink, ESPMode::ThreadSafe> Link = MakeShared<FSocketLink, ESPMode::ThreadSafe>(nullptr);
+		FVaRestSocketConnectRequest Req;
+		Req.SendHighWater = 8;
+		FConn Conn(3, Link, MoveTemp(Req));
+		FVaRestSocketEvent Opened;
+		Opened.Type = EVaRestSocketEventType::Open;
+		Link->Push(MoveTemp(Opened));
+		Conn.Send(Service, MakeFrame(8), Link->BufferedBytes.fetch_add(8) + 8);
+		const int64 EmptyObservation = Link->BufferedBytes.fetch_add(0);
+		Link->ReleaseBuffered(8);
+		Conn.Send(Service, MakeFrame(0), EmptyObservation);
+		Link->ReleaseBuffered(0);
+		TArray<FVaRestSocketEvent> Events;
+		Link->PopAll(Events);
+		TestEqual(TEXT("empty send cannot re-arm the spent captured cycle"), CountType(Events, EVaRestSocketEventType::Drained), 1);
+		Conn.Send(Service, MakeFrame(8), Link->BufferedBytes.fetch_add(8) + 8);
+		Link->ReleaseBuffered(8);
+		Events.Reset();
+		Link->PopAll(Events);
+		TestEqual(TEXT("a fresh positive cycle still drains"), CountType(Events, EVaRestSocketEventType::Drained), 1);
+	}
+	{
 		// An end drops what is queued from the buffered amount, with no Drained; a send after the end is dropped there too
 		const TSharedRef<FSocketLink, ESPMode::ThreadSafe> Link = MakeShared<FSocketLink, ESPMode::ThreadSafe>(nullptr, TEXT("ws#2"));
 		FVaRestSocketConnectRequest Req;

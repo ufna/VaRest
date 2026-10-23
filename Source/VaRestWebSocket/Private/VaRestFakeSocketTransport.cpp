@@ -159,6 +159,12 @@ FVaRestFakeSocketAttempt& FVaRestFakeSocketAttempt::End(EVaRestSocketEventType T
 		UE_LOG(LogVaRestSocket, Error, TEXT("FVaRestFakeSocketAttempt::End takes Closed or Error, not %s"), LexToString(Type));
 		return *this;
 	}
+	check(IsInGameThread());
+	if (!HasEnded())
+	{
+		// Discard before terminal publication/notification. Sent remains historical evidence; discard is not Drained.
+		Link->BufferedBytes.store(0, std::memory_order_relaxed);
+	}
 	FVaRestSocketEvent Event;
 	Event.Type = Type;
 	Event.End = InEnd;
@@ -195,7 +201,10 @@ bool FVaRestFakeSocketAttempt::OnSend(FVaRestSocketFrame&& Frame)
 	++ConsumerDepth;
 	// The mark is decided on what this add produced (review I-1), as the real handle passes it on to the service thread
 	const int64 After = Link->BufferedBytes.fetch_add(Frame.Length, std::memory_order_relaxed) + Frame.Length;
-	Link->NoteBuffered(After, Request.SendHighWater);
+	if (Frame.Length > 0)
+	{
+		Link->NoteBuffered(After, Request.SendHighWater);
+	}
 	Sent.Add(MoveTemp(Frame));
 	--ConsumerDepth;
 	return true;

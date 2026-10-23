@@ -92,6 +92,17 @@ Tools/run_tests.sh --no-build Probe.VaRest.Risky.Lws.StatusInConnectionError.Ref
 runner dies. `VAREST_NO_TESTSERVER=1` runs without it (integration tests then fail, by design). Server log:
 `<Host>/Saved/Logs/VaRestTestServer.<runner pid>.log`.
 
+WebSocket NoPCH/nonunity checks temporarily set `PCHUsage = PCHUsageMode.NoPCHs; bUseUnity = false;`
+in `VaRestWebSocket.Build.cs` and `VaRestTests.Build.cs`, then restore those exact edits. Always inspect
+`-WriteOutdatedActions=<file>` before compiling: every compiled source and produced output must belong to the plugin.
+UHT can invalidate unrelated generated engine code even during a dry run; `-Module` and `-UsePrecompiled` do not
+guarantee isolation. Stop on engine actions; do not rebuild the engine or alter generated files, timestamps or caches.
+
+If the milestone accepts a compile-only fallback, validate and replay only the saved JSON's plugin `Compile` actions
+with no PCH, snapshot the response files, and redirect only `.o`/`.d` outputs into an isolated plugin Intermediate directory.
+Keep normal libraries byte-identical (hash before/after), then run `Tools/run_tests.sh --no-build VaRest.WebSocket.Module`.
+Record the limit: this verifies standalone translation units, **not NoPCH linking**; normal/monolithic link gates remain separate.
+
 **Dev-loop hazards** (inherited from VaCuus, each one cost real time there):
 
 - **No editor may be running while you build** -- it holds the module `.so` files. Kill **by PID**,

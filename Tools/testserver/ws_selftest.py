@@ -368,6 +368,34 @@ class ScenarioTest(WsTestBase):
         self.assertEqual(self.of(journal, "close")[0]["code"], 4001)
         self.assertEqual(len([event for event in self.of(journal, "sent") if event["op"] == ws.OP_CLOSE]), 1)
 
+    def test_close_waits_for_message(self):
+        key = uuid.uuid4().hex
+        client = self.connect("/ws/close/4001?wait_for_message=1&key=" + key)
+        self.assertTrue(client.accepted)
+        client.send(ws.OP_PING, b"held")
+        self.assertEqual(client.message(), ("pong", b"held"))
+        client.send(ws.OP_TEXT, b"release")
+        self.assertEqual(client.message(), ("close", struct.pack("!H", 4001)))
+        client.close(4001)
+        journal = self.ended(key)
+        self.assertEqual(len(self.of(journal, "close_gate_released")), 1)
+        self.assertEqual(len(self.of(journal, "close_gate_timeout")), 0)
+        self.assertEqual(self.connect("/ws/close/4001?wait_for_message=0").message(), ("close", struct.pack("!H", 4001)))
+        for value in ("2", "-1", "oops"):
+            self.assertEqual(self.connect("/ws/close/4001?wait_for_message=" + value).status, 400)
+
+    def test_close_gate_cleanup(self):
+        key = uuid.uuid4().hex
+        client = self.connect("/ws/close/4001?wait_for_message=1&key=" + key)
+        client.close(1000)
+        self.assertEqual(client.message(), ("close", struct.pack("!H", 1000)))
+        self.assertEqual(len(self.of(self.ended(key), "close_gate_released")), 0)
+        key = uuid.uuid4().hex
+        client = self.connect("/ws/close/4001?wait_for_message=1&key=" + key)
+        with self.assertRaises(EOFError):
+            client.message()
+        self.assertEqual(len(self.of(self.ended(key), "close_gate_timeout")), 1)
+
     def test_close_payload_shapes(self):
         self.assertEqual(self.connect("/ws/close/none").message(), ("close", b""))
         self.assertEqual(self.connect("/ws/close/onebyte").message(), ("close", b"\x03"))
@@ -699,6 +727,15 @@ class WssTest(unittest.TestCase):
         self.assertEqual(client.message(), ("text", b"over tls"))
         client.close()
         self.assertEqual(client.message()[0], "close")
+
+    def test_wss_close_waits_for_message(self):
+        client = self.connect("/ws/close/4001?wait_for_message=1")
+        self.assertTrue(client.accepted)
+        client.send(ws.OP_PING, b"held")
+        self.assertEqual(client.message(), ("pong", b"held"))
+        client.send(ws.OP_TEXT, b"release")
+        self.assertEqual(client.message(), ("close", struct.pack("!H", 4001)))
+        client.close(4001)
 
     def trusted(self):
         return ssl.create_default_context(cafile=os.path.join(server.CERTS_DIR, "test-ca.pem"))

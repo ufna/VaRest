@@ -4,6 +4,8 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
+#include "HAL/PlatformProcess.h"
+#include "HAL/PlatformTime.h"
 #include "Misc/AutomationTest.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Guid.h"
@@ -379,6 +381,29 @@ FString VaRest::WsTest::Utf8(TConstArrayView<uint8> Bytes)
 FString VaRest::WsTest::Sha256Hex(TConstArrayView<uint8> Bytes)
 {
 	return VaRest::Http::FSha256::Hash(Bytes).ToHex();
+}
+
+void VaRest::WsTest::FCallbackGate::Hold()
+{
+	bEntered = true;
+	const double Until = FPlatformTime::Seconds() + 10.0;
+	while (!bRelease.load() && FPlatformTime::Seconds() < Until)
+	{
+		FPlatformProcess::SleepNoStats(0.001f);
+	}
+	bTimedOut = !bRelease.load();
+	bCompleted = true;
+}
+
+bool VaRest::WsTest::FCallbackGate::WaitEntered()
+{
+	return VaRest::Http::Testing::PumpUntil([this] { return bEntered.load(); }, 5.0, true);
+}
+
+bool VaRest::WsTest::FCallbackGate::ReleaseAndWait()
+{
+	bRelease = true;
+	return VaRest::Http::Testing::PumpUntil([this] { return bCompleted.load(); }, 5.0, true) && !bTimedOut.load();
 }
 
 #endif // WITH_DEV_AUTOMATION_TESTS

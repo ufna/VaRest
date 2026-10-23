@@ -84,9 +84,19 @@ bool FVaRestWsTlsIpLiteralTest::RunTest(const FString& Parameters)
 		Events.Pull();
 		return false;
 	}
-	const TUniquePtr<FEvents> Server = VisitChecked(*this, *Transport, Request(Ip, TEXT("/ws/close/4001?key=") + NewKey()));
-	const FVaRestSocketEvent* End = Server->GetEnd();
-	TestTrue(FString::Printf(TEXT("... and a server close arrives over it (%s)"), *Server->Describe()), End && End->End.Code == 4001 && End->End.By == EVaRestSocketCloseBy::Server);
+	FEvents Server(Transport->Connect(Request(Ip, TEXT("/ws/close/4001?wait_for_message=1&key=") + NewKey())));
+	if (TestTrue(TEXT("the peer-close leg observes Open before releasing the server"), Server.WaitType(EVaRestSocketEventType::Open)))
+	{
+		TestTrue(TEXT("release the peer close after Open"), Server.Connection->Send(FVaRestSocketFrame::Text(FStringView(TEXT("release")))));
+	}
+	if (!TestTrue(TEXT("the peer-close leg ends without a client Close"), Server.WaitEnd()))
+	{
+		Transport->Shutdown();
+		Server.Pull();
+	}
+	const FVaRestSocketEvent* End = Server.GetEnd();
+	TestTrue(FString::Printf(TEXT("... and a server close arrives over it (%s)"), *Server.Describe()),
+		End && End->Type == EVaRestSocketEventType::Closed && End->End.Code == 4001 && End->End.By == EVaRestSocketCloseBy::Server);
 	return true;
 }
 

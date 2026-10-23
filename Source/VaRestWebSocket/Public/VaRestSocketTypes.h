@@ -133,8 +133,9 @@ struct FVaRestSocketEnd
 	/** The close reason, decoded as UTF-8 (ill-formed bytes as U+FFFD) */
 	FString Reason;
 	/**
-	 * The close handshake ended: the peer's close was echoed, or a close VaRest started ended before CloseTimeout (plan
-	 * decision 4: LWS 3.0 raises no callback for the peer's reply, [close.ours_sequence], so an echo and a TCP end look alike)
+	 * The peer's close was echoed, or a close VaRest started ended before both its configured close deadline and LWS's
+	 * five-second acknowledgement cutoff. LWS 3.0 exposes no callback for the reply itself (plan decision 4,
+	 * [close.ours_sequence]), so this inferred clean end cannot distinguish an echo from a TCP end.
 	 */
 	bool bWasClean = false;
 	EVaRestSocketCloseBy By = EVaRestSocketCloseBy::Transport;

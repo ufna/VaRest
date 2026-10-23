@@ -215,8 +215,23 @@ bool FVaRestWsSendBeforeOpenTest::RunTest(const FString& Parameters)
 		FVaRestSocketConnectRequest Req = Request(Scheme, TEXT("/ws/sink?key=") + Key);
 		// Task 3 residual: the send's 5 bytes reach the high-water mark before the open, so its write is a Drained
 		Req.SendHighWater = 5;
+		const TSharedRef<FCallbackGate, ESPMode::ThreadSafe> Gate = MakeShared<FCallbackGate, ESPMode::ThreadSafe>();
+		ON_SCOPE_EXIT { Gate->bRelease = true; };
+		FVaRestSocketConnectRequest Blocker;
+		Blocker.Url = TEXT("ftp://127.0.0.1/");
+		FEvents Blocked(Transport->Connect(MoveTemp(Blocker), [Gate] { Gate->Hold(); }));
+		if (!TestTrue(TEXT("service gate entered before target Connect"), Gate->WaitEntered()))
+		{
+			Gate->bRelease = true;
+			Blocked.WaitEnd();
+			return false;
+		}
 		FEvents Events(Transport->Connect(MoveTemp(Req)));
+		// Independent HTTP work deliberately lets the game thread arrive late while the service remains held.
+		TestEqual(TEXT("the held target has sent no request"), FetchJournal(*this, Site, Key, 1, 100)[TEXT("connections")].AsInt(), 0);
 		TestTrue(FString::Printf(TEXT("%s: a send before the open is accepted"), Scheme.Name), Events.Connection->Send(FVaRestSocketFrame::Text(FStringView(TEXT("early")))));
+		TestTrue(TEXT("service gate released normally"), Gate->ReleaseAndWait());
+		TestTrue(TEXT("gate connection drained"), Blocked.WaitEnd());
 		TestTrue(FString::Printf(TEXT("%s: opened"), Scheme.Name), Events.WaitType(EVaRestSocketEventType::Open));
 		// ... and nothing comes ahead of the Open (IVaRestSocketConnection): its Drained follows it on the link's one queue.
 		// Waited for before the Close: the close's own WRITEABLE request writes the queued send too, so only a write before

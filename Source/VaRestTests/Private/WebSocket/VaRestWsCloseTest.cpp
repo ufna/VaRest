@@ -220,8 +220,8 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestWsCloseCancelTest, "VaRest.Integration.W
 bool FVaRestWsCloseCancelTest::RunTest(const FString& Parameters)
 {
 	VAREST_WS_BEGIN();
-	// Review conc I-1: an attempt the game cancels in the tick that started it never sends its upgrade request, headers and
-	// all. Its kill lands at LWS's next timeout walk (up to about 1 s, decision 12) and LWS's own stage timers can overwrite
+	// Review conc I-1: cancellation processed by the service before the request is built prevents its upgrade, headers and
+	// all. Same-game-tick calls alone do not establish that ordering. Its kill lands at LWS's next timeout walk (up to about 1 s, decision 12) and LWS's own stage timers can overwrite
 	// it meanwhile, while a loopback TCP connect or TLS handshake finishes in a few ms: the veto in APPEND_HANDSHAKE_HEADER
 	// keeps the request off the wire
 	for (const FScheme& Scheme : Schemes(Site))
@@ -229,8 +229,23 @@ bool FVaRestWsCloseCancelTest::RunTest(const FString& Parameters)
 		const FString Key = NewKey();
 		FVaRestSocketConnectRequest Req = Request(Scheme, TEXT("/ws/echo?key=") + Key);
 		Req.Headers = { { TEXT("Authorization"), TEXT("Bearer cancel-test") } };
+		const TSharedRef<FCallbackGate, ESPMode::ThreadSafe> Gate = MakeShared<FCallbackGate, ESPMode::ThreadSafe>();
+		ON_SCOPE_EXIT { Gate->bRelease = true; };
+		FVaRestSocketConnectRequest Blocker;
+		Blocker.Url = TEXT("ftp://127.0.0.1/");
+		FEvents Blocked(Transport->Connect(MoveTemp(Blocker), [Gate] { Gate->Hold(); }));
+		if (!TestTrue(TEXT("service gate entered before target Connect"), Gate->WaitEntered()))
+		{
+			Gate->bRelease = true;
+			Blocked.WaitEnd();
+			return false;
+		}
 		FEvents Events(Transport->Connect(MoveTemp(Req)));
+		// Independent HTTP work deliberately lets the game thread arrive late while the service remains held.
+		TestEqual(TEXT("the held target has sent no request"), FetchJournal(*this, Site, Key, 1, 100)[TEXT("connections")].AsInt(), 0);
 		Events.Connection->Close(1000, TEXT("never mind"));
+		TestTrue(TEXT("service gate released normally"), Gate->ReleaseAndWait());
+		TestTrue(TEXT("gate connection drained"), Blocked.WaitEnd());
 		TestTrue(FString::Printf(TEXT("%s: ended"), Scheme.Name), Events.WaitEnd());
 		TestTrue(FString::Printf(TEXT("%s: Error Canceled (%s)"), Scheme.Name, *Events.Describe()), IsError(Events, EVaRestSocketFailure::Canceled));
 		TestTrue(FString::Printf(TEXT("%s: LWS destroyed it within 2 s"), Scheme.Name), WaitIdle(*Transport, 2.0));
