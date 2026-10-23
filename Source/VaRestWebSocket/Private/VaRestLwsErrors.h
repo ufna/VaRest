@@ -48,4 +48,35 @@ namespace VaRest::WebSocket::Lws
 	 * ConnectTimeout; before, Unknown (a kill VaRest did not make); so are a negative and a NaN time. OutDetail says which, with the time
 	 */
 	FConnectionErrorClass ClassifyEmptyConnectionError(double TookSeconds, FString& OutDetail);
+
+	/**
+	 * The most characters of a libwebsockets error string that a Detail, and so a log line, quotes (Task 5 review M-4):
+	 * "ERROR proxy: %s" carries the proxy's own reply (the Release archive's client strings), so its length is the proxy's
+	 * to choose. LWS's fixed strings are at most 45 characters ("HS: Upgrade to something other than websocket")
+	 */
+	inline constexpr int32 MaxLwsErrorTextChars = 256;
+
+	/**
+	 * Any thread: Text as a Detail may quote it -- trailing whitespace and NULs trimmed (as ClassifyConnectionError reads
+	 * it), control characters (C0, DEL, C1) shown as '?', and cut to MaxLwsErrorTextChars, never inside a surrogate pair,
+	 * with "..." after a cut
+	 */
+	FString CleanConnectionErrorText(FStringView Text);
+
+	/** How a CLIENT_CONNECTION_ERROR ends an attempt when VaRest has no failure of its own that explains it better (plan decision 11) */
+	struct FConnectionErrorEnd
+	{
+		EVaRestSocketFailure Failure = EVaRestSocketFailure::Unknown;
+		/** Timeout for ConnectTimeout (LWS's own stage timer), else Transport */
+		EVaRestSocketCloseBy By = EVaRestSocketCloseBy::Transport;
+		int32 HttpStatus = 0;
+		/**
+		 * libwebsockets' string, cleaned (CleanConnectionErrorText), for every failure -- Unknown included, where it is the
+		 * only clue (Task 5 review M-4); for an empty string, which timer it was (ClassifyEmptyConnectionError)
+		 */
+		FString Detail;
+	};
+
+	/** Any thread: ClassifyConnectionError on the string as LWS gave it, ClassifyEmptyConnectionError by TookSeconds for an empty one */
+	FConnectionErrorEnd DescribeConnectionError(FStringView Text, double TookSeconds);
 }

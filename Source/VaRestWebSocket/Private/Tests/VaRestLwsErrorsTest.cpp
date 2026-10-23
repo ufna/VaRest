@@ -132,4 +132,50 @@ bool FVaRestLwsErrorsTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestLwsErrorDetailTest, "VaRest.WebSocket.Lws.ConnectErrorDetail",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestLwsErrorDetailTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::WebSocket::Lws;
+	// Task 5 review M-4: an Unknown keeps libwebsockets' string in Detail -- there it is the only clue
+	for (const TCHAR* UnknownText : { TEXT("HS: EXT: unknown ext"), TEXT("a string a later libwebsockets may add") })
+	{
+		const FConnectionErrorEnd Ended = DescribeConnectionError(UnknownText, 0.5);
+		TestTrue(FString::Printf(TEXT("\"%s\" is Unknown, By Transport"), UnknownText), Ended.Failure == EVaRestSocketFailure::Unknown && Ended.By == EVaRestSocketCloseBy::Transport);
+		TestEqualSensitive(TEXT("... and its Detail quotes the string"), Ended.Detail, FString::Printf(TEXT("libwebsockets: \"%s\""), UnknownText));
+	}
+	const FConnectionErrorEnd Refused = DescribeConnectionError(TEXT("HS: ws upgrade not 101, was 404"), 0.1);
+	TestTrue(TEXT("a known string keeps its class and status"), Refused.Failure == EVaRestSocketFailure::UpgradeRefused && Refused.HttpStatus == 404);
+	TestEqualSensitive(TEXT("... and its string"), Refused.Detail, FString(TEXT("libwebsockets: \"HS: ws upgrade not 101, was 404\"")));
+	TestEqualSensitive(TEXT("trailing CR, LF and NUL are trimmed, not shown"), CleanConnectionErrorText(FStringView(TEXT("read failed\r\n\0"), 14)), FString(TEXT("read failed")));
+
+	// The proxy's own reply: control characters never reach a Detail or a log line, and its length is capped
+	const FString ProxyReply = FString(TEXT("ERROR proxy: HTTP/1.1 407 Proxy\r\nX-Evil: 1\x1b[31m\x7f\x85")) + FString::ChrN(1000, TEXT('z'));
+	const FConnectionErrorEnd Proxied = DescribeConnectionError(ProxyReply, 0.3);
+	TestTrue(TEXT("a proxy's reply is ConnectFailed"), Proxied.Failure == EVaRestSocketFailure::ConnectFailed && Proxied.By == EVaRestSocketCloseBy::Transport);
+	TestTrue(FString::Printf(TEXT("... its controls shown as '?' (%s)"), *Proxied.Detail.Left(80)),
+		Proxied.Detail.StartsWith(TEXT("libwebsockets: \"ERROR proxy: HTTP/1.1 407 Proxy??X-Evil: 1?[31m??zzz"), ESearchCase::CaseSensitive));
+	TestFalse(TEXT("... no control character left"), Proxied.Detail.Contains(TEXT("\r"), ESearchCase::CaseSensitive) || Proxied.Detail.Contains(TEXT("\n"), ESearchCase::CaseSensitive)
+		|| Proxied.Detail.Contains(TEXT("\x1b"), ESearchCase::CaseSensitive));
+	// "libwebsockets: \"" + the capped text + "...\""
+	TestEqual(TEXT("... cut to MaxLwsErrorTextChars, with \"...\""), Proxied.Detail.Len(), 16 + MaxLwsErrorTextChars + 3 + 1);
+	TestTrue(TEXT("... the cut is marked"), Proxied.Detail.EndsWith(TEXT("zzz...\""), ESearchCase::CaseSensitive));
+
+	// The cap's edges, and never half a surrogate pair (TCHAR is UTF-16)
+	TestEqualSensitive(TEXT("exactly the cap: kept whole"), CleanConnectionErrorText(FString::ChrN(MaxLwsErrorTextChars, TEXT('a'))), FString::ChrN(MaxLwsErrorTextChars, TEXT('a')));
+	TestEqualSensitive(TEXT("one over: cut, marked"), CleanConnectionErrorText(FString::ChrN(MaxLwsErrorTextChars + 1, TEXT('a'))), FString::ChrN(MaxLwsErrorTextChars, TEXT('a')) + TEXT("..."));
+	const FString Emoji = FString::ChrN(MaxLwsErrorTextChars - 1, TEXT('a')) + FString(UTF8_TO_TCHAR("\xF0\x9F\x98\x80")) + TEXT("b");
+	TestEqualSensitive(TEXT("a pair across the cap goes whole"), CleanConnectionErrorText(Emoji), FString::ChrN(MaxLwsErrorTextChars - 1, TEXT('a')) + TEXT("..."));
+
+	// An empty string: which timer, by the time taken; By Timeout only for LWS's own timer
+	const FConnectionErrorEnd Stage = DescribeConnectionError(FStringView(), 20.0);
+	TestTrue(FString::Printf(TEXT("an empty string after 20 s is ConnectTimeout, By Timeout (%s)"), *Stage.Detail),
+		Stage.Failure == EVaRestSocketFailure::ConnectTimeout && Stage.By == EVaRestSocketCloseBy::Timeout && Stage.Detail.Contains(TEXT("20 s connect stage"), ESearchCase::CaseSensitive));
+	const FConnectionErrorEnd Early = DescribeConnectionError(TEXT(" \r\n"), 0.4);
+	TestTrue(FString::Printf(TEXT("an empty one after 0.4 s is Unknown, By Transport (%s)"), *Early.Detail),
+		Early.Failure == EVaRestSocketFailure::Unknown && Early.By == EVaRestSocketCloseBy::Transport && Early.Detail.Contains(TEXT("empty CONNECTION_ERROR"), ESearchCase::CaseSensitive));
+	return true;
+}
+
 #endif

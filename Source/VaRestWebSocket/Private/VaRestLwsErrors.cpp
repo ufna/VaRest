@@ -2,6 +2,8 @@
 
 #include "VaRestLwsErrors.h"
 
+#include "Containers/StringConv.h"
+
 namespace VaRest::WebSocket::Lws::VaRestLwsErrorsPrivate
 {
 	struct FRow
@@ -60,16 +62,23 @@ namespace VaRest::WebSocket::Lws::VaRestLwsErrorsPrivate
 
 	const TCHAR* const NotOneOhOne = TEXT("HS: ws upgrade not 101, was ");
 	const TCHAR* const ProxyError = TEXT("ERROR proxy: ");
+
+	/** The string without trailing whitespace and NULs: what both the classification and a Detail read */
+	FStringView TrimLwsText(FStringView Text)
+	{
+		FStringView Trimmed = Text;
+		while (!Trimmed.IsEmpty() && (Trimmed[Trimmed.Len() - 1] == 0 || FChar::IsWhitespace(Trimmed[Trimmed.Len() - 1])))
+		{
+			Trimmed.LeftChopInline(1);
+		}
+		return Trimmed;
+	}
 }
 
 VaRest::WebSocket::Lws::FConnectionErrorClass VaRest::WebSocket::Lws::ClassifyConnectionError(FStringView Text)
 {
 	using namespace VaRest::WebSocket::Lws::VaRestLwsErrorsPrivate;
-	FStringView Trimmed = Text;
-	while (!Trimmed.IsEmpty() && (Trimmed[Trimmed.Len() - 1] == 0 || FChar::IsWhitespace(Trimmed[Trimmed.Len() - 1])))
-	{
-		Trimmed.LeftChopInline(1);
-	}
+	const FStringView Trimmed = TrimLwsText(Text);
 	FConnectionErrorClass Out;
 	if (Trimmed.IsEmpty())
 	{
@@ -139,5 +148,49 @@ VaRest::WebSocket::Lws::FConnectionErrorClass VaRest::WebSocket::Lws::ClassifyEm
 	{
 		OutDetail = FString::Printf(TEXT("an empty CONNECTION_ERROR from libwebsockets after %.1f s"), TookSeconds);
 	}
+	return Out;
+}
+
+FString VaRest::WebSocket::Lws::CleanConnectionErrorText(FStringView Text)
+{
+	using namespace VaRest::WebSocket::Lws::VaRestLwsErrorsPrivate;
+	const FStringView Trimmed = TrimLwsText(Text);
+	int32 Keep = FMath::Min(Trimmed.Len(), MaxLwsErrorTextChars);
+	// TCHAR is UTF-16 (Linux included): a cut after a high surrogate would leave half a code point
+	if (Keep < Trimmed.Len() && Keep > 0 && StringConv::IsHighSurrogate(static_cast<uint32>(Trimmed[Keep - 1])))
+	{
+		--Keep;
+	}
+	FString Out(Trimmed.Left(Keep));
+	for (TCHAR& Char : Out)
+	{
+		// A proxy's bytes may hold anything: no line breaks or terminal controls reach a log line
+		if (Char < 0x20 || (Char >= 0x7F && Char <= 0x9F))
+		{
+			Char = TEXT('?');
+		}
+	}
+	if (Keep < Trimmed.Len())
+	{
+		Out += TEXT("...");
+	}
+	return Out;
+}
+
+VaRest::WebSocket::Lws::FConnectionErrorEnd VaRest::WebSocket::Lws::DescribeConnectionError(FStringView Text, double TookSeconds)
+{
+	// Classified on the string as LWS gave it: cleaning it first could change what the table matches
+	const FConnectionErrorClass Class = ClassifyConnectionError(Text);
+	FConnectionErrorEnd Out;
+	Out.Failure = Class.Failure;
+	Out.HttpStatus = Class.HttpStatus;
+	// Every failure keeps the string, Unknown above all: there it is the only clue (Task 5 review M-4)
+	Out.Detail = FString::Printf(TEXT("libwebsockets: \"%s\""), *CleanConnectionErrorText(Text));
+	if (Class.bEmpty)
+	{
+		// Review conc M-1, M-2: which of LWS's own timers, or a kill VaRest did not make, by the time taken
+		Out.Failure = ClassifyEmptyConnectionError(TookSeconds, Out.Detail).Failure;
+	}
+	Out.By = Out.Failure == EVaRestSocketFailure::ConnectTimeout ? EVaRestSocketCloseBy::Timeout : EVaRestSocketCloseBy::Transport;
 	return Out;
 }
