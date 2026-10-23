@@ -804,6 +804,12 @@ and `Time`, which are taken only when the mask is non-zero.
 
 ### 9.1 Core events (`VaRestHttp`)
 
+M4b consumer details and M5 freeze: [cache-offline.md](../../dev/cache-offline.md). Queue
+acceptance uses the public handle’s `IsActive()` cutoff while callback delivery remains pending;
+there is no public `IsDone()` getter. M5 supplies per-Hub ScopeId and a reflected queued-result
+wrapper; core default scope0 remains process-wide. Successful replay Response.Body contains
+the actual raw bytes via one owned adapter copy, outside persistence-executor accounting.
+
 | # | Event | Fields | Thread | Lands in |
 | --- | --- | --- | --- | --- |
 | IN-1 | `Started` | `RequestId`, `ScopeId`, `ClientId`, `Verb`, `Url`*, `PathTemplate` (before substitution, no query), `Endpoint` (FName), `Tag`, `Priority`, `Flags` {Idempotent, QueueWhenOffline, NoAuth, AuthRefresh, Partial}, `QueueReplayOf` {QueueId, OriginalRequestId}, `Initiator` {OwnerPath, ScriptObject, ScriptFunction, ScriptCodeOffset, SourceFile, SourceLine}, `CachePolicy`, `CacheLookup` {None, Miss, HitMemory, HitDisk, Stale, Revalidate}, `bCacheLookupPending` (Started initial; snapshots current, never a predicted disk hit), `Headers`* (as built), `Body` {ContentType, Bytes, Kind}, `bExcerptPending`, `StartUtc` | GT | M3; cache fields M4 |

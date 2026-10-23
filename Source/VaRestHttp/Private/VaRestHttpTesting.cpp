@@ -13,6 +13,7 @@
 #include "String/Find.h"
 #include "VaRestRedactionPipe.h"
 #include "VaRestPersistence.h"
+#include "HAL/PlatformFile.h"
 #include "HAL/PlatformFileManager.h"
 #include "Misc/Paths.h"
 #include "Misc/Guid.h"

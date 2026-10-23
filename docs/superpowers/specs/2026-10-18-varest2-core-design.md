@@ -419,6 +419,8 @@ that persist sessions themselves; the docs carry the security caveat).
 
 ### 4.3 Cache
 
+The code-first guide and exact M5 consumer freeze are [cache-offline.md](../../dev/cache-offline.md).
+
 `FVaRestCachePolicy`: `None` | `Memory` | `MemoryAndDisk`; disabled by default, with 8 MiB memory
 and 64 MiB disk LRU caps when enabled. Default root: `Saved/VaRest/Cache`. Only eligible GET/HEAD
 status 200 representations are retained; GET and HEAD have separate keys. `.NoCache()` bypasses
@@ -459,7 +461,9 @@ updates can replace it. A no-store 304 can satisfy the current request but inval
 memory/disk bytes. A 304 does not unconditionally renew TTL; conservative cases cost extra wire.
 
 `ClearCache()` immediately invalidates client memory and queues the configured disk namespace
-clear; epochs and serial order reject late results. Shared disk-store capacity is the minimum ever
+clear, even before its first lookup; epochs and serial order reject late results. Mandatory invalidation/
+capacity failure quarantines the namespace for later retry; bounded intent exhaustion disables disk
+reuse for this process. Failed/refused clear is not a durable restart acknowledgment. Shared disk-store capacity is the minimum ever
 requested during that live instance, recovering only after every holder releases it and it reopens.
 Writable physical roots are normalized before registry use (mobile writable-target conversion before
 lexical normalization); virtual/package roots and arbitrary physical aliases are not a sandbox promise.
@@ -496,7 +500,12 @@ VaRest; trace copies use VaRest_Trace and user callbacks restore sender tags.
   callbacks, owner and result type are never serialized. Defaults: MaxQueued256, MaxAge24h,
   32MiB per item, 64MiB aggregate body; encoded metadata64KiB and retained metadata10MiB.
   Admission reserves count/body/metadata before copying payload. Over-limit recovery exposes
-  no partial queue and preserves acknowledged files for a compatible reopen.
+  no partial queue and preserves acknowledged files for a compatible reopen. Canonical metadata
+  charges max(live, recovered) for restart parity; count/body/encoded accounts remain independent.
+  The executor bounds owned worker/results at 128MiB logically, separate from caller/exchange and
+  coordinator bodies and cache-control intent. JSON guard reservation is 8×body+2MiB and may
+  refuse below 32MiB; scans are never truncated, and cache refusal does not fail a live response.
+  Load waiters drain FIFO through bounded owned handoff only after the Load reservation releases.
 * Admission is two-phase: a worker prepares and flushes nonreplayable `.pending`; GT rechecks
   scope/origin/owner/deadline and races cancellation through one atomic commit gate; only the
   winner schedules rename to `.json`. Before the gate cancellation wins promptly. After commit
@@ -510,7 +519,9 @@ VaRest; trace copies use VaRest_Trace and user callbacks restore sender tags.
   wire before a successful network replay can retire. The idempotency key survives replay.
   Original callbacks remain absent; one OnQueuedResult per live registration broadcasts after
   durable removal from a snapshotted subscriber list. An active exchange owns its client until
-  completion; future work selects a surviving registrant.
+  completion; future work selects a surviving registrant. Successful raw replay Value is mapped
+  into queued Response.Body; absent Value preserves the existing error response. The const-result
+  adapter makes one owned response-buffer copy outside the persistence executor account.
 * Stored replay origin mismatch ends Config, identity/provider/scope mismatch ends Auth, expiry
   ends Offline, all without transport. Each terminal replay has a fresh real RequestId and
   QueueReplayOf; OriginalRequestId is zero across process runs, while QueueId stays durable.
@@ -520,7 +531,9 @@ VaRest; trace copies use VaRest_Trace and user callbacks restore sender tags.
 * Persistence excludes configured auth/session fields and registered known-secret byte forms,
   with full off-GT body/metadata checks independent of trace excerpt caps/minimum lengths.
   Applications must register additional secrets; arbitrary unknown payload secrets cannot be
-  inferred. Refused persistence never rewrites a payload into a different operation. Credentials
+  inferred. Whole-candidate work exhaustion refuses persistence; short known-secret byte/hex forms
+  can conservatively collide with benign encoded metadata/hashes. Refused persistence never
+  rewrites a payload into a different operation. Credentials
   are not stored on the application's behalf; ExportSession/ImportSession remain caller-owned.
 * `bool FlushQueue(callback={})` flushes admitted persistence work, not network replay. False
   means no callback (invalid registration, shutdown or bounded slot/waiter refusal); true delivers
@@ -623,6 +636,11 @@ The Hub handles immediate FlushQueue admission refusal explicitly before teardow
 block or run a nested GT pump. Module shutdown drains owned persistence results/continuations
 with user callbacks suppressed. Queue admission follows §1's bounded body-free GT normalization
 exception; payload and disk work stay on workers.
+M5 gives each Hub its own connectivity and ScopeId; process default scope0 is not GameInstance
+isolation. It exposes storage directories in settings, uses asset-path queue naming with an explicit
+account isolation policy and endpoint bQueueWhenOffline, and wraps the plain C++ queued response
+for reflection. Preserve runtime readback/OnQueuedResult and consume the existing single queue.
+The policy/result/builder/client/optional-auth spelling freeze is listed in the code-first guide.
 
 
 ### 5.3 `UVaRestApiClient` (BP)

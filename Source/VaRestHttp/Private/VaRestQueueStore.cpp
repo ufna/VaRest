@@ -9,6 +9,7 @@
 #include "VaRestPersistence.h"
 #include "Misc/Base64.h"
 #include "Misc/Paths.h"
+#include "HAL/PlatformFile.h"
 #include "HAL/PlatformFileManager.h"
 
 #if WITH_DEV_AUTOMATION_TESTS

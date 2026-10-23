@@ -7,6 +7,7 @@
 #include "Misc/Paths.h"
 #include "VaRestSha256.h"
 #include "VaRestUrl.h"
+#include "HAL/PlatformFile.h"
 #include "HAL/PlatformFileManager.h"
 
 namespace VaRest::Http::DiskCachePrivate

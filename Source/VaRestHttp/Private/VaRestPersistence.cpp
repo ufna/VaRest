@@ -3,6 +3,7 @@
 #include "VaRestPersistence.h"
 
 #include "Containers/Ticker.h"
+#include "HAL/PlatformFile.h"
 #include "HAL/PlatformFileManager.h"
 #include "HAL/PlatformProcess.h"
 #include "HAL/PlatformTime.h"
