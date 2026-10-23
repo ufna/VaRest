@@ -25,25 +25,35 @@ namespace VaRest::WsTest::VaRestWsConnectTestPrivate
 
 	/**
 	 * Holds the service thread from inside a connection's OnEvents, which runs there for an Error that FConn::Start queues
-	 * (E7): until the test opens the gate (at most 10 s), then 0.5 s more, so the commands queued behind it run after the
-	 * Shutdown that the test calls right after opening it has begun. OnEvents' contract is to only schedule work; this test
-	 * breaks it on purpose
+	 * (E7): until the transport's Shutdown has begun (its first line sets bShuttingDown, VaRestLwsService.cpp:241), at most
+	 * 10 s, so the commands queued behind it run after it -- the real condition, never a fixed sleep (Task 7 review M-1).
+	 * OnEvents' contract is to only schedule work; this test breaks it on purpose
 	 */
 	struct FServiceGate
 	{
 		std::atomic<bool> bEntered{ false };
-		std::atomic<bool> bOpened{ false };
+		/** Hold saw Shutdown begin; false when it gave up at its cap */
+		std::atomic<bool> bSawShutdown{ false };
 
-		void Hold()
+		/**
+		 * The service thread. Weak: the transport owns the link that owns the OnEvents holding this, so a strong reference
+		 * would be a cycle. The test's frame holds the transport until its Shutdown has joined this thread, so a pin here is
+		 * never the last reference
+		 */
+		void Hold(const TWeakPtr<ILwsTestTransport, ESPMode::ThreadSafe>& Transport)
 		{
 			bEntered = true;
 			const double Until = FPlatformTime::Seconds() + 10.0;
-			while (!bOpened.load() && FPlatformTime::Seconds() < Until)
+			while (FPlatformTime::Seconds() < Until)
 			{
+				const TSharedPtr<ILwsTestTransport, ESPMode::ThreadSafe> Pinned = Transport.Pin();
+				if (Pinned.IsValid() && Pinned->IsShuttingDown())
+				{
+					bSawShutdown = true;
+					return;
+				}
 				FPlatformProcess::SleepNoStats(0.001f);
 			}
-			// The margin covers the game thread's step from opening the gate to Shutdown's first line (bShuttingDown)
-			FPlatformProcess::SleepNoStats(0.5f);
 		}
 	};
 
@@ -454,17 +464,17 @@ bool FVaRestWsConnectShutdownFlushTest::RunTest(const FString& Parameters)
 	const TSharedRef<FServiceGate, ESPMode::ThreadSafe> Gate = MakeShared<FServiceGate, ESPMode::ThreadSafe>();
 	FVaRestSocketConnectRequest Bad;
 	Bad.Url = TEXT("ftp://127.0.0.1/");
-	FEvents Holder(Held->Connect(MoveTemp(Bad), [Gate] { Gate->Hold(); }));
+	FEvents Holder(Held->Connect(MoveTemp(Bad), [Gate, WeakHeld = TWeakPtr<ILwsTestTransport, ESPMode::ThreadSafe>(Held)] { Gate->Hold(WeakHeld); }));
 	TestTrue(TEXT("the service thread is held"), VaRest::Http::Testing::PumpUntil([Gate] { return Gate->bEntered.load(); }, 5.0, true));
 	// Both run on the service thread after Shutdown has begun (FServiceGate)
 	Open.Connection->Close(4001, TEXT("exit"));
 	const FString LateKey = NewKey();
 	FEvents Late(Held->Connect(Request(Plain, TEXT("/ws/echo?key=") + LateKey)));
-	Gate->bOpened = true;
 	Held->Shutdown();
 	Open.Pull();
 	Late.Pull();
 	Holder.Pull();
+	TestTrue(TEXT("the held service thread went on once Shutdown had begun, not at its 10 s cap"), Gate->bSawShutdown.load());
 	TestTrue(FString::Printf(TEXT("the holder ended BadUrl (%s)"), *Holder.Describe()), IsError(Holder, EVaRestSocketFailure::BadUrl));
 	// Task 6 review M-7: FConn::Close is never gated on IsShuttingDown -- the close asked for just before Shutdown goes out in its flush
 	FString Reason;

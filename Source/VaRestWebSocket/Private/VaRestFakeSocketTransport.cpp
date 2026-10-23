@@ -169,6 +169,12 @@ FVaRestFakeSocketAttempt& FVaRestFakeSocketAttempt::End(EVaRestSocketEventType T
 FVaRestFakeSocketAttempt& FVaRestFakeSocketAttempt::Flush(int64 Bytes)
 {
 	check(IsInGameThread());
+	// Task 3 residual: nothing reaches the socket before the open -- the real transport writes a send made before it only
+	// after it (plan decision 18) -- so a pending attempt keeps its bytes, and no Drained can come ahead of the Open
+	if (!bOpen && !HasEnded())
+	{
+		return *this;
+	}
 	// Relaxed: a count (VaRestSocketLink.h); the fake's sends and flushes are both on this thread
 	const int64 Take = FMath::Min(Bytes, Link->BufferedBytes.load(std::memory_order_relaxed));
 	if (Take > 0)

@@ -33,6 +33,11 @@ void VaRest::WebSocket::FSocketLink::Push(FVaRestSocketEvent&& Event, bool bNoti
 	{
 		UE_LOG(LogVaRestSocket, Error, TEXT("%s: Error was queued after the Open (an open connection ends with Closed): a transport bug"), *Label);
 	}
+	else if (!bOpenQueued && (Event.Type == EVaRestSocketEventType::Message || Event.Type == EVaRestSocketEventType::Pong || Event.Type == EVaRestSocketEventType::Drained))
+	{
+		// Task 3 residual: nothing comes ahead of the Open -- a send before it is written, and so Drained, only after it (plan decision 18)
+		UE_LOG(LogVaRestSocket, Error, TEXT("%s: %s was queued before the Open (nothing comes ahead of it): a transport bug"), *Label, LexToString(Event.Type));
+	}
 	bOpenQueued = bOpenQueued || Event.Type == EVaRestSocketEventType::Open;
 	const bool bTerminal = Event.IsTerminal();
 	bTerminalQueued = bTerminal;

@@ -47,6 +47,8 @@ namespace VaRest::WebSocket::Testing::VaRestSocketTestingPrivate
 			return Out;
 		}
 
+		virtual bool IsShuttingDown() const override { return Inner.IsShuttingDown(); }
+
 	private:
 		VaRest::WebSocket::Lws::FTransport Inner;
 	};

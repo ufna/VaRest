@@ -352,6 +352,19 @@ bool FVaRestSocketLinkLifecycleTest::RunTest(const FString& Parameters)
 	Opened.Push(Typed(EVaRestSocketEventType::Error));
 	Events.Reset();
 	TestTrue(TEXT("an Error after the Open is logged, and the end still reaches the consumer"), Opened.PopAll(Events) == 2 && Opened.bEnded.load(std::memory_order_acquire));
+	// Task 3 residual: nothing comes ahead of the Open -- a Message, a Pong or a Drained before it is logged too, and queued
+	AddExpectedErrorPlain(TEXT("lifecycle#6: Message was queued before the Open"), EAutomationExpectedErrorFlags::Contains, 1);
+	AddExpectedErrorPlain(TEXT("lifecycle#6: Pong was queued before the Open"), EAutomationExpectedErrorFlags::Contains, 1);
+	AddExpectedErrorPlain(TEXT("lifecycle#6: Drained was queued before the Open"), EAutomationExpectedErrorFlags::Contains, 1);
+	FSocketLink Early(nullptr, TEXT("lifecycle#6"));
+	Early.Push(Numbered(1));
+	Early.Push(Typed(EVaRestSocketEventType::Pong));
+	Early.Push(Typed(EVaRestSocketEventType::Drained));
+	Early.Push(Typed(EVaRestSocketEventType::Open));
+	Early.Push(Typed(EVaRestSocketEventType::Drained));
+	Early.Push(Typed(EVaRestSocketEventType::Closed));
+	Events.Reset();
+	TestEqual(TEXT("each one before the Open is logged and still queued; after it they are quiet"), Early.PopAll(Events), 6);
 	// The shapes the transport makes log nothing (any line here would be an unexpected Error)
 	FSocketLink Refused(nullptr, TEXT("lifecycle#4"));
 	Refused.Push(Typed(EVaRestSocketEventType::Error));

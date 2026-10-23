@@ -52,7 +52,10 @@ public:
 	FVaRestFakeSocketAttempt& Fail(EVaRestSocketFailure Failure, int32 HttpStatus = 0, const FString& Detail = FString());
 	/** Any terminal event (Type Closed or Error) */
 	FVaRestFakeSocketAttempt& End(EVaRestSocketEventType Type, const FVaRestSocketEnd& InEnd);
-	/** Bytes of the consumer's sends (all, by default) reach "the socket": the buffered amount falls, Drained per spec 2.4 */
+	/**
+	 * Bytes of the consumer's sends (all, by default) reach "the socket": the buffered amount falls, Drained per spec 2.4.
+	 * Not before the Open: a pending attempt keeps its bytes, as the real transport writes them only after it (plan decision 18)
+	 */
 	FVaRestFakeSocketAttempt& Flush(int64 Bytes = MAX_int64);
 
 	/** Game thread. true (default): the consumer's Close on an open attempt is answered at once -- Closed, By Client, clean, its code and reason. false: the test ends it */

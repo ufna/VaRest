@@ -10,7 +10,7 @@ namespace VaRest::WebSocket::Lws
 {
 	/**
 	 * IVaRestSocketTransport on one FService: VaRest's own client on the engine-bundled libwebsockets (spec 2, ruling R1).
-	 * Game thread, GetCounters' pointee excepted (atomics, any thread)
+	 * Game thread, GetCounters' pointee and IsShuttingDown excepted (atomics, any thread)
 	 */
 	class FTransport final : public IVaRestSocketTransport
 	{
@@ -30,6 +30,11 @@ namespace VaRest::WebSocket::Lws
 		void ResetAfterFork();
 		/** Game thread: the service's counters (atomics, readable anywhere while the service lives); null before the first start */
 		const FServiceCounters* GetCounters() const;
+		/**
+		 * Any thread, the service thread included: FService::IsShuttingDown (an atomic); false before the first start. The
+		 * pointer is set on the game thread before the service thread starts, and only ResetAfterFork changes it later
+		 */
+		bool IsShuttingDown() const;
 
 	private:
 		FServiceOptions Options;

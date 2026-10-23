@@ -199,6 +199,11 @@ const VaRest::WebSocket::Lws::FServiceCounters* VaRest::WebSocket::Lws::FTranspo
 	return Service.IsValid() ? &Service->GetCounters() : nullptr;
 }
 
+bool VaRest::WebSocket::Lws::FTransport::IsShuttingDown() const
+{
+	return Service.IsValid() && Service->IsShuttingDown();
+}
+
 TSharedRef<IVaRestSocketConnection, ESPMode::ThreadSafe> VaRest::WebSocket::Lws::FTransport::Connect(FVaRestSocketConnectRequest&& Request, TFunction<void()> OnEvents)
 {
 	using namespace VaRest::WebSocket::Lws::VaRestLwsTransportPrivate;

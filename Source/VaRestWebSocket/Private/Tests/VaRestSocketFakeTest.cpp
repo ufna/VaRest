@@ -150,6 +150,31 @@ bool FVaRestSocketFakeBufferedTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestSocketFakeBeforeOpenTest, "VaRest.WebSocket.Fake.BeforeOpen",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestSocketFakeBeforeOpenTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::WebSocket::VaRestSocketFakeTestPrivate;
+	FVaRestFakeSocketTransport Fake;
+	FVaRestSocketConnectRequest Req = Request(TEXT("ws://fake.test/early"));
+	Req.SendHighWater = 4;
+	const TSharedRef<IVaRestSocketConnection, ESPMode::ThreadSafe> Connection = Fake.Connect(MoveTemp(Req));
+	// Task 3 residual: a send before the open may reach the high-water mark, but nothing comes ahead of the Open -- the real
+	// transport writes such a send only after it (plan decision 18), so a flush of a pending attempt takes nothing
+	TestTrue(TEXT("a send before the open is accepted"), Connection->Send(FVaRestSocketFrame::Text(FUtf8StringView(UTF8TEXT("early")))));
+	Fake.GetLast().Flush();
+	TestEqual(TEXT("a flush before the open takes nothing"), Connection->GetBufferedAmount(), static_cast<int64>(5));
+	Fake.GetLast().Open();
+	Fake.GetLast().Flush();
+	TestEqual(TEXT("the flush after the open empties it"), Connection->GetBufferedAmount(), static_cast<int64>(0));
+	TArray<FVaRestSocketEvent> Events;
+	Connection->PopEvents(Events);
+	TestTrue(TEXT("Open first, then the Drained (spec 2.4)"), Events.Num() == 2 && Events[0].Type == EVaRestSocketEventType::Open
+		&& Events[1].Type == EVaRestSocketEventType::Drained);
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestSocketFakeTerminalTest, "VaRest.WebSocket.Fake.TerminalOnce",
 	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
 

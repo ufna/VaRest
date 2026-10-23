@@ -15,9 +15,10 @@ namespace VaRest::WebSocket
 	 * What a connection's producer (the service thread; the fake on the game thread) and its consumer share: the one ordered
 	 * event queue (WebSocket spec 2.1, SPSC), the buffered amount (spec 2.4) and the undelivered inbound bytes (spec 2.3).
 	 * The producer queues exactly one terminal event (Closed or Error, plan decision 2); a later event is dropped with an
-	 * Error log line. Error ends an attempt that never opened, Closed one that did, and Open comes at most once: a push that
-	 * breaks this is queued (the end still reaches the consumer) with an Error log line -- a transport bug, or a mis-scripted
-	 * fake. Producer functions run on one thread at a time; PopAll on the consumer's.
+	 * Error log line. Error ends an attempt that never opened, Closed one that did, Open comes at most once, and no Message,
+	 * Pong or Drained comes before it: a push that breaks this is queued (the end still reaches the consumer) with an Error
+	 * log line -- a transport bug, or a mis-scripted fake. Producer functions run on one thread at a time; PopAll on the
+	 * consumer's.
 	 *
 	 * Memory order. The flags are written with release and read with acquire; the two byte counts are relaxed, because they
 	 * publish nothing -- each is one number, read and changed by atomic operations only, and no other memory is read on the

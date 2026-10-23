@@ -43,7 +43,8 @@ struct FVaRestSocketConnectRequest
 /**
  * One attempt's connection (WebSocket spec 1.3). Its events arrive in one ordered queue (spec 2.1, 7.1): Open first when it
  * opens, then Message and Drained (and W1b's Pong) in wire order, then exactly one terminal event -- Error when it never
- * opened, Closed when it did (plan decision 2). Destroying the last reference releases it (any thread): an open connection
+ * opened, Closed when it did (plan decision 2). Nothing comes ahead of the Open: a send made before it may reach the
+ * high-water mark, and its Drained follows the Open (plan decision 18). Destroying the last reference releases it (any thread): an open connection
  * is closed with 1001 "released" (spec 1.4), a pending one is cancelled, and its remaining events are discarded.
  */
 class IVaRestSocketConnection

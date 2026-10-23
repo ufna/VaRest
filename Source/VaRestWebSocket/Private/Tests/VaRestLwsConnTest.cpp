@@ -47,6 +47,11 @@ bool FVaRestLwsConnSendTest::RunTest(const FString& Parameters)
 		Req.SendHighWater = 150;
 		FConn Conn(1, Link, MoveTemp(Req));
 		TestEqualSensitive(TEXT("the connection's label is its link's"), Conn.GetLabel(), FString(TEXT("ws#1")));
+		// The releases below are OnWriteable's, which writes only once the connection is open: its Open is on the link
+		// first, as OnEstablished queues it (a Drained ahead of the Open is a transport bug, FSocketLink::Push)
+		FVaRestSocketEvent Opened;
+		Opened.Type = EVaRestSocketEventType::Open;
+		Link->Push(MoveTemp(Opened));
 		// A's command runs before B is sent: 100 there, under the mark either way
 		const int64 AfterA = Link->BufferedBytes.fetch_add(100) + 100;
 		Conn.Send(Service, MakeFrame(100), AfterA);
