@@ -420,6 +420,55 @@ class TlsTest(unittest.TestCase):
             stalled.close()
 
 
+class SilentTest(unittest.TestCase):
+    """--silent-port (WebSocket W1a Task 11): accepts, reads and discards, never writes; GET /tcp/silent counts it"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.httpd = server.make_server("127.0.0.1", 0)
+        cls.silent = server.make_silent_server("127.0.0.1", 0)
+        for listener in (cls.httpd, cls.silent):
+            threading.Thread(target=listener.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        for listener in (cls.silent, cls.httpd):
+            listener.shutdown()
+            listener.server_close()
+
+    def counts(self):
+        connection = http.client.HTTPConnection("127.0.0.1", self.httpd.server_address[1], timeout=10)
+        try:
+            connection.request("GET", "/tcp/silent")
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            return json.loads(response.read())
+        finally:
+            connection.close()
+
+    def test_accepts_and_never_answers(self):
+        before = self.counts()
+        self.assertEqual(before["port"], self.silent.server_address[1])
+        with socket.create_connection(("127.0.0.1", self.silent.server_address[1]), timeout=10) as client:
+            # What a TLS client sends first, and an upgrade request: neither gets a byte back
+            client.sendall(b"\x16\x03\x01\x00\x05hello")
+            client.sendall(b"GET /ws/echo HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\n\r\n")
+            client.settimeout(0.5)
+            with self.assertRaises(socket.timeout):
+                client.recv(1)
+            deadline = time.monotonic() + 5
+            while self.counts()["open"] != before["open"] + 1 and time.monotonic() < deadline:
+                time.sleep(0.05)
+            during = self.counts()
+            self.assertEqual(during["accepted"], before["accepted"] + 1)
+            self.assertEqual(during["open"], before["open"] + 1)
+        # The client's EOF ends it
+        deadline = time.monotonic() + 5
+        while self.counts()["open"] != before["open"] and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(self.counts()["open"], before["open"])
+
+
 class LifecycleTest(unittest.TestCase):
     def test_ready_file_and_parent_watch(self):
         # The runner's contract (M3 plan decision 14): a ready file with the URL; exit when the parent -- the process
@@ -585,6 +634,36 @@ class LifecycleTest(unittest.TestCase):
                     process.wait()
                     process.stderr.close()
             self.assertEqual(b"TLS error from" in errors, verbose == "1", errors)
+
+
+    def test_silent_listener_in_the_ready_file(self):
+        # The runner reads the ready file by scheme: http first, then https and tcp:// for --tls-port and --silent-port
+        with tempfile.TemporaryDirectory() as directory:
+            ready = os.path.join(directory, "url")
+            process = subprocess.Popen([sys.executable, "-I", os.path.join(HERE, "server.py"), "--port", "0", "--tls-port", "0", "--silent-port", "0",
+                                        "--ready-file", ready], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            try:
+                deadline = time.monotonic() + 10
+                while not os.path.exists(ready) and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                with open(ready, encoding="utf-8") as stream:
+                    urls = [urllib.parse.urlsplit(line) for line in stream.read().split()]
+                self.assertEqual([url.scheme for url in urls], ["http", "https", "tcp"])
+                with socket.create_connection(("127.0.0.1", urls[2].port), timeout=10) as client:
+                    client.sendall(b"GET / HTTP/1.1\r\n\r\n")
+                    client.settimeout(0.5)
+                    with self.assertRaises(socket.timeout):
+                        client.recv(1)
+                connection = http.client.HTTPConnection("127.0.0.1", urls[0].port, timeout=10)
+                connection.request("GET", "/tcp/silent")
+                self.assertEqual(json.loads(connection.getresponse().read())["port"], urls[2].port)
+                connection.close()
+            finally:
+                process.kill()
+                output = process.stdout.read()
+                process.wait()
+                process.stdout.close()
+            self.assertIn(("VaRestTestServerSilent tcp://127.0.0.1:%d" % urls[2].port).encode("ascii"), output)
 
 
 class PluginTest(unittest.TestCase):

@@ -2,14 +2,16 @@
 # Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 """VaRest HTTP test server (core spec 7.1). Python 3.9+ standard library only.
 
-    python3 -I Tools/testserver/server.py [--host 127.0.0.1] [--port 0] [--tls-port P] [--ready-file PATH]
-                                          [--parent-pid PID] [--fixtures-dir DIR]
+    python3 -I Tools/testserver/server.py [--host 127.0.0.1] [--port 0] [--tls-port P] [--silent-port P]
+                                          [--ready-file PATH] [--parent-pid PID] [--fixtures-dir DIR]
 
 --port 0 lets the OS choose. Once the server accepts connections it prints "VaRestTestServer <base url>" and,
 with --ready-file, writes the base URL to that file (atomically, so a reader never sees half of it). --tls-port also
 serves every route and plug-in over TLS (stdlib ssl, the test certificate in certs/: localhost, 127.0.0.1 and ::1,
 signed by the throwaway test CA certs/test-ca.pem; WebSocket spec 16.3): it prints "VaRestTestServerTls <https url>" and
-the ready file holds that URL on a second line. With --parent-pid it exits when that process is gone or is no longer
+the ready file holds that URL on a second line. --silent-port also opens a raw TCP listener that accepts, reads and
+discards, and never writes (WebSocket W1a Task 11: a peer that hangs a TLS handshake): it prints "VaRestTestServerSilent
+tcp://<host>:<port>" and the ready file holds that URL on the line after the others. With --parent-pid it exits when that process is gone or is no longer
 its parent (a reused PID), so a runner killed with SIGKILL leaves no server behind. The parent must be the process
 that started the server: any other PID is refused at start (exit 2). A server that stops by itself (the parent
 watch, Ctrl-C) removes its ready file.
@@ -53,6 +55,8 @@ not an integer or is out of its range 400 ({"error", "name", ...}); each closes 
   GET  /envelope/ok, /envelope/err            {"ok": true, "data": {...}} / {"ok": false, "code", "message"}
   GET  /envelope/gone       404 {"ok": false, "code": "E404", "message": "not here"}
   GET  /tls/ca.pem          the test CA, for a client that verifies the TLS listener instead of allowing self-signed
+  GET  /tcp/silent          {"port": the silent listener's port or null, "accepted", "open"}: its connections so far
+                            and those it still holds (a test reads it before and after)
 
 Plug-ins (WebSocket spec 16.3): each module named in PLUGINS that sits next to this file is imported at start
 and may call register_upgrade(token, handler) and register_route(methods, pattern, route). A request whose Upgrade
@@ -71,6 +75,7 @@ import os
 import random
 import re
 import socket
+import socketserver
 try:
     import ssl
 except ImportError:
@@ -85,6 +90,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CERTS_DIR = os.path.join(HERE, "certs")
 # A TLS client that never finishes its handshake is dropped after this, on its own thread (Handler.setup)
 TLS_HANDSHAKE_TIMEOUT = 10.0
+# The silent listener closes a connection after this at the latest; the client's EOF closes it sooner
+SILENT_HOLD = 30.0
 PLUGINS = ("ws",)
 
 LOCK = threading.Lock()
@@ -96,6 +103,9 @@ STATE = {
 }
 _UPGRADES = {}
 FIXTURES_DIR = None
+# The silent listener (--silent-port): its port once it listens, and its connections, under SILENT_LOCK
+SILENT = {"port": None, "accepted": 0, "open": 0}
+SILENT_LOCK = threading.Lock()
 _FIXTURES = {}
 
 # Review M1 (task 16): bounds, so a wrong request costs a 4xx and not the run's memory or time. The largest body a test
@@ -486,6 +496,13 @@ def route_tls_ca(h, match):
         h.send_bytes(200, stream.read(), "application/x-pem-file")
 
 
+def route_tcp_silent(h, match):
+    """The silent listener's port and counts: a test reads them before and after a connection it expects there"""
+    with SILENT_LOCK:
+        counts = dict(SILENT)
+    h.send_json(200, counts)
+
+
 ANY = None
 ROUTES = [
     (ANY, r"/echo(?:/.*)?", route_echo),
@@ -512,6 +529,7 @@ ROUTES = [
     (("GET",), r"/envelope/err", route_envelope_err),
     (("GET",), r"/envelope/gone", route_envelope_gone),
     (("GET",), r"/tls/ca.pem", route_tls_ca),
+    (("GET",), r"/tcp/silent", route_tcp_silent),
 ]
 ROUTES = [(methods, re.compile(pattern), route) for methods, pattern, route in ROUTES]
 
@@ -675,6 +693,37 @@ def make_tls_server(host="127.0.0.1", port=0):
     return TlsServer((host, port), Handler, make_tls_context())
 
 
+class SilentHandler(socketserver.BaseRequestHandler):
+    """Accepts, reads and discards, never writes: a TLS ClientHello or an upgrade request gets no answer, ever"""
+
+    def handle(self):
+        with SILENT_LOCK:
+            SILENT["accepted"] += 1
+            SILENT["open"] += 1
+        try:
+            self.request.settimeout(SILENT_HOLD)
+            while self.request.recv(65536):
+                pass
+        except OSError:
+            # socket.timeout and a reset are both OSErrors: either way the connection is done
+            pass
+        finally:
+            with SILENT_LOCK:
+                SILENT["open"] -= 1
+
+
+class SilentServer(socketserver.ThreadingTCPServer):
+    daemon_threads = True
+    request_queue_size = 64
+
+
+def make_silent_server(host="127.0.0.1", port=0):
+    silent = SilentServer((host, port), SilentHandler)
+    with SILENT_LOCK:
+        SILENT["port"] = silent.server_address[1]
+    return silent
+
+
 def load_plugins():
     # Run as a script this module is __main__; a plug-in's "import server" must get this module, not a second copy
     # with its own STATE and registry
@@ -723,6 +772,7 @@ def main(argv=None):
     parser.add_argument("--parent-pid", type=int)
     parser.add_argument("--fixtures-dir")
     parser.add_argument("--tls-port", type=int, help="also serve every route with TLS on this port (0: the OS picks)")
+    parser.add_argument("--silent-port", type=int, help="also accept TCP on this port and never answer (0: the OS picks)")
     args = parser.parse_args(argv)
     # Review M-13: the watch compares getppid() with this PID, so it must be the parent now; any other PID would stop the
     # server half a second after it started, with nothing said
@@ -748,11 +798,21 @@ def main(argv=None):
             server.server_close()
             return 2
         urls.append("https://%s:%d" % (args.host, extras[0].server_address[1]))
+    if args.silent_port is not None:
+        try:
+            extras.append(make_silent_server(args.host, args.silent_port))
+        except OSError as error:
+            print("VaRestTestServer: cannot start the silent listener: binding %s:%d: %s" % (args.host, args.silent_port, error), file=sys.stderr, flush=True)
+            for extra in extras:
+                extra.server_close()
+            server.server_close()
+            return 2
+        urls.append("tcp://%s:%d" % (args.host, extras[-1].server_address[1]))
     if args.parent_pid:
         threading.Thread(target=watch_parent, args=(args.parent_pid, server), daemon=True).start()
     print("VaRestTestServer " + urls[0], flush=True)
-    if extras:
-        print("VaRestTestServerTls " + urls[1], flush=True)
+    for url in urls[1:]:
+        print(("VaRestTestServerTls " if url.startswith("https://") else "VaRestTestServerSilent ") + url, flush=True)
     for extra in extras:
         threading.Thread(target=extra.serve_forever, kwargs={"poll_interval": 0.2}, daemon=True).start()
     if args.ready_file:
@@ -762,7 +822,7 @@ def main(argv=None):
     except KeyboardInterrupt:
         pass
     finally:
-        # The parent watch stops the plain listener; the TLS one goes with it
+        # The parent watch stops the plain listener; the TLS and silent ones go with it
         for extra in extras:
             extra.shutdown()
             extra.server_close()

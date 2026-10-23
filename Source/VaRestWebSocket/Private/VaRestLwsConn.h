@@ -36,6 +36,17 @@ namespace VaRest::WebSocket::Lws
 	 */
 	FOurCloseEnd ClassifyOurCloseEnd(bool bCloseWritten, bool bPeerCloseRead, double SinceCloseWritten);
 
+	/** What FConn::Prepare does with a request's ConnectTimeout (spec 2.2, plan decision 17; Task 11 review M-3) */
+	struct FConnectTimeoutClamp
+	{
+		double Seconds = 0.0;
+		/** The value was not finite, not positive, or above MaxConnectTimeoutSeconds: Prepare logs a Warning */
+		bool bWarn = false;
+	};
+
+	/** Any thread (pure): a ConnectTimeout outside (0, MaxConnectTimeoutSeconds], NaN included, becomes MaxConnectTimeoutSeconds */
+	FConnectTimeoutClamp ClampConnectTimeout(double Asked);
+
 	/**
 	 * One connection (WebSocket spec 2.1-2.5): libwebsockets' userdata for it, owned by the FService from Adopt on. Made and
 	 * prepared on the game thread by FTransport::Connect. From Adopt on every member is the service's: its functions run on
@@ -159,10 +170,11 @@ namespace VaRest::WebSocket::Lws
 		/**
 		 * DEL_POLL_FD took the wsi out of LWS's poll set and no ADD_POLL_FD has put it back (__remove_wsi_socket_from_fds and
 		 * __insert_wsi_socket_into_fds pass the wsi's userdata, pollfd.c.o 0x79f and 0x3ec of the Release archive, so both reach
-		 * this connection). A client wsi leaves the set to be destroyed -- WSI_DESTROY follows in the same call -- or to change
-		 * sockets: lws_client_reset following a redirect, lws_client_connect_2 trying the next address. There LWS 3.0 frees it
-		 * with no callback at all when the new socket never joins the set (ReapIfDropped). Not "out of the set": an attempt
-		 * queued for a header table has not joined it yet (__lws_header_table_detach starts its connect later, parsers.c.o 0x5b8)
+		 * this connection). A client wsi leaves the set to be destroyed -- WSI_DESTROY follows in the same call -- or, in
+		 * lws_client_reset, to follow a redirect: LWS 3.0 frees it with no callback at all when the redirect's new socket never
+		 * joins the set (ReapIfDropped). lws_client_connect_2's next-address loop also takes it out, and ends it by
+		 * CONNECTION_ERROR and WSI_DESTROY (the reap's comment). Not "out of the set": an attempt queued for a header table has
+		 * not joined it yet (__lws_header_table_detach starts its connect later, parsers.c.o 0x5b8)
 		 */
 		bool bLeftPollSet = false;
 		int32 AppendCalls = 0;

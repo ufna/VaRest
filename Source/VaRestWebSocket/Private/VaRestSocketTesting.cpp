@@ -65,6 +65,7 @@ TSharedRef<VaRest::WebSocket::Testing::ILwsTestTransport, ESPMode::ThreadSafe> V
 	ServiceOptions.ShortWaitCapMs = Options.ShortWaitCapMs;
 	ServiceOptions.ExitFlushSeconds = Options.ExitFlushSeconds;
 	ServiceOptions.bFailThreadForTest = Options.bFailThreadForTest;
+	ServiceOptions.bOnlyKillReapsForTest = Options.bOnlyKillReapsForTest;
 	ServiceOptions.ThreadName = TEXT("VaRestLwsTest");
 	return MakeShared<VaRestSocketTestingPrivate::FTestTransport, ESPMode::ThreadSafe>(MoveTemp(ServiceOptions));
 }

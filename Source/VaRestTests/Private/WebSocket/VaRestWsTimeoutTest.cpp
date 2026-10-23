@@ -316,20 +316,31 @@ bool FVaRestWsTimeoutKillLatencyBusyTest::RunTest(const FString& Parameters)
 	};
 	TopUp();
 	int32 TimedOut = 0;
+	// Task 11 review M-1: the neighbour is sampled while each kill is pending, not once at the end (4 MiB drain in a few
+	// milliseconds, so a late sample says nothing): bytes queued when the attempt timed out, and more of them taken while
+	// its kill had not landed
+	int32 QueuedAtTimeout = 0;
+	int32 SentWhileKillPending = 0;
 	for (int32 Index = 0; Index < 4; ++Index)
 	{
 		FVaRestSocketConnectRequest Req;
 		Req.Url = FString::Printf(TEXT("ws://%s:%d/ws/hang?ms=20000&key=%s"), *Site.Host, Site.Port, *NewKey());
 		Req.ConnectTimeout = 0.5;
 		FEvents Events(Busy->Connect(MoveTemp(Req)));
-		Events.WaitFor([&TopUp](const TArray<FVaRestSocketEvent>& All)
+		bool bQueuedAtTimeout = false;
+		Events.WaitFor([&TopUp, &Neighbour, &bQueuedAtTimeout](const TArray<FVaRestSocketEvent>& All)
 		{
 			TopUp();
-			return All.ContainsByPredicate([](const FVaRestSocketEvent& Each) { return Each.IsTerminal(); });
+			const bool bTimedOut = All.ContainsByPredicate([](const FVaRestSocketEvent& Each) { return Each.IsTerminal(); });
+			bQueuedAtTimeout = bTimedOut && Neighbour->GetBufferedAmount() > 0;
+			return bTimedOut;
 		}, 5.0);
 		TimedOut += IsError(Events, EVaRestSocketFailure::ConnectTimeout) ? 1 : 0;
+		QueuedAtTimeout += bQueuedAtTimeout ? 1 : 0;
 		// Until LWS destroyed the killed one; the neighbour stays
+		const int64 SentBeforeLanded = SentBytes;
 		VaRest::Http::Testing::PumpUntil([&TopUp, &Busy] { TopUp(); return Busy->GetCounters().LiveConnections == 1; }, 5.0, true);
+		SentWhileKillPending += SentBytes > SentBeforeLanded ? 1 : 0;
 	}
 	const VaRest::WebSocket::Testing::FLwsCounters Counters = Busy->GetCounters();
 	AddInfo(FString::Printf(TEXT("beside a busy send (%lld MiB queued in all): longest kill to WSI_DESTROY %.1f ms over %d kills"),
@@ -338,7 +349,9 @@ bool FVaRestWsTimeoutKillLatencyBusyTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("every kill landed"), Counters.KillsLanded, 4);
 	TestTrue(FString::Printf(TEXT("beside a busy neighbour a kill still lands within 1.6 s (%.1f ms)"), Counters.MaxKillToDestroySeconds * 1000.0),
 		Counters.MaxKillToDestroySeconds >= 0.0 && Counters.MaxKillToDestroySeconds < 1.6);
-	TestTrue(TEXT("the neighbour was still sending at the end"), Neighbour->GetBufferedAmount() > 0 && !Neighbour->HasEnded());
+	TestEqual(TEXT("the neighbour had bytes queued when each attempt timed out"), QueuedAtTimeout, 4);
+	TestEqual(TEXT("the neighbour's socket took more while each kill was pending"), SentWhileKillPending, 4);
+	TestFalse(TEXT("the neighbour was still open at the end"), Neighbour->HasEnded());
 	Neighbour->Close(1000, TEXT("done"));
 	Sink.WaitEnd(30.0);
 	return true;

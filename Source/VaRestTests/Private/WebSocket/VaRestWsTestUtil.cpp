@@ -5,7 +5,9 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "Misc/AutomationTest.h"
+#include "Misc/CommandLine.h"
 #include "Misc/Guid.h"
+#include "Misc/Parse.h"
 #include "VaRestClient.h"
 #include "VaRestHttpTesting.h"
 #include "VaRestSha256.h"
@@ -67,6 +69,23 @@ bool VaRest::WsTest::FindSite(FAutomationTestBase& Test, FSite& Out, bool bNeedT
 		Test.AddError(TEXT("no TLS listener: -VaRestTestServerTls=<url> is missing (Tools/run_tests.sh passes it; Tools/testserver/server.py --tls-port)"));
 		return false;
 	}
+	// "VaRestTestServerSilent=" is no substring of the other two keys, nor they of it (VaRestHttpTesting.cpp:73)
+	FString SilentUrl;
+	FString SilentHost;
+	if (!FParse::Value(FCommandLine::Get(), TEXT("VaRestTestServerSilent="), SilentUrl) || !SplitUrl(SilentUrl, TEXT("tcp"), SilentHost, Out.SilentPort))
+	{
+		Out.SilentPort = 0;
+	}
+	return true;
+}
+
+bool VaRest::WsTest::HasSilentListener(FAutomationTestBase& Test, const FSite& Site)
+{
+	if (Site.SilentPort == 0)
+	{
+		Test.AddError(TEXT("no silent listener: -VaRestTestServerSilent=<url> is missing (Tools/run_tests.sh passes it; Tools/testserver/server.py --silent-port)"));
+		return false;
+	}
 	return true;
 }
 
@@ -84,10 +103,11 @@ FString VaRest::WsTest::NewKey()
 	return FGuid::NewGuid().ToString(EGuidFormats::Digits);
 }
 
-TSharedPtr<VaRest::WebSocket::Testing::ILwsTestTransport, ESPMode::ThreadSafe> VaRest::WsTest::MakeTransport(FAutomationTestBase& Test, const FSite& Site, bool bTrustTestCa)
+TSharedPtr<VaRest::WebSocket::Testing::ILwsTestTransport, ESPMode::ThreadSafe> VaRest::WsTest::MakeTransport(FAutomationTestBase& Test, const FSite& Site, bool bTrustTestCa,
+	VaRest::WebSocket::Testing::FLwsTransportOptions BaseOptions)
 {
 	using namespace VaRest::WsTest::VaRestWsTestUtilPrivate;
-	VaRest::WebSocket::Testing::FLwsTransportOptions Options;
+	VaRest::WebSocket::Testing::FLwsTransportOptions Options = MoveTemp(BaseOptions);
 	Options.TcpAddressOverride = Site.Host;
 	if (bTrustTestCa)
 	{
@@ -258,23 +278,27 @@ FVaRestSocketConnectRequest VaRest::WsTest::Request(const FScheme& Scheme, const
 
 FVaRestJson VaRest::WsTest::FetchJournal(FAutomationTestBase& Test, const FSite& Site, const FString& Key, int32 Connections, int32 WaitMs)
 {
+	return FetchJson(Test, Site, FString::Printf(TEXT("/ws/journal?key=%s&connections=%d&wait_ms=%d"), *Key, Connections, WaitMs), WaitMs / 1000.0 + 15.0);
+}
+
+FVaRestJson VaRest::WsTest::FetchJson(FAutomationTestBase& Test, const FSite& Site, const FString& Path, double Seconds)
+{
 	using namespace VaRest::Http::Testing;
 	FVaRestClient Client = FVaRestClient::Make(Site.HttpBase);
 	Client.WithLogLevel(EVaRestLogLevel::None);
 	auto Outcome = MakeOutcome<FVaRestJson>();
-	const FVaRestRequestHandle Handle = Observe(Client.Get(FString::Printf(TEXT("/ws/journal?key=%s&connections=%d&wait_ms=%d"), *Key, Connections, WaitMs)), Outcome).Send();
-	const double Seconds = WaitMs / 1000.0 + 15.0;
+	const FVaRestRequestHandle Handle = Observe(Client.Get(Path), Outcome).Send();
 	if (!PumpUntil([Outcome] { return Outcome->IsDone(); }, Seconds, true))
 	{
 		// Drained before returning (VaRestLwsProbe.cpp:59-64): Canceled completes on a later game-thread task
 		Handle.Cancel();
 		PumpUntil([Outcome, &Handle] { return Outcome->IsDone() && !Handle.IsActive(); }, 5.0, true);
-		Test.AddError(FString::Printf(TEXT("the journal of %s did not arrive within %.0f s"), *Key, Seconds));
+		Test.AddError(FString::Printf(TEXT("GET %s did not arrive within %.0f s"), *Path, Seconds));
 		return FVaRestJson();
 	}
 	if (Outcome->SuccessCalls.load() != 1 || !Outcome->Value.IsSet())
 	{
-		Test.AddError(FString::Printf(TEXT("the journal of %s did not arrive: %s"), *Key, *Outcome->Error.Describe()));
+		Test.AddError(FString::Printf(TEXT("GET %s did not arrive: %s"), *Path, *Outcome->Error.Describe()));
 		return FVaRestJson();
 	}
 	return Outcome->Value.GetValue();

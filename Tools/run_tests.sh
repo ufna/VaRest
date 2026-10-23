@@ -9,9 +9,9 @@
 # VAREST_EXTRA_ARGS is appended to the editor command line (e.g. -llm for the benchmarks).
 # VAREST_TEST_TIMEOUT (seconds, default 1800) bounds the editor run: a hung test fails the run
 # with "timed out" instead of blocking forever.
-# The runner starts Tools/testserver/server.py on ports the OS picks (plain and TLS) and passes its URLs to the editor as
-# -VaRestTestServer=<url> and -VaRestTestServerTls=<url> for the VaRest.Integration.* and Probe.VaRest.* tests (M3 plan
-# decision 14, WebSocket W0 plan decision 5); it stops the server on exit, and the
+# The runner starts Tools/testserver/server.py on ports the OS picks (plain, TLS and silent) and passes its URLs to the editor
+# as -VaRestTestServer=<url>, -VaRestTestServerTls=<url> and -VaRestTestServerSilent=<url> for the VaRest.Integration.* and
+# Probe.VaRest.* tests (M3 plan decision 14, WebSocket W0 plan decision 5, W1a Task 11); it stops the server on exit, and the
 # server also exits by itself when this script dies (--parent-pid). VAREST_NO_TESTSERVER=1 skips it: integration tests
 # then fail, by design. The server's output goes to <Host>/Saved/Logs/VaRestTestServer.<runner pid>.log.
 #
@@ -84,7 +84,7 @@ if [[ "${VAREST_NO_TESTSERVER:-0}" != "1" ]]; then
 	# --fixtures-dir: the benchmark fixtures of Tools/gen_bench_json.py, for Bench.VaRest.Http.RequestPath (Task 17).
 	# A simple command run with &: bash forks once and execs python3, so the server is this shell's direct child and its
 	# getppid() is $$ until this shell dies (review M-13)
-	python3 -I "$SERVER_DIR/server.py" --host 127.0.0.1 --port 0 --tls-port 0 --ready-file "$SERVER_URL_FILE" --parent-pid $$ \
+	python3 -I "$SERVER_DIR/server.py" --host 127.0.0.1 --port 0 --tls-port 0 --silent-port 0 --ready-file "$SERVER_URL_FILE" --parent-pid $$ \
 		--fixtures-dir "$HOST/Saved/VaRestBench" >"$SERVER_LOG" 2>&1 &
 	SERVER_PID=$!
 	for _ in $(seq 1 100); do
@@ -94,12 +94,19 @@ if [[ "${VAREST_NO_TESTSERVER:-0}" != "1" ]]; then
 	done
 	[[ -s "$SERVER_URL_FILE" ]] || { echo "run_tests: the test server did not start -- see $SERVER_LOG" >&2; exit 2; }
 	SERVER_ARGS=("-VaRestTestServer=$(head -n 1 "$SERVER_URL_FILE")")
-	# WebSocket W0: the TLS listener's base URL is the ready file's second line (VaRest::Http::Testing::GetTestServerTlsUrl)
-	TLS_URL="$(sed -n 2p "$SERVER_URL_FILE")"
+	# WebSocket W0: the TLS listener's base URL is the ready file's https:// line (VaRest::Http::Testing::GetTestServerTlsUrl)
+	TLS_URL="$(grep -m 1 '^https://' "$SERVER_URL_FILE" || true)"
 	if [[ -n "$TLS_URL" ]]; then
 		SERVER_ARGS+=("-VaRestTestServerTls=$TLS_URL")
 	else
 		echo "run_tests: the test server's ready file has no TLS URL; -VaRestTestServerTls is not passed and TLS tests will fail" >&2
+	fi
+	# W1a Task 11: the silent listener (accepts, never answers) is its tcp:// line (VaRest::WsTest::FSite::SilentPort)
+	SILENT_URL="$(grep -m 1 '^tcp://' "$SERVER_URL_FILE" || true)"
+	if [[ -n "$SILENT_URL" ]]; then
+		SERVER_ARGS+=("-VaRestTestServerSilent=$SILENT_URL")
+	else
+		echo "run_tests: the test server's ready file has no silent listener; -VaRestTestServerSilent is not passed and its tests will fail" >&2
 	fi
 fi
 

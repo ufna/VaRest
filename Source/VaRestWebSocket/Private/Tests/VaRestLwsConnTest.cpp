@@ -1,13 +1,15 @@
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 
 // FConn's send bookkeeping without a socket: a connection that never started (no wsi), driven as the handle drives it; the
-// classification of our close's end (ClassifyOurCloseEnd)
+// classification of our close's end (ClassifyOurCloseEnd); the ConnectTimeout clamp (ClampConnectTimeout)
 
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "Misc/AutomationTest.h"
 #include "VaRestLwsConn.h"
 #include "VaRestSocketLink.h"
+
+#include <limits>
 
 namespace VaRest::WebSocket::Lws::VaRestLwsConnTestPrivate
 {
@@ -124,6 +126,42 @@ bool FVaRestLwsConnCloseAckTest::RunTest(const FString& Parameters)
 		const FOurCloseEnd Got = ClassifyOurCloseEnd(Row.bCloseWritten, Row.bPeerCloseRead, Row.Seconds);
 		TestTrue(FString::Printf(TEXT("%s: clean is %s"), Row.What, Row.bClean ? TEXT("true") : TEXT("false")), Got.bClean == Row.bClean);
 		TestTrue(FString::Printf(TEXT("%s: the close-ack timer is %s"), Row.What, Row.bAckTimedOut ? TEXT("true") : TEXT("false")), Got.bAckTimedOut == Row.bAckTimedOut);
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestLwsConnConnectTimeoutClampTest, "VaRest.WebSocket.Lws.Conn.ConnectTimeoutClamp",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestLwsConnConnectTimeoutClampTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::WebSocket::Lws;
+	// Task 11 review M-3: the value FConn::Prepare keeps, which Timeout.Clamp (the Warning and the open) cannot see.
+	// (0, MaxConnectTimeoutSeconds] stands; the rest is the context's 60 s backstop, with a Warning (plan decision 17)
+	struct FRow
+	{
+		const TCHAR* What;
+		double Asked;
+		double Seconds;
+		bool bWarn;
+	};
+	const FRow Rows[] = {
+		{ TEXT("120 s, over the backstop"), 120.0, VaRest::WebSocket::MaxConnectTimeoutSeconds, true },
+		{ TEXT("60 s, the backstop itself"), 60.0, 60.0, false },
+		{ TEXT("60.001 s, just over it"), 60.001, VaRest::WebSocket::MaxConnectTimeoutSeconds, true },
+		{ TEXT("0.5 s (Timeout.KillLatency's)"), 0.5, 0.5, false },
+		{ TEXT("10 s, the default"), 10.0, 10.0, false },
+		{ TEXT("0 s, not positive"), 0.0, VaRest::WebSocket::MaxConnectTimeoutSeconds, true },
+		{ TEXT("-1 s"), -1.0, VaRest::WebSocket::MaxConnectTimeoutSeconds, true },
+		{ TEXT("NaN"), std::numeric_limits<double>::quiet_NaN(), VaRest::WebSocket::MaxConnectTimeoutSeconds, true },
+		{ TEXT("+infinity"), std::numeric_limits<double>::infinity(), VaRest::WebSocket::MaxConnectTimeoutSeconds, true },
+		{ TEXT("-infinity"), -std::numeric_limits<double>::infinity(), VaRest::WebSocket::MaxConnectTimeoutSeconds, true },
+	};
+	for (const FRow& Row : Rows)
+	{
+		const FConnectTimeoutClamp Got = ClampConnectTimeout(Row.Asked);
+		TestEqual(FString::Printf(TEXT("%s: %g s kept"), Row.What, Row.Seconds), Got.Seconds, Row.Seconds);
+		TestTrue(FString::Printf(TEXT("%s: the Warning is %s"), Row.What, Row.bWarn ? TEXT("logged") : TEXT("not logged")), Got.bWarn == Row.bWarn);
 	}
 	return true;
 }

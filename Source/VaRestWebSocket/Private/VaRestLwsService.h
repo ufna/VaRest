@@ -59,6 +59,8 @@ namespace VaRest::WebSocket::Lws
 		double ExitFlushSeconds = 0.25;
 		/** Tests (review conc I-2): Start makes the context, then fails as if the thread could not be made */
 		bool bFailThreadForTest = false;
+		/** Tests (Task 11 review M-4): FConn::CheckDeadlines does not reap a wsi LWS dropped, so only Kill's guard does */
+		bool bOnlyKillReapsForTest = false;
 	};
 
 	/** What a test reads (any thread) */

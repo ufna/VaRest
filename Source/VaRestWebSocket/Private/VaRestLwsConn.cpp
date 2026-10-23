@@ -47,6 +47,16 @@ VaRest::WebSocket::Lws::FOurCloseEnd VaRest::WebSocket::Lws::ClassifyOurCloseEnd
 	return Out;
 }
 
+VaRest::WebSocket::Lws::FConnectTimeoutClamp VaRest::WebSocket::Lws::ClampConnectTimeout(double Asked)
+{
+	// Spec 2.2: the context's timeout_secs backs up every socket, so a longer value is clamped (plan decision 17); so is one
+	// that is not a positive number. NaN fails every comparison, hence IsFinite first
+	FConnectTimeoutClamp Out;
+	Out.bWarn = !FMath::IsFinite(Asked) || Asked <= 0.0 || Asked > MaxConnectTimeoutSeconds;
+	Out.Seconds = Out.bWarn ? MaxConnectTimeoutSeconds : Asked;
+	return Out;
+}
+
 VaRest::WebSocket::Lws::FConn::FConn(uint64 InId, TSharedRef<FSocketLink, ESPMode::ThreadSafe> InLink, FVaRestSocketConnectRequest&& InRequest)
 	: Id(InId)
 	, Link(MoveTemp(InLink))
@@ -88,12 +98,12 @@ void VaRest::WebSocket::Lws::FConn::Prepare(const FServiceOptions& Options)
 		UE_LOG(LogVaRestSocket, Warning, TEXT("%s: CloseTimeout %g s is not a positive number; %g s is used"), *GetLabel(), Request.CloseTimeout, LwsCloseAckSeconds);
 		Request.CloseTimeout = LwsCloseAckSeconds;
 	}
-	// ConnectTimeout (spec 2.2): the context's timeout_secs backs up every socket, so a longer value is clamped (plan decision 17)
-	if (!FMath::IsFinite(Request.ConnectTimeout) || Request.ConnectTimeout <= 0.0 || Request.ConnectTimeout > MaxConnectTimeoutSeconds)
+	const FConnectTimeoutClamp Clamped = ClampConnectTimeout(Request.ConnectTimeout);
+	if (Clamped.bWarn)
 	{
-		UE_LOG(LogVaRestSocket, Warning, TEXT("%s: ConnectTimeout %g s is outside (0, %g]; %g s is used"), *GetLabel(), Request.ConnectTimeout, MaxConnectTimeoutSeconds, MaxConnectTimeoutSeconds);
-		Request.ConnectTimeout = MaxConnectTimeoutSeconds;
+		UE_LOG(LogVaRestSocket, Warning, TEXT("%s: ConnectTimeout %g s is outside (0, %g]; %g s is used"), *GetLabel(), Request.ConnectTimeout, MaxConnectTimeoutSeconds, Clamped.Seconds);
 	}
+	Request.ConnectTimeout = Clamped.Seconds;
 	TValueOrError<FSocketTarget, FTargetError> Made = PrepareTarget(Request);
 	if (Made.HasError())
 	{
@@ -456,8 +466,10 @@ bool VaRest::WebSocket::Lws::FConn::ReapIfDropped()
 	// getaddrinfo failure there (0x6b6), a socket() or socket-option failure (0x5ee, 0x8be) or a refused insert (0x8d6)
 	// jumps to 0x6bd, which raises CONNECTION_ERROR only for a state without the 0x200 bit -- lws_client_reset's 0x200 and
 	// connect_2's 0x201 (0x4f7) have it -- and frees a wsi outside the set with lws_free, no WSI_DESTROY (0x702-0x75b). The
-	// parser, handed NULL, returns 1 without touching it (client.c.o 0xd84-0xdb9); connect_2's next-address loop
-	// (0x46e-0x495) reaches the same path. A close takes a wsi out of the set only on its way to WSI_DESTROY in the same call
+	// parser, handed NULL, returns 1 without touching it (client.c.o 0xd84-0xdb9). connect_2's next-address loop takes the
+	// wsi out of the set too (0x46e) but never reaches that path: it closes the socket (0x47d) and, the descriptor number
+	// left in place (only 0xc78 and 0xe55 store -1), connect()s it again (0x3e7-0x40a) and fails by CONNECTION_ERROR and
+	// lws_close_free_wsi (0x8e2, 0x8fc, 0x931). A close takes a wsi out of the set only on its way to WSI_DESTROY in the same call
 	// (libwebsockets.c.o 0xd35, 0xf0e, then 0x1108-0x1115; the one early return, 0x10bb, is an event library's logical
 	// close). So a wsi that left the set and was not destroyed, seen here outside its own callbacks, is freed memory, and a
 	// later wsi may have its address (VaRest-81s): no LWS call names it again. After the first APPEND only a redirect changes
@@ -501,8 +513,12 @@ void VaRest::WebSocket::Lws::FConn::Kill(FService& Service)
 void VaRest::WebSocket::Lws::FConn::CheckDeadlines(FService& Service, double Now)
 {
 	using namespace VaRest::WebSocket::Lws::VaRestLwsConnPrivate;
-	// First: everything below may touch the wsi
-	ReapIfDropped();
+	// First: everything below may touch the wsi. A test can leave the reap to Kill alone (bOnlyKillReapsForTest), so Kill's
+	// own guard has a row of its own (Redirect.UnresolvableKillGuard)
+	if (!Service.GetOptions().bOnlyKillReapsForTest)
+	{
+		ReapIfDropped();
+	}
 	if (bKillIssued && !bDestroyed && Wsi && Now - KillArmedAt >= KillRearmSeconds)
 	{
 		// Review conc I-1: LWS's own stage timers replace a pending timeout (lws_client_socket_service and
@@ -525,7 +541,18 @@ void VaRest::WebSocket::Lws::FConn::CheckDeadlines(FService& Service, double Now
 		// blocked in LWS's synchronous DNS (review conc I-4; W1b B9, VaRest-gi0); reported at the deadline and killed (plan
 		// decision 3). LWS's own cuts (its 20 s connect stage, timeout_secs) also end in CONNECTION_ERROR "", so the detail
 		// says which one fired (review conc M-1, M-2)
-		EndPreOpen(EVaRestSocketFailure::ConnectTimeout, EVaRestSocketCloseBy::Timeout, 0, FString::Printf(TEXT("VaRest's ConnectTimeout (%g s) passed"), Request.ConnectTimeout));
+		const FString Passed = FString::Printf(TEXT("VaRest's ConnectTimeout (%g s) passed"), Request.ConnectTimeout);
+		if (PendingFailure != EVaRestSocketFailure::None)
+		{
+			// Task 11 review I-1: the attempt's own failure explains the end better, as in OnConnectionError and OnEnded -- above
+			// all a redirect LWS is following (OnWsiCreate) to a target that hangs: plan decision 10 makes it Redirect, a stop
+			// row (spec 3.4), whichever timer cuts it. By Transport: before the open, By Timeout is ConnectTimeout's alone
+			EndPreOpen(PendingFailure, EVaRestSocketCloseBy::Transport, 0, PendingDetail + TEXT("; ") + Passed);
+		}
+		else
+		{
+			EndPreOpen(EVaRestSocketFailure::ConnectTimeout, EVaRestSocketCloseBy::Timeout, 0, Passed);
+		}
 		Kill(Service);
 		return;
 	}

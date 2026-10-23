@@ -34,6 +34,11 @@ namespace VaRest::WebSocket::Testing
 		double ExitFlushSeconds = 0.25;
 		/** The first connect makes the context, then fails as if the thread could not start (review conc I-2) */
 		bool bFailThreadForTest = false;
+		/**
+		 * A wsi LWS freed without a callback (a redirect whose host does not resolve) is reaped only by the kill's own guard,
+		 * not after each service pass: Kill's guard gets a test of its own (Task 11 review M-4). Never in a real transport
+		 */
+		bool bOnlyKillReapsForTest = false;
 	};
 
 	/** A snapshot of a transport's counters */

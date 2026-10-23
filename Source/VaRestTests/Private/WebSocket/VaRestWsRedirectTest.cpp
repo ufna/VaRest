@@ -1,7 +1,7 @@
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 
 // Ruling Q2 (VaRest-2rt): an upgrade redirect is never followed -- to the same port, an absolute URL, wss, a downgrade, with
-// any redirect status, or to a target that refuses TCP
+// any redirect status, or to a target that refuses TCP, does not resolve, or hangs
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -156,6 +156,136 @@ bool FVaRestWsRedirectUnresolvableTest::RunTest(const FString& Parameters)
 			VaRest::Http::Testing::PumpUntil([&Transport] { return Transport->GetCounters().LiveConnections == 0; }, 5.0, true));
 	}
 	TestEqual(TEXT("no kill was issued"), Transport->GetCounters().KillsIssued, 0);
+	TestEqual(TEXT("the wss attempt left the handshakes in flight (VaRest-rti)"), VaRest::WebSocket::Testing::GetTlsHandshakesInFlight(), InFlightBefore);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestWsRedirectHangsAfterRedirectTest, "VaRest.Integration.WebSocket.Transport.Redirect.HangsAfterRedirect", VAREST_WS_TEST_FLAGS)
+
+bool FVaRestWsRedirectHangsAfterRedirectTest::RunTest(const FString& Parameters)
+{
+	VAREST_WS_BEGIN();
+	if (!HasSilentListener(*this, Site))
+	{
+		return false;
+	}
+	// Task 11 review I-1 (plan decision 10): a redirect LWS follows to a target that hangs ends Redirect, whichever timer cuts
+	// it -- here VaRest's ConnectTimeout, before LWS's own 20 s stage. The target is the server's silent listener on loopback:
+	// it takes the TCP connect and never answers the TLS ClientHello, so the redirect's handshake hangs after the WSI_CREATE
+	// that marks it. The plain port would not hang: a ClientHello holds a 0x0a byte (the supported_groups extension), so its
+	// readline answers 400 at once. The control: the same hang, not redirected, is VaRest's ConnectTimeout
+	struct FLeg
+	{
+		const TCHAR* What;
+		FString Url;
+		bool bRedirected;
+	};
+	const TArray<FScheme> Both = Schemes(Site);
+	const FString SilentTarget = FString::Printf(TEXT("wss://127.0.0.1:%d/"), Site.SilentPort);
+	TArray<FLeg> Legs;
+	TArray<FString> StatusKeys;
+	for (const FScheme& Scheme : Both)
+	{
+		const FString Key = NewKey();
+		StatusKeys.Add(Key);
+		Legs.Add({ Scheme.Name, Scheme.Base + FString::Printf(TEXT("/ws/status/302?location=%s&key=%s"), *VaRest::Http::PercentEncode(SilentTarget), *Key), true });
+	}
+	Legs.Add({ TEXT("not redirected (control)"), SilentTarget, false });
+	for (int32 Index = 0; Index < Legs.Num(); ++Index)
+	{
+		const FLeg& Leg = Legs[Index];
+		const int32 AcceptedBefore = FetchJson(*this, Site, TEXT("/tcp/silent"))[TEXT("accepted")].AsInt(-1);
+		const VaRest::WebSocket::Testing::FLwsCounters Before = Transport->GetCounters();
+		FVaRestSocketConnectRequest Req;
+		Req.Url = Leg.Url;
+		Req.ConnectTimeout = 1.0;
+		const double Started = FPlatformTime::Seconds();
+		FEvents Events(Transport->Connect(MoveTemp(Req)));
+		TestTrue(FString::Printf(TEXT("%s: ended within 5 s"), Leg.What), Events.WaitEnd(5.0));
+		const FVaRestSocketEvent* End = Events.GetEnd();
+		if (!TestNotNull(FString::Printf(TEXT("%s: a terminal event"), Leg.What), End))
+		{
+			Events.Connection->Close(1000, TEXT("done"));
+			Events.WaitEnd(30.0);
+			continue;
+		}
+		const double Took = End->Time - Started;
+		// Margins as Timeout.Connect's: reported at the deadline on the service thread, 1 s asked
+		TestTrue(FString::Printf(TEXT("%s: ended at the deadline, %.3f s after the connect (1 s asked)"), Leg.What, Took), Took >= 0.95 && Took < 1.5);
+		const bool bRedirectSaid = End->End.Detail.Contains(TEXT("which VaRest does not follow"), ESearchCase::CaseSensitive);
+		const bool bDeadlineSaid = End->End.Detail.Contains(TEXT("VaRest's ConnectTimeout (1 s) passed"), ESearchCase::CaseSensitive);
+		if (Leg.bRedirected)
+		{
+			TestTrue(FString::Printf(TEXT("%s: Error Redirect, status 0, By Transport, the Detail naming the redirect and the deadline (%s)"), Leg.What, *Events.Describe()),
+				End->Type == EVaRestSocketEventType::Error && End->End.Failure == EVaRestSocketFailure::Redirect && End->End.HttpStatus == 0
+				&& End->End.By == EVaRestSocketCloseBy::Transport && bRedirectSaid && bDeadlineSaid);
+			TestEqual(FString::Printf(TEXT("%s: the 302 was asked once"), Leg.What), FetchJournal(*this, Site, StatusKeys[Index])[TEXT("connections")].AsInt(), 1);
+		}
+		else
+		{
+			TestTrue(FString::Printf(TEXT("%s: Error ConnectTimeout, By Timeout, VaRest's own (%s)"), Leg.What, *Events.Describe()),
+				End->Type == EVaRestSocketEventType::Error && End->End.Failure == EVaRestSocketFailure::ConnectTimeout
+				&& End->End.By == EVaRestSocketCloseBy::Timeout && bDeadlineSaid && !bRedirectSaid);
+		}
+		TestTrue(FString::Printf(TEXT("%s: the killed attempt is destroyed"), Leg.What),
+			VaRest::Http::Testing::PumpUntil([&Transport] { return Transport->GetCounters().LiveConnections == 0; }, 5.0, true));
+		const VaRest::WebSocket::Testing::FLwsCounters After = Transport->GetCounters();
+		TestEqual(FString::Printf(TEXT("%s: one kill issued"), Leg.What), After.KillsIssued - Before.KillsIssued, 1);
+		TestEqual(FString::Printf(TEXT("%s: one kill landed"), Leg.What), After.KillsLanded - Before.KillsLanded, 1);
+		// It hung where this row says: one TCP connect reached the silent listener
+		TestEqual(FString::Printf(TEXT("%s: the silent listener took one connection"), Leg.What),
+			FetchJson(*this, Site, TEXT("/tcp/silent"))[TEXT("accepted")].AsInt(-1) - AcceptedBefore, 1);
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestWsRedirectUnresolvableKillGuardTest, "VaRest.Integration.WebSocket.Transport.Redirect.UnresolvableKillGuard", VAREST_WS_TEST_FLAGS)
+
+bool FVaRestWsRedirectUnresolvableKillGuardTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::WsTest;
+	ExpectLwsLines(*this);
+	FSite Site;
+	if (!FindSite(*this, Site))
+	{
+		return false;
+	}
+	// Task 11 review M-4: Redirect.Unresolvable with the reap left to Kill's own guard (bOnlyKillReapsForTest). The wsi LWS
+	// freed is still held when the deadline comes; the deadline's Kill must reap it instead of arming a kill on freed memory --
+	// the guard a Close drained in the lws_service call that dropped the wsi relies on. Without the pass-end reap nothing
+	// marks the attempt Redirect first, so the deadline reports ConnectTimeout: this switch exists only for this row
+	VaRest::WebSocket::Testing::FLwsTransportOptions Options;
+	Options.bOnlyKillReapsForTest = true;
+	const TSharedPtr<VaRest::WebSocket::Testing::ILwsTestTransport, ESPMode::ThreadSafe> Guarded = MakeTransport(*this, Site, true, MoveTemp(Options));
+	if (!Guarded.IsValid())
+	{
+		return false;
+	}
+	ON_SCOPE_EXIT
+	{
+		Guarded->Shutdown();
+	};
+	const int32 InFlightBefore = VaRest::WebSocket::Testing::GetTlsHandshakesInFlight();
+	for (const FScheme& Scheme : Schemes(Site))
+	{
+		const FString Location = FString::Printf(TEXT("%s://a..b:1/"), Scheme.bTls ? TEXT("wss") : TEXT("ws"));
+		FVaRestSocketConnectRequest Req = Request(Scheme, FString::Printf(TEXT("/ws/status/302?location=%s&key=%s"), *VaRest::Http::PercentEncode(Location), *NewKey()));
+		Req.ConnectTimeout = 1.0;
+		FEvents Events(Guarded->Connect(MoveTemp(Req)));
+		TestTrue(FString::Printf(TEXT("%s: ended within 5 s"), Scheme.Name), Events.WaitEnd(5.0));
+		const FVaRestSocketEvent* End = Events.GetEnd();
+		if (!TestNotNull(FString::Printf(TEXT("%s: a terminal event"), Scheme.Name), End))
+		{
+			Events.Connection->Close(1000, TEXT("done"));
+			Events.WaitEnd(30.0);
+			continue;
+		}
+		TestTrue(FString::Printf(TEXT("%s: Error ConnectTimeout at the deadline (%s)"), Scheme.Name, *Events.Describe()),
+			End->Type == EVaRestSocketEventType::Error && End->End.Failure == EVaRestSocketFailure::ConnectTimeout);
+		TestTrue(FString::Printf(TEXT("%s: the connection left the service"), Scheme.Name),
+			VaRest::Http::Testing::PumpUntil([&Guarded] { return Guarded->GetCounters().LiveConnections == 0; }, 5.0, true));
+	}
+	TestEqual(TEXT("Kill reaped both instead of arming a kill"), Guarded->GetCounters().KillsIssued, 0);
 	TestEqual(TEXT("the wss attempt left the handshakes in flight (VaRest-rti)"), VaRest::WebSocket::Testing::GetTlsHandshakesInFlight(), InFlightBefore);
 	return true;
 }
