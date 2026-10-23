@@ -88,6 +88,12 @@ void VaRest::WebSocket::Lws::FConn::Prepare(const FServiceOptions& Options)
 		UE_LOG(LogVaRestSocket, Warning, TEXT("%s: CloseTimeout %g s is not a positive number; %g s is used"), *GetLabel(), Request.CloseTimeout, LwsCloseAckSeconds);
 		Request.CloseTimeout = LwsCloseAckSeconds;
 	}
+	// ConnectTimeout (spec 2.2): the context's timeout_secs backs up every socket, so a longer value is clamped (plan decision 17)
+	if (!FMath::IsFinite(Request.ConnectTimeout) || Request.ConnectTimeout <= 0.0 || Request.ConnectTimeout > MaxConnectTimeoutSeconds)
+	{
+		UE_LOG(LogVaRestSocket, Warning, TEXT("%s: ConnectTimeout %g s is outside (0, %g]; %g s is used"), *GetLabel(), Request.ConnectTimeout, MaxConnectTimeoutSeconds, MaxConnectTimeoutSeconds);
+		Request.ConnectTimeout = MaxConnectTimeoutSeconds;
+	}
 	TValueOrError<FSocketTarget, FTargetError> Made = PrepareTarget(Request);
 	if (Made.HasError())
 	{
@@ -160,6 +166,7 @@ void VaRest::WebSocket::Lws::FConn::Start(FService& Service)
 	// The wsi early, so a kill reaches an attempt that has not opened yet (libwebsockets.h:3441-3451)
 	Info.pwsi = &Wsi;
 	State = EConnState::Connecting;
+	ConnectDeadline = StartedAt + Request.ConnectTimeout;
 	// Review conc I-3 (VaRest-rti): a wss attempt was counted by FTransport::Connect on the game thread (MarkTlsCounted,
 	// re-review N-2) and stays counted until LWS establishes or destroys it -- the whole upgrade, not only the TLS handshake:
 	// conservative, and simple. UncountTls lowers it once
@@ -512,6 +519,16 @@ void VaRest::WebSocket::Lws::FConn::CheckDeadlines(FService& Service, double Now
 	{
 		return;
 	}
+	if (State == EConnState::Connecting && Now >= ConnectDeadline)
+	{
+		// Spec 2.2, D32: measured here, so a hitching game thread cannot delay it -- exact unless the service thread is itself
+		// blocked in LWS's synchronous DNS (review conc I-4; W1b B9, VaRest-gi0); reported at the deadline and killed (plan
+		// decision 3). LWS's own cuts (its 20 s connect stage, timeout_secs) also end in CONNECTION_ERROR "", so the detail
+		// says which one fired (review conc M-1, M-2)
+		EndPreOpen(EVaRestSocketFailure::ConnectTimeout, EVaRestSocketCloseBy::Timeout, 0, FString::Printf(TEXT("VaRest's ConnectTimeout (%g s) passed"), Request.ConnectTimeout));
+		Kill(Service);
+		return;
+	}
 	if (State == EConnState::Open && bCloseQueued && Now >= CloseDeadline)
 	{
 		// Spec 2.5: CloseTimeout cuts the close VaRest started; reported at once, then killed (plan decision 3). Never gated
@@ -530,11 +547,14 @@ void VaRest::WebSocket::Lws::FConn::CheckDeadlines(FService& Service, double Now
 
 double VaRest::WebSocket::Lws::FConn::NextDeadline() const
 {
-	// Task 11 adds the connect deadline beside it
 	double Next = TNumericLimits<double>::Max();
 	if (State == EConnState::Open && bCloseQueued)
 	{
 		Next = CloseDeadline;
+	}
+	if (State == EConnState::Connecting)
+	{
+		Next = FMath::Min(Next, ConnectDeadline);
 	}
 	return Next;
 }

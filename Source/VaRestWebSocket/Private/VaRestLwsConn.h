@@ -154,6 +154,8 @@ namespace VaRest::WebSocket::Lws
 		/** In TlsHandshakesInFlight(): a wss attempt from its connect until CLIENT_ESTABLISHED or WSI_DESTROY (review conc I-3) */
 		bool bTlsCounted = false;
 		double StartedAt = 0.0;
+		/** FPlatformTime::Seconds() past which the attempt fails ConnectTimeout (spec 2.2, D32) */
+		double ConnectDeadline = 0.0;
 		/**
 		 * DEL_POLL_FD took the wsi out of LWS's poll set and no ADD_POLL_FD has put it back (__remove_wsi_socket_from_fds and
 		 * __insert_wsi_socket_into_fds pass the wsi's userdata, pollfd.c.o 0x79f and 0x3ec of the Release archive, so both reach

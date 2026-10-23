@@ -165,6 +165,185 @@ bool FVaRestWsTimeoutCloseAnsweredLateTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestWsTimeoutConnectTest, "VaRest.Integration.WebSocket.Transport.Timeout.Connect", VAREST_WS_TEST_FLAGS)
+
+bool FVaRestWsTimeoutConnectTest::RunTest(const FString& Parameters)
+{
+	VAREST_WS_BEGIN();
+	for (const FScheme& Scheme : Schemes(Site))
+	{
+		FVaRestSocketConnectRequest Req = Request(Scheme, TEXT("/ws/hang?ms=20000&key=") + NewKey());
+		Req.ConnectTimeout = 1.0;
+		const double Started = FPlatformTime::Seconds();
+		FEvents Events(Transport->Connect(MoveTemp(Req)));
+		TestTrue(FString::Printf(TEXT("%s: ended within 5 s"), Scheme.Name), Events.WaitEnd(5.0));
+		const FVaRestSocketEvent* End = Events.GetEnd();
+		if (!TestNotNull(FString::Printf(TEXT("%s: a terminal event"), Scheme.Name), End))
+		{
+			Events.Connection->Close(1000, TEXT("done"));
+			Events.WaitEnd(30.0);
+			continue;
+		}
+		const double Took = End->Time - Started;
+		// Measured on the service thread and reported at the deadline (spec 2.2, D32; plan decision 3), not at LWS's kill
+		TestTrue(FString::Printf(TEXT("%s: reported at the deadline, %.3f s after the connect (1 s asked)"), Scheme.Name, Took), Took >= 0.95 && Took < 1.5);
+		TestTrue(FString::Printf(TEXT("%s: Error ConnectTimeout, by Timeout, VaRest's own (%s)"), Scheme.Name, *Events.Describe()), End->Type == EVaRestSocketEventType::Error
+			&& End->End.Failure == EVaRestSocketFailure::ConnectTimeout && End->End.By == EVaRestSocketCloseBy::Timeout && End->End.Detail.Contains(TEXT("VaRest's ConnectTimeout"), ESearchCase::CaseSensitive));
+	}
+	TestTrue(TEXT("the killed attempts are destroyed"), VaRest::Http::Testing::PumpUntil([&Transport] { return Transport->GetCounters().LiveConnections == 0; }, 5.0, true));
+	const VaRest::WebSocket::Testing::FLwsCounters Counters = Transport->GetCounters();
+	AddInfo(FString::Printf(TEXT("kill to WSI_DESTROY: last %.1f ms, longest %.1f ms (VaRest-wcv, 100 ms wait cap while a kill is in flight)"),
+		Counters.LastKillToDestroySeconds * 1000.0, Counters.MaxKillToDestroySeconds * 1000.0));
+	TestTrue(TEXT("both kills landed"), Counters.KillsLanded >= 2);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestWsTimeoutClampTest, "VaRest.Integration.WebSocket.Transport.Timeout.Clamp", VAREST_WS_TEST_FLAGS)
+
+bool FVaRestWsTimeoutClampTest::RunTest(const FString& Parameters)
+{
+	VAREST_WS_BEGIN();
+	// Plan decision 17: over the context's 60 s backstop, or not a positive number: 60 s, with a Warning (two values, two schemes)
+	AddExpectedMessagePlain(TEXT("ConnectTimeout 120 s is outside (0, 60]"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 2);
+	AddExpectedMessagePlain(TEXT("ConnectTimeout 0 s is outside (0, 60]"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 2);
+	for (const FScheme& Scheme : Schemes(Site))
+	{
+		for (const double Asked : { 120.0, 0.0 })
+		{
+			FVaRestSocketConnectRequest Req = Request(Scheme, TEXT("/ws/echo?key=") + NewKey());
+			Req.ConnectTimeout = Asked;
+			const TUniquePtr<FEvents> Events = Visit(*Transport, MoveTemp(Req));
+			TestNotNull(FString::Printf(TEXT("%s %g s: still opens"), Scheme.Name, Asked), Events->Find(EVaRestSocketEventType::Open));
+		}
+		// A slow upgrade inside the deadline opens (/ws/slowupgrade waits before its 101)
+		FVaRestSocketConnectRequest Slow = Request(Scheme, TEXT("/ws/slowupgrade?ms=300&key=") + NewKey());
+		Slow.ConnectTimeout = 2.0;
+		const TUniquePtr<FEvents> SlowEvents = Visit(*Transport, MoveTemp(Slow));
+		TestNotNull(FString::Printf(TEXT("%s: a 300 ms upgrade opens within 2 s (%s)"), Scheme.Name, *SlowEvents->Describe()), SlowEvents->Find(EVaRestSocketEventType::Open));
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestWsTimeoutKillLatencyTest, "VaRest.Integration.WebSocket.Transport.Timeout.KillLatency", VAREST_WS_TEST_FLAGS)
+
+bool FVaRestWsTimeoutKillLatencyTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::WsTest;
+	ExpectLwsLines(*this);
+	FSite Site;
+	if (!FindSite(*this, Site, false))
+	{
+		return false;
+	}
+	// VaRest-wcv: LWS walks its timeouts only when the wall-clock second changed, on a return of lws_service (T26). Measured
+	// with the short cap VaRest uses while a kill is in flight (plan decision 12), and, for the record, with the 1 s cap alone
+	double Longest[2] = { -1.0, -1.0 };
+	const int32 Caps[2] = { 100, 1000 };
+	for (int32 Run = 0; Run < 2; ++Run)
+	{
+		VaRest::WebSocket::Testing::FLwsTransportOptions Options;
+		Options.TcpAddressOverride = Site.Host;
+		Options.ShortWaitCapMs = Caps[Run];
+		const TSharedRef<VaRest::WebSocket::Testing::ILwsTestTransport, ESPMode::ThreadSafe> Measured = VaRest::WebSocket::Testing::MakeLwsTransport(MoveTemp(Options));
+		ON_SCOPE_EXIT
+		{
+			Measured->Shutdown();
+		};
+		// The kills measured are the deadline's: a handle dropped at the end of an iteration releases its attempt with a kill
+		// of its own (spec 1.4), which this count tells apart (it passed with no connect deadline at all, Task 11 RED)
+		int32 TimedOut = 0;
+		for (int32 Index = 0; Index < 4; ++Index)
+		{
+			FVaRestSocketConnectRequest Req;
+			Req.Url = FString::Printf(TEXT("ws://%s:%d/ws/hang?ms=20000&key=%s"), *Site.Host, Site.Port, *NewKey());
+			Req.ConnectTimeout = 0.5;
+			FEvents Events(Measured->Connect(MoveTemp(Req)));
+			Events.WaitEnd(5.0);
+			TimedOut += IsError(Events, EVaRestSocketFailure::ConnectTimeout) ? 1 : 0;
+			VaRest::Http::Testing::PumpUntil([&Measured] { return Measured->GetCounters().LiveConnections == 0; }, 5.0, true);
+		}
+		TestEqual(FString::Printf(TEXT("wait cap %d ms: four attempts timed out"), Caps[Run]), TimedOut, 4);
+		TestEqual(FString::Printf(TEXT("wait cap %d ms: every kill landed"), Caps[Run]), Measured->GetCounters().KillsLanded, 4);
+		Longest[Run] = Measured->GetCounters().MaxKillToDestroySeconds;
+		AddInfo(FString::Printf(TEXT("wait cap %d ms while a kill is in flight: longest kill to WSI_DESTROY over 4 kills %.1f ms"), Caps[Run], Longest[Run] * 1000.0));
+	}
+	TestTrue(FString::Printf(TEXT("with VaRest's 100 ms cap a kill lands within 1.6 s (%.1f ms)"), Longest[0] * 1000.0), Longest[0] >= 0.0 && Longest[0] < 1.6);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestWsTimeoutKillLatencyBusyTest, "VaRest.Integration.WebSocket.Transport.Timeout.KillLatencyBusy", VAREST_WS_TEST_FLAGS)
+
+bool FVaRestWsTimeoutKillLatencyBusyTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::WsTest;
+	ExpectLwsLines(*this);
+	FSite Site;
+	if (!FindSite(*this, Site, false))
+	{
+		return false;
+	}
+	// Re-review N-1: kills beside a busy neighbour on the same service. The neighbour's send to /ws/sink keeps the service
+	// thread in WRITEABLE callbacks (each masks and writes 64 KiB) while four attempts time out one after another. A kill
+	// re-armed on every pass is stamped with the new second whenever a second boundary falls inside a callback, so the walk of
+	// that second keeps the wsi and the kill moves on: past decision 12's 1.6 s. The game thread tops the send up while it
+	// waits, so the neighbour stays busy for every kill (32 MiB alone would drain in tens of milliseconds)
+	VaRest::WebSocket::Testing::FLwsTransportOptions Options;
+	Options.TcpAddressOverride = Site.Host;
+	const TSharedRef<VaRest::WebSocket::Testing::ILwsTestTransport, ESPMode::ThreadSafe> Busy = VaRest::WebSocket::Testing::MakeLwsTransport(MoveTemp(Options));
+	ON_SCOPE_EXIT
+	{
+		Busy->Shutdown();
+	};
+	FVaRestSocketConnectRequest SinkRequest;
+	SinkRequest.Url = FString::Printf(TEXT("ws://%s:%d/ws/sink?key=%s"), *Site.Host, Site.Port, *NewKey());
+	FEvents Sink(Busy->Connect(MoveTemp(SinkRequest)));
+	if (!TestTrue(TEXT("the busy neighbour opened"), Sink.WaitType(EVaRestSocketEventType::Open)))
+	{
+		Sink.WaitEnd();
+		return false;
+	}
+	TArray<uint8> Megabyte;
+	Megabyte.SetNumZeroed(1024 * 1024);
+	const TSharedRef<IVaRestSocketConnection, ESPMode::ThreadSafe> Neighbour = Sink.Connection;
+	int64 SentBytes = 0;
+	// Game thread, from the waits below: keeps at least 4 MiB queued, in 1 MiB frames
+	const auto TopUp = [&Neighbour, &Megabyte, &SentBytes]
+	{
+		while (Neighbour->GetBufferedAmount() < 4 * 1024 * 1024 && Neighbour->Send(FVaRestSocketFrame::Binary(Megabyte)))
+		{
+			SentBytes += Megabyte.Num();
+		}
+	};
+	TopUp();
+	int32 TimedOut = 0;
+	for (int32 Index = 0; Index < 4; ++Index)
+	{
+		FVaRestSocketConnectRequest Req;
+		Req.Url = FString::Printf(TEXT("ws://%s:%d/ws/hang?ms=20000&key=%s"), *Site.Host, Site.Port, *NewKey());
+		Req.ConnectTimeout = 0.5;
+		FEvents Events(Busy->Connect(MoveTemp(Req)));
+		Events.WaitFor([&TopUp](const TArray<FVaRestSocketEvent>& All)
+		{
+			TopUp();
+			return All.ContainsByPredicate([](const FVaRestSocketEvent& Each) { return Each.IsTerminal(); });
+		}, 5.0);
+		TimedOut += IsError(Events, EVaRestSocketFailure::ConnectTimeout) ? 1 : 0;
+		// Until LWS destroyed the killed one; the neighbour stays
+		VaRest::Http::Testing::PumpUntil([&TopUp, &Busy] { TopUp(); return Busy->GetCounters().LiveConnections == 1; }, 5.0, true);
+	}
+	const VaRest::WebSocket::Testing::FLwsCounters Counters = Busy->GetCounters();
+	AddInfo(FString::Printf(TEXT("beside a busy send (%lld MiB queued in all): longest kill to WSI_DESTROY %.1f ms over %d kills"),
+		SentBytes / (1024 * 1024), Counters.MaxKillToDestroySeconds * 1000.0, Counters.KillsLanded));
+	TestEqual(TEXT("four attempts timed out"), TimedOut, 4);
+	TestEqual(TEXT("every kill landed"), Counters.KillsLanded, 4);
+	TestTrue(FString::Printf(TEXT("beside a busy neighbour a kill still lands within 1.6 s (%.1f ms)"), Counters.MaxKillToDestroySeconds * 1000.0),
+		Counters.MaxKillToDestroySeconds >= 0.0 && Counters.MaxKillToDestroySeconds < 1.6);
+	TestTrue(TEXT("the neighbour was still sending at the end"), Neighbour->GetBufferedAmount() > 0 && !Neighbour->HasEnded());
+	Neighbour->Close(1000, TEXT("done"));
+	Sink.WaitEnd(30.0);
+	return true;
+}
+
 #undef VAREST_WS_BEGIN
 #undef VAREST_WS_TEST_FLAGS
 
