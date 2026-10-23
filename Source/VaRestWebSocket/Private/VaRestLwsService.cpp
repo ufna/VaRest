@@ -2,12 +2,12 @@
 
 #include "VaRestLwsService.h"
 
+#include "HAL/PlatformProcess.h"
 #include "HAL/PlatformTime.h"
 #include "HAL/RunnableThread.h"
 #include "Misc/Fork.h"
 #include "Misc/ScopeLock.h"
 #include "Modules/ModuleManager.h"
-#include "HAL/PlatformProcess.h"
 #include "PlatformHttp.h"
 #include "Ssl.h"
 #include "VaRestSocketTransport.h"
@@ -63,6 +63,15 @@ void VaRest::WebSocket::Lws::Utf8Copy(const FString& Text, TArray<ANSICHAR>& Out
 
 void VaRest::WebSocket::Lws::ApplyLogLevel()
 {
+	// At most once per module copy (review M-1): lws_set_log_level is two plain stores to the copy's globals, which an
+	// earlier service's thread may be reading in _lws_log (the default transport's outlives its test). The first Start comes
+	// before every VaRest service thread, so that one write happens-before every reader (thread creation). Set only when
+	// applied, never std::call_once: a shared copy may rightly skip while WebSockets is loaded and apply at a later start
+	static std::atomic<bool> bApplied{ false };
+	if (bApplied.load())
+	{
+		return;
+	}
 	// D30 (spec 1.2): VaRest's own LWS copy in modular builds, always; the one copy a monolithic or merged build shares, only
 	// while the engine's WebSockets module is not loaded. A WebSockets module that loads later sets its own level and emitter
 	// (LwsWebSocketsManager.cpp:174-176), and VaRest's lines then go to LogWebSockets: never both in one copy
@@ -70,6 +79,7 @@ void VaRest::WebSocket::Lws::ApplyLogLevel()
 	if (!bSharedCopy || !FModuleManager::Get().IsModuleLoaded(TEXT("WebSockets")))
 	{
 		lws_set_log_level(LLL_ERR | LLL_WARN, &VaRestLwsServicePrivate::EmitLwsLine);
+		bApplied = true;
 	}
 }
 
@@ -113,7 +123,6 @@ VaRest::WebSocket::Lws::FService::~FService()
 
 bool VaRest::WebSocket::Lws::FService::Start()
 {
-	using namespace VaRest::WebSocket::Lws::VaRestLwsServicePrivate;
 	check(IsInGameThread());
 	if (Context)
 	{
@@ -133,6 +142,7 @@ bool VaRest::WebSocket::Lws::FService::Start()
 		return false;
 	}
 	LLM_SCOPE_BYTAG(VaRest_WebSocket);
+	// Plan decision 16 as amended (review M-1): the D30 rule runs at the first start that may apply it
 	ApplyLogLevel();
 	// One protocol, "varest" (spec 2.1). per_session_data_size 0: the connection's userdata is ours (connect_info.userdata),
 	// as the engine's (LwsWebSocketsManager.cpp:163-166). Protocols[1] stays zero: LWS's terminator
@@ -198,6 +208,8 @@ bool VaRest::WebSocket::Lws::FService::Start()
 		FScopeLock Guard(&EnqueueLock);
 		bAccepting = true;
 	}
+	// Read before the thread exists, so no lws_* call but the cancel runs off the service thread while it runs (review M-8)
+	const char* const LwsVersion = lws_get_library_version();
 	// 128 KiB, below normal, forkable: the engine's service thread (LwsWebSocketsManager.cpp:239-247). The thread's start
 	// follows every write above, Context among them (the context is the game thread's until here)
 	Thread = Options.bFailThreadForTest ? nullptr
@@ -216,21 +228,23 @@ bool VaRest::WebSocket::Lws::FService::Start()
 		ReleaseSsl();
 		return false;
 	}
-	UE_LOG(LogVaRestSocket, Verbose, TEXT("libwebsockets %s: context and thread %s started"), UTF8_TO_TCHAR(lws_get_library_version()), *Options.ThreadName);
+	UE_LOG(LogVaRestSocket, Verbose, TEXT("libwebsockets %s: context and thread %s started"), UTF8_TO_TCHAR(LwsVersion), *Options.ThreadName);
 	return true;
 }
 
 void VaRest::WebSocket::Lws::FService::Shutdown()
 {
 	check(IsInGameThread());
+	// First (review M-7): a connect queued just before Shutdown and adopted during the flush ends with Shutdown
+	// (FConn::Start) instead of starting -- LWS 3.0 resolves DNS on the service thread, which would hold the flush and the
+	// join. Closes are never gated on it, so the ones asked for still go out
+	bShuttingDown = true;
 	// Review conc M-3: the close frames already asked for (the hub's 1001 at engine exit, spec 1.4) go out first, while the
 	// thread still runs. Only where it is a real thread: the main thread ticks it otherwise (Fork.h:86-93), and does not here
 	if (Thread && bAccepting.load() && Options.ExitFlushSeconds > 0.0 && VaRestLwsServicePrivate::HasRealThread())
 	{
 		FlushCloses(Options.ExitFlushSeconds);
 	}
-	// Before bAccepting drops: whoever sees the service no longer running sees that Shutdown has begun (FConn::Start)
-	bShuttingDown = true;
 	{
 		// Every Enqueue from here on drops its command, and none is still inside lws_cancel_service: the context may go
 		FScopeLock Guard(&EnqueueLock);

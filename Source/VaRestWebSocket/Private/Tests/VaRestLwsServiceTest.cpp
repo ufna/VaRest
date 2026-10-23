@@ -178,6 +178,18 @@ bool FVaRestLwsServiceWaitTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("a kill in flight: the 100 ms cap (plan decision 12)"), Service.ComputeWaitMs(95.25), 100);
 	TestNotNull(TEXT("Find by id"), Service.Find(2));
 	TestNull(TEXT("... and only those"), Service.Find(3));
+	{
+		// Review M-3: an open, idle connection never waits the idle 30 s -- LWS's own timers (close-ack, a kill) run only when
+		// lws_service returns (spec 2.1, T26)
+		FService Quiet{ FServiceOptions() };
+		Quiet.Adopt(MakeUnique<FStandIn>(3, TNumericLimits<double>::Max(), false, Log));
+		TestEqual(TEXT("a connection with no deadline: the 1 s cap, not the idle wait"), Quiet.ComputeWaitMs(95.25), 1000);
+	}
+	{
+		FService Killing{ FServiceOptions() };
+		Killing.Adopt(MakeUnique<FStandIn>(4, TNumericLimits<double>::Max(), true, Log));
+		TestEqual(TEXT("... and one with no deadline and a kill in flight: the 100 ms cap"), Killing.ComputeWaitMs(95.25), 100);
+	}
 	return true;
 }
 
@@ -223,7 +235,8 @@ bool FVaRestLwsServiceShutdownTest::RunTest(const FString& Parameters)
 		return false;
 	}
 	const TSharedRef<FStandInLog, ESPMode::ThreadSafe> Log = MakeShared<FStandInLog, ESPMode::ThreadSafe>();
-	Service->Enqueue([Log](FService& Self) { Self.Adopt(MakeUnique<FStandIn>(9, TNumericLimits<double>::Max(), false, Log)); });
+	TestTrue(TEXT("Enqueue reports a command it queued"),
+		Service->Enqueue([Log](FService& Self) { Self.Adopt(MakeUnique<FStandIn>(9, TNumericLimits<double>::Max(), false, Log)); }));
 	TestTrue(TEXT("adopted"), VaRest::Http::Testing::PumpUntil([Log] { return Log->bStarted.load(); }, 5.0));
 	Service->Shutdown();
 	TestEqual(TEXT("Shutdown ends each connection once (its terminal event)"), Log->ShutdownEnds.load(), 1);
@@ -231,6 +244,12 @@ bool FVaRestLwsServiceShutdownTest::RunTest(const FString& Parameters)
 	Service->Enqueue([Late](FService& Self) { *Late = true; });
 	// Review conc M-7: nothing would run a queued command either, so check that it was let go at once -- its capture released
 	TestEqual(TEXT("a command after Shutdown is dropped at once (its capture released)"), Late.GetSharedReferenceCount(), 1);
+	{
+		// Review M-4: a named command outlives the call, so only Enqueue itself can let go of its capture
+		FCommand Named = [Late](FService& Self) { *Late = true; };
+		TestFalse(TEXT("Enqueue reports a refused command"), Service->Enqueue(MoveTemp(Named)));
+		TestEqual(TEXT("... and releases a named one before it returns, the variable still in scope"), Late.GetSharedReferenceCount(), 1);
+	}
 	return true;
 }
 
@@ -320,7 +339,17 @@ bool FVaRestLwsServiceLogLevelTest::RunTest(const FString& Parameters)
 #if IS_MONOLITHIC || UE_MERGED_MODULES
 	AddInfo(TEXT("a shared LWS copy: the level is the engine's when WebSockets is loaded (D30); checked in W1b's monolithic run"));
 #else
-	ApplyLogLevel();
+	// Review M-6: through Start, the D30 rule's one caller (plan decision 16 as amended by review M-1: the first start that
+	// may apply it). An earlier start in this run may have applied it already, and the row still holds Start to it: nothing
+	// else in the module calls ApplyLogLevel, so without Start's call no start applies it and LWS's default, notices on,
+	// stays in this copy whatever ran before (VaRestTests' LWS is another copy [coexist.lws_symbol_owner])
+	AddExpectedMessagePlain(TEXT("libwebsockets("), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, -1);
+	const TSharedRef<FService, ESPMode::ThreadSafe> Service = MakeShared<FService, ESPMode::ThreadSafe>(FServiceOptions());
+	if (!TestTrue(TEXT("the service starts"), Service->Start()))
+	{
+		return false;
+	}
+	Service->Shutdown();
 	// D30 (spec 1.2): VaRest's own copy logs errors and warnings only [coexist.shared_lws_state] (lwsl_visible, libwebsockets.h:434-443)
 	TestTrue(TEXT("errors are visible"), lwsl_visible(LLL_ERR) != 0);
 	TestTrue(TEXT("warnings are visible"), lwsl_visible(LLL_WARN) != 0);
@@ -340,10 +369,14 @@ bool FVaRestLwsServiceStartupPolicyTest::RunTest(const FString& Parameters)
 	const auto Nothing = [](const TCHAR*) { return false; };
 	const auto WebSockets = [](const TCHAR* Name) { return FCString::Strcmp(Name, TEXT("WebSockets")) == 0; };
 	const auto Replay = [](const TCHAR* Name) { return FCString::Strcmp(Name, TEXT("HttpNetworkReplayStreaming")) == 0; };
+	const auto Server = [](const TCHAR* Name) { return FCString::Strcmp(Name, TEXT("WebSocketServer")) == 0; };
+	const auto Networking = [](const TCHAR* Name) { return FCString::Strcmp(Name, TEXT("WebSocketNetworking")) == 0; };
 	TestFalse(TEXT("a modular build: lazily, VaRest's copy is its own"), ShouldCreateAtStartup(false, WebSockets));
 	TestFalse(TEXT("a shared copy with no other LWS module: lazily"), ShouldCreateAtStartup(true, Nothing));
 	TestTrue(TEXT("a shared copy with WebSockets: at startup"), ShouldCreateAtStartup(true, WebSockets));
 	TestTrue(TEXT("... or with any other LWS module"), ShouldCreateAtStartup(true, Replay));
+	TestTrue(TEXT("... WebSocketServer among them"), ShouldCreateAtStartup(true, Server));
+	TestTrue(TEXT("... and WebSocketNetworking"), ShouldCreateAtStartup(true, Networking));
 	return true;
 }
 

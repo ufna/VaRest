@@ -78,7 +78,11 @@ namespace VaRest::WebSocket::Lws
 		std::atomic<double> MaxKillToDestroySeconds{ -1.0 };
 	};
 
-	/** One connection as the service sees it: FConn (Task 7), or a test's stand-in. Service thread, except EndForShutdown */
+	/**
+	 * One connection as the service sees it: FConn (Task 7), or a test's stand-in. Called on the service thread, or on the
+	 * game thread once the thread is joined (Shutdown's drain and lws_context_destroy) or before any thread ran (a service
+	 * never started); EndForShutdown on the game thread with the thread stopped (review M-2)
+	 */
 	class IServiceConnection
 	{
 	public:
@@ -129,7 +133,10 @@ namespace VaRest::WebSocket::Lws
 		void Shutdown();
 		/** Any thread */
 		bool IsRunning() const { return bAccepting.load(); }
-		/** Any thread: Shutdown has begun (FConn::Start reports Shutdown then) */
+		/**
+		 * Any thread: Shutdown has begun -- from its first line, before the flush (review M-7). FConn::Start reports Shutdown
+		 * then; FConn::Close is never gated on it, so the closes the flush waits for still go out (Tasks 7, 9)
+		 */
 		bool IsShuttingDown() const { return bShuttingDown.load(); }
 		/**
 		 * Any thread: Command runs on the service thread. True when it was queued; false when the service does not accept
@@ -138,11 +145,14 @@ namespace VaRest::WebSocket::Lws
 		 */
 		bool Enqueue(FCommand&& Command);
 
+		/** Any thread: set at construction, never changed */
+		const FServiceOptions& GetOptions() const { return Options; }
+		/** Any thread: atomics (tests read them from the game thread while the thread runs) */
+		FServiceCounters& GetCounters() { return Counters; }
+
 		// ---- service thread (or the game thread while the thread does not run)
 		lws_context* GetContext() const { return Context; }
-		const FServiceOptions& GetOptions() const { return Options; }
 		ISslCertificateManager* GetCertificates() const { return Certificates; }
-		FServiceCounters& GetCounters() { return Counters; }
 		/**
 		 * Takes the connection, makes its userdata known, and starts it. Its id is unique among the connections held. The
 		 * userdata it gives LWS (lws_client_connect_info::userdata) is this IServiceConnection pointer itself, not a derived
@@ -153,7 +163,10 @@ namespace VaRest::WebSocket::Lws
 		/** lws_service's next wait (plan decision 12); public for the service's tests */
 		int32 ComputeWaitMs(double Now) const;
 
-		/** The protocol's callback (lws_protocols::callback): the service comes from the context's user pointer */
+		/**
+		 * The protocol's callback (lws_protocols::callback): the service comes from the context's user pointer. The service
+		 * thread inside lws_service; the game thread inside lws_create_context and lws_context_destroy (review M-2)
+		 */
 		static int Callback(lws* Wsi, lws_callback_reasons Reason, void* User, void* In, size_t Len);
 
 	private:
@@ -206,10 +219,13 @@ namespace VaRest::WebSocket::Lws
 	/** Any thread: Text as NUL-terminated UTF-8 in Out, for the char* fields libwebsockets keeps */
 	void Utf8Copy(const FString& Text, TArray<ANSICHAR>& Out);
 
-	/** Game thread: the D30 rule for this module's LWS copy (spec 1.2; plan decision 16) */
+	/**
+	 * Game thread: the D30 rule for this module's LWS copy (spec 1.2; plan decision 16, amended by review M-1: at the first
+	 * start that may apply it, then never again in this copy)
+	 */
 	void ApplyLogLevel();
 
-	/** Plan decision 8 (VaRest-rti): whether VaRest's context is made at module startup */
+	/** Any thread: plan decision 8 (VaRest-rti), whether VaRest's context is made at module startup */
 	bool ShouldCreateAtStartup(bool bSharedCopy, TFunctionRef<bool(const TCHAR*)> IsLinked);
 
 	/**
