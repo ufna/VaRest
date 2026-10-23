@@ -1,6 +1,7 @@
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 
 #include "VaRestClientState.h"
+#include "VaRestPersistenceGuard.h"
 
 #include "HAL/PlatformTime.h"
 #include "Misc/ScopeLock.h"
@@ -171,6 +172,12 @@ void VaRest::Http::RememberAppliedRedactor(FExchangeState& Ex)
 {
 	check(IsInGameThread());
 	const TSharedRef<const FClientConfig, ESPMode::ThreadSafe> Now = Ex.State->GetConfig();
+	// Keep persistence knowledge independently of the log redactor's minimum/history and early return.
+	auto Guard = Ex.PersistenceGuard.IsValid()
+		? MakeShared<FPersistenceGuard, ESPMode::ThreadSafe>(*Ex.PersistenceGuard)
+		: MakeShared<FPersistenceGuard, ESPMode::ThreadSafe>();
+	if (Now->PersistenceGuard.IsValid()) Guard->UnionWith(*Now->PersistenceGuard);
+	Ex.PersistenceGuard = MoveTemp(Guard);
 	const FVaRestRedactor& Known = ClientStatePrivate::KnownRedactor(Ex);
 	if (&Known == Now->Redactor.Get())
 	{
@@ -253,6 +260,10 @@ void VaRest::Http::FClientState::Publish(const TSharedRef<FClientConfig, ESPMode
 		Rules.AddKey(Key);
 	}
 	Next->Redactor = MakeShared<FVaRestRedactor, ESPMode::ThreadSafe>(MoveTemp(Rules), Secrets.GetActive(Next->Clock->Now()));
+	auto Guard = MakeShared<FPersistenceGuard, ESPMode::ThreadSafe>();
+	for (const FString& Key : Next->RedactedKeys) Guard->AddKey(Key);
+	for (const FString& Secret : Secrets.GetCurrentForPersistence()) Guard->AddSecret(Secret);
+	Next->PersistenceGuard = MoveTemp(Guard);
 
 	// The replaced snapshot is released after the lock is dropped: with it can go the last reference to a transport, a
 	// clock or a stage, whose destructor may read a configuration, and FRWLock is not recursive

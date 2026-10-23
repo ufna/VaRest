@@ -10,6 +10,9 @@ class IVaRestAuth;
 
 namespace VaRest::Http
 {
+	/** Strict scheme/ASCII host/port origin; no userinfo. IPv6 alternatives compare conservatively. */
+	bool CanonicalOrigin(FStringView Url, FString& OutOrigin);
+	bool SameOrigin(FStringView Left, FStringView Right);
 	/** Domain-separated, length-framed UTF-8 SHA256; no raw fields escape in the result. */
 	FString HashFields(FStringView Domain, TConstArrayView<FString> Fields);
 	TArray<FString> CanonicalHeaders(const FVaRestHeaders& Headers);

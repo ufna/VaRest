@@ -173,6 +173,7 @@ FVaRestRequestHandle VaRest::Http::FRequestSpecAccess::Send(TUniquePtr<FRequestS
 	// Spec 3.1, verbatim: "A request snapshots the configuration at Send()" -- here, on the sending thread, under the
 	// state's read lock (decision 27). A struct body was encoded in Body() with the naming of that moment.
 	Ex.Config = Spec->State->GetConfig();
+	Ex.PersistenceGuard = Ex.Config->PersistenceGuard;
 	// Moved, not copied (review I-1): the builder dies in the caller after this returns, on the sending thread, and its
 	// reference must not be the client state's last one there
 	Ex.State = MoveTemp(Spec->State);
@@ -260,6 +261,7 @@ void FVaRestRequestHandle::Cancel() const
 	// Any thread: the flag now (a decode in flight sees it), the rest where the control plane lives (spec 1). The pin is
 	// moved into the task, so this thread never drops the last reference (review I-1).
 	VaRest::Http::Internals(*Pinned).bCancelRequested = true;
+	VaRest::Http::Internals(*Pinned).PersistenceAbort->store(true, std::memory_order_relaxed);
 	UE::Tasks::Launch(TEXT("VaRest.Cancel"), [Target = MoveTemp(Pinned)] { VaRest::Http::Internals(*Target).State->Cancel(Target.ToSharedRef(), EVaRestCancelReason::User); },
 		UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
 }

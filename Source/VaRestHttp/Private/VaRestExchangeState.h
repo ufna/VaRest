@@ -15,6 +15,7 @@ class FVaRestRedactor;
 
 namespace VaRest::Http
 {
+	struct FPersistenceGuard;
 	/**
 	 * M4a final review A1 (VaRest-tqt): one transport dispatch's identity, made by the transport stage at each start and
 	 * carried by its completion guard into FClientState::OnAttemptDone -- a parameter of its own, never a field of
@@ -76,6 +77,10 @@ namespace VaRest::Http
 		TUniquePtr<IResultHandler> Handler;
 		/** Spec 3.1, decision 27: the configuration snapshot, taken by Send on the sending thread (Enter fills it only for an exchange made another way) */
 		TSharedPtr<const FClientConfig, ESPMode::ThreadSafe> Config;
+		/** Snapshot plus every applied configuration. Copy before worker scans. */
+		TSharedPtr<const FPersistenceGuard, ESPMode::ThreadSafe> PersistenceGuard;
+		/** Worker input owns only this signal, never the exchange. Successful completion leaves it false. */
+		TSharedRef<std::atomic<bool>, ESPMode::ThreadSafe> PersistenceAbort = MakeShared<std::atomic<bool>, ESPMode::ThreadSafe>(false);
 		/**
 		 * Game thread, RedactorFor's cache (review I-1): the union of Config's redactor and a later current one, and the
 		 * current one it was built from -- held, so a new redactor at a freed one's address is never taken for it. Both
@@ -276,5 +281,6 @@ namespace VaRest::Http
 			Ex.CancelReason = EVaRestCancelReason::OwnerGone;
 		}
 		Ex.bCancelRequested = true;
+		Ex.PersistenceAbort->store(true, std::memory_order_relaxed);
 	}
 }

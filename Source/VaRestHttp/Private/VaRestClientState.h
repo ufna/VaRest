@@ -18,6 +18,8 @@
 
 namespace VaRest::Http
 {
+	struct FPersistenceGuard;
+
 	/** One immutable configuration snapshot; FClientState swaps a new one in on every edit (spec 3.1) */
 	struct FClientConfig
 	{
@@ -46,6 +48,7 @@ namespace VaRest::Http
 		// Derived by FClientState::Publish
 		TSharedPtr<const FVaRestStageChain, ESPMode::ThreadSafe> Chain;
 		TSharedPtr<const FVaRestRedactor, ESPMode::ThreadSafe> Redactor;
+		TSharedPtr<const FPersistenceGuard, ESPMode::ThreadSafe> PersistenceGuard;
 		/** A custom stage may re-issue: the transport copies bodies (decision 12) */
 		bool bMayReissue = false;
 	};

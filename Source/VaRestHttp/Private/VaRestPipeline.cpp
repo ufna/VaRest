@@ -887,6 +887,7 @@ void VaRest::Http::FClientState::Enter(const FVaRestExchangeRef& Exchange)
 		// Review M-14: after OnEnginePreExit; the HTTP module unloads next (LaunchEngineLoop.cpp:5182)
 		Ex.CancelReason = EVaRestCancelReason::Shutdown;
 		Ex.bCancelRequested = true;
+		Ex.PersistenceAbort->store(true, std::memory_order_relaxed);
 	}
 	if (IsOwnerGone(Ex))
 	{
@@ -1276,6 +1277,7 @@ void VaRest::Http::FClientState::Cancel(const FVaRestExchangeRef& Exchange, EVaR
 		Ex.CancelReason = Reason;
 	}
 	Ex.bCancelRequested = true;
+	Ex.PersistenceAbort->store(true, std::memory_order_relaxed);
 	if (Ex.Phase != EVaRestExchangePhase::InChain)
 	{
 		// Created: Enter sees the flag. Decoding: Complete replaces the decoded result when it comes back.

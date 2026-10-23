@@ -1007,3 +1007,10 @@ FVaRestTraceExcerpt FVaRestRedactor::DescribeStream(FStringView FilePath, FStrin
 	Excerpt.Bytes = Share(ToUtf8(Text));
 	return Excerpt;
 }
+
+TArray<FString> FVaRestSecretSet::GetCurrentForPersistence() const
+{
+    TArray<FString> Result;
+    for (const auto& Pair : Current) if (!Pair.Value.IsEmpty()) Result.Add(Pair.Value); // byte-array deduplication happens in AddSecret
+    return Result;
+}

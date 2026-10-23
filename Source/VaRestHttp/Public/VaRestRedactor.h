@@ -33,6 +33,8 @@ public:
 	int32 ClearSlots(TFunctionRef<bool(FName Slot)> Matches);
 	/** The values to scrub at Now: current ones and unexpired previous ones of at least MinBytes UTF-8 bytes, longest first */
 	TArray<FString> GetActive(double Now) const;
+	/** Every nonempty current slot, of any length; no retired history or log minimum. */
+	TArray<FString> GetCurrentForPersistence() const;
 	/**
 	 * Expiries are doubles and clocks round (the virtual clock to whole nanoseconds), so a timer armed for ExpiresAt can
 	 * fire a hair before it: a value within ExpirySlack of Now counts as expired in NextExpiry and Prune (reviews N-2,
