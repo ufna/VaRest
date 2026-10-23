@@ -12,15 +12,10 @@ bool VaRest::WebSocket::Lws::CertificateMatchesIp(X509* Certificate, const FStri
 
 int32 VaRest::WebSocket::Lws::EvaluateServerCertificate(const FSocketTarget& Target, ISslCertificateManager* Certificates, X509_STORE_CTX* Store, int32 PreverifyOk, FString& OutDetail)
 {
-	if (Target.bInsecure)
-	{
-		// Plan decision 24: what LWS's flags allow decides (a self-signed chain, no name check; spec 2.2); no pin check
-		return 0;
-	}
 	int32 Ok = PreverifyOk;
 	const int32 Error = X509_STORE_CTX_get_error(Store);
 	const int32 Depth = X509_STORE_CTX_get_error_depth(Store);
-	if (!Ok && Error == X509_V_ERR_HOSTNAME_MISMATCH && Depth == 0 && Target.bHostIsIp
+	if (!Ok && !Target.bInsecure && Error == X509_V_ERR_HOSTNAME_MISMATCH && Depth == 0 && Target.bHostIsIp
 		&& CertificateMatchesIp(X509_STORE_CTX_get_current_cert(Store), Target.Host))
 	{
 		// VaRest-sjj (plan decision 9, ruling Q3): LWS 3.0 checks an IP host as a DNS name and fails it even with that IP in the
@@ -35,6 +30,13 @@ int32 VaRest::WebSocket::Lws::EvaluateServerCertificate(const FSocketTarget& Tar
 	{
 		OutDetail = FString::Printf(TEXT("the server's certificate was refused: X509 error %d at depth %d (%s)"), Error, Depth, UTF8_TO_TCHAR(X509_verify_cert_error_string(Error)));
 		return 1;
+	}
+	if (Target.bInsecure)
+	{
+		// LWS consumes the errors allowed by its flags before this callback (openssl-client.c.o,
+		// OpenSSL_client_verify_callback 0x23f-0x267, 0x2ca-0x2f0). Remaining errors must reach the refusal above;
+		// only successful insecure verification bypasses pins. Our flags do not include ALLOW_EXPIRED (review I-1).
+		return 0;
 	}
 	// The certificate manager's own check (pinned keys) on what OpenSSL accepted, for the host without its port: the engine's
 	// step (LwsWebSocket.cpp:549-572; ISslCertificateManager.h:58-66)

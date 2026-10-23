@@ -8,15 +8,38 @@
 
 namespace VaRest::WebSocket::Lws::VaRestLwsTlsTestPrivate
 {
+	struct FOutcome
+	{
+		bool bVerified = false;
+		int32 Error = -1;
+		int32 Depth = -1;
+		/** VaRest's verdict/detail, before LWS applies its final store-error check. */
+		int32 Verdict = -1;
+		FString Detail;
+	};
+
+	/** Borrowed only during synchronous X509_verify_cert; detached before the context is destroyed. */
+	struct FVerification
+	{
+		const FSocketTarget& Target;
+		FOutcome& Outcome;
+	};
+
 	/**
 	 * Game thread: OpenSSL's verify callback, forwarding to VaRest's decision with LWS 3.0's convention (libwebsockets.h:1028-1035): a
 	 * verdict of 1 refuses in any case; 0 accepts only when no error is left (VaRest reset it, or there was none)
 	 */
 	int VerifyAsLws(int PreverifyOk, X509_STORE_CTX* Store)
 	{
-		const FSocketTarget* Target = static_cast<const FSocketTarget*>(X509_STORE_CTX_get_app_data(Store));
+		FVerification* Verification = static_cast<FVerification*>(X509_STORE_CTX_get_app_data(Store));
+		if (!Verification)
+		{
+			return 0;
+		}
 		FString Detail;
-		if (!Target || EvaluateServerCertificate(*Target, nullptr, Store, PreverifyOk, Detail) != 0)
+		Verification->Outcome.Verdict = EvaluateServerCertificate(Verification->Target, nullptr, Store, PreverifyOk, Detail);
+		Verification->Outcome.Detail = MoveTemp(Detail);
+		if (Verification->Outcome.Verdict != 0)
 		{
 			return 0;
 		}
@@ -64,13 +87,6 @@ namespace VaRest::WebSocket::Lws::VaRestLwsTlsTestPrivate
 		return Leaf;
 	}
 
-	struct FOutcome
-	{
-		bool bVerified = false;
-		int32 Error = -1;
-		int32 Depth = -1;
-	};
-
 	/** Game thread: OpenSSL's verification of Leaf, Trusted in the store (or nothing), the host name set as LWS 3.0 sets it: an IP host as a DNS name [tls.hostname_ip_literal] */
 	FOutcome Verify(X509* Leaf, X509* Trusted, const FSocketTarget& Target, bool bCheckSignature = false)
 	{
@@ -81,7 +97,8 @@ namespace VaRest::WebSocket::Lws::VaRestLwsTlsTestPrivate
 		{
 			X509_VERIFY_PARAM_set1_host(X509_STORE_CTX_get0_param(Context), TCHAR_TO_UTF8(*Target.Host), 0);
 			X509_STORE_CTX_set_verify_cb(Context, &VerifyAsLws);
-			X509_STORE_CTX_set_app_data(Context, const_cast<FSocketTarget*>(&Target));
+			FVerification Verification { Target, Out };
+			X509_STORE_CTX_set_app_data(Context, &Verification);
 			if (bCheckSignature)
 			{
 				X509_VERIFY_PARAM_set_flags(X509_STORE_CTX_get0_param(Context), X509_V_FLAG_CHECK_SS_SIGNATURE);
@@ -186,6 +203,36 @@ bool FVaRestLwsTlsIpCheckTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("the refusal names the error and depth"), Detail.Contains(TEXT("X509 error 62 at depth 1"), ESearchCase::CaseSensitive));
 	X509_STORE_CTX_free(NonLeaf);
 
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestLwsTlsInsecureRefusalTest, "VaRest.WebSocket.Lws.TlsInsecureRefusal",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestLwsTlsInsecureRefusalTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::WebSocket;
+	using namespace VaRest::WebSocket::Lws::VaRestLwsTlsTestPrivate;
+	EVP_PKEY* Key = MakeKey();
+	X509* ExpiredLeaf = Key ? MakeLeaf(Key, "DNS:localhost", -60) : nullptr;
+	ON_SCOPE_EXIT
+	{
+		X509_free(ExpiredLeaf);
+		EVP_PKEY_free(Key);
+	};
+	if (!TestNotNull(TEXT("the expired leaf is made"), ExpiredLeaf))
+	{
+		return false;
+	}
+	FSocketTarget Insecure = TargetFor(TEXT("localhost"), false);
+	Insecure.bInsecure = true;
+	// LWS consumes allowed self-signed errors before our callback; trust the leaf and match its DNS SAN to isolate expiry.
+	// Our flags omit ALLOW_EXPIRED: OpenSSL rejects even the old early-return implementation. The regression is VaRest's
+	// own refusal and detail, which FConn::OnVerifyServerCertificate maps to PendingFailure=TlsVerification.
+	const FOutcome Expired = Verify(ExpiredLeaf, ExpiredLeaf, Insecure);
+	TestTrue(TEXT("OpenSSL still refuses an expired insecure leaf"), !Expired.bVerified && Expired.Error == X509_V_ERR_CERT_HAS_EXPIRED && Expired.Depth == 0);
+	TestEqual(TEXT("VaRest refuses the insecure expiry, supplying the TlsVerification classification input"), Expired.Verdict, 1);
+	TestTrue(TEXT("VaRest's insecure refusal names X509 error 10 at depth 0"), Expired.Detail.Contains(TEXT("X509 error 10 at depth 0"), ESearchCase::CaseSensitive));
 	return true;
 }
 
