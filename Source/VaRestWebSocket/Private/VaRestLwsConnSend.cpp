@@ -69,7 +69,8 @@ int32 VaRest::WebSocket::Lws::FConn::OnWriteable(lws* InWsi)
 		// Plan decision 6: fragment k is written from the frame's storage, its header in the 16 bytes before it -- the tail of
 		// fragment k-1, which LWS has sent or copied into its own buffer (T10, libwebsockets.h:4914-4930); fragment 0's goes
 		// into the frame's headroom (Offset >= FrameHeadroom), and LWS masks each payload in place (RFC 6455 5.3). FragmentBytes
-		// each (spec 2.4), so a PING or the close frame can go between them (RFC 6455 5.4) [tx.ping_between_fragments]
+		// each (spec 2.4), so a control frame can go between them (RFC 6455 5.4) [tx.ping_between_fragments]: W1b's PING, or a
+		// failure close written after DropOutbox. Our Close() waits for the whole outbox (plan decision 18, Send.CloseAfterData)
 		// FragmentStart and FragmentSize, never Start or Size: a local named like a member function of FConn (Start) is
 		// C4458, an error on MSVC that clang's -Wshadow does not report (review spec I-3)
 		const int64 FragmentStart = static_cast<int64>(NextFragment) * FragmentBytes;

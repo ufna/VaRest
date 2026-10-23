@@ -60,8 +60,9 @@ namespace VaRest::WebSocket::Testing
 		/** Game thread */
 		virtual FLwsCounters GetCounters() const = 0;
 		/**
-		 * Any thread, the service thread included: Shutdown has begun on the service (from its first line, before the flush);
-		 * false before the first connect started it (Task 7 review M-1: a test waits for this, never for a fixed time)
+		 * The game thread or the service thread (from a connection's OnEvents): Shutdown has begun on the service (from its
+		 * first line, before the flush); false before the first connect started it (Task 7 review M-1: a test waits for this,
+		 * never for a fixed time). Not another thread: the transport's service pointer is plain, set on the game thread
 		 */
 		virtual bool IsShuttingDown() const = 0;
 	};

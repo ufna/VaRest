@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "HAL/CriticalSection.h"
 #include "VaRestLwsService.h"
 #include "VaRestSocketTransport.h"
 
@@ -10,7 +11,7 @@ namespace VaRest::WebSocket::Lws
 {
 	/**
 	 * IVaRestSocketTransport on one FService: VaRest's own client on the engine-bundled libwebsockets (spec 2, ruling R1).
-	 * Game thread, GetCounters' pointee and IsShuttingDown excepted (atomics, any thread)
+	 * Game thread, but GetCounters' pointee (atomics, any thread) and IsShuttingDown (the game thread or the service thread)
 	 */
 	class FTransport final : public IVaRestSocketTransport
 	{
@@ -31,8 +32,9 @@ namespace VaRest::WebSocket::Lws
 		/** Game thread: the service's counters (atomics, readable anywhere while the service lives); null before the first start */
 		const FServiceCounters* GetCounters() const;
 		/**
-		 * Any thread, the service thread included: FService::IsShuttingDown (an atomic); false before the first start. The
-		 * pointer is set on the game thread before the service thread starts, and only ResetAfterFork changes it later
+		 * The game thread or the service thread: FService::IsShuttingDown (an atomic); false before the first start. Service
+		 * is a plain TSharedPtr that EnsureStarted assigns on the game thread before the service thread starts, and only
+		 * ResetAfterFork changes it later, so no other thread may read it (Task 8 review M-4)
 		 */
 		bool IsShuttingDown() const;
 
@@ -43,11 +45,37 @@ namespace VaRest::WebSocket::Lws
 		uint64 NextId = 1;
 	};
 
+	/**
+	 * Where the process's transport lives (plan decision 8): made at its first use, and shut down by the engine-exit hook
+	 * whether or not anything used it. GetDefaultTransport reads the process's one; a test makes its own, so it never touches
+	 * the transport other tests share (Task 7 review M-3)
+	 */
+	class FDefaultTransportSlot
+	{
+	public:
+		explicit FDefaultTransportSlot(FServiceOptions InOptions);
+		FDefaultTransportSlot(const FDefaultTransportSlot&) = delete;
+		FDefaultTransportSlot& operator=(const FDefaultTransportSlot&) = delete;
+
+		/** Any thread: the transport, made at the first call (constructing one makes no context and no thread) */
+		TSharedRef<FTransport, ESPMode::ThreadSafe> Get();
+		/**
+		 * Game thread: the engine-exit hook's work. The transport is made first when nothing used it yet, so a first use
+		 * after exit ends with Shutdown instead of starting a context and a thread during exit (Task 7 review M-3)
+		 */
+		void ShutdownForExit();
+
+	private:
+		const FServiceOptions Options;
+		FCriticalSection Lock;
+		TSharedPtr<FTransport, ESPMode::ThreadSafe> Made;
+	};
+
 	/** Game thread: the process's transport (plan decision 8) */
 	FTransport& GetDefault();
 	/** Game thread, StartupModule: plan decision 8's start in a shared LWS copy */
 	void OnModuleStartup();
-	/** Game thread: OnEnginePreExit and ShutdownModule; nothing when the default transport was never made */
+	/** Game thread: OnEnginePreExit and ShutdownModule (FDefaultTransportSlot::ShutdownForExit on the process's slot) */
 	void ShutdownDefault();
 	/** Game thread: OnChildEndFramePostFork */
 	void ResetDefaultAfterFork();

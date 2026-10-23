@@ -3,6 +3,7 @@
 #include "VaRestLwsTransport.h"
 
 #include "Async/Async.h"
+#include "Misc/ScopeLock.h"
 #include "Modules/ModuleManager.h"
 #include "VaRestLwsConn.h"
 #include "VaRestSocketLink.h"
@@ -10,8 +11,16 @@
 
 namespace VaRest::WebSocket::Lws::VaRestLwsTransportPrivate
 {
-	/** Set once GetDefaultTransport made the default transport */
-	std::atomic<bool> bDefaultMade{ false };
+	/**
+	 * The process's slot, leaked on purpose as VaRest::Http::GetDefaultTransport: nothing of it runs at static destruction;
+	 * the engine-exit hook shuts its transport down. A function-local static: its first use from any thread makes it once
+	 * (C++11 [stmt.dcl]/4)
+	 */
+	FDefaultTransportSlot& DefaultSlot()
+	{
+		static FDefaultTransportSlot* const Slot = new FDefaultTransportSlot(FServiceOptions());
+		return *Slot;
+	}
 
 	/**
 	 * The consumer's handle on one FConn (WebSocket spec 1.3): commands go to the service thread, and the link is shared with
@@ -234,22 +243,40 @@ TSharedRef<IVaRestSocketConnection, ESPMode::ThreadSafe> VaRest::WebSocket::Lws:
 	return MakeShared<FHandle, ESPMode::ThreadSafe>(Service, ConnId, Link);
 }
 
+VaRest::WebSocket::Lws::FDefaultTransportSlot::FDefaultTransportSlot(FServiceOptions InOptions)
+	: Options(MoveTemp(InOptions))
+{
+}
+
+TSharedRef<VaRest::WebSocket::Lws::FTransport, ESPMode::ThreadSafe> VaRest::WebSocket::Lws::FDefaultTransportSlot::Get()
+{
+	// Any thread (GetDefaultTransport's promise): the lock makes the first use make it once. FTransport's constructor only
+	// copies the options -- the context and the thread come with its first Connect (EnsureStarted)
+	FScopeLock Guard(&Lock);
+	if (!Made.IsValid())
+	{
+		Made = MakeShared<FTransport, ESPMode::ThreadSafe>(Options);
+	}
+	return Made.ToSharedRef();
+}
+
+void VaRest::WebSocket::Lws::FDefaultTransportSlot::ShutdownForExit()
+{
+	check(IsInGameThread());
+	// Task 7 review M-3: unconditionally, made here if nothing used it yet. Shutdown on a transport that never started only
+	// sets bShutDown, so the first GetDefaultTransport after OnEnginePreExit gets a transport whose Connect ends with Shutdown
+	Get()->Shutdown();
+}
+
 TSharedRef<IVaRestSocketTransport, ESPMode::ThreadSafe> VaRest::WebSocket::GetDefaultTransport()
 {
-	// Leaked on purpose, as VaRest::Http::GetDefaultTransport: nothing of it runs at static destruction; the engine-exit hook
-	// shuts it down. A function-local static: its first use from any thread makes it once (C++11 [stmt.dcl]/4)
-	static TSharedRef<IVaRestSocketTransport, ESPMode::ThreadSafe>* const Instance = []
-	{
-		VaRest::WebSocket::Lws::VaRestLwsTransportPrivate::bDefaultMade = true;
-		return new TSharedRef<IVaRestSocketTransport, ESPMode::ThreadSafe>(
-			MakeShared<VaRest::WebSocket::Lws::FTransport, ESPMode::ThreadSafe>(VaRest::WebSocket::Lws::FServiceOptions()));
-	}();
-	return *Instance;
+	return VaRest::WebSocket::Lws::VaRestLwsTransportPrivate::DefaultSlot().Get();
 }
 
 VaRest::WebSocket::Lws::FTransport& VaRest::WebSocket::Lws::GetDefault()
 {
-	return static_cast<FTransport&>(VaRest::WebSocket::GetDefaultTransport().Get());
+	// The slot keeps the transport for the process's life, so the reference outlives the TSharedRef copy
+	return VaRestLwsTransportPrivate::DefaultSlot().Get().Get();
 }
 
 void VaRest::WebSocket::Lws::OnModuleStartup()
@@ -275,17 +302,12 @@ void VaRest::WebSocket::Lws::OnModuleStartup()
 
 void VaRest::WebSocket::Lws::ShutdownDefault()
 {
-	if (VaRestLwsTransportPrivate::bDefaultMade.load())
-	{
-		GetDefault().Shutdown();
-	}
+	VaRestLwsTransportPrivate::DefaultSlot().ShutdownForExit();
 }
 
 void VaRest::WebSocket::Lws::ResetDefaultAfterFork()
 {
-	if (VaRestLwsTransportPrivate::bDefaultMade.load())
-	{
-		GetDefault().ResetAfterFork();
-	}
+	// A transport made here has no service yet: its ResetAfterFork only clears bShutDown
+	GetDefault().ResetAfterFork();
 	OnModuleStartup();
 }

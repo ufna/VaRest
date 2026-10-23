@@ -384,10 +384,10 @@ void VaRest::WebSocket::Lws::FConn::Release(FService& Service)
 	{
 		return;
 	}
-	bool bTruncated = false;
 	// Spec 1.4: the last handle is gone -- an open connection is closed with 1001 "released", a pending one cancelled (Close
-	// does both); the link discards what follows
-	Close(Service, 1001, CloseReasonBytes(TEXT("released"), bTruncated), EVaRestSocketCloseBy::Client, EVaRestSocketFailure::None);
+	// does both); the link discards what follows. Built by the one helper that builds our close (Task 7 review M-2)
+	FOutboundClose Released = MakeOutboundClose(GetLabel(), 1001, TEXT("released"));
+	Close(Service, Released.Code, MoveTemp(Released.Reason), EVaRestSocketCloseBy::Client, EVaRestSocketFailure::None);
 }
 
 void VaRest::WebSocket::Lws::FConn::UncountTls()

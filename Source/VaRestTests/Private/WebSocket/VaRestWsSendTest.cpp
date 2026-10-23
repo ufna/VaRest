@@ -142,8 +142,10 @@ bool FVaRestWsSendOffsetTest::RunTest(const FString& Parameters)
 			continue;
 		}
 		const FString LongSha = Sha256Hex(Pattern(200000));
-		Events->Connection->Send(MoveTemp(Frame.GetValue()));
+		// The binary first (Task 8 review M-5): a text written from the gap is invalid UTF-8 (0xAA), which ws.py closes with
+		// 1007 (ws.py serve's strict_utf8) -- sent first, it would end the connection before the long frame's row could fail
 		Events->Connection->Send(MoveTemp(LongFrame.GetValue()));
+		Events->Connection->Send(MoveTemp(Frame.GetValue()));
 		Events->Connection->Close(1000, TEXT("done"));
 		Events->WaitEnd();
 		const TArray<FVaRestJson> Messages = JournalEvents(FetchJournal(*this, Site, Key), TEXT("message"));
@@ -151,8 +153,8 @@ bool FVaRestWsSendOffsetTest::RunTest(const FString& Parameters)
 		{
 			continue;
 		}
-		TestEqualSensitive(FString::Printf(TEXT("%s: the payload from its offset, not the gap"), Scheme.Name), Messages[0][TEXT("text")].AsString(), FString(TEXT("offset-ok")));
-		TestEqualSensitive(FString::Printf(TEXT("%s: a long frame at an offset, byte for byte"), Scheme.Name), Messages[1][TEXT("sha256")].AsString(), LongSha);
+		TestEqualSensitive(FString::Printf(TEXT("%s: a long frame at an offset, byte for byte"), Scheme.Name), Messages[0][TEXT("sha256")].AsString(), LongSha);
+		TestEqualSensitive(FString::Printf(TEXT("%s: the payload from its offset, not the gap"), Scheme.Name), Messages[1][TEXT("text")].AsString(), FString(TEXT("offset-ok")));
 	}
 	return true;
 }

@@ -172,6 +172,12 @@ bool FVaRestSocketFakeBeforeOpenTest::RunTest(const FString& Parameters)
 	Connection->PopEvents(Events);
 	TestTrue(TEXT("Open first, then the Drained (spec 2.4)"), Events.Num() == 2 && Events[0].Type == EVaRestSocketEventType::Open
 		&& Events[1].Type == EVaRestSocketEventType::Drained);
+	// Task 8 review M-2: the attempt ends before the test returns
+	Fake.GetLast().ServerClose(1000);
+	Events.Reset();
+	Connection->PopEvents(Events);
+	TestTrue(TEXT("the server's close ends it: Closed 1000 by the server"), Events.Num() == 1 && Events[0].Type == EVaRestSocketEventType::Closed
+		&& Events[0].End.Code == 1000 && Events[0].End.By == EVaRestSocketCloseBy::Server);
 	return true;
 }
 
