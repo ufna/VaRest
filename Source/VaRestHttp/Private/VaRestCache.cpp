@@ -30,6 +30,39 @@ void KeepRetainedValidators(FCacheEntry& Stored)
     Stored.Metadata.LastModified=Stored.Headers.Get(TEXT("Last-Modified"));
 }
 
+// Answer headers are deliberately lossy. Policy is carried independently, and new
+// restrictions are read from the raw304 before hop/protected names are removed.
+FCacheMetadata RevalidatedPolicy(const FCacheEntry& Stored,const FVaRestHeaders& Raw,double Now,FDateTime Utc)
+{
+    FCacheMetadata Result=Stored.Metadata;
+    const auto Fresh=ReadCacheMetadata(Raw,0,Now,Utc);
+    Result.bNoStore|=Fresh.bNoStore;
+    if (Raw.Contains(TEXT("Vary"))) Result.Vary=Fresh.Vary;
+    if (!Raw.Contains(TEXT("Cache-Control")))
+    {
+        // With no freshness update retain the original age anchor, not a new default TTL.
+        // Date/Age/Expires alone cannot establish precedence over a potentially filtered CC.
+        if (Raw.Contains(TEXT("Date")) || Raw.Contains(TEXT("Age")) || Raw.Contains(TEXT("Expires"))) Result.bNoStore=true;
+        return Result;
+    }
+    // Missing stored CC is unknown provenance, even when its parsed lifetime equals
+    // the client default. Do not reconstruct it from the retained header map.
+    if (!Stored.Headers.Contains(TEXT("Cache-Control"))) Result.bNoStore=true;
+    Result.bNoCache=Fresh.bNoCache;
+    Result.bMustRevalidate=Fresh.bMustRevalidate;
+    // Different sentinel defaults reveal a missing explicit lifetime without adding
+    // another parser. no-cache is safe to retain: it permits neither fresh nor stale reuse.
+    if (Fresh.Lifetime!=ReadCacheMetadata(Raw,1,Now,Utc).Lifetime && !Fresh.bNoCache) Result.bNoStore=true;
+    Result.Lifetime=Fresh.Lifetime;
+    Result.StoredAt=Now; Result.StoredUtc=Utc; Result.InitialAge=Fresh.InitialAge;
+    // A new lifetime or a malformed Date cannot erase an inherited age anchor.
+    FDateTime FreshDate;
+    if (!FDateTime::ParseHttpDate(Raw.Get(TEXT("Date")),FreshDate))
+        Result.InitialAge=FMath::Max(Result.InitialAge,Stored.Metadata.InitialAge+FMath::Max(0.0,Now-Stored.Metadata.StoredAt));
+    else if (!Raw.Contains(TEXT("Age"))) Result.InitialAge=FMath::Max(Result.InitialAge,Stored.Metadata.InitialAge);
+    return Result;
+}
+
 class FCacheOperation : public TSharedFromThis<FCacheOperation,ESPMode::ThreadSafe>
 {
 public:
@@ -152,7 +185,7 @@ void FCacheOperation::OnResult(FVaRestAttemptOutcome&& Outcome)
         Updated.Generation=FGuid::NewGuid();
         Updated.Headers=MergeNotModified(Entry->Headers,Outcome.Headers,Entry->Body.Num(),Ex.Verb==TEXT("HEAD"));
         if (Updated.Headers.Contains(TEXT("Content-Type"))) Updated.ContentType=Updated.Headers.Get(TEXT("Content-Type"));
-        Updated.Metadata=ReadCacheMetadata(Updated.Headers,Ex.CachePolicy.DefaultTtlSeconds,Ex.Config->Clock->Now(),FDateTime::UtcNow());
+        Updated.Metadata=RevalidatedPolicy(*Entry,Outcome.Headers,Ex.Config->Clock->Now(),FDateTime::UtcNow());
         Updated.Headers=RetainedHeaders(Ex,Updated.Headers,Updated.Body.Num());
         KeepRetainedValidators(Updated);
         if (!CanContinue()) return;

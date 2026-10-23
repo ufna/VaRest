@@ -11,7 +11,6 @@
 #include "VaRestAuthInternal.h"
 #include "VaRestHttpTesting.h"
 #include "VaRestRetryInternal.h"
-#include "VaRestIdentity.h"
 #include "Misc/Paths.h"
 #include "VaRestTracePoints.h"
 

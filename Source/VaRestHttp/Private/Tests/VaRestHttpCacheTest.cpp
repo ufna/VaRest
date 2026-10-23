@@ -851,4 +851,110 @@ bool FVaRestCacheSessionHeadersTest::RunTest(const FString& Parameters)
     return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestCacheInherited304PolicyTest,"VaRest.Http.Cache.Inherited304Policy",
+ EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+bool FVaRestCacheInherited304PolicyTest::RunTest(const FString& Parameters)
+{
+    using namespace VaRest::Http; using namespace VaRest::Http::Testing; using namespace VaRest::Http::CacheTestPrivate;
+    for (int32 Mode=0;Mode<9;++Mode)
+    {
+        FTestRig Rig; FCleanup Cleanup(Rig); auto Policy=FVaRestCachePolicy::Memory();
+        Policy.DefaultTtlSeconds=60; Policy.bServeStaleOnError=true; Rig.Client.WithCache(Policy);
+        if (Mode<6) Rig.Client.WithRedactedKeys({Mode==3 ? TEXT("Age") : TEXT("Cache-Control")});
+        auto Capture=MakeShared<FCapture,ESPMode::ThreadSafe>(); Rig.Client.Use(Capture,EVaRestStageSlot::Outer);
+        auto Seed=Response(200,TEXT("policy-bytes"),(Mode==5 || Mode==6) ? TEXT("max-age=0") : Mode==0 ? TEXT("no-cache") : Mode==1 ? TEXT("max-age=0,must-revalidate") : Mode==2 ? TEXT("max-age=1") : TEXT("max-age=60"));
+        if (Mode==3) Seed.Headers.Set(TEXT("Age"),TEXT("120"));
+        Rig.Fake->Enqueue(MoveTemp(Seed)); auto A=MakeOutcome<FString>(); Observe(Rig.Client.Get<FString>(TEXT("/inherited-policy")),A).Send();
+        auto FirstEx=Capture->Seen.Pin(); if (!TestTrue(TEXT("seed exchange"),FirstEx.IsValid())) return false;
+        if (!TestTrue(TEXT("policy seed"),Rig.Wait(A))) return false;
+        const FString Key=Internals(*FirstEx).LookupKey;
+        if (Mode==2) Rig.Clock->Advance(1);
+        if (Mode==4 || Mode>=7) Rig.Clock->Advance(60);
+        auto Modified=Response(304,TEXT("")); Modified.Headers.Remove(TEXT("Cache-Control"));
+        if (Mode>=7)
+        {
+            Modified.Headers.Set(TEXT("Cache-Control"),TEXT("max-age=60"));
+            Modified.Headers.Set(TEXT("Date"),Mode==7 ? FString(TEXT("invalid")) : FDateTime::UtcNow().ToHttpDate());
+        }
+        if (Mode==5) Modified.Headers.Set(TEXT("Cache-Control"),TEXT("max-age=60"));
+        if (Mode==6) Modified.Headers.Set(TEXT("Cache-Control"),TEXT("public"));
+        if (Mode==4)
+        {
+            // The filtered max-age equals the client default; numerical equality cannot prove provenance.
+            const auto Date=FDateTime::UtcNow(); Modified.Headers.Set(TEXT("Date"),Date.ToHttpDate());
+            Modified.Headers.Set(TEXT("Expires"),(Date+FTimespan::FromHours(1)).ToHttpDate());
+        }
+        Rig.Fake->Enqueue(MoveTemp(Modified)); auto B=MakeOutcome<FString>(); Observe(Rig.Client.Get<FString>(TEXT("/inherited-policy")),B).Send();
+        auto SecondEx=Capture->Seen.Pin(); if (!TestTrue(TEXT("304 exchange"),SecondEx.IsValid())) return false;
+        if (!TestTrue(TEXT("captured304 response"),Rig.Wait(B)) || !TestEqual(TEXT("conditional wire"),Rig.Fake->NumCalls(),2)) return false;
+        TestTrue(TEXT("304 still satisfies current bytes"),B->Response.bFromCache);
+        if (!TestTrue(TEXT("304 body"),B->Value.IsSet())) return false;
+        TestEqual(TEXT("captured body unchanged"),B->Value.GetValue(),FString(TEXT("policy-bytes")));
+        if (Mode<6) TestFalse(TEXT("protected policy header stays omitted"),B->Response.Headers.Contains(Mode==3 ? TEXT("Age") : TEXT("Cache-Control")));
+        TestEqual(TEXT("unchanged key"),Internals(*SecondEx).LookupKey,Key);
+        if (Mode==1) Rig.Connectivity->ReportOffline();
+        if (Mode==2) Rig.Clock->Advance(1);
+        Rig.Fake->Enqueue(Response(200,TEXT("next-own-wire")));
+        auto C=MakeOutcome<FString>(); Observe(Rig.Client.Get<FString>(TEXT("/inherited-policy")),C).Send();
+        if (!TestTrue(TEXT("following request"),Rig.Wait(C))) return false;
+        TestEqual(TEXT("only explicit valid fresh policy permits hit"),C->Response.bFromCache,Mode==8);
+        if (Mode==1) TestEqual(TEXT("inherited must-revalidate forbids offline stale"),C->Error.Kind,EVaRestErrorKind::Offline);
+        else
+        {
+            TestEqual(TEXT("inherited restriction or valid-date control wire count"),Rig.Fake->NumCalls(),Mode==8 ? 2 : 3);
+            if (!TestTrue(TEXT("following wire body"),C->Value.IsSet())) return false;
+            TestEqual(TEXT("following response owns new bytes"),C->Value.GetValue(),FString(Mode==8 ? TEXT("policy-bytes") : TEXT("next-own-wire")));
+        }
+        TestTrue(TEXT("drain"),Rig.Drain());
+    }
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestCacheRaw304NoStoreTest,"VaRest.Http.Cache.Raw304NoStore",
+ EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+bool FVaRestCacheRaw304NoStoreTest::RunTest(const FString& Parameters)
+{
+    using namespace VaRest::Http; using namespace VaRest::Http::Testing; using namespace VaRest::Http::CacheTestPrivate;
+    FScopedPersistenceTest Disk; FScopedCacheControls Controls; FTestRig Rig; FCleanup Cleanup(Rig); FScopedTraceRecorder Trace;
+    auto Policy=FVaRestCachePolicy::MemoryAndDisk(); Policy.DefaultTtlSeconds=60;
+    Rig.Client.WithStorageDirectories(Disk.Root,Disk.Root).WithCache(Policy);
+    auto Capture=MakeShared<FCapture,ESPMode::ThreadSafe>(); Rig.Client.Use(Capture,EVaRestStageSlot::Outer);
+    const auto State=FClientAccess::State(Rig.Client);
+    Rig.Fake->Enqueue(Response(200,TEXT("durable-original"),TEXT("max-age=0")));
+    auto A=MakeOutcome<FString>(); Observe(Rig.Client.Get<FString>(TEXT("/raw304")),A).Send();
+    auto SeedEx=Capture->Seen.Pin(); if (!TestTrue(TEXT("seed exchange"),SeedEx.IsValid())) return false;
+    if (!TestTrue(TEXT("seed lookup"),Disk.Drain()) || !TestTrue(TEXT("seed response"),Rig.Wait(A)) || !TestTrue(TEXT("seed durable"),Disk.Drain())) return false;
+    const FString Key=Internals(*SeedEx).LookupKey,Identity=Internals(*SeedEx).LookupIdentity;
+    TestTrue(TEXT("seed memory retained"),State->GetMemoryCache().Find(Key).IsValid());
+    State->GetMemoryCache().Clear();
+    auto Modified=Response(304,TEXT(""),TEXT("no-store")); Modified.Headers.Set(TEXT("Connection"),TEXT("Cache-Control"));
+    Rig.Fake->Enqueue(MoveTemp(Modified)); auto B=MakeOutcome<FString>(); auto BHandle=Observe(Rig.Client.Get<FString>(TEXT("/raw304")),B).Send();
+    if (!TestTrue(TEXT("actual persisted seed read"),Disk.Drain()) || !TestTrue(TEXT("raw304 response"),Rig.Wait(B))) return false;
+    TestTrue(TEXT("raw304 returns captured disk bytes"),B->Response.bFromCache);
+    TestEqual(TEXT("current304 keeps revalidated note"),Notes(*Trace.Recorder,BHandle.GetId(),EVaRestTraceNoteKind::CacheRevalidated),1);
+    if (!TestTrue(TEXT("captured bytes"),B->Value.IsSet())) return false;
+    TestEqual(TEXT("captured original"),B->Value.GetValue(),FString(TEXT("durable-original")));
+    TestFalse(TEXT("hop policy not returned"),B->Response.Headers.Contains(TEXT("Cache-Control")));
+    if (!TestEqual(TEXT("conditional call count"),Rig.Fake->NumCalls(),2)) return false;
+    TestEqual(TEXT("actual disk candidate supplies validator"),Rig.Fake->GetCall(1).Request.Headers.Get(TEXT("If-None-Match")),FString(TEXT("\"one\"")));
+    if (!TestTrue(TEXT("invalidation durable"),Disk.Drain())) return false;
+    TestFalse(TEXT("raw304 no-store invalidates memory"),State->GetMemoryCache().Find(Key).IsValid());
+    State->GetMemoryCache().Clear();
+    FScopedPersistenceHooks Hooks(Directory(Rig)); auto Barrier=MakeShared<FPersistenceBarrier,ESPMode::ThreadSafe>(); Hooks.Hooks->BeforeRead=Barrier;
+    ON_SCOPE_EXIT { Barrier->Released=true; Disk.Drain(); Rig.Client.CancelAll(); Rig.Drain(); };
+    Rig.Fake->Enqueue(Response(200,TEXT("cold-own-wire")));
+    auto C=MakeOutcome<FString>(); Observe(Rig.Client.Get<FString>(TEXT("/raw304")),C).Send();
+    auto ColdEx=Capture->Seen.Pin(); if (!TestTrue(TEXT("cold exchange"),ColdEx.IsValid())) return false;
+    if (!TestTrue(TEXT("cold disk lookup really held"),PumpUntil([Barrier] { return Barrier->Entered.load(); }))) return false;
+    TestFalse(TEXT("cold lookup is not inline"),C->IsDone()); Barrier->Released=true;
+    if (!TestTrue(TEXT("cold read handoff"),Disk.Drain()) || !TestTrue(TEXT("cold request result"),Rig.Wait(C))) return false;
+    TestEqual(TEXT("same cold key"),Internals(*ColdEx).LookupKey,Key); TestEqual(TEXT("same cold identity"),Internals(*ColdEx).LookupIdentity,Identity);
+    TestFalse(TEXT("raw304 no-store invalidates disk"),C->Response.bFromCache);
+    if (!TestTrue(TEXT("cold own bytes"),C->Value.IsSet())) return false;
+    TestEqual(TEXT("own wire after cold miss"),C->Value.GetValue(),FString(TEXT("cold-own-wire")));
+    TestEqual(TEXT("third physical call"),Rig.Fake->NumCalls(),3);
+    TestFalse(TEXT("owned gate did not expire"),Barrier->TimedOut.load());
+    return TestTrue(TEXT("drain"),Disk.Drain() && Rig.Drain());
+}
+
 #endif
