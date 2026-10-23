@@ -69,6 +69,11 @@ bool FVaRestLwsProxyAttemptTest::RunTest(const FString& Parameters)
 	// DNS SAN verification succeeds without production IP-literal repair; TCP remains numeric.
 	Spec.Host = FString::Printf(TEXT("localhost:%d"), bTls ? Site.TlsPort : Site.Port);
 	Spec.Path = RequestPath;
+	if (FParse::Param(Command, TEXT("VaRestProxyRedirectControl")))
+	{
+		Spec.SslFlags |= LCCSCF_SKIP_SERVER_CERT_HOSTNAME_CHECK;
+	}
+	const bool bRedirectHostnameSkip = (Spec.SslFlags & LCCSCF_SKIP_SERVER_CERT_HOSTNAME_CHECK) != 0;
 	Spec.AppendHeaders.Add(TEXT("Authorization: Bearer b1-probe-marker"));
 	const double PrimaryBudget = Mode.Equals(TEXT("silent"), ESearchCase::CaseSensitive) ? 30.0 : 8.0;
 	const double Begin = FPlatformTime::Seconds();
@@ -132,6 +137,7 @@ bool FVaRestLwsProxyAttemptTest::RunTest(const FString& Parameters)
 		.Set(TEXT("dropped_events"), Rig.DroppedEventCount())
 		.Set(TEXT("lws_version"), UTF8_TO_TCHAR(lws_get_library_version()))
 		.Set(TEXT("openssl_version"), UTF8_TO_TCHAR(OpenSSL_version(OPENSSL_VERSION)))
+		.Set(TEXT("redirect_hostname_skip"), bRedirectHostnameSkip)
 		.Set(TEXT("events"), Rows);
 	TestTrue(TEXT("trace saved"), FFileHelper::SaveStringToFile(Trace.ToString(), *TraceFile,
 		FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM));

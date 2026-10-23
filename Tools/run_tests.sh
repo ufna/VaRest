@@ -118,14 +118,30 @@ rm -f "$LOG" "$PIDFILE"
 # `, Quit` is a separate console command that never fires and the editor idles forever.
 # The inner shell writes its PID and execs the editor, so the PID file names the editor itself:
 # if `timeout` leaves it behind, exactly that process is killed (never by name or pattern).
+PROXY_CHILD_ENV=(env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u all_proxy -u ALL_PROXY -u no_proxy -u NO_PROXY)
+if [[ -n "${VAREST_LWS_PROXY_ENV:-}" || -n "${VAREST_LWS_PROXY_NO_PROXY:-}" ]]; then
+	[[ "$FILTER" == '^Probe.VaRest.Lws.Proxy.Attempt' && "${VAREST_NO_TESTSERVER:-0}" == 1 ]] || {
+		echo 'run_tests: proxy environment is restricted to the isolated B1 attempt' >&2; exit 2;
+	}
+	[[ "${VAREST_LWS_PROXY_ENV:-}" =~ ^127\.0\.0\.1:([0-9]{1,5})$ ]] || {
+		echo 'run_tests: proxy environment must name a loopback listener' >&2; exit 2;
+	}
+	PROXY_PORT="${BASH_REMATCH[1]}"
+	[[ $((10#$PROXY_PORT)) -gt 0 && $((10#$PROXY_PORT)) -lt 65536 ]] || exit 2
+	[[ -z "${VAREST_LWS_PROXY_NO_PROXY:-}" || "$VAREST_LWS_PROXY_NO_PROXY" == '*' ]] || exit 2
+	PROXY_CHILD_ENV+=("http_proxy=http://${VAREST_LWS_PROXY_ENV}")
+	if [[ -n "${VAREST_LWS_PROXY_NO_PROXY:-}" ]]; then
+		PROXY_CHILD_ENV+=("no_proxy=$VAREST_LWS_PROXY_NO_PROXY")
+	fi
+fi
 START=$SECONDS
 set +e
 # --foreground: without it timeout runs the command in a background process group, so a terminal Ctrl-C no longer
 # reaches the editor and the next run refuses to start ("an editor is running"). The command is the editor itself
 # (exec), so --foreground's "children are not timed out" caveat does not apply.
-# No proxy variables until W1b B1 measures LWS 3.0 behind a proxy (review conc M-12): env execs the editor, so the PID file still names it.
+# Ordinary runs scrub proxy variables; only the exact B1 child may receive a controlled lowercase proxy environment.
 timeout --foreground --kill-after=30 "$TIMEOUT" bash -c 'echo $$ > "$0"; exec "$@"' "$PIDFILE" \
-	env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY "$ENGINE/Engine/Binaries/Linux/UnrealEditor-Cmd" "$PROJECT" \
+	"${PROXY_CHILD_ENV[@]}" "$ENGINE/Engine/Binaries/Linux/UnrealEditor-Cmd" "$PROJECT" \
 	-ExecCmds="Automation RunTests $FILTER; Quit" \
 	-unattended -nullrhi -nosplash -nopause -abslog="$LOG" ${SERVER_ARGS[@]+"${SERVER_ARGS[@]}"} ${VAREST_EXTRA_ARGS:-} >/dev/null 2>&1
 STATUS=$?
