@@ -13,11 +13,13 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
 import urllib.parse
 import uuid
+from unittest.mock import patch
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'Tools' / 'testserver'))
@@ -53,7 +55,7 @@ def write_json(path, value):
     pathlib.Path(path).write_text(json.dumps(value, indent=2, sort_keys=True) + '\n', encoding='utf-8')
 
 
-def direct_json(base, path):
+def direct_json(base, path, *, raw_path=None):
     parsed = urllib.parse.urlsplit(base)
     if parsed.scheme != 'http' or parsed.hostname != '127.0.0.1' or not parsed.port:
         raise ValueError('control must be numeric loopback HTTP')
@@ -62,6 +64,8 @@ def direct_json(base, path):
         conn.request('GET', path)
         response = conn.getresponse()
         body = response.read(2 * 1024 * 1024 + 1)
+        if raw_path is not None:
+            pathlib.Path(raw_path).write_bytes(body)
         if response.status != 200 or len(body) > 2 * 1024 * 1024:
             raise RuntimeError('invalid control response')
         return json.loads(body)
@@ -84,33 +88,69 @@ def child_environment(base, extra, proxy='', no_proxy=''):
 
 
 def check_trace(trace, case_id):
+    if not isinstance(trace, dict):
+        return ['trace root must be an object']
+    events = trace.get('events')
+    if not isinstance(events, list):
+        return ['trace events must be an array']
+    if any(not isinstance(event, dict) for event in events):
+        return ['trace event must be an object']
     problems = []
-    if trace.get('schema') != 1 or trace.get('case') != case_id:
+    if type(trace.get('schema')) is not int or trace['schema'] != 1 or trace.get('case') != case_id:
         problems.append('trace identity/schema')
-    events = trace.get('events', [])
-    if not events or [e.get('seq') for e in events] != list(range(1, len(events) + 1)):
+    if (not events or any(type(e.get('seq')) is not int for e in events)
+            or [e.get('seq') for e in events] != list(range(1, len(events) + 1))):
         problems.append('missing/unordered events')
-    if trace.get('dropped_events') != 0:
+    if type(trace.get('dropped_events')) is not int or trace['dropped_events'] != 0:
         problems.append('dropped trace events')
-    if not trace.get('shutdown_completed'):
+    if trace.get('shutdown_completed') is not True:
         problems.append('context shutdown incomplete')
-    if not trace.get('destroyed'):
+    if trace.get('destroyed') is not True:
         problems.append('attempt destruction not recorded')
-    if not trace.get('primary_completed'):
+    if trace.get('primary_completed') is not True:
         problems.append('attempt observation deadline')
     for event in events:
-        if event.get('reason') == 1:
-            if isinstance(event.get('len'), int) and event['len'] < 0:
-                problems.append('negative callback length')
-            if not isinstance(event.get('input_present'), bool) or not isinstance(event.get('len'), int):
+        if type(event.get('reason')) is not int:
+            problems.append('trace event reason must be an integer')
+            continue
+        if event['reason'] == 1:
+            length = event.get('len')
+            present = event.get('input_present')
+            if type(length) is not int or type(present) is not bool:
                 problems.append('error input metadata missing')
+                continue
+            if length < 0:
+                problems.append('negative callback length')
+                continue
             try:
                 raw = bytes.fromhex(event['hex'])
-                expected = min(event['len'], 256) if event['input_present'] else 0
+                expected = min(length, 256) if present else 0
                 if len(raw) != expected:
                     problems.append('error byte capture differs from length/presence')
             except (KeyError, TypeError, ValueError):
                 problems.append('malformed error hex')
+    return problems
+
+
+def check_journal(journal, label):
+    prefix = label + ' journal '
+    if not isinstance(journal, dict):
+        return [prefix + 'root must be an object']
+    events = journal.get('events')
+    if not isinstance(events, list):
+        return [prefix + 'events must be an array']
+    problems = []
+    if any(not isinstance(event, dict) or not isinstance(event.get('ev'), str) for event in events):
+        problems.append(prefix + 'event must be an object with a string ev')
+    if type(journal.get('dropped')) is not int or journal['dropped'] != 0:
+        problems.append(prefix + 'dropped events')
+    connections = journal.get('connections')
+    if type(connections) is not int or connections < 0:
+        problems.append(prefix + 'connections must be a nonnegative integer')
+    if type(journal.get('ended')) is not bool:
+        problems.append(prefix + 'ended must be a boolean')
+    elif type(connections) is int and connections > 0 and not journal['ended']:
+        problems.append(prefix + 'not ended')
     return problems
 
 
@@ -251,18 +291,16 @@ def run_case(directory, case, plain, tls):
     write_json(directory / 'proxy-b.json', proxy_b.snapshot())
     for label, key in (('source', source_key), ('target', target_key)):
         try:
-            journal = direct_json(plain, '/ws/journal?key=' + key + '&wait_ms=2000')
-            write_json(directory / (label + '.json'), journal)
-            if journal.get('dropped') != 0:
-                errors.append(label + ' journal dropped events')
-            if journal.get('connections', 0) and not journal.get('ended'):
-                errors.append(label + ' journal not ended')
+            journal = direct_json(plain, '/ws/journal?key=' + key + '&wait_ms=2000',
+                                  raw_path=directory / (label + '.json'))
+            errors.extend(check_journal(journal, label))
         except (OSError, ValueError, RuntimeError, http.client.HTTPException) as error:
             errors.append(label + ' control fetch: ' + str(error))
     try:
         trace = json.loads((directory / 'trace.json').read_text())
         errors.extend(check_trace(trace, case_id))
-        if mode in ('env', 'precedence', 'env-noproxy') and not trace.get('configured_proxy_absent'):
+        if (mode in ('env', 'precedence', 'env-noproxy')
+                and (not isinstance(trace, dict) or trace.get('configured_proxy_absent') is not True)):
             errors.append('engine configured proxy not absent; null-fallback claim invalid')
     except (OSError, ValueError) as error:
         errors.append('trace missing/malformed: ' + str(error))
@@ -295,6 +333,96 @@ def run_matrix(out, only):
 
 
 class ControllerTests(unittest.TestCase):
+    @staticmethod
+    def valid_trace():
+        return dict(schema=1, case='env-ws', events=[dict(seq=1, reason=1,
+                    input_present=False, len=0, hex='')], dropped_events=0,
+                    primary_completed=True, shutdown_completed=True, destroyed=True,
+                    configured_proxy_absent=True)
+
+    def test_trace_shapes_rejected(self):
+        for payload in ([], None, {'events': None}, {'events': [None]}):
+            with self.subTest(payload=payload):
+                self.assertTrue(check_trace(payload, 'env-ws'))
+        for field, value in (('schema', True), ('dropped_events', False),
+                             ('primary_completed', 'yes'), ('destroyed', 1),
+                             ('shutdown_completed', [])):
+            with self.subTest(field=field):
+                trace = self.valid_trace()
+                trace[field] = value
+                self.assertTrue(check_trace(trace, 'env-ws'))
+        for field, value in (('seq', True), ('reason', '1'), ('len', False),
+                             ('len', -1), ('input_present', 'false'), ('hex', 17)):
+            with self.subTest(event_field=field, value=value):
+                trace = self.valid_trace()
+                trace['events'][0][field] = value
+                self.assertTrue(check_trace(trace, 'env-ws'))
+
+    def assert_failed_acquisition(self, trace_bytes, journal_bytes, error_text, raw_name):
+        # Synthetic acquisition only: real loopback HTTP/Proxy fixtures, no UE process.
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header('Content-Length', str(len(journal_bytes)))
+                self.end_headers()
+                self.wfile.write(journal_bytes)
+            def log_message(self, *_):
+                pass
+        with tempfile.TemporaryDirectory(prefix='b1-shape-selftest-') as temp:
+            host = pathlib.Path(temp) / 'host'
+            (host / 'Saved/Logs').mkdir(parents=True)
+            (host / 'Saved/Logs/VaRestTests.log').write_text('SYNTHETIC; no UE launched\n')
+            out = pathlib.Path(temp) / 'acquisition'
+            with http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler) as server:
+                thread = threading.Thread(target=server.serve_forever, kwargs={'poll_interval': .05})
+                thread.start()
+                @contextlib.contextmanager
+                def synthetic_target(_directory):
+                    yield ('http://127.0.0.1:%d' % server.server_port,
+                           'https://127.0.0.1:%d' % server.server_port)
+                def synthetic_runner(env, output):
+                    args = env['VAREST_EXTRA_ARGS'].split()
+                    trace_path = next(a.split('=', 1)[1] for a in args if a.startswith('-VaRestProxyTrace='))
+                    pathlib.Path(trace_path).write_bytes(trace_bytes)
+                    output.write_text('SYNTHETIC; no UE launched\n')
+                    return 0
+                try:
+                    with patch(__name__ + '.target_server', synthetic_target), \
+                         patch(__name__ + '.invoke_runner', synthetic_runner), \
+                         patch.dict(os.environ, {'VAREST_HOST': str(host)}):
+                        self.assertEqual(run_matrix(out, 'env-ws'), 1)
+                    case = json.loads((out / 'env-ws/case.json').read_text())
+                    self.assertTrue(any(error_text in e for e in case['harness_errors']), case)
+                    manifest = json.loads((out / 'manifest.json').read_text())
+                    self.assertEqual(manifest['results'], [dict(case='env-ws', harness_ok=False)])
+                    self.assertTrue(manifest['acquisition_only'])
+                    expected_raw = trace_bytes if raw_name == 'trace.json' else journal_bytes
+                    self.assertEqual((out / 'env-ws' / raw_name).read_bytes(), expected_raw)
+                    hashes = json.loads((out / 'sha256.json').read_text())
+                    for name in ('manifest.json', 'env-ws/case.json', 'env-ws/' + raw_name):
+                        self.assertEqual(hashes[name], hashlib.sha256((out / name).read_bytes()).hexdigest())
+                    for name in ('proxy-a.json', 'proxy-b.json'):
+                        self.assertEqual(json.loads((out / 'env-ws' / name).read_text())['active'], 0)
+                finally:
+                    server.shutdown()
+                    thread.join(1)
+                    self.assertFalse(thread.is_alive())
+
+    def test_malformed_trace_persists_failed_acquisition(self):
+        journal = b'{"connections":0,"ended":false,"dropped":0,"events":[]}'
+        for raw in (b' [ ] \n', b'{"events":null}', b'{"events":[null]}'):
+            with self.subTest(raw=raw):
+                self.assert_failed_acquisition(raw, journal, 'trace', 'trace.json')
+
+    def test_malformed_journal_persists_failed_acquisition(self):
+        trace = json.dumps(self.valid_trace()).encode()
+        for raw in (b' [ ] \n', b'{"events":null}', b'{"events":[null]}',
+                    b'{"connections":"zero","ended":false,"dropped":0,"events":[]}',
+                    b'{"connections":0,"ended":"false","dropped":false,"events":[]}',
+                    b'{"connections":0,"ended":false,"dropped":0,"events":[{"ev":null}]}'):
+            with self.subTest(raw=raw):
+                self.assert_failed_acquisition(trace, raw, 'journal', 'source.json')
+
     def test_child_environment_is_explicit(self):
         base = dict(http_proxy='secret', HTTPS_PROXY='secret', no_proxy='*',
                     VAREST_LWS_PROXY_ENV='old', VAREST_EXTRA_ARGS='old', PATH='/bin')
