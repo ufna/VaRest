@@ -127,6 +127,8 @@ namespace VaRest::WebSocket::Lws
 		TArray<FVaRestSocketFrame> Outbox;
 		/** Bytes of a write LWS still holds (lws_partial_buffered); released once it says the write drained */
 		int64 HeldBytes = 0;
+		/** Fragments of Outbox[0] already written (plan decision 6); 0 at a message boundary */
+		int32 NextFragment = 0;
 		// ---- our close (spec 2.5)
 		bool bCloseQueued = false;
 		bool bCloseSent = false;

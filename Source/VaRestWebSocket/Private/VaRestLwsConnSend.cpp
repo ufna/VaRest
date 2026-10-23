@@ -1,6 +1,6 @@
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 
-// FConn's write path (WebSocket spec 2.4, 2.5): whole messages here, one lws_write per WRITEABLE; Task 8 fragments them
+// FConn's write path (WebSocket spec 2.4, 2.5): one lws_write per WRITEABLE, a message in fragments of FragmentBytes
 
 #include "VaRestLwsConn.h"
 
@@ -66,16 +66,36 @@ int32 VaRest::WebSocket::Lws::FConn::OnWriteable(lws* InWsi)
 	if (Outbox.Num() > 0)
 	{
 		FVaRestSocketFrame& Head = Outbox[0];
-		const int64 FrameSize = Head.Length;
-		const int32 Protocol = Head.Kind == EVaRestSocketFrameKind::Text ? LWS_WRITE_TEXT : LWS_WRITE_BINARY;
-		// One lws_write per WRITEABLE: a second in one callback returns -1 and is lost (spec 2.4) [tx.two_writes_one_writeable].
-		// The frame header goes into the FrameHeadroom bytes before the payload, and LWS masks the payload in place (RFC 6455 5.3)
-		const int Wrote = lws_write(InWsi, Head.Storage.GetData() + Head.Offset, static_cast<size_t>(FrameSize), static_cast<lws_write_protocol>(Protocol));
-		// LWS sent the bytes or copied the rest into its own buffer (T10, libwebsockets.h:4914-4930): the frame can go
-		Outbox.RemoveAt(0);
+		// Plan decision 6: fragment k is written from the frame's storage, its header in the 16 bytes before it -- the tail of
+		// fragment k-1, which LWS has sent or copied into its own buffer (T10, libwebsockets.h:4914-4930); fragment 0's goes
+		// into the frame's headroom (Offset >= FrameHeadroom), and LWS masks each payload in place (RFC 6455 5.3). FragmentBytes
+		// each (spec 2.4), so a PING or the close frame can go between them (RFC 6455 5.4) [tx.ping_between_fragments]
+		// FragmentStart and FragmentSize, never Start or Size: a local named like a member function of FConn (Start) is
+		// C4458, an error on MSVC that clang's -Wshadow does not report (review spec I-3)
+		const int64 FragmentStart = static_cast<int64>(NextFragment) * FragmentBytes;
+		const int32 FragmentSize = static_cast<int32>(FMath::Min<int64>(FragmentBytes, Head.Length - FragmentStart));
+		const bool bLast = FragmentStart + FragmentSize >= Head.Length;
+		int32 Protocol = NextFragment == 0 ? (Head.Kind == EVaRestSocketFrameKind::Text ? LWS_WRITE_TEXT : LWS_WRITE_BINARY) : LWS_WRITE_CONTINUATION;
+		if (!bLast)
+		{
+			// T10: NO_FIN, then CONTINUATION, one frame each, as written [tx.no_fin_frames]
+			Protocol |= LWS_WRITE_NO_FIN;
+		}
+		// One lws_write per WRITEABLE: a second in one callback returns -1 and is lost (spec 2.4) [tx.two_writes_one_writeable]
+		const int Wrote = lws_write(InWsi, Head.Storage.GetData() + Head.Offset + FragmentStart, static_cast<size_t>(FragmentSize), static_cast<lws_write_protocol>(Protocol));
+		if (bLast)
+		{
+			Outbox.RemoveAt(0);
+			NextFragment = 0;
+		}
+		else
+		{
+			++NextFragment;
+		}
 		if (Wrote < 0)
 		{
-			Link->BufferedBytes.fetch_sub(FrameSize);
+			// This fragment is neither in the outbox nor released: it leaves the count here, the rest in DropOutbox (EndOpen)
+			Link->BufferedBytes.fetch_sub(FragmentSize);
 			EndOpen(1006, FString(), false, EVaRestSocketCloseBy::Transport, EVaRestSocketFailure::None, TEXT("lws_write failed"));
 			return -1;
 		}
@@ -83,11 +103,11 @@ int32 VaRest::WebSocket::Lws::FConn::OnWriteable(lws* InWsi)
 		// [tx.partial_after_fragment]. lws_partial_buffered says LWS still holds part of this one [tx.large_write_result]
 		if (lws_partial_buffered(InWsi))
 		{
-			HeldBytes += FrameSize;
+			HeldBytes += FragmentSize;
 		}
 		else
 		{
-			Link->ReleaseBuffered(FrameSize);
+			Link->ReleaseBuffered(FragmentSize);
 		}
 		if (Outbox.Num() > 0 || bCloseQueued || HeldBytes > 0)
 		{
@@ -123,11 +143,13 @@ void VaRest::WebSocket::Lws::FConn::ReleaseHeld()
 void VaRest::WebSocket::Lws::FConn::DropOutbox()
 {
 	int64 Bytes = HeldBytes;
-	for (const FVaRestSocketFrame& Frame : Outbox)
+	for (int32 Index = 0; Index < Outbox.Num(); ++Index)
 	{
-		Bytes += Frame.Length;
+		// The fragments of the head already written were released (or are held, counted above)
+		Bytes += Outbox[Index].Length - (Index == 0 ? static_cast<int64>(NextFragment) * FragmentBytes : 0);
 	}
 	Outbox.Empty();
+	NextFragment = 0;
 	HeldBytes = 0;
 	if (Bytes > 0)
 	{
