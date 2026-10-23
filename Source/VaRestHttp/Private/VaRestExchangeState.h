@@ -235,6 +235,9 @@ namespace VaRest::Http
 		 * a game-thread Send() is covered, and so is the Enter task of a request sent from another thread (one extra hop).
 		 */
 		int32 ApiDepth = 0;
+		/** Accepted waits own their API-stack completion until terminal Complete. */
+		bool bPersistenceOwned = false;
+		uint64 PersistenceCompletionTicket = 0;
 		/**
 		 * Spec 4.8: Enter counted this exchange as a request in flight (FHttpStats::RequestStarted). Set once, never cleared:
 		 * an exchange entered a second time (the VaRest.Http.Auth.InFlightEntryIsTheExchange case) is still one request, and

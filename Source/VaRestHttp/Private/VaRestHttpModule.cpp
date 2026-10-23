@@ -5,6 +5,7 @@
 #include "VaRestClientState.h"
 #include "VaRestHttpLog.h"
 #include "VaRestRedactionPipe.h"
+#include "VaRestPersistence.h"
 #include "VaRestTrace.h"
 #include "VaRestTracePoints.h"
 
@@ -16,6 +17,7 @@ public:
 	virtual void StartupModule() override
 	{
 		VaRest::Http::StartRedactionPipe();
+		VaRest::Http::StartPersistence();
 		// Ordering: OnEnginePreExit fires before any module shuts down (CoreDelegates.h:261-262; GEngine->PreExit() at
 		// LaunchEngineLoop.cpp:5065 precedes UnloadModulesAtShutdown at :5182). Modules then shut down last-loaded first
 		// (ModuleManager.cpp:1458), so the HTTP module, loaded lazily after this one, can be gone before our ShutdownModule
@@ -24,7 +26,11 @@ public:
 		// request that completes during that teardown still gets its callbacks. An automation run's Quit force-exits
 		// (AutomationCommandline.cpp:504; on Linux a forced RequestExit is _exit, UnixPlatformMisc.cpp:350), so neither
 		// this hook nor ShutdownModule runs there.
-		PreExitHandle = FCoreDelegates::OnEnginePreExit.AddStatic(&VaRest::Http::FClientState::CancelForShutdown);
+		PreExitHandle = FCoreDelegates::OnEnginePreExit.AddLambda([]
+		{
+			VaRest::Http::FClientState::CancelForShutdown();
+			VaRest::Http::StopPersistence();
+		});
 		// IN-12: a sink that attaches late learns the live clients and in-flight requests. OnBuildSnapshot and the live-client
 		// registry it walks are leaked singletons (review I-4), so neither runs anything at static destruction.
 		SnapshotHandle = FVaRestTrace::OnBuildSnapshot().AddStatic(&VaRest::Http::TracePoints::ContributeSnapshot);
@@ -34,6 +40,7 @@ public:
 	{
 		FVaRestTrace::OnBuildSnapshot().Remove(SnapshotHandle);
 		FCoreDelegates::OnEnginePreExit.Remove(PreExitHandle);
+		VaRest::Http::StopPersistence();
 		VaRest::Http::StopRedactionPipe();
 	}
 

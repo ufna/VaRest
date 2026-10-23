@@ -168,6 +168,17 @@ namespace VaRest::Http::Testing
 		}
 	}
 
+	/** Private root, worker cleanup, and owned persistence quiescence for HTTP and integration tests. */
+	struct VARESTHTTP_API FScopedPersistenceTest
+	{
+		FString Root;
+		FScopedPersistenceTest();
+		~FScopedPersistenceTest();
+		FScopedPersistenceTest(const FScopedPersistenceTest&) = delete;
+		FScopedPersistenceTest& operator=(const FScopedPersistenceTest&) = delete;
+		bool Drain(double TimeoutSeconds = 5.0) const;
+	};
+
 	/** A client on the fake transport and the virtual clock (spec 7.1). Game thread. */
 	struct VARESTHTTP_API FTestRig
 	{

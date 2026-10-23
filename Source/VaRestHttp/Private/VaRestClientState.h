@@ -93,6 +93,8 @@ namespace VaRest::Http
 		void OnAttemptDone(const FVaRestExchangeRef& Exchange, FDispatchTag&& Tag, FVaRestTransportResult&& Result, FVaRestOutcomeCallback&& OnOutcome);
 		/** Game thread */
 		int32 NumInFlight() const { return InFlight.Num(); }
+		/** GT: ordinary global completion wrappers; accepted persistence uses its own reserved slot. */
+		int32 PendingApiCompletionWrappers = 0;
 		/** Game thread */
 		FLimiter& GetLimiter() { return Limiter; }
 		/** This client's share of stat VaRest (concurrency review M-13: what a test compares exactly). Any thread. */

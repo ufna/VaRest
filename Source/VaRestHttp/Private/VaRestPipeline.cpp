@@ -2,6 +2,7 @@
 
 #include "Misc/Guid.h"
 #include "VaRestClientState.h"
+#include "VaRestPersistence.h"
 
 #include "HAL/FileManager.h"
 #include "Tasks/Task.h"
@@ -1139,22 +1140,31 @@ void VaRest::Http::FClientState::Complete(const FVaRestExchangeRef& Exchange, FF
 		// cancel flag is set: see below), so finishing here would leave nothing to deliver to and lose every callback.
 		return;
 	}
-	if (Ex.ApiDepth > 0)
+	const bool bOwnedSilentShutdown = Ex.bPersistenceOwned && Ex.CancelReason == EVaRestCancelReason::Shutdown;
+	if (Ex.ApiDepth > 0 && !bOwnedSilentShutdown)
 	{
-		// Decision 3: never inside Send() or Cancel(); the callbacks run from a later game-thread task. The answer is
-		// accepted now (Task 8 review minor 1): until that task runs, nothing proceeds and no second outcome is taken, and
-		// a stage's wait ends here as it would when Complete finishes (concurrency review M-3) -- its Canceled meets
-		// OnChainDone's guard. Inside a game-thread Send() a backoff could otherwise fire first (a virtual clock advanced
-		// before the next pump; a 0 s delay armed inside a core-ticker delegate: FTSTicker fires at CurrentTime + Delay and
-		// runs tickers added during its Tick in that same Tick, Ticker.cpp:26, :93-94, :139-140).
 		Ex.bCompletionQueued = true;
 		EndWaits(Ex);
-		OnGameThread(TEXT("VaRest.Complete"), [Exchange, Pending = MoveTemp(Finish)]() mutable
+		if (Ex.bPersistenceOwned)
 		{
-			Internals(*Exchange).State->Complete(Exchange, MoveTemp(Pending));
-		});
+			check(Ex.PersistenceCompletionTicket != 0);
+			SetPersistenceCompletion(Ex.PersistenceCompletionTicket,
+			                         [Exchange, Pending = MoveTemp(Finish)]() mutable { Internals(*Exchange).State->Complete(Exchange, MoveTemp(Pending)); });
+			return;
+		}
+		++PendingApiCompletionWrappers;
+		OnGameThread(TEXT("VaRest.Complete"),
+		             [Exchange, Pending = MoveTemp(Finish)]() mutable
+		             {
+			             const auto Client = Internals(*Exchange).State;
+			             --Client->PendingApiCompletionWrappers;
+			             Client->Complete(Exchange, MoveTemp(Pending));
+		             });
 		return;
 	}
+	ReleasePersistenceCompletion(Ex.PersistenceCompletionTicket);
+	Ex.PersistenceCompletionTicket = 0;
+
 	if (IsOwnerGone(Ex))
 	{
 		// Spec 3.2: owner gone -> no callbacks, whatever canceled it first (a Cancel() in the owner's EndPlay, review C-2)

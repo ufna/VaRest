@@ -12,6 +12,10 @@
 #include "Misc/ScopeLock.h"
 #include "String/Find.h"
 #include "VaRestRedactionPipe.h"
+#include "VaRestPersistence.h"
+#include "HAL/PlatformFileManager.h"
+#include "Misc/Paths.h"
+#include "Misc/Guid.h"
 
 #if !UE_BUILD_SHIPPING
 VaRest::Http::Testing::FTestCounters& VaRest::Http::Testing::Counters()
@@ -36,12 +40,14 @@ bool VaRest::Http::Testing::PumpUntil(TFunctionRef<bool()> Done, double TimeoutS
 	double LastTick = FPlatformTime::Seconds();
 	for (;;)
 	{
+		VaRest::Http::PumpPersistence();
 		FTaskGraphInterface::Get().ProcessThreadUntilIdle(ENamedThreads::GameThread);
 		if (bTickCoreTicker)
 		{
 			const double Now = FPlatformTime::Seconds();
 			FTSTicker::GetCoreTicker().Tick(static_cast<float>(Now - LastTick));
 			LastTick = Now;
+			VaRest::Http::PumpPersistence();
 			FTaskGraphInterface::Get().ProcessThreadUntilIdle(ENamedThreads::GameThread);
 		}
 		if (Done())
@@ -130,22 +136,29 @@ bool VaRest::Http::Testing::FTestRig::Drain(double TimeoutSeconds) const
 	// zero with its result still queued
 	const auto Started = [this]
 	{
-		return static_cast<int64>(Fake->NumCompletionsQueued()) + Counters().DecodeTasksLaunched.load();
+		return static_cast<int64>(Fake->NumCompletionsQueued()) + Counters().DecodeTasksLaunched.load()
+			+ static_cast<int64>(PersistenceCounters().Launched.load());
 	};
 	const auto Settled = [this]
 	{
-		return Fake->NumCompletionsRun() == Fake->NumCompletionsQueued() && Counters().DecodeTasksHandedBack.load() == Counters().DecodeTasksLaunched.load();
+		return Fake->NumCompletionsRun() == Fake->NumCompletionsQueued() && Counters().DecodeTasksHandedBack.load() == Counters().DecodeTasksLaunched.load()
+			&& PersistenceCounters().HandedBack.load() == PersistenceCounters().Launched.load();
 	};
 	for (;;)
 	{
+		if (FPlatformTime::Seconds() >= Deadline)
+		{
+			return false;
+		}
 		// Each worker counts itself done after it queued its game-thread task, so once settled, all of that is queued
 		if (!PumpUntil(Settled, FMath::Max(0.0, Deadline - FPlatformTime::Seconds())))
 		{
 			return false;
 		}
 		const int64 Before = Started();
+		VaRest::Http::PumpPersistence();
 		FTaskGraphInterface::Get().ProcessThreadUntilIdle(ENamedThreads::GameThread);
-		if (Started() == Before)
+		if (Started() == Before && PersistenceCounters().Delivered.load() == PersistenceCounters().Launched.load() && PersistenceIdle())
 		{
 			return true;
 		}
@@ -259,5 +272,51 @@ VaRest::Http::Testing::FScopedTraceRecorder::~FScopedTraceRecorder()
 {
 	// Before Isolation's destructor restores the outer list (members die in reverse order)
 	FVaRestTrace::RemoveSink(Recorder);
+}
+VaRest::Http::Testing::FScopedPersistenceTest::FScopedPersistenceTest()
+    : Root(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("VaRestTests"), FGuid::NewGuid().ToString(EGuidFormats::DigitsLower)))
+{
+}
+bool VaRest::Http::Testing::FScopedPersistenceTest::Drain(double TimeoutSeconds) const
+{
+	const double Deadline = FPlatformTime::Seconds() + TimeoutSeconds;
+	for (;;)
+	{
+		if (FPlatformTime::Seconds() >= Deadline)
+		{
+			return false;
+		}
+		if (!PumpUntil(
+		        []
+		        {
+			        const auto& Counts = PersistenceCounters();
+			        return Counts.Launched.load() == Counts.HandedBack.load();
+		        },
+		        FMath::Max(0.0, Deadline - FPlatformTime::Seconds())))
+			return false;
+		const uint64 Before = PersistenceCounters().Launched.load();
+		PumpPersistence();
+		FTaskGraphInterface::Get().ProcessThreadUntilIdle(ENamedThreads::GameThread);
+		if (Before == PersistenceCounters().Launched.load() && Before == PersistenceCounters().Delivered.load() && PersistenceIdle())
+			return true;
+	}
+}
+VaRest::Http::Testing::FScopedPersistenceTest::~FScopedPersistenceTest()
+{
+	// Every barrier guard is declared after this fixture and therefore releases before this destructor.
+	if (!Drain())
+	{
+		ensureMsgf(false, TEXT("persistence test did not drain"));
+		return;
+	}
+	LaunchPersistence(
+	    [Directory = Root]
+	    {
+		    FIoResult Result;
+		    Result.bOk = FPlatformFileManager::Get().GetPlatformFile().DeleteDirectoryRecursively(*Directory);
+		    return Result;
+	    },
+	    [](FIoResult&&) {});
+	ensure(Drain());
 }
 #endif // WITH_DEV_AUTOMATION_TESTS
