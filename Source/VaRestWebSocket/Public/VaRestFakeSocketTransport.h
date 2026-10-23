@@ -34,7 +34,9 @@ class VARESTWEBSOCKET_API FVaRestFakeSocketAttempt final
 public:
 	FVaRestFakeSocketAttempt(int32 InIndex, FVaRestSocketConnectRequest&& InRequest, TFunction<void()> InOnEvents);
 
+	/** Any thread: fixed at Connect */
 	int32 GetIndex() const { return Index; }
+	/** Any thread: the request as Connect was given it, fixed from then on */
 	const FVaRestSocketConnectRequest& GetRequest() const { return Request; }
 
 	// ---- the server's side (game thread); after the terminal event each one is dropped, with an Error log line
@@ -53,14 +55,21 @@ public:
 	/** Bytes of the consumer's sends (all, by default) reach "the socket": the buffered amount falls, Drained per spec 2.4 */
 	FVaRestFakeSocketAttempt& Flush(int64 Bytes = MAX_int64);
 
-	/** true (default): the consumer's Close on an open attempt is answered at once -- Closed, By Client, clean, its code and reason. false: the test ends it */
+	/** Game thread. true (default): the consumer's Close on an open attempt is answered at once -- Closed, By Client, clean, its code and reason. false: the test ends it */
 	bool bEchoClose = true;
 
 	// ---- what the consumer did
+	/** Game thread: the frames Send accepted, in order */
 	const TArray<FVaRestSocketFrame>& GetSent() const { return Sent; }
+	/** Game thread: the consumer called Close, or its release closed or cancelled the attempt */
 	bool WasCloseRequested() const { return bCloseRequested; }
-	/** The close as the real transport sends it: the code sanitised, the reason cut (spec 3.5) */
+	/**
+	 * Game thread: the close as the real transport sends it -- the code sanitised, the reason cut (spec 3.5). For an attempt
+	 * that was pending, nothing is sent (plan decision 5: it is cancelled); this is then the Close it was given, sanitised,
+	 * 1001 "released" for a release
+	 */
 	int32 GetCloseCode() const { return CloseCode; }
+	/** Game thread: the reason of GetCloseCode's close, as UTF-8 decoded */
 	const FString& GetCloseReason() const { return CloseReason; }
 	/**
 	 * Any thread: release and Consumed may come from the consumer's thread (W3's pipe), so both are atomic (review conc M-4).
@@ -68,7 +77,9 @@ public:
 	 */
 	bool WasReleased() const { return bReleased.load(std::memory_order_acquire); }
 	int64 GetConsumed() const { return ConsumedBytes.load(std::memory_order_relaxed); }
+	/** Game thread: Open was scripted and the attempt has not ended */
 	bool IsOpen() const { return bOpen && !HasEnded(); }
+	/** Any thread: the terminal event is queued (or, after the release, would have been) */
 	bool HasEnded() const;
 
 private:
@@ -107,6 +118,7 @@ public:
 	/** Runs for each attempt as Connect starts it: script it there (Open, Fail, ...) or later through GetAttempt */
 	TFunction<void(FVaRestFakeSocketAttempt&)> OnConnect;
 
+	/** Game thread, as the rest of the class */
 	int32 NumAttempts() const { return Attempts.Num(); }
 	FVaRestFakeSocketAttempt& GetAttempt(int32 InIndex) const { return *Attempts[InIndex]; }
 	FVaRestFakeSocketAttempt& GetLast() const { return *Attempts.Last(); }

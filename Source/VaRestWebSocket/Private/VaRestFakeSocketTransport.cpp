@@ -8,6 +8,15 @@
 #include "VaRestSocketLink.h"
 #include "VaRestWebSocketLog.h"
 
+namespace VaRest::WebSocket::VaRestFakeSocketTransportPrivate
+{
+	/** The attempt's name in log lines: the request's LogName, as the real transport uses it, else "fake#<index>" */
+	FString MakeFakeLabel(int32 InIndex, const FVaRestSocketConnectRequest& InRequest)
+	{
+		return InRequest.LogName.IsEmpty() ? FString::Printf(TEXT("fake#%d"), InIndex) : InRequest.LogName;
+	}
+}
+
 /** The consumer's handle on a fake attempt; its destruction is the release */
 class FVaRestFakeSocketConnection final : public IVaRestSocketConnection
 {
@@ -48,7 +57,9 @@ private:
 FVaRestFakeSocketAttempt::FVaRestFakeSocketAttempt(int32 InIndex, FVaRestSocketConnectRequest&& InRequest, TFunction<void()> InOnEvents)
 	: Index(InIndex)
 	, Request(MoveTemp(InRequest))
-	, Link(MakeShared<VaRest::WebSocket::FSocketLink, ESPMode::ThreadSafe>(MoveTemp(InOnEvents)))
+	// Request is initialised first (declaration order), so the label reads the moved-in request
+	, Link(MakeShared<VaRest::WebSocket::FSocketLink, ESPMode::ThreadSafe>(MoveTemp(InOnEvents),
+		VaRest::WebSocket::VaRestFakeSocketTransportPrivate::MakeFakeLabel(InIndex, Request)))
 {
 }
 
@@ -176,8 +187,9 @@ bool FVaRestFakeSocketAttempt::OnSend(FVaRestSocketFrame&& Frame)
 		return false;
 	}
 	++ConsumerDepth;
-	Link->BufferedBytes.fetch_add(Frame.Length, std::memory_order_relaxed);
-	Link->NoteBuffered(Request.SendHighWater);
+	// The mark is decided on what this add produced (review I-1), as the real handle passes it on to the service thread
+	const int64 After = Link->BufferedBytes.fetch_add(Frame.Length, std::memory_order_relaxed) + Frame.Length;
+	Link->NoteBuffered(After, Request.SendHighWater);
 	Sent.Add(MoveTemp(Frame));
 	--ConsumerDepth;
 	return true;
@@ -186,16 +198,18 @@ bool FVaRestFakeSocketAttempt::OnSend(FVaRestSocketFrame&& Frame)
 void FVaRestFakeSocketAttempt::OnClose(int32 Code, FStringView Reason)
 {
 	check(IsInGameThread());
+	// The real handle's spec 3.5 rule and its Warnings, from the same function (review I-2), at every call as the real
+	// handle logs them -- before the early return
+	const VaRest::WebSocket::FOutboundClose Outbound = VaRest::WebSocket::MakeOutboundClose(Link->GetLabel(), Code, Reason);
 	if (HasEnded() || bCloseRequested)
 	{
 		return;
 	}
 	++ConsumerDepth;
-	bool bReplaced = false;
-	bool bTruncated = false;
-	CloseCode = VaRest::WebSocket::SanitizeCloseCode(Code, bReplaced);
-	const TArray<uint8> Bytes = VaRest::WebSocket::CloseReasonBytes(Reason, bTruncated);
-	CloseReason = Bytes.Num() > 0 ? FString::ConstructFromPtrSize(reinterpret_cast<const UTF8CHAR*>(Bytes.GetData()), Bytes.Num()) : FString();
+	CloseCode = Outbound.Code;
+	CloseReason = Outbound.Reason.Num() > 0
+		? FString::ConstructFromPtrSize(reinterpret_cast<const UTF8CHAR*>(Outbound.Reason.GetData()), Outbound.Reason.Num())
+		: FString();
 	bCloseRequested = true;
 	if (!bOpen)
 	{

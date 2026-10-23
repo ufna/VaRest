@@ -97,6 +97,8 @@ bool FVaRestSocketFakeConsumerCallTest::RunTest(const FString& Parameters)
 
 	const TSharedRef<IVaRestSocketConnection, ESPMode::ThreadSafe> Open = Fake.Connect(Request(TEXT("ws://fake.test/c")));
 	Fake.GetLast().Open();
+	// Review I-2: the Warning IVaRestSocketConnection::Close promises, as the real handle logs it, naming the third attempt
+	AddExpectedMessagePlain(TEXT("fake#2: close code 1006 cannot be sent"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
 	Open->Close(1006, TEXT("bad code"));
 	TestTrue(TEXT("the close is recorded as it would be sent: 1006 becomes 1000"), Fake.GetLast().WasCloseRequested() && Fake.GetLast().GetCloseCode() == 1000);
 	VaRest::Http::Testing::PumpUntil([Open] { return Open->HasEnded(); });
@@ -158,7 +160,8 @@ bool FVaRestSocketFakeTerminalTest::RunTest(const FString& Parameters)
 	TSharedPtr<IVaRestSocketConnection, ESPMode::ThreadSafe> Connection = Fake.Connect(Request(TEXT("ws://fake.test/e")));
 	Fake.GetLast().Open().Drop();
 	// Plan decision 2: nothing after the terminal event
-	AddExpectedErrorPlain(TEXT("after the connection's terminal event was dropped"), EAutomationExpectedErrorFlags::Contains, 1);
+	// The line names the attempt (review M-1): the request has no LogName, so the fake's own "fake#<index>"
+	AddExpectedErrorPlain(TEXT("fake#0: an event (Message) after the connection's terminal event was dropped"), EAutomationExpectedErrorFlags::Contains, 1);
 	Fake.GetLast().Text(TEXT("after the end"));
 	TArray<FVaRestSocketEvent> Events;
 	Connection->PopEvents(Events);
@@ -166,6 +169,38 @@ bool FVaRestSocketFakeTerminalTest::RunTest(const FString& Parameters)
 	FVaRestFakeSocketAttempt& Attempt = Fake.GetLast();
 	Connection.Reset();
 	TestTrue(TEXT("dropping the handle releases the attempt"), Attempt.WasReleased());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestSocketFakeCloseRulesTest, "VaRest.WebSocket.Fake.CloseRules",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestSocketFakeCloseRulesTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::WebSocket::VaRestSocketFakeTestPrivate;
+	FVaRestFakeSocketTransport Fake;
+	// Spec 3.5 and review I-2: a code that may not be sent becomes 1000 and a long reason is cut, each with the Warning the
+	// real handle logs (VaRest::WebSocket::MakeOutboundClose), named by the request's LogName as the real transport names it
+	FVaRestSocketConnectRequest Req = Request(TEXT("ws://fake.test/rules"));
+	Req.LogName = TEXT("chat#3");
+	const TSharedRef<IVaRestSocketConnection, ESPMode::ThreadSafe> Connection = Fake.Connect(MoveTemp(Req));
+	Fake.GetLast().Open();
+	AddExpectedMessagePlain(TEXT("chat#3: close code 1005 cannot be sent"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
+	AddExpectedMessagePlain(TEXT("chat#3: the close reason is cut to 123 bytes"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
+	Connection->Close(1005, FString::ChrN(200, TEXT('r')));
+	TestEqual(TEXT("1005 is sent as 1000"), Fake.GetLast().GetCloseCode(), 1000);
+	TestEqualSensitive(TEXT("... with the reason cut to 123 bytes"), Fake.GetLast().GetCloseReason(), FString::ChrN(VaRest::WebSocket::MaxCloseReasonBytes, TEXT('r')));
+	TArray<FVaRestSocketEvent> Events;
+	Connection->PopEvents(Events);
+	TestTrue(TEXT("the echo carries what was sent"), Events.Num() == 2 && Events[1].Type == EVaRestSocketEventType::Closed && Events[1].End.Code == 1000
+		&& Events[1].End.Reason.Len() == VaRest::WebSocket::MaxCloseReasonBytes);
+	// A close that needs no change logs nothing (a Warning here would be unexpected, so an error)
+	const TSharedRef<IVaRestSocketConnection, ESPMode::ThreadSafe> Quiet = Fake.Connect(Request(TEXT("ws://fake.test/quiet")));
+	Fake.GetLast().Open();
+	Quiet->Close(4001, TEXT("ok"));
+	Events.Reset();
+	Quiet->PopEvents(Events);
+	TestTrue(TEXT("4001 \"ok\" is sent as given"), Events.Num() == 2 && Events[1].End.Code == 4001 && Events[1].End.Reason.Equals(TEXT("ok"), ESearchCase::CaseSensitive));
 	return true;
 }
 

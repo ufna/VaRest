@@ -5,8 +5,9 @@
 #include "HAL/PlatformTime.h"
 #include "VaRestWebSocketLog.h"
 
-VaRest::WebSocket::FSocketLink::FSocketLink(TFunction<void()> InOnEvents)
+VaRest::WebSocket::FSocketLink::FSocketLink(TFunction<void()> InOnEvents, FString InLabel)
 	: OnEvents(MoveTemp(InOnEvents))
+	, Label(InLabel.IsEmpty() ? FString(TEXT("ws#?")) : MoveTemp(InLabel))
 {
 }
 
@@ -15,9 +16,24 @@ void VaRest::WebSocket::FSocketLink::Push(FVaRestSocketEvent&& Event, bool bNoti
 	if (bTerminalQueued)
 	{
 		// Plan decision 2, made loud: a producer that queues after the end has a bug
-		UE_LOG(LogVaRestSocket, Error, TEXT("an event (%s) after the connection's terminal event was dropped: a transport bug"), LexToString(Event.Type));
+		UE_LOG(LogVaRestSocket, Error, TEXT("%s: an event (%s) after the connection's terminal event was dropped: a transport bug"), *Label, LexToString(Event.Type));
 		return;
 	}
+	// Plan decision 2's types, made loud (review M-2): logged, not dropped, so the end still reaches the consumer. Before the
+	// released check, so a mis-scripted fake is caught whether or not its handle is still held
+	if (Event.Type == EVaRestSocketEventType::Open && bOpenQueued)
+	{
+		UE_LOG(LogVaRestSocket, Error, TEXT("%s: a second Open was queued: a transport bug"), *Label);
+	}
+	else if (Event.Type == EVaRestSocketEventType::Closed && !bOpenQueued)
+	{
+		UE_LOG(LogVaRestSocket, Error, TEXT("%s: Closed was queued before any Open (an attempt that never opened ends with Error): a transport bug"), *Label);
+	}
+	else if (Event.Type == EVaRestSocketEventType::Error && bOpenQueued)
+	{
+		UE_LOG(LogVaRestSocket, Error, TEXT("%s: Error was queued after the Open (an open connection ends with Closed): a transport bug"), *Label);
+	}
+	bOpenQueued = bOpenQueued || Event.Type == EVaRestSocketEventType::Open;
 	const bool bTerminal = Event.IsTerminal();
 	bTerminalQueued = bTerminal;
 	// Acquire, pairing with the handle's release: see bReleased in the header
@@ -57,7 +73,8 @@ void VaRest::WebSocket::FSocketLink::Push(FVaRestSocketEvent&& Event, bool bNoti
 void VaRest::WebSocket::FSocketLink::Notify() const
 {
 	// A released handle's events are discarded (plan decision 5), so nothing is left to tell it about: this also covers a
-	// notification posted before the release that runs after it (the fake's deferred one, the transport's refusal task)
+	// notification posted before the release that runs after it (the fake's deferred one, the transport's refusal task).
+	// Best effort across threads: a release between this check and the call still gets the call (see the header)
 	if (OnEvents && !bReleased.load(std::memory_order_acquire))
 	{
 		OnEvents();
@@ -76,11 +93,10 @@ int32 VaRest::WebSocket::FSocketLink::PopAll(TArray<FVaRestSocketEvent>& Out)
 	return Popped;
 }
 
-void VaRest::WebSocket::FSocketLink::NoteBuffered(int64 HighWater)
+void VaRest::WebSocket::FSocketLink::NoteBuffered(int64 BufferedAfterSend, int64 HighWater)
 {
-	// Relaxed: the Send that added these bytes reached the producer through a queue (the service's commands, or the same
-	// thread in the fake), so this load sees that add or a later value of the count
-	if (BufferedBytes.load(std::memory_order_relaxed) >= HighWater)
+	// The value the Send's own add produced, never a re-read of the count: a re-read can be lower already (review I-1, header)
+	if (BufferedAfterSend >= HighWater)
 	{
 		bHighWaterReached = true;
 	}
@@ -97,4 +113,22 @@ void VaRest::WebSocket::FSocketLink::ReleaseBuffered(int64 Bytes)
 		Drained.Type = EVaRestSocketEventType::Drained;
 		Push(MoveTemp(Drained));
 	}
+}
+
+VaRest::WebSocket::FOutboundClose VaRest::WebSocket::MakeOutboundClose(const FString& Label, int32 Code, FStringView Reason)
+{
+	FOutboundClose Out;
+	bool bReplaced = false;
+	bool bTruncated = false;
+	Out.Code = SanitizeCloseCode(Code, bReplaced);
+	Out.Reason = CloseReasonBytes(Reason, bTruncated);
+	if (bReplaced)
+	{
+		UE_LOG(LogVaRestSocket, Warning, TEXT("%s: close code %d cannot be sent (RFC 6455 7.4); 1000 is sent instead"), *Label, Code);
+	}
+	if (bTruncated)
+	{
+		UE_LOG(LogVaRestSocket, Warning, TEXT("%s: the close reason is cut to %d bytes (RFC 6455 5.5)"), *Label, MaxCloseReasonBytes);
+	}
+	return Out;
 }

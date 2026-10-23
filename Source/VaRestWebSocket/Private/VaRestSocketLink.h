@@ -15,7 +15,9 @@ namespace VaRest::WebSocket
 	 * What a connection's producer (the service thread; the fake on the game thread) and its consumer share: the one ordered
 	 * event queue (WebSocket spec 2.1, SPSC), the buffered amount (spec 2.4) and the undelivered inbound bytes (spec 2.3).
 	 * The producer queues exactly one terminal event (Closed or Error, plan decision 2); a later event is dropped with an
-	 * Error log line. Producer functions run on one thread at a time; PopAll on the consumer's.
+	 * Error log line. Error ends an attempt that never opened, Closed one that did, and Open comes at most once: a push that
+	 * breaks this is queued (the end still reaches the consumer) with an Error log line -- a transport bug, or a mis-scripted
+	 * fake. Producer functions run on one thread at a time; PopAll on the consumer's.
 	 *
 	 * Memory order. The flags are written with release and read with acquire; the two byte counts are relaxed, because they
 	 * publish nothing -- each is one number, read and changed by atomic operations only, and no other memory is read on the
@@ -26,7 +28,11 @@ namespace VaRest::WebSocket
 	class FSocketLink final
 	{
 	public:
-		explicit FSocketLink(TFunction<void()> InOnEvents);
+		/** InLabel names the connection in the link's log lines (Task 7: "ws#<id>" or the request's LogName; the fake: its own) */
+		explicit FSocketLink(TFunction<void()> InOnEvents, FString InLabel = FString());
+
+		/** Any thread: the connection's name in log lines */
+		const FString& GetLabel() const { return Label; }
 
 		/**
 		 * Producer: queues Event, stamps its Time, counts a Message's bytes; bNotify false leaves the notification to a later
@@ -35,14 +41,25 @@ namespace VaRest::WebSocket
 		 */
 		void Push(FVaRestSocketEvent&& Event, bool bNotify = true);
 
-		/** The thread that queued: runs the consumer's OnEvents, if any and not released. It changes no link state, and no lock is held */
+		/**
+		 * The thread that queued: runs the consumer's OnEvents, if any and not released. It changes no link state, and no lock
+		 * is held. The released check is exact on one thread and best effort across threads: a release that lands between the
+		 * check and the call still gets that one call, which Connect's contract (OnEvents captures weak or thread-safe state)
+		 * already makes harmless.
+		 */
 		void Notify() const;
 
 		/** Consumer: appends the queued events to Out; returns how many */
 		int32 PopAll(TArray<FVaRestSocketEvent>& Out);
 
-		/** Producer, after a Send's bytes were added to BufferedBytes: remembers that the high-water mark was reached */
-		void NoteBuffered(int64 HighWater);
+		/**
+		 * Producer, for one Send: BufferedAfterSend is the count that Send's own add produced (the value fetch_add returned,
+		 * plus the frame's length), which is what GetBufferedAmount showed the app. The mark is decided on it, never on a
+		 * re-read: by the time the producer handles the Send, earlier frames' bytes may have left (review I-1), and a re-read
+		 * below HighWater would lose a crossing the app saw, and with it the Drained (spec 2.4, 6.3). The Send's own bytes stay
+		 * counted until it is released, so the count cannot reach 0 before this note.
+		 */
+		void NoteBuffered(int64 BufferedAfterSend, int64 HighWater);
 
 		/** Producer: Bytes left the buffer (on the socket now); queues Drained when it reaches 0 after the high-water mark (spec 2.4) */
 		void ReleaseBuffered(int64 Bytes);
@@ -78,15 +95,36 @@ namespace VaRest::WebSocket
 		std::atomic<bool> bCloseRequested{ false };
 
 	private:
-		/** TQueue's SPSC mode: Enqueue writes the item, a full barrier, then the link to it (Queue.h:184-193); Dequeue reads that link (Queue.h:82) */
+		/**
+		 * TQueue's SPSC mode: Enqueue makes the node with the item, a full barrier, then the link to it (Queue.h:167-193);
+		 * Dequeue reads that link (Queue.h:82)
+		 */
 		TQueue<FVaRestSocketEvent, EQueueMode::Spsc> Queue;
 		const TFunction<void()> OnEvents;
+		const FString Label;
 		/**
 		 * Producer only: plain, because producer functions run on one thread at a time. A producer that moves to another
 		 * thread hands over with a join (the real transport ends connections on the game thread only once its service thread
 		 * has stopped).
 		 */
 		bool bTerminalQueued = false;
+		bool bOpenQueued = false;
 		bool bHighWaterReached = false;
 	};
+
+	/** Our close as it goes on the wire (spec 3.5) */
+	struct FOutboundClose
+	{
+		/** IsValidCloseCode holds */
+		int32 Code = 1000;
+		/** UTF-8, at most MaxCloseReasonBytes, cut on a code-point boundary */
+		TArray<uint8> Reason;
+	};
+
+	/**
+	 * Any thread (the handles call it on the game thread, at the consumer's Close): spec 3.5 -- SanitizeCloseCode and
+	 * CloseReasonBytes, with a Warning in LogVaRestSocket for each change, naming the connection by Label
+	 * (IVaRestSocketConnection::Close promises both). The real handle and the fake share it, so the lines cannot drift.
+	 */
+	FOutboundClose MakeOutboundClose(const FString& Label, int32 Code, FStringView Reason);
 }
