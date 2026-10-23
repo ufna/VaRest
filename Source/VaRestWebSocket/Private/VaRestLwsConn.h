@@ -77,6 +77,8 @@ namespace VaRest::WebSocket::Lws
 		int32 OnFilterPreEstablish(lws* InWsi);
 		int32 OnEstablished(lws* InWsi);
 		int32 OnWriteable(lws* InWsi);
+		/** PEER_INITIATED_CLOSE: the peer's close read by spec 2.5's rules (ParsePeerClose); 0, so LWS echoes it */
+		int32 OnPeerClose(const void* In, size_t Len);
 		void OnConnectionError(const void* In, size_t Len);
 		/** CLIENT_CLOSED, CLOSED_CLIENT_HTTP, and WSI_DESTROY for what did not end before it */
 		void OnEnded();
@@ -140,5 +142,10 @@ namespace VaRest::WebSocket::Lws
 		TArray<uint8> CloseReason;
 		EVaRestSocketCloseBy CloseBy = EVaRestSocketCloseBy::Client;
 		EVaRestSocketFailure CloseFailure = EVaRestSocketFailure::None;
+		/** FPlatformTime::Seconds() past which our close is cut: CloseTimeout from the Close command (plan decision 17) */
+		double CloseDeadline = 0.0;
+		// ---- the peer's close (spec 2.5)
+		bool bPeerClosed = false;
+		VaRest::WebSocket::FPeerClose Peer;
 	};
 }

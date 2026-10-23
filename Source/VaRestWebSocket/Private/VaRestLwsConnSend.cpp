@@ -45,6 +45,9 @@ void VaRest::WebSocket::Lws::FConn::Close(FService& Service, int32 Code, TArray<
 	CloseReason = MoveTemp(Reason);
 	CloseBy = By;
 	CloseFailure = Failure;
+	// Spec 2.5: CloseTimeout bounds a server that never echoes; above LWS's fixed 5 s close-ack it acts as about 5 s (plan
+	// decision 17). Armed here, not gated on Service.IsShuttingDown() either: the flush's closes keep their bound (Task 6 M-7)
+	CloseDeadline = FPlatformTime::Seconds() + Request.CloseTimeout;
 	// Review conc M-3: Shutdown's flush waits for this close frame (at most ExitFlushSeconds); UncountClose lowers it once,
 	// when the frame is written or the connection ends first
 	bCloseCounted = true;

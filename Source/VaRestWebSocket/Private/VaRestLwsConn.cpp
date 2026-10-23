@@ -49,6 +49,12 @@ VaRest::WebSocket::Lws::FConn* VaRest::WebSocket::Lws::FConn::Find(FService& Ser
 void VaRest::WebSocket::Lws::FConn::Prepare(const FServiceOptions& Options)
 {
 	check(IsInGameThread());
+	// CloseTimeout (spec 2.5, 15): a value that is not a positive number is LWS's own close-ack wait (plan decision 17)
+	if (!FMath::IsFinite(Request.CloseTimeout) || Request.CloseTimeout <= 0.0)
+	{
+		UE_LOG(LogVaRestSocket, Warning, TEXT("%s: CloseTimeout %g s is not a positive number; %g s is used"), *GetLabel(), Request.CloseTimeout, LwsCloseAckSeconds);
+		Request.CloseTimeout = LwsCloseAckSeconds;
+	}
 	TValueOrError<FSocketTarget, FTargetError> Made = PrepareTarget(Request);
 	if (Made.HasError())
 	{
@@ -154,6 +160,8 @@ int32 VaRest::WebSocket::Lws::FConn::OnCallback(FService& Service, lws* InWsi, i
 		return 0;
 	case LWS_CALLBACK_CLIENT_WRITEABLE:
 		return OnWriteable(InWsi);
+	case LWS_CALLBACK_WS_PEER_INITIATED_CLOSE:
+		return OnPeerClose(In, Len);
 	case LWS_CALLBACK_CLIENT_CLOSED:
 	case LWS_CALLBACK_CLOSED_CLIENT_HTTP:
 		// A client ends with CLIENT_CLOSED, never CLOSED (T29, close.peer_sequence); a handshake VaRest refused, with
@@ -266,6 +274,22 @@ void VaRest::WebSocket::Lws::FConn::OnConnectionError(const void* In, size_t Len
 	EndPreOpen(Described.Failure, Described.By, Described.HttpStatus, MoveTemp(Described.Detail));
 }
 
+int32 VaRest::WebSocket::Lws::FConn::OnPeerClose(const void* In, size_t Len)
+{
+	// in: the close frame's payload, its code first in network order (T12, libwebsockets.h:1217-1225); LWS 3.0 rewrote some
+	// codes to 1002 before this [close.rewritten_codes]. An empty payload is 1005, never two bytes read past it (E27,
+	// LwsWebSocket.cpp:351) [close.empty_len]. Recorded only: CLIENT_CLOSED follows and OnEnded reports it [close.peer_sequence]
+	Peer = ParsePeerClose(TConstArrayView<uint8>(static_cast<const uint8*>(In), In ? static_cast<int32>(Len) : 0));
+	bPeerClosed = true;
+	if (Peer.bReasonRepaired && State == EConnState::Open)
+	{
+		UE_LOG(LogVaRestSocket, Warning, TEXT("%s: the server's close reason is not UTF-8; ill-formed bytes are shown as U+FFFD"), *GetLabel());
+	}
+	// 0: LWS echoes the close (RFC 6455 5.5.1) [close.echo_on_return_0]; the engine returns 1 (LwsWebSocket.cpp:389-390),
+	// so it never answers [close.return_1_echo]
+	return 0;
+}
+
 void VaRest::WebSocket::Lws::FConn::OnEnded()
 {
 	using namespace VaRest::WebSocket::Lws::VaRestLwsConnPrivate;
@@ -284,8 +308,29 @@ void VaRest::WebSocket::Lws::FConn::OnEnded()
 	if (bCloseQueued)
 	{
 		// Our close (spec 2.5): LWS 3.0 raises no callback for the peer's reply [close.ours_sequence], so an end before
-		// CloseTimeout counts as clean (plan decision 4); a close that never went out ended unclean
-		EndOpen(bCloseSent ? CloseCode : 1006, bCloseSent ? Utf8ToString(CloseReason) : FString(), bCloseSent, CloseBy, CloseFailure);
+		// CloseTimeout counts as clean (plan decision 4). The peer's own close, crossing ours before it went out, ends it
+		// cleanly too; a close that went out neither way ended unclean. Review conc I-5: an end by LWS's own close-ack timer
+		// -- 5 s after our close frame (T20) -- with no close from the peer is the unanswered close CloseTimeout exists for:
+		// not clean. Above about 5 s LWS's timer ends it before VaRest's deadline; at 5 s both can fire in one lws_service
+		// return, LWS's first. 0.25 s under the 5 s: CloseSentAt is read before LWS writes the frame and arms its timer, which
+		// then ends the close at 5.5 s [close.ours_noecho_wait_ms], on its once-a-second walk (T26)
+		const double SinceCloseSent = FPlatformTime::Seconds() - CloseSentAt;
+		const bool bAckTimedOut = bCloseSent && !bPeerClosed && SinceCloseSent >= LwsCloseAckSeconds - 0.25;
+		const int32 Code = bCloseSent ? CloseCode : (bPeerClosed ? Peer.Code : 1006);
+		FString Reason = bCloseSent ? Utf8ToString(CloseReason) : (bPeerClosed ? Peer.Reason : FString());
+		// Re-review N-8: worded by what VaRest knows -- an echo arriving just before LWS's timer cannot be seen
+		EndOpen(Code, MoveTemp(Reason), (bCloseSent || bPeerClosed) && !bAckTimedOut, CloseBy, CloseFailure,
+			bAckTimedOut ? FString::Printf(TEXT("the connection ended %.1f s after our close frame, at or past libwebsockets' 5 s close-ack timer"), SinceCloseSent) : FString());
+		return;
+	}
+	if (bPeerClosed)
+	{
+		// The peer's close, echoed (OnPeerClose returned 0). Task 2 review M-4: a normalised code is named as received -- a
+		// number, never the reason, which is payload
+		const FString Detail = Peer.bCodeNormalised
+			? FString::Printf(TEXT("the server sent close code %d, which a peer must not send; reported as %d"), Peer.ReceivedCode, Peer.Code)
+			: Peer.bMalformed ? FString(TEXT("the server's close payload was one byte; reported as 1002")) : FString();
+		EndOpen(Peer.Code, Peer.Reason, true, EVaRestSocketCloseBy::Server, EVaRestSocketFailure::None, Detail);
 		return;
 	}
 	// An end without a close frame (spec 2.5): FIN and RST both give CLIENT_CLOSED [close.drop_reports_client_closed]
@@ -330,6 +375,7 @@ void VaRest::WebSocket::Lws::FConn::Kill(FService& Service)
 
 void VaRest::WebSocket::Lws::FConn::CheckDeadlines(FService& Service, double Now)
 {
+	using namespace VaRest::WebSocket::Lws::VaRestLwsConnPrivate;
 	if (bKillIssued && !bDestroyed && Wsi && Now - KillArmedAt >= KillRearmSeconds)
 	{
 		// Review conc I-1: LWS's own stage timers replace a pending timeout (lws_client_socket_service and
@@ -346,6 +392,15 @@ void VaRest::WebSocket::Lws::FConn::CheckDeadlines(FService& Service, double Now
 	{
 		return;
 	}
+	if (State == EConnState::Open && bCloseQueued && Now >= CloseDeadline)
+	{
+		// Spec 2.5: CloseTimeout cuts the close VaRest started; reported at once, then killed (plan decision 3). Never gated
+		// on Service.IsShuttingDown(): a close Shutdown's flush waits for keeps its bound (Task 6 review M-7)
+		EndOpen(bCloseSent ? CloseCode : 1006, bCloseSent ? Utf8ToString(CloseReason) : FString(), false, CloseBy, CloseFailure,
+			FString::Printf(TEXT("CloseTimeout (%g s) passed without the connection ending"), Request.CloseTimeout));
+		Kill(Service);
+		return;
+	}
 	if (State == EConnState::Open)
 	{
 		// LWS calls WRITEABLE only once a held write drained; this sweep releases it even when no WRITEABLE was asked for (plan decision 7)
@@ -355,7 +410,13 @@ void VaRest::WebSocket::Lws::FConn::CheckDeadlines(FService& Service, double Now
 
 double VaRest::WebSocket::Lws::FConn::NextDeadline() const
 {
-	return TNumericLimits<double>::Max();
+	// Task 11 adds the connect deadline beside it
+	double Next = TNumericLimits<double>::Max();
+	if (State == EConnState::Open && bCloseQueued)
+	{
+		Next = CloseDeadline;
+	}
+	return Next;
 }
 
 bool VaRest::WebSocket::Lws::FConn::WantsShortWait() const
