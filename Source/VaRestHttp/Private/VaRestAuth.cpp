@@ -202,6 +202,7 @@ namespace VaRest::Http::AuthPrivate
 		virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) override
 		{
 			FExchangeState& Ex = Internals(*Exchange);
+			CheckConditionalIdentity(Ex);
 			// First, before the configuration check and the session: the refresh request (plan decision 23) and NoAuth() -- a
 			// login -- go out bare, with neither credentials nor session headers. MarkAuthRefresh sends the refresh request with
 			// AuthMode None too; the flag is checked as well, so the refresh request is bare by what it is, not by a mode.

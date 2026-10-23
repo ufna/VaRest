@@ -36,6 +36,8 @@ namespace VaRest::Http
 		std::atomic<int64> BytesDown{ 0 };
 		/** Re-issues by the retry stage (a session replay is not one, plan decision 2) */
 		std::atomic<int64> Retries{ 0 };
+		std::atomic<int64> CacheLookups{0};
+		std::atomic<int64> CacheHits{0};
 	};
 
 	/**
@@ -52,6 +54,8 @@ namespace VaRest::Http
 		/** One attempt's bytes */
 		static void Transferred(FHttpCounters& Client, int64 Up, int64 Down);
 		static void Retried(FHttpCounters& Client);
+		static void CacheLookup(FHttpCounters& Client);
+		static void CacheHit(FHttpCounters& Client);
 	};
 
 	/**

@@ -850,6 +850,19 @@ bool VaRest::Http::FClientState::Resolve(FExchangeState& Exchange, FString& OutE
 		// a token here (checked above), so it is shown as it is.
 		UE_LOG(LogVaRestHttp, Log, TEXT("#%llu VaRest: %s is not retried without Idempotent() (spec 4.1)"), Exchange.RequestId, *Exchange.Verb);
 	}
+    Exchange.CachePolicy = Exchange.CacheOverride.Get(Cfg.Cache);
+    if ((!Exchange.CacheOverride.IsSet() && !Cfg.CacheConfigError.IsEmpty()) || !IsValidCachePolicy(Exchange.CachePolicy))
+    {
+        OutError = TEXT("invalid cache policy");
+        return false;
+    }
+    if (Exchange.CachePolicy.Mode == EVaRestCacheMode::MemoryAndDisk && !Cfg.StorageConfigError.IsEmpty())
+    {
+        OutError = Cfg.StorageConfigError;
+        return false;
+    }
+    FString CacheKeyNow, CacheIdentityNow;
+    Exchange.bCacheLookupPending = BuildCacheKey(Exchange, CacheKeyNow, CacheIdentityNow);
 	return true;
 }
 
@@ -1020,6 +1033,7 @@ void VaRest::Http::FClientState::OnChainDone(const FVaRestExchangeRef& Exchange,
 	}
 	FFinish Finish = MakeFinish(Ex);
 	Finish.Response.Status = Outcome.Status;
+	Finish.Response.bFromCache = Outcome.bFromCache;
 	Finish.Response.Headers = MoveTemp(Outcome.Headers);
 	Finish.Response.EffectiveUrl = MoveTemp(Outcome.EffectiveUrl);
 	Finish.Response.ContentType = MoveTemp(Outcome.ContentType);

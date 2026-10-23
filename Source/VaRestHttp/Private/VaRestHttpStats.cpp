@@ -20,6 +20,8 @@ DECLARE_DWORD_ACCUMULATOR_STAT(TEXT("In flight"), STAT_VaRestInFlight, STATGROUP
 DECLARE_DWORD_ACCUMULATOR_STAT(TEXT("Bytes up"), STAT_VaRestBytesUp, STATGROUP_VaRest);
 DECLARE_DWORD_ACCUMULATOR_STAT(TEXT("Bytes down"), STAT_VaRestBytesDown, STATGROUP_VaRest);
 DECLARE_DWORD_ACCUMULATOR_STAT(TEXT("Retries"), STAT_VaRestRetries, STATGROUP_VaRest);
+DECLARE_DWORD_ACCUMULATOR_STAT(TEXT("Cache lookups"), STAT_VaRestCacheLookups, STATGROUP_VaRest);
+DECLARE_DWORD_ACCUMULATOR_STAT(TEXT("Cache hits"), STAT_VaRestCacheHits, STATGROUP_VaRest);
 
 VaRest::Http::FHttpCounters& VaRest::Http::FHttpStats::Global()
 {
@@ -66,4 +68,15 @@ void VaRest::Http::FHttpStats::Retried(FHttpCounters& Client)
 		Set->Retries.fetch_add(1, std::memory_order_relaxed);
 	}
 	INC_DWORD_STAT(STAT_VaRestRetries);
+}
+
+void VaRest::Http::FHttpStats::CacheLookup(FHttpCounters& Client)
+{
+    for (FHttpCounters* Set : {&Global(), &Client}) Set->CacheLookups.fetch_add(1, std::memory_order_relaxed);
+    INC_DWORD_STAT(STAT_VaRestCacheLookups);
+}
+void VaRest::Http::FHttpStats::CacheHit(FHttpCounters& Client)
+{
+    for (FHttpCounters* Set : {&Global(), &Client}) Set->CacheHits.fetch_add(1, std::memory_order_relaxed);
+    INC_DWORD_STAT(STAT_VaRestCacheHits);
 }

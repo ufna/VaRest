@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "VaRestAuthTypes.h"
+#include "VaRestCache.h"
 #include "VaRestEnvelope.h"
 #include "VaRestHttpStatsInternal.h"
 #include "VaRestRetry.h"
@@ -149,6 +150,17 @@ namespace VaRest::Http
 		/** Set by that timer before it takes the entry out of the queue: the abort answers Deadline, not Canceled */
 		bool bQueueDeadlinePassed = false;
 		int32 RetriesDone = 0;
+
+        // Cache lookup and captured identity are independent of config republishing.
+        TOptional<FVaRestCachePolicy> CacheOverride;
+        FVaRestCachePolicy CachePolicy;
+        FString LookupKey, LookupIdentity;
+        uint64 CacheEpoch = 0;
+        bool bCacheLookupPending = false;
+        bool bCacheLookupCounted = false, bCacheHitCounted = false;
+        bool bCacheConditional = false, bCacheIdentityChanged = false;
+        bool bCacheHadBody = false;
+        EVaRestTraceCacheLookup CacheLookup = EVaRestTraceCacheLookup::None;
 
 		// Envelope (Task 11):
 		/** The request's Envelope(), from Send */

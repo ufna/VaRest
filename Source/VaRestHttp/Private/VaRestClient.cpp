@@ -214,6 +214,8 @@ FVaRestRequestHandle VaRest::Http::FRequestSpecAccess::Send(TUniquePtr<FRequestS
 	Ex.Naming = Spec->Naming;
 	Ex.bStrictDecode = Spec->bStrictDecode;
 	Ex.RetryOverride = MoveTemp(Spec->Retry);
+	Ex.CacheOverride = MoveTemp(Spec->Cache);
+	Ex.bCacheHadBody = !Ex.Body.IsEmpty();
 	Ex.EnvelopeOverride = MoveTemp(Spec->Envelope);
 	Ex.bNoEnvelope = Spec->bNoEnvelope;
 	Ex.AuthMode = Spec->AuthMode;
@@ -413,6 +415,17 @@ FVaRestClient& FVaRestClient::WithRandomSeed(int32 Seed)
 	}
 	return *this;
 }
+
+FVaRestClient& FVaRestClient::WithCache(const FVaRestCachePolicy& Policy)
+{
+    if (State.IsValid()) State->EditConfig([Policy](VaRest::Http::FClientConfig& Edited)
+    {
+        Edited.Cache = Policy;
+        Edited.CacheConfigError = VaRest::Http::IsValidCachePolicy(Policy) ? FString() : FString(TEXT("invalid cache policy"));
+    });
+    return *this;
+}
+void FVaRestClient::ClearCache() { if (State.IsValid()) State->ClearCacheState(); }
 
 FVaRestClient& FVaRestClient::WithRetry(const FVaRestRetryPolicy& Policy)
 {

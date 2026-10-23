@@ -12,6 +12,8 @@
 #include "VaRestExchangeState.h"
 #include "VaRestHttpStatsInternal.h"
 #include "VaRestLimiter.h"
+#include "VaRestMemoryCache.h"
+#include "VaRestDiskCache.h"
 #include "VaRestRedactor.h"
 #include "VaRestRetry.h"
 #include "VaRestSession.h"
@@ -19,6 +21,15 @@
 
 namespace VaRest::Http
 {
+    FVaRestStageRef MakeCacheStage();
+    bool BuildCacheKey(const FExchangeState& Ex, FString& OutKey, FString& OutIdentity);
+    void CheckConditionalIdentity(FExchangeState& Ex);
+    inline bool IsValidCachePolicy(const FVaRestCachePolicy& Policy)
+    {
+        return Policy.Mode >= EVaRestCacheMode::None && Policy.Mode <= EVaRestCacheMode::MemoryAndDisk
+            && FMath::IsFinite(Policy.DefaultTtlSeconds) && Policy.DefaultTtlSeconds >= 0
+            && Policy.MemoryBytes >= 0 && Policy.DiskBytes >= 0;
+    }
 	struct FPersistenceGuard;
 
 	/** One immutable configuration snapshot; FClientState swaps a new one in on every edit (spec 3.1) */
@@ -30,6 +41,8 @@ namespace VaRest::Http
 		FString CacheRoot;
 		FString QueueRoot;
 		FString StorageConfigError;
+		FVaRestCachePolicy Cache;
+		FString CacheConfigError;
 		/** WithName's text; empty: the client is named by its current BaseUrl (IN-8), which the trace URL-redacts */
 		FString DisplayName;
 		FVaRestHeaders DefaultHeaders;
@@ -68,6 +81,10 @@ namespace VaRest::Http
 		/** Builds the derived configuration and registers the client. Game thread. */
 		static TSharedRef<FClientState, ESPMode::ThreadSafe> Create(FClientConfig&& InConfig);
 
+        FMemoryCache& GetMemoryCache() { check(IsInGameThread()); return MemoryCache; }
+        uint64 GetCacheEpoch() const { check(IsInGameThread()); return CacheEpoch; }
+        TSharedRef<FDiskCache, ESPMode::ThreadSafe> GetDiskCacheFor(const FClientConfig& Cfg, int64 Capacity);
+        void ClearCacheState();
 		void AttachConnectivity();
 		uint64 GetClientId() const { return ClientId; }
 		/** Any thread */
@@ -277,6 +294,9 @@ namespace VaRest::Http
 		TMap<uint64, FVaRestExchangeRef> InFlight;
 		/** Spec 4.6 */
 		FLimiter Limiter;
+		FMemoryCache MemoryCache;
+		TSharedPtr<FDiskCache, ESPMode::ThreadSafe> DiskCache;
+		uint64 CacheEpoch = 1;
 		/** Spec 4.8: written on the game thread (Enter, Complete, OnAttemptDone, Retry's re-issue), read anywhere */
 		FHttpCounters Counters;
 		/** Game thread; Publish copies its active values into each redactor */

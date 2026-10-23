@@ -14,6 +14,7 @@
 #include "VaRestRedactor.h"
 #include "VaRestResultHandler.h"
 #include "VaRestRetry.h"
+#include "VaRestCache.h"
 #include "VaRestUrl.h"
 #include "VaRestStage.h"
 
@@ -84,6 +85,7 @@ namespace VaRest::Http
 		bool bStrictDecode = false;
 		/** Retry() / NoRetry(); unset: the client's policy */
 		TOptional<FVaRestRetryPolicy> Retry;
+		TOptional<FVaRestCachePolicy> Cache;
 		/** Envelope(); unset with bNoEnvelope false: the client's */
 		TOptional<FVaRestEnvelope> Envelope;
 		/** NoEnvelope() */
@@ -468,6 +470,13 @@ public:
 		return MoveTemp(*this);
 	}
 
+	/** Replace the client cache policy for this request. */
+	TVaRestRequest Cache(const FVaRestCachePolicy& Policy) &&
+	{ Spec->Cache = Policy; return MoveTemp(*this); }
+	/** Bypass both cache reads and writes. */
+	TVaRestRequest NoCache() &&
+	{ Spec->Cache = FVaRestCachePolicy(); return MoveTemp(*this); }
+
 	/**
 	 * No retry for this request, whatever the client's policy -- and none of that policy's Deadline either, so its queue
 	 * wait and a park behind a session refresh are not bounded by it. To keep a deadline without retries:
@@ -693,6 +702,10 @@ public:
 	 * does not retry (plan decision 1). Game thread; requests already sent keep the policy they started with.
 	 */
 	FVaRestClient& WithRetry(const FVaRestRetryPolicy& Policy);
+	/** Opt in to response caching; invalid policy fails deferred at Send. */
+	FVaRestClient& WithCache(const FVaRestCachePolicy& Policy);
+	/** Immediately invalidate memory and pending reads; queue current disk namespace clear. */
+	void ClearCache();
 	/**
 	 * Spec 3.4: the envelope of this client's responses (a request's Envelope() or NoEnvelope() replaces it). Game thread;
 	 * requests already sent keep the envelope they started with.

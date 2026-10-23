@@ -11,6 +11,8 @@
 #include "VaRestAuthInternal.h"
 #include "VaRestHttpTesting.h"
 #include "VaRestRetryInternal.h"
+#include "VaRestIdentity.h"
+#include "Misc/Paths.h"
 #include "VaRestTracePoints.h"
 
 namespace VaRest::Http::ClientStatePrivate
@@ -235,7 +237,8 @@ void VaRest::Http::FClientState::Publish(const TSharedRef<FClientConfig, ESPMode
 			bReissue |= Entry.Key->MayReissue();
 		}
 	}
-	// Spec 4.1 and plan decision 2: retry is the first built-in Outer stage (M4b puts offline queue and cache in front of it)
+	// Cache answers before Retry; a request already inside Retry retains that complete retry cycle.
+	NewChain->Add(MakeCacheStage());
 	NewChain->Add(MakeRetryStage());
 	// Spec 4.2: after retry (a replay is not a retry, plan decision 2), before the boundary (a replay is a new attempt) and
 	// the limiter (a parked request holds no slot)
@@ -462,4 +465,24 @@ void VaRest::Http::FClientState::AttachConnectivity()
             [Connectivity = Current->Connectivity] { Connectivity->ProbeFinished(); });
         return true;
     });
+}
+
+TSharedRef<VaRest::Http::FDiskCache, ESPMode::ThreadSafe> VaRest::Http::FClientState::GetDiskCacheFor(const FClientConfig& Cfg, int64 Capacity)
+{
+    check(IsInGameThread());
+    FString Origin;
+    CanonicalOrigin(Cfg.BaseUrl, Origin);
+    DiskCache = FDiskCache::Open(FPaths::Combine(Cfg.CacheRoot,
+        HashFields(TEXT("VaRest/cache-origin/v1"), TArray<FString>{Origin})), Capacity);
+    return DiskCache.ToSharedRef();
+}
+void VaRest::Http::FClientState::ClearCacheState()
+{
+    check(IsInGameThread());
+    ++CacheEpoch;
+    MemoryCache.Clear();
+    const auto Current = GetConfig();
+    FString Origin;
+    if (Current->StorageConfigError.IsEmpty() && CanonicalOrigin(Current->BaseUrl, Origin))
+        GetDiskCacheFor(*Current, Current->Cache.DiskBytes)->Clear();
 }
