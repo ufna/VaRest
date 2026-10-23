@@ -635,7 +635,7 @@ for (int32 Operation=0;Operation<3;++Operation) // clear, no-store Remove, small
     Store->Put(Entry,FPersistenceGuard());
     if (!TestTrue(TEXT("seed store"),Disk.Drain())) return false;
     const auto Gate=MakeShared<FPersistenceBarrier,ESPMode::ThreadSafe>();
-    ON_SCOPE_EXIT { Gate->Released=true; };
+    ON_SCOPE_EXIT { Gate->Released=true; TestTrue(TEXT("mandatory cache controls cleanup drained"),Disk.Drain()); };
     LaunchPersistence([Gate]{ WaitPersistenceBarrier(Gate); FIoResult Result; Result.bOk=true; return Result; },[](FIoResult&&){});
     for (int32 Index=1;Index<8192;++Index)
         if (!TestTrue(TEXT("fill real slots"),LaunchPersistence([]{ FIoResult Result; Result.bOk=true; return Result; },[](FIoResult&&){})))
@@ -705,7 +705,7 @@ const FString Original=FPaths::Combine(Disk.Root,TEXT("original"));
 auto Store=FDiskCache::Open(Original,1024*1024); const auto Entry=SafeEntry(); Store->Put(Entry,FPersistenceGuard());
 if (!TestTrue(TEXT("baseline persisted"),Disk.Drain())) return false;
 const auto Gate=MakeShared<FPersistenceBarrier,ESPMode::ThreadSafe>();
-ON_SCOPE_EXIT { Gate->Released=true; };
+ON_SCOPE_EXIT { Gate->Released=true; TestTrue(TEXT("control cap fallback cleanup drained"),Disk.Drain()); };
 LaunchPersistence([Gate]{ WaitPersistenceBarrier(Gate); return FIoResult(); },[](FIoResult&&){});
 for (int32 Index=0;Index<4097;++Index)
     FDiskCache::Open(FPaths::Combine(Disk.Root,FString::Printf(TEXT("pending-%d"),Index)),1024)->Clear();
