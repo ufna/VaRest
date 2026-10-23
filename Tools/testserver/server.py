@@ -103,6 +103,8 @@ STATE = {
 }
 _UPGRADES = {}
 FIXTURES_DIR = None
+QUEUE_WRITES = {}
+QUEUE_FAILURES = set()
 # The silent listener (--silent-port): its port once it listens, and its connections, under SILENT_LOCK
 SILENT = {"port": None, "accepted": 0, "open": 0}
 SILENT_LOCK = threading.Lock()
@@ -419,6 +421,59 @@ def route_etag(h, match):
         h.send_json(200, {"tag": tag}, [("ETag", tag), ("Cache-Control", "no-cache")])
 
 
+def route_cache_value(h, match):
+    key = h.query.get("key", [""])[0]
+    if not re.fullmatch(r"[0-9a-f]{32}", key):
+        h.send_json(400, {"error": "key"})
+        return
+    etag = '"' + key + '"'
+    if h.headers.get("If-None-Match") == etag:
+        h.send_bytes(304, b"", headers=[("ETag", etag), ("Cache-Control", "max-age=60")])
+        return
+    h.send_json(200, {"value": key}, [("ETag", etag), ("Cache-Control", "max-age=1")])
+
+
+def route_queue_write(h, match):
+    # Test-only current credential oracle: refusals neither echo credentials nor admit a write.
+    if h.headers.get("Authorization") != "Bearer integration-queue-current":
+        h.send_json(401, {"error": "authorization"})
+        return
+    operation = h.headers.get("Idempotency-Key", "")
+    if not operation or len(operation) > 128:
+        h.send_json(400, {"error": "idempotency"})
+        return
+    digest = hashlib.sha256(h.body or b"").hexdigest()
+    with LOCK:
+        previous = QUEUE_WRITES.get(operation)
+        if previous is None and len(QUEUE_WRITES) >= 4096:
+            status, result = 503, {"error": "fixture-cap"}
+        else:
+            if previous is None:
+                previous = {"applied": 1, "bodySha256": digest}
+                QUEUE_WRITES[operation] = previous
+            status = 409 if previous["bodySha256"] != digest else 200
+            result = dict(previous)
+    h.send_json(status, result)
+
+
+def route_queue_flaky(h, match):
+    key = match.group(1)
+    with LOCK:
+        first = key not in QUEUE_FAILURES
+        capped = first and len(QUEUE_FAILURES) >= 4096
+        if first and not capped:
+            QUEUE_FAILURES.add(key)
+    if capped:
+        h.send_json(503, {"error": "fixture-cap"})
+        return
+    if first:
+        h.close_connection = True
+        h.connection.shutdown(socket.SHUT_RDWR)
+        h.connection.close()
+        return
+    route_queue_write(h, match)
+
+
 def read_json(h):
     try:
         value = json.loads(h.body or b"{}")
@@ -520,6 +575,9 @@ ROUTES = [
     (("GET",), r"/fixture/([A-Za-z0-9_.-]+)", route_fixture),
     (ANY, r"/retry-after/(\d+)", route_retry_after),
     (("GET",), r"/etag", route_etag),
+    (("GET", "HEAD"), r"/cache/value", route_cache_value),
+    (("POST",), r"/queue/write", route_queue_write),
+    (("POST",), r"/queue/flaky/([0-9a-f]{32})", route_queue_flaky),
     (("POST",), r"/login", route_login),
     (("POST",), r"/refresh", route_refresh),
     (ANY, r"/protected", route_protected),

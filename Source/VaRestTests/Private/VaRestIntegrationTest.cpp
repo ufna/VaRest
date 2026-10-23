@@ -14,9 +14,13 @@
 #include "Tasks/Task.h"
 #include "VaRestAuth.h"
 #include "VaRestClient.h"
+#include "VaRestCache.h"
+#include "VaRestClock.h"
+#include "VaRestConnectivity.h"
 #include "VaRestEnvelope.h"
 #include "VaRestHttpTestTypes.h"
 #include "VaRestHttpTesting.h"
+#include "VaRestOffline.h"
 #include "VaRestRetry.h"
 #include "VaRestSha256.h"
 #include "VaRestTrace.h"
@@ -41,6 +45,8 @@ namespace VaRestTestsIntegrationPrivate
 	FVaRestClient MakeClient(const FString& BaseUrl)
 	{
 		FVaRestClient Made = FVaRestClient::Make(BaseUrl);
+		// Intentional connection failures belong to this client, not later HTTP or WebSocket fixtures.
+		Made.WithConnectivity(FVaRestConnectivity::Make(FVaRestRealClock::Get()));
 		Made.WithLogLevel(EVaRestLogLevel::None);
 		return Made;
 	}
@@ -114,10 +120,16 @@ namespace VaRestTestsIntegrationPrivate
 	class FSink final : public IVaRestTraceSink
 	{
 	public:
+		explicit FSink(EVaRestTraceDetail InFlags = EVaRestTraceDetail::Metadata | EVaRestTraceDetail::Headers) : Flags(InFlags) {}
+		TArray<FVaRestTraceEvent> Snapshot()
+		{
+			FScopeLock Lock(&Mutex);
+			return Events;
+		}
 		virtual FVaRestTraceDetailSettings GetDetail() const override
 		{
 			FVaRestTraceDetailSettings Detail;
-			Detail.Flags = EVaRestTraceDetail::Metadata | EVaRestTraceDetail::Headers;
+			Detail.Flags = Flags;
 			return Detail;
 		}
 		virtual void OnAttached(const FVaRestTraceSnapshot&) override {}
@@ -131,9 +143,45 @@ namespace VaRestTestsIntegrationPrivate
 			Events.Add(Event);
 		}
 
+		const EVaRestTraceDetail Flags;
 		std::atomic<bool> bAllOnGameThread{ true };
 		FCriticalSection Mutex;
 		TArray<FVaRestTraceEvent> Events;
+	};
+
+	/** New persistence scenarios observe only metadata, including client lifecycle and replay links. */
+	struct FMetadataCapture
+	{
+		FVaRestTrace::FScopedSinkIsolation Isolation;
+		TSharedRef<FSink, ESPMode::ThreadSafe> Sink = MakeShared<FSink, ESPMode::ThreadSafe>(EVaRestTraceDetail::Metadata);
+		FMetadataCapture() { FVaRestTrace::AddSink(Sink); }
+		~FMetadataCapture() { FVaRestTrace::RemoveSink(Sink); }
+
+		bool ClientEvent(uint64 ClientId, bool bCreated) const
+		{
+			for (const auto& Event : Sink->Snapshot())
+				if (Event.Kind == EVaRestTraceKind::Client)
+				{
+					const auto& Life = Event.Payload.Get<FVaRestTraceClient>();
+					if (Life.ClientId == ClientId && Life.bCreated == bCreated) return true;
+				}
+			return false;
+		}
+		TArray<FVaRestTraceEvent> For(uint64 RequestId) const
+		{
+			TArray<FVaRestTraceEvent> Found;
+			for (const auto& Event : Sink->Snapshot())
+				if (VaRest::Http::Testing::RequestIdOf(Event) == RequestId) Found.Add(Event);
+			return Found;
+		}
+		TArray<FVaRestTraceEvent> Replays(const FString& QueueId) const
+		{
+			TArray<FVaRestTraceEvent> Found;
+			for (const auto& Event : Sink->Snapshot())
+				if (Event.Kind == EVaRestTraceKind::Started && Event.Payload.Get<FVaRestTraceStarted>().QueueReplayOf.QueueId == QueueId)
+					Found.Add(Event);
+			return Found;
+		}
 	};
 
 	struct FProgressLog
@@ -667,7 +715,7 @@ bool FVaRestIntegrationTraceLogTest::RunTest(const FString& Parameters)
 	const TSharedRef<FSink, ESPMode::ThreadSafe> Sink = MakeShared<FSink, ESPMode::ThreadSafe>();
 	FVaRestTrace::AddSink(Sink);
 	FLogCapture Capture;
-	FVaRestClient Client = FVaRestClient::Make(BaseUrl);
+	FVaRestClient Client = MakeClient(BaseUrl);
 	Client.WithLogLevel(EVaRestLogLevel::Body);
 	Client.SetSecretValue(TEXT("bearer"), TEXT("canary-bearer-0123456789"));
 
@@ -1113,6 +1161,335 @@ bool FVaRestIntegrationEnvelopeTest::RunTest(const FString& Parameters)
 		&& Err->Error.Code == TEXT("E42") && Err->Error.Message == TEXT("the envelope says no"));
 	TestTrue(TEXT("a 404 envelope: Kind Http, its code read (bParseErrorBodies)"), Gone->Error.Kind == EVaRestErrorKind::Http && Gone->Error.HttpStatus == 404
 		&& Gone->Error.Code == TEXT("E404") && Gone->Error.Message == TEXT("not here"));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestIntegrationCacheRevalidateTest, "VaRest.Integration.Cache.Revalidate",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestIntegrationCacheRevalidateTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRestTestsIntegrationPrivate;
+	FString BaseUrl;
+	if (!ServerUrl(*this, BaseUrl)) return false;
+	FScopedPersistenceTest Disk;
+	FMetadataCapture Trace;
+	const auto Clock = MakeShared<FVaRestVirtualClock, ESPMode::ThreadSafe>();
+	const auto Connectivity = FVaRestConnectivity::Make(Clock);
+	const FString CacheRoot = FPaths::Combine(Disk.Root, TEXT("Cache"));
+	const FString QueueRoot = FPaths::Combine(Disk.Root, TEXT("Queue"));
+	const FString Key = FGuid::NewGuid().ToString(EGuidFormats::DigitsLower);
+	const FString Path = TEXT("/cache/value?key=") + Key;
+	FVaRestClient Client = MakeClient(BaseUrl);
+	Client.WithClock(Clock).WithConnectivity(Connectivity).WithStorageDirectories(CacheRoot, QueueRoot)
+		.WithAuth(FVaRestAuth::Bearer()).WithCache(FVaRestCachePolicy::MemoryAndDisk());
+	Client.SetBearerToken(TEXT("integration-owned-session"));
+	const uint64 OldClientId = Client.GetId();
+	TestTrue(TEXT("original client creation observed"), Trace.ClientEvent(OldClientId, true));
+	const FString Exported = Client.ExportSession();
+	auto First = MakeOutcome<FVaRestJson>();
+	const auto FirstHandle = Observe(Client.Get(Path).NoRetry().KeepBody(), First).Send();
+	if (!TestTrue(TEXT("first complete"), Wait(First)) || !Succeeded(*this, TEXT("first"), First)) return false;
+	TestFalse(TEXT("first used HTTP"), First->Response.bFromCache);
+	TestEqual(TEXT("first exact value"), First->Value.GetValue()[TEXT("value")].AsString(), Key);
+	if (!TestTrue(TEXT("first retained representation is nonempty"), !First->Response.Body.IsEmpty())) return false;
+	TestEqual(TEXT("first representation length"), First->Response.Headers.Get(TEXT("Content-Length")), FString::FromInt(First->Response.Body.Num()));
+	for (const auto& Event : Trace.For(FirstHandle.GetId()))
+		if (Event.Kind == EVaRestTraceKind::Started)
+			TestEqual(TEXT("first belongs to original client"), Event.Payload.Get<FVaRestTraceStarted>().ClientId, OldClientId);
+	Clock->Advance(1.0);
+	auto Validated = MakeOutcome<FVaRestJson>();
+	const auto ValidateHandle = Observe(Client.Get(Path).NoRetry().KeepBody(), Validated).Send();
+	if (!TestTrue(TEXT("validation complete"), Wait(Validated)) || !Succeeded(*this, TEXT("validation"), Validated)) return false;
+	int32 Wire304 = 0;
+	for (const auto& Event : Trace.For(ValidateHandle.GetId()))
+		if (Event.Kind == EVaRestTraceKind::AttemptEnded && Event.Payload.Get<FVaRestTraceAttemptEnded>().Status == 304) ++Wire304;
+	TestEqual(TEXT("actual HTTP304"), Wire304, 1);
+	TestEqual(TEXT("logical status200"), Validated->Response.Status, 200);
+	TestTrue(TEXT("revalidated from cache"), Validated->Response.bFromCache);
+	TestEqual(TEXT("validated exact value"), Validated->Value.GetValue()[TEXT("value")].AsString(), Key);
+	TestTrue(TEXT("joined original bytes"), Validated->Response.Body == First->Response.Body);
+	TestEqual(TEXT("304 preserves representation length"), Validated->Response.Headers.Get(TEXT("Content-Length")), First->Response.Headers.Get(TEXT("Content-Length")));
+	auto Hit = MakeOutcome<FVaRestJson>();
+	const auto HitHandle = Observe(Client.Get(Path).NoRetry().KeepBody(), Hit).Send();
+	if (!TestTrue(TEXT("memory hit complete"), Wait(Hit)) || !Succeeded(*this, TEXT("memory hit"), Hit)) return false;
+	TestEqual(TEXT("memory exact value"), Hit->Value.GetValue()[TEXT("value")].AsString(), Key);
+	TestTrue(TEXT("memory original bytes"), Hit->Response.Body == First->Response.Body);
+	TestTrue(TEXT("memory cached response"), Hit->Response.bFromCache);
+	const auto HitEvents = Trace.For(HitHandle.GetId());
+	if (!TestEqual(TEXT("memory has only started/completed"), HitEvents.Num(), 2)) return false;
+	if (!TestTrue(TEXT("memory kinds"), HitEvents[0].Kind == EVaRestTraceKind::Started && HitEvents[1].Kind == EVaRestTraceKind::Completed)) return false;
+	TestTrue(TEXT("actual memory hit"), HitEvents[1].Payload.Get<FVaRestTraceCompleted>().CacheLookup == EVaRestTraceCacheLookup::HitMemory);
+	if (!TestTrue(TEXT("disk persistence finished"), Disk.Drain())) return false;
+	Client = FVaRestClient();
+	if (!TestTrue(TEXT("old cache client destroyed"), PumpUntil([&Trace, OldClientId] { return Trace.ClientEvent(OldClientId, false); }, 20, true))) return false;
+	if (!TestTrue(TEXT("post-reset storage drain"), Disk.Drain())) return false;
+	// Public lifecycle + storage quiescence is bounded restart evidence, not a weak coordinator or process-kill proof.
+	FVaRestClient Restarted = MakeClient(BaseUrl);
+	Restarted.WithClock(Clock).WithConnectivity(Connectivity).WithStorageDirectories(CacheRoot, QueueRoot)
+		.WithAuth(FVaRestAuth::Bearer()).WithCache(FVaRestCachePolicy::MemoryAndDisk());
+	const uint64 NewClientId = Restarted.GetId();
+	TestTrue(TEXT("replacement cache client differs and was created"), NewClientId != OldClientId && Trace.ClientEvent(NewClientId, true));
+	if (!TestTrue(TEXT("restore trusted export"), Restarted.ImportSession(Exported))) return false;
+	auto Restored = MakeOutcome<FVaRestJson>();
+	const auto RestoredHandle = Observe(Restarted.Get(Path).NoRetry().KeepBody(), Restored).Send();
+	if (!TestTrue(TEXT("restart hit complete"), Wait(Restored)) || !Succeeded(*this, TEXT("restart hit"), Restored)) return false;
+	TestEqual(TEXT("restored exact value"), Restored->Value.GetValue()[TEXT("value")].AsString(), Key);
+	TestTrue(TEXT("restored original bytes"), Restored->Response.Body == First->Response.Body);
+	TestTrue(TEXT("restored cached response"), Restored->Response.bFromCache);
+	const auto RestoredEvents = Trace.For(RestoredHandle.GetId());
+	if (!TestEqual(TEXT("restart has no transport"), RestoredEvents.Num(), 2)) return false;
+	if (!TestTrue(TEXT("restart kinds"), RestoredEvents[0].Kind == EVaRestTraceKind::Started && RestoredEvents[1].Kind == EVaRestTraceKind::Completed)) return false;
+	TestEqual(TEXT("disk request belongs to replacement"), RestoredEvents[0].Payload.Get<FVaRestTraceStarted>().ClientId, NewClientId);
+	TestTrue(TEXT("validated disk hit"), RestoredEvents[1].Payload.Get<FVaRestTraceCompleted>().CacheLookup == EVaRestTraceCacheLookup::HitDisk);
+	auto Head = MakeOutcome<void>();
+	Observe(Restarted.Head<void>(Path).NoRetry().KeepBody(), Head).Send();
+	if (!TestTrue(TEXT("HEAD complete"), Wait(Head)) || !Succeeded(*this, TEXT("HEAD"), Head)) return false;
+	TestEqual(TEXT("HEAD has distinct key"), Head->Response.Attempts, 1);
+	TestTrue(TEXT("HEAD no body"), Head->Response.Body.IsEmpty());
+	TestEqual(TEXT("HEAD representation length"), Head->Response.Headers.Get(TEXT("Content-Length")), First->Response.Headers.Get(TEXT("Content-Length")));
+	for (int32 Index = 0; Index < 2; ++Index)
+	{
+		auto NoCache = MakeOutcome<FString>();
+		Observe(Restarted.Get<FString>(TEXT("/etag")).NoRetry(), NoCache).Send();
+		if (!TestTrue(TEXT("no-cache complete"), Wait(NoCache)) || !Succeeded(*this, TEXT("no-cache"), NoCache)) return false;
+		TestEqual(TEXT("no-cache always reaches HTTP"), NoCache->Response.Attempts, 1);
+	}
+	TestTrue(TEXT("final drain"), Disk.Drain());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestIntegrationOfflineRestartTest, "VaRest.Integration.Offline.RestartReplay",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestIntegrationOfflineRestartTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRestTestsIntegrationPrivate;
+	FString BaseUrl;
+	if (!ServerUrl(*this, BaseUrl)) return false;
+	FScopedPersistenceTest Disk;
+	FMetadataCapture Trace;
+	const auto Clock = MakeShared<FVaRestVirtualClock, ESPMode::ThreadSafe>();
+	const auto Connectivity = FVaRestConnectivity::Make(Clock);
+	Connectivity->ReportOffline();
+	const FString CacheRoot = FPaths::Combine(Disk.Root, TEXT("Cache"));
+	const FString QueueRoot = FPaths::Combine(Disk.Root, TEXT("Queue"));
+	const FString Operation = FGuid::NewGuid().ToString(EGuidFormats::DigitsLower);
+	const FString QueueName = TEXT("restart-account-A-") + Operation;
+	FVaRestClient Client = MakeClient(BaseUrl);
+	Client.WithClock(Clock).WithConnectivity(Connectivity).WithStorageDirectories(CacheRoot, QueueRoot).WithAuth(FVaRestAuth::Bearer());
+	Client.SetBearerToken(TEXT("integration-queue-old"));
+	const uint64 OldClientId = Client.GetId();
+	TestTrue(TEXT("original queue client creation"), Trace.ClientEvent(OldClientId, true));
+	const FString Exported = Client.ExportSession();
+	Client.WithOfflineQueue(QueueName);
+	const auto QueueId = MakeShared<FString, ESPMode::ThreadSafe>();
+	const auto Original = MakeOutcome<void>();
+	const auto OriginalHandle = Observe(Client.Post<void>(TEXT("/queue/write")).Body(FVaRestJson::Object().Set(TEXT("value"), 7))
+		.Header(TEXT("Idempotency-Key"), Operation).Idempotent().NoRetry().QueueWhenOffline(), Original)
+		.OnQueued([QueueId](const FString& Id) { *QueueId = Id; }).Send();
+	TestTrue(TEXT("queue acknowledgement not inline"), QueueId->IsEmpty());
+	if (!TestTrue(TEXT("durable queued"), PumpUntil([QueueId] { return !QueueId->IsEmpty(); }, 20, true))) return false;
+	const auto Flushed = MakeShared<TOptional<bool>, ESPMode::ThreadSafe>();
+	if (!TestTrue(TEXT("flush admitted"), Client.FlushQueue([Flushed](bool bOk) { *Flushed = bOk; }))) return false;
+	TestFalse(TEXT("flush not inline"), Flushed->IsSet());
+	if (!TestTrue(TEXT("flush finished"), PumpUntil([Flushed] { return Flushed->IsSet(); }, 20, true))) return false;
+	TestTrue(TEXT("flush succeeded"), Flushed->GetValue());
+	TestEqual(TEXT("queued original callbacks silent"), Original->SuccessCalls.load() + Original->ErrorCalls.load() + Original->CompleteCalls.load(), 0);
+	Client = FVaRestClient();
+	if (!TestTrue(TEXT("old queue client destroyed"), PumpUntil([&Trace, OldClientId] { return Trace.ClientEvent(OldClientId, false); }, 20, true))) return false;
+	if (!TestTrue(TEXT("post-reset persistence drain"), Disk.Drain())) return false;
+	FVaRestClient Restarted = MakeClient(BaseUrl);
+	Restarted.WithClock(Clock).WithConnectivity(Connectivity).WithStorageDirectories(CacheRoot, QueueRoot).WithAuth(FVaRestAuth::Bearer());
+	const uint64 NewClientId = Restarted.GetId();
+	TestTrue(TEXT("replacement queue client differs and was created"), NewClientId != OldClientId && Trace.ClientEvent(NewClientId, true));
+	if (!TestTrue(TEXT("restored same trusted account"), Restarted.ImportSession(Exported))) return false;
+	Restarted.SetBearerToken(TEXT("integration-queue-current"), true);
+	const auto Results = MakeShared<TArray<FVaRestQueuedResult>, ESPMode::ThreadSafe>();
+	Restarted.OnQueuedResult().AddLambda([Results](const FVaRestQueuedResult& Result) { Results->Add(Result); });
+	Restarted.WithOfflineQueue(QueueName);
+	Connectivity->ReportOnline();
+	TestTrue(TEXT("replay result not inline"), Results->IsEmpty());
+	if (!TestTrue(TEXT("replayed"), PumpUntil([Results] { return !Results->IsEmpty(); }, 20, true))) return false;
+	if (!TestEqual(TEXT("one result"), Results->Num(), 1)) return false;
+	TestTrue(TEXT("current credentials accepted by server"), (*Results)[0].bSuccess);
+	TestEqual(TEXT("replay status200"), (*Results)[0].Response.Status, 200);
+	TestFalse(TEXT("replay response is physical"), (*Results)[0].Response.bFromCache);
+	TestEqual(TEXT("durable queue id"), (*Results)[0].QueueId, *QueueId);
+	TestEqual(TEXT("retired before event"), Restarted.GetQueuedCount(), 0);
+	const auto Replays = Trace.Replays(*QueueId);
+	if (!TestEqual(TEXT("one replay Started"), Replays.Num(), 1)) return false;
+	const auto& Replay = Replays[0].Payload.Get<FVaRestTraceStarted>();
+	TestEqual(TEXT("replay replacement owner"), Replay.ClientId, NewClientId);
+	TestEqual(TEXT("same-process original link"), Replay.QueueReplayOf.OriginalRequestId, OriginalHandle.GetId());
+	TestEqual(TEXT("original URL preserved"), Replay.Url, BaseUrl + TEXT("/queue/write"));
+	TestEqual(TEXT("POST preserved"), Replay.Verb, FString(TEXT("POST")));
+	int32 Wire200 = 0;
+	for (const auto& Event : Trace.For(Replay.RequestId))
+		if (Event.Kind == EVaRestTraceKind::AttemptEnded)
+		{
+			const auto& Ended = Event.Payload.Get<FVaRestTraceAttemptEnded>();
+			if (Ended.Status == 200 && Ended.Failure == EVaRestTransportFailure::None && Ended.TransportDoneAt >= 0.0) ++Wire200;
+		}
+	TestEqual(TEXT("actual physical replay200"), Wire200, 1);
+	const auto Reply = FVaRestJson::Parse((*Results)[0].Response.Body);
+	TestTrue(TEXT("replay retains response bytes"), !(*Results)[0].Response.Body.IsEmpty());
+	if (!TestTrue(TEXT("raw reply parses"), Reply.HasValue())) return false;
+	const FTCHARToUTF8 Expected(TEXT("{\"value\":7}"));
+	const FString Digest = VaRest::Http::FSha256::Hash(MakeArrayView(reinterpret_cast<const uint8*>(Expected.Get()), Expected.Length())).ToHex();
+	TestEqual(TEXT("replay body unchanged"), Reply.GetValue()[TEXT("bodySha256")].AsString(), Digest);
+	TestEqual(TEXT("replay applied once"), Reply.GetValue()[TEXT("applied")].AsInt(), 1);
+	// Conflict before any duplicate can create the expected key: this proves replay preserved Operation itself.
+	auto Conflict = MakeOutcome<FVaRestJson>();
+	Observe(Restarted.Post(TEXT("/queue/write")).Body(FVaRestJson::Object().Set(TEXT("value"), 8))
+		.Header(TEXT("Idempotency-Key"), Operation).Idempotent().NoRetry(), Conflict).Send();
+	if (!TestTrue(TEXT("conflict complete"), Wait(Conflict))) return false;
+	if (!TestTrue(TEXT("original key already applied by replay"), Conflict->Error.Kind == EVaRestErrorKind::Http && Conflict->Response.Status == 409)) return false;
+	const auto ConflictReply = FVaRestJson::Parse(Conflict->Response.Body);
+	if (!TestTrue(TEXT("conflict reply parses"), ConflictReply.HasValue())) return false;
+	TestEqual(TEXT("conflict retains original digest"), ConflictReply.GetValue()[TEXT("bodySha256")].AsString(), Digest);
+	TestEqual(TEXT("conflict retains applied once"), ConflictReply.GetValue()[TEXT("applied")].AsInt(), 1);
+	auto Duplicate = MakeOutcome<FVaRestJson>();
+	Observe(Restarted.Post(TEXT("/queue/write")).Body(FVaRestJson::Object().Set(TEXT("value"), 7))
+		.Header(TEXT("Idempotency-Key"), Operation).Idempotent().NoRetry(), Duplicate).Send();
+	if (!TestTrue(TEXT("duplicate complete"), Wait(Duplicate)) || !Succeeded(*this, TEXT("duplicate"), Duplicate)) return false;
+	TestEqual(TEXT("duplicate status200"), Duplicate->Response.Status, 200);
+	TestEqual(TEXT("fixture applies same key once"), Duplicate->Value.GetValue()[TEXT("applied")].AsInt(), 1);
+	TestEqual(TEXT("same key retains body digest"), Duplicate->Value.GetValue()[TEXT("bodySha256")].AsString(), Digest);
+	TestTrue(TEXT("final drain"), Disk.Drain());
+	TestEqual(TEXT("no late duplicate event"), Results->Num(), 1);
+	TestEqual(TEXT("original callbacks remain silent"), Original->SuccessCalls.load() + Original->ErrorCalls.load() + Original->CompleteCalls.load(), 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestIntegrationOfflineProbeTest, "VaRest.Integration.Offline.ConnectionThenProbe",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestIntegrationOfflineProbeTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRestTestsIntegrationPrivate;
+	FString BaseUrl;
+	if (!ServerUrl(*this, BaseUrl)) return false;
+	FScopedPersistenceTest Disk;
+	FMetadataCapture Trace;
+	const auto Clock = MakeShared<FVaRestVirtualClock, ESPMode::ThreadSafe>();
+	const auto Connectivity = FVaRestConnectivity::Make(Clock);
+	FVaRestClient Client = MakeClient(BaseUrl);
+	const FString Operation = FGuid::NewGuid().ToString(EGuidFormats::DigitsLower);
+	Client.WithClock(Clock).WithConnectivity(Connectivity).WithAuth(FVaRestAuth::Bearer())
+		.WithStorageDirectories(FPaths::Combine(Disk.Root, TEXT("Cache")), FPaths::Combine(Disk.Root, TEXT("Queue")))
+		.WithOfflineQueue(TEXT("fail-once-") + Operation);
+	Client.SetBearerToken(TEXT("integration-queue-current"));
+	const IConsoleVariable* const MaxIdleConnections = IConsoleManager::Get().FindConsoleVariable(TEXT("HTTP.Curl.MaxIdleConnections"));
+	if (!TestNotNull(TEXT("curl idle cap exists"), MaxIdleConnections)) return false;
+	const int32 WarmUps = FMath::Max(8, MaxIdleConnections->GetInt() + 1);
+	TGuardConsoleVariable<bool> NoReuse(TEXT("http.CurlReuseConnectionEnabled"), false);
+	// Drain old pooled sockets before the intentional close; no credential goes to the echo route.
+	TArray<TSharedRef<TTestOutcome<FVaRestJson>, ESPMode::ThreadSafe>> Burst;
+	for (int32 Index = 0; Index < WarmUps; ++Index)
+	{
+		Burst.Add(MakeOutcome<FVaRestJson>());
+		Observe(Client.Get(TEXT("/echo")).NoAuth().NoRetry(), Burst.Last()).Send();
+	}
+	bool bBurstDone = true;
+	for (const auto& Done : Burst) bBurstDone = Wait(Done) && bBurstDone;
+	if (!TestTrue(TEXT("idle pool drain completes"), bBurstDone)) return false;
+	for (const auto& Done : Burst)
+		if (!Succeeded(*this, TEXT("pool warm-up"), Done)) return false;
+	AddExpectedMessagePlain(TEXT("libcurl"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, -1);
+	AddExpectedMessagePlain(TEXT("completed with reason 'ConnectionError'"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, -1);
+	const FString Path = TEXT("/queue/flaky/") + FGuid::NewGuid().ToString(EGuidFormats::DigitsLower);
+	AddExpectedMessagePlain(TEXT("completed with reason 'Other'"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, -1);
+	const auto Queued = MakeShared<FString, ESPMode::ThreadSafe>();
+	const auto Results = MakeShared<TArray<FVaRestQueuedResult>, ESPMode::ThreadSafe>();
+	const auto Original = MakeOutcome<void>();
+	Client.OnQueuedResult().AddLambda([Results](const FVaRestQueuedResult& Result) { Results->Add(Result); });
+	const auto InitialHandle = Observe(Client.Post<void>(Path).Body(FVaRestJson::Object().Set(TEXT("value"), 7))
+		.Header(TEXT("Idempotency-Key"), Operation).Idempotent().NoRetry().QueueWhenOffline(), Original)
+		.OnQueued([Queued](const FString& Id) { *Queued = Id; }).Send();
+	TestTrue(TEXT("durable acknowledgment not inline"), Queued->IsEmpty());
+	if (!TestTrue(TEXT("connection failure becomes durable queue"), PumpUntil([Queued] { return !Queued->IsEmpty(); }, 20, true))) return false;
+	int32 PhysicalFailures = 0;
+	int32 InitialDispatches = 0;
+	uint64 DispatchSequence = 0;
+	uint64 FailureSequence = 0;
+	uint64 AcknowledgedSequence = 0;
+	for (const auto& Event : Trace.For(InitialHandle.GetId()))
+	{
+		if (Event.Kind == EVaRestTraceKind::AttemptDispatched)
+		{
+			++InitialDispatches;
+			DispatchSequence = Event.Seq;
+		}
+		if (Event.Kind == EVaRestTraceKind::AttemptEnded)
+		{
+			const auto& Ended = Event.Payload.Get<FVaRestTraceAttemptEnded>();
+			// Curl's empty reply can be Other; the accepted classifier maps both to logical Connection.
+			if (Ended.Status == 0 && Ended.TransportDoneAt >= 0.0
+				&& (Ended.Failure == EVaRestTransportFailure::Connection || Ended.Failure == EVaRestTransportFailure::Other))
+			{
+				++PhysicalFailures;
+				FailureSequence = Event.Seq;
+			}
+		}
+		if (Event.Kind == EVaRestTraceKind::Completed && Event.Payload.Get<FVaRestTraceCompleted>().Outcome == EVaRestTraceOutcome::Queued)
+			AcknowledgedSequence = Event.Seq;
+	}
+	TestEqual(TEXT("one initial physical dispatch"), InitialDispatches, 1);
+	TestEqual(TEXT("one actual connection failure with no status"), PhysicalFailures, 1);
+	TestTrue(TEXT("dispatch and physical failure precede durable queued completion"), DispatchSequence > 0 && FailureSequence > DispatchSequence && AcknowledgedSequence > FailureSequence);
+	TestFalse(TEXT("physical failure marked offline"), Connectivity->IsOnline());
+	TestTrue(TEXT("not replayed without probe"), Results->IsEmpty());
+	Clock->Advance(9.999);
+	TestEqual(TEXT("no replay Started before default ten seconds"), Trace.Replays(*Queued).Num(), 0);
+	TestTrue(TEXT("no result before due time"), Results->IsEmpty());
+	Clock->Advance(0.001);
+	const auto Replays = Trace.Replays(*Queued);
+	if (!TestEqual(TEXT("one replay Started at default ten seconds"), Replays.Num(), 1)) return false;
+	const auto& Replay = Replays[0].Payload.Get<FVaRestTraceStarted>();
+	TestEqual(TEXT("probe Started at due boundary"), Replays[0].Time, 10.0);
+	TestEqual(TEXT("probe original same-origin URL"), Replay.Url, BaseUrl + Path);
+	TestEqual(TEXT("probe POST"), Replay.Verb, FString(TEXT("POST")));
+	TestEqual(TEXT("probe client"), Replay.ClientId, Client.GetId());
+	TestEqual(TEXT("probe original request link"), Replay.QueueReplayOf.OriginalRequestId, InitialHandle.GetId());
+	TestTrue(TEXT("probe result not inline"), Results->IsEmpty());
+	if (!TestTrue(TEXT("probe completed"), PumpUntil([Results] { return !Results->IsEmpty(); }, 20, true))) return false;
+	int32 Dispatches = 0;
+	int32 Wire200 = 0;
+	for (const auto& Event : Trace.For(Replay.RequestId))
+	{
+		if (Event.Kind == EVaRestTraceKind::AttemptDispatched)
+		{
+			++Dispatches;
+			TestTrue(TEXT("probe dispatch not early"), Event.Time >= 10.0);
+		}
+		if (Event.Kind == EVaRestTraceKind::AttemptEnded)
+		{
+			const auto& Ended = Event.Payload.Get<FVaRestTraceAttemptEnded>();
+			if (Ended.Status == 200 && Ended.Failure == EVaRestTransportFailure::None && Ended.TransportDoneAt >= 10.0) ++Wire200;
+		}
+	}
+	TestEqual(TEXT("one physical probe dispatch"), Dispatches, 1);
+	TestEqual(TEXT("matching successful completed physical probe"), Wire200, 1);
+	if (!TestEqual(TEXT("one queued result"), Results->Num(), 1)) return false;
+	TestTrue(TEXT("physical probe succeeded and marked online"), (*Results)[0].bSuccess && Connectivity->IsOnline());
+	TestEqual(TEXT("same durable item"), (*Results)[0].QueueId, *Queued);
+	TestEqual(TEXT("probe status200"), (*Results)[0].Response.Status, 200);
+	TestFalse(TEXT("probe response is physical"), (*Results)[0].Response.bFromCache);
+	const auto ProbeReply = FVaRestJson::Parse((*Results)[0].Response.Body);
+	if (!TestTrue(TEXT("probe raw reply parses"), ProbeReply.HasValue())) return false;
+	const FTCHARToUTF8 Expected(TEXT("{\"value\":7}"));
+	TestEqual(TEXT("probe preserved body"), ProbeReply.GetValue()[TEXT("bodySha256")].AsString(),
+		VaRest::Http::FSha256::Hash(MakeArrayView(reinterpret_cast<const uint8*>(Expected.Get()), Expected.Length())).ToHex());
+	TestEqual(TEXT("probe applied once"), ProbeReply.GetValue()[TEXT("applied")].AsInt(), 1);
+	TestEqual(TEXT("consumed"), Client.GetQueuedCount(), 0);
+	TestTrue(TEXT("drain"), Disk.Drain());
+	TestEqual(TEXT("no duplicate replay Started"), Trace.Replays(*Queued).Num(), 1);
+	TestEqual(TEXT("no duplicate result"), Results->Num(), 1);
+	TestEqual(TEXT("original callbacks silent"), Original->SuccessCalls.load() + Original->ErrorCalls.load() + Original->CompleteCalls.load(), 0);
 	return true;
 }
 

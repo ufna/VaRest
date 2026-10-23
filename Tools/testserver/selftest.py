@@ -57,6 +57,82 @@ class ServerTest(unittest.TestCase):
         status, headers_in, data = self.call(method, path, body, headers, chunked)
         return status, headers_in, (json.loads(data) if data else None)
 
+    def test_cache_and_queue_contract(self):
+        key = uuid.uuid4().hex
+        path = "/cache/value?key=" + key
+        status, headers, data = self.call("GET", path)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(data), {"value": key})
+        self.assertEqual(headers.get("Cache-Control"), "max-age=1")
+        self.assertEqual(headers.get("ETag"), '"' + key + '"')
+        self.assertEqual(int(headers["Content-Length"]), len(data))
+        status, headers, empty = self.call("GET", path, headers={"If-None-Match": '"' + key + '"'})
+        self.assertEqual(status, 304)
+        self.assertEqual(empty, b"")
+        self.assertIsNone(headers.get("Content-Length"))
+        self.assertEqual(headers.get("ETag"), '"' + key + '"')
+        self.assertEqual(headers.get("Cache-Control"), "max-age=60")
+        status, head_headers, head_body = self.call("HEAD", path)
+        self.assertEqual(status, 200)
+        self.assertEqual(head_body, b"")
+        self.assertEqual(int(head_headers["Content-Length"]), len(data))
+        self.assertEqual(self.call("GET", "/cache/value?key=invalid")[0], 400)
+        body = b'{"value":7}'
+        request_headers = {"Content-Type": "application/json", "Idempotency-Key": uuid.uuid4().hex,
+                           "Authorization": "Bearer integration-queue-current"}
+        expected = {"applied": 1, "bodySha256": hashlib.sha256(body).hexdigest()}
+        for sent_body, expected_status in ((body, 200), (body, 200), (b'{"value":8}', 409), (body, 200)):
+            status, _, result = self.call_json("POST", "/queue/write", sent_body, request_headers)
+            self.assertEqual(status, expected_status)
+            self.assertEqual(result, expected)
+
+    def test_queue_authorization(self):
+        headers = {"Idempotency-Key": uuid.uuid4().hex}
+        for authorization in (None, "Bearer integration-queue-old"):
+            if authorization is not None:
+                headers["Authorization"] = authorization
+            status, _, reply = self.call_json("POST", "/queue/write", b"refused", headers)
+            self.assertEqual((status, reply), (401, {"error": "authorization"}))
+        headers["Authorization"] = "Bearer integration-queue-current"
+        status, _, reply = self.call_json("POST", "/queue/write", b"accepted", headers)
+        self.assertEqual((status, reply), (200, {"applied": 1, "bodySha256": hashlib.sha256(b"accepted").hexdigest()}))
+        self.assertEqual(self.call("POST", "/queue/write", b"", {"Authorization": headers["Authorization"]})[0], 400)
+
+    def test_queue_cap_preserves_accepted_keys(self):
+        body = b'{"value":7}'
+        accepted = uuid.uuid4().hex
+        expected = {"applied": 1, "bodySha256": hashlib.sha256(body).hexdigest()}
+        headers = {"Idempotency-Key": accepted, "Authorization": "Bearer integration-queue-current"}
+        # Isolated boundary setup: exercise HTTP at the cap without 4096 network round trips.
+        with server.LOCK:
+            saved = dict(server.QUEUE_WRITES)
+            server.QUEUE_WRITES.clear()
+            server.QUEUE_WRITES.update({uuid.uuid4().hex: dict(expected) for _ in range(4095)})
+            server.QUEUE_WRITES[accepted] = dict(expected)
+        try:
+            unseen = dict(headers, **{"Idempotency-Key": uuid.uuid4().hex})
+            status, _, reply = self.call_json("POST", "/queue/write", body, unseen)
+            self.assertEqual((status, reply), (503, {"error": "fixture-cap"}))
+            for sent_body, expected_status in ((body, 200), (b"different", 409), (body, 200)):
+                status, _, reply = self.call_json("POST", "/queue/write", sent_body, headers)
+                self.assertEqual((status, reply), (expected_status, expected))
+        finally:
+            with server.LOCK:
+                server.QUEUE_WRITES.clear()
+                server.QUEUE_WRITES.update(saved)
+
+    def test_queue_flaky_once(self):
+        path = "/queue/flaky/" + uuid.uuid4().hex
+        body = b'{"value":7}'
+        headers = {"Idempotency-Key": uuid.uuid4().hex, "Content-Type": "application/json",
+                   "Authorization": "Bearer integration-queue-current"}
+        with self.assertRaises(http.client.RemoteDisconnected):
+            self.call("POST", path, body, headers)
+        for _ in range(2):
+            status, _, reply = self.call_json("POST", path, body, headers)
+            self.assertEqual(status, 200)
+            self.assertEqual(reply, {"applied": 1, "bodySha256": hashlib.sha256(body).hexdigest()})
+
     def test_echo_json_query_headers(self):
         status, _, echo = self.call_json("POST", "/echo/x?a=1&a=2&b=", b'{"k":"v"}', {"Content-Type": "application/json", "X-Test": "yes"})
         self.assertEqual(status, 200)

@@ -547,6 +547,7 @@ bool VaRest::Http::FOfflineQueue::TryReplay(bool bProbe)
             FVaRestQueuedResult Result; Result.QueueId=Item.QueueId;
             Result.Tag=Item.Tag.IsEmpty() ? NAME_None : FName(*Item.Tag);
             Result.bSuccess=!Reply.Error.IsError(); Result.Response=Reply.Response; Result.Error=Reply.Error;
+            if (Reply.Value.IsSet()) Result.Response.Body=Reply.Value.GetValue();
             const bool bKeep=Reply.Error.Kind==EVaRestErrorKind::Connection || Reply.Error.Kind==EVaRestErrorKind::Offline;
             // Expiry is terminal Offline; a network Offline must remain pending.
             Self->ReplayFinished(Item.QueueId,MoveTemp(Result),bKeep && Terminal!=TEXT("QueueExpired"));
