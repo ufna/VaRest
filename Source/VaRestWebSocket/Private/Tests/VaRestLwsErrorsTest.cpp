@@ -5,6 +5,8 @@
 #include "Misc/AutomationTest.h"
 #include "VaRestLwsErrors.h"
 
+#include <limits>
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestLwsErrorsTest, "VaRest.WebSocket.Lws.ConnectError",
 	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
 
@@ -25,6 +27,18 @@ bool FVaRestLwsErrorsTest::RunTest(const FString& Parameters)
 		{ TEXT("HS: ws upgrade not 101, was 429"), EVaRestSocketFailure::UpgradeRefused, 429 },
 		{ TEXT("HS: ws upgrade not 101, was 503"), EVaRestSocketFailure::UpgradeRefused, 503 },
 		{ TEXT("HS: ws upgrade not 101, was 302"), EVaRestSocketFailure::Redirect, 302 },            // a 3xx LWS did not follow
+		{ TEXT("HS: ws upgrade not 101, was 000"), EVaRestSocketFailure::Unknown, 0 },
+		{ TEXT("HS: ws upgrade not 101, was 099"), EVaRestSocketFailure::Unknown, 0 },
+		{ TEXT("HS: ws upgrade not 101, was 600"), EVaRestSocketFailure::Unknown, 0 },
+		{ TEXT("HS: ws upgrade not 101, was 999"), EVaRestSocketFailure::Unknown, 0 },
+		{ TEXT("HS: ws upgrade not 101, was 42"), EVaRestSocketFailure::Unknown, 0 },
+		{ TEXT("HS: ws upgrade not 101, was "), EVaRestSocketFailure::Unknown, 0 },
+		{ TEXT("HS: ws upgrade not 101, was 99999999999"), EVaRestSocketFailure::Unknown, 0 },
+		{ TEXT("HS: ws upgrade not 101, was 404 x"), EVaRestSocketFailure::Unknown, 0 },
+		{ TEXT("HS: ws upgrade not 101, was +40"), EVaRestSocketFailure::Unknown, 0 },
+		{ TEXT("HS: ws upgrade not 101, was -10"), EVaRestSocketFailure::Unknown, 0 },
+		{ TEXT("HS: ws upgrade not 101, was 100"), EVaRestSocketFailure::UpgradeRefused, 100 },
+		{ TEXT("HS: ws upgrade not 101, was 599"), EVaRestSocketFailure::UpgradeRefused, 599 },
 		{ TEXT("HS: ws upgrade not 101, was abc"), EVaRestSocketFailure::Unknown, 0 },
 		{ TEXT("HS: Redirect failed"), EVaRestSocketFailure::Redirect, 0 },
 		{ TEXT("HS: Redirect attempted SSL downgrade"), EVaRestSocketFailure::Redirect, 0 },         // hs.redirect_downgrade
@@ -92,9 +106,16 @@ bool FVaRestLwsErrorsTest::RunTest(const FString& Parameters)
 	const FEmptyRow EmptyRows[] = {
 		{ 0.2, EVaRestSocketFailure::Unknown, TEXT("empty CONNECTION_ERROR") },          // a kill VaRest did not make
 		{ 19.4, EVaRestSocketFailure::Unknown, TEXT("empty CONNECTION_ERROR") },
+		{ 19.499, EVaRestSocketFailure::Unknown, TEXT("empty CONNECTION_ERROR") },     // just under the 19.5 s tolerance edge
 		{ 19.5, EVaRestSocketFailure::ConnectTimeout, TEXT("20 s connect stage") },     // LWS's fixed TCP-connect timer (review conc M-1)
+		{ 19.999, EVaRestSocketFailure::ConnectTimeout, TEXT("20 s connect stage") },
+		{ 20.0, EVaRestSocketFailure::ConnectTimeout, TEXT("20 s connect stage") },
+		{ 20.001, EVaRestSocketFailure::ConnectTimeout, TEXT("20 s connect stage") },
 		{ 20.1, EVaRestSocketFailure::ConnectTimeout, TEXT("20 s connect stage") },
+		{ -1.0, EVaRestSocketFailure::Unknown, TEXT("empty CONNECTION_ERROR") },        // a clock step back
+		{ std::numeric_limits<double>::quiet_NaN(), EVaRestSocketFailure::Unknown, TEXT("empty CONNECTION_ERROR") },
 		{ 60.3, EVaRestSocketFailure::ConnectTimeout, TEXT("timeout_secs") },           // the context's backstop
+		{ 25.0, EVaRestSocketFailure::ConnectTimeout, TEXT("timeout_secs") },
 	};
 	for (const FEmptyRow& Row : EmptyRows)
 	{
@@ -102,6 +123,11 @@ bool FVaRestLwsErrorsTest::RunTest(const FString& Parameters)
 		const FConnectionErrorClass Class = ClassifyEmptyConnectionError(Row.Took, Detail);
 		TestTrue(FString::Printf(TEXT("an empty string after %.1f s is %s (got %s)"), Row.Took, LexToString(Row.Failure), LexToString(Class.Failure)), Class.Failure == Row.Failure);
 		TestTrue(FString::Printf(TEXT("... its detail names it (%s)"), *Detail), Detail.Contains(Row.DetailHas, ESearchCase::CaseSensitive));
+		// Each detail names one cause only, so the 20 s and timeout_secs rows cannot pass the same way
+		const bool bStageRow = FCString::Strstr(Row.DetailHas, TEXT("20 s connect stage")) != nullptr;
+		const bool bSecsRow = FCString::Strstr(Row.DetailHas, TEXT("timeout_secs")) != nullptr;
+		TestFalse(FString::Printf(TEXT("... and names no other cause (%s)"), *Detail),
+			(bStageRow && Detail.Contains(TEXT("timeout_secs"), ESearchCase::CaseSensitive)) || (bSecsRow && Detail.Contains(TEXT("20 s connect stage"), ESearchCase::CaseSensitive)));
 	}
 	return true;
 }

@@ -23,7 +23,7 @@ namespace VaRest::WebSocket::Lws
 	/**
 	 * Any thread: libwebsockets 3.0's error string for a client that never opened (libwebsockets.h:1255-1299; the strings of
 	 * lib/Unix/x86_64-unknown-linux-gnu/Release/libwebsockets.a; passport hs.*, tls.untrusted_rejected, timeout.*), as VaRest
-	 * classifies it. The status comes only from the string: lws_http_client_http_response is never called there (T18).
+	 * classifies it. Only trailing whitespace and NULs are trimmed. The status (100-599, else Unknown with 0) comes only from the string: lws_http_client_http_response is never called there (T18).
 	 * A failure VaRest caused itself (a redirect veto, a refused certificate, its own kill) is the connection's to report: it
 	 * overrides what this says.
 	 */
@@ -36,9 +36,16 @@ namespace VaRest::WebSocket::Lws
 	inline constexpr double LwsConnectStageSeconds = 20.0;
 
 	/**
+	 * How far under LwsConnectStageSeconds an elapsed time still counts as LWS's stage timer: LWS's timers fire on its
+	 * whole-second service ticks, so VaRest's wall clock can read just under 20 s when the stage fired. The plan (decision 17,
+	 * review conc M-2) fixes the split at "19.5 s"; the passport gives no measurement behind the 0.5
+	 */
+	inline constexpr double LwsStageToleranceSeconds = 0.5;
+
+	/**
 	 * Any thread: an empty CONNECTION_ERROR (bEmpty) by the time the attempt took (review conc M-1, M-2; re-review: a pure
-	 * function, so the split is table-tested). From LwsConnectStageSeconds - 0.5 on it is LWS's own stage timer --
-	 * ConnectTimeout; before, Unknown (a kill VaRest did not make). OutDetail says which, with the time
+	 * function, so the split is table-tested). From LwsConnectStageSeconds - LwsStageToleranceSeconds (19.5 s, inclusive) on it is LWS's own stage timer --
+	 * ConnectTimeout; before, Unknown (a kill VaRest did not make); so are a negative and a NaN time. OutDetail says which, with the time
 	 */
 	FConnectionErrorClass ClassifyEmptyConnectionError(double TookSeconds, FString& OutDetail);
 }

@@ -117,7 +117,8 @@ namespace VaRest::WebSocket::VaRestSocketTargetPrivate
 
 	/**
 	 * What inet_aton (the resolver's numeric-host parser) would take: 1-4 labels, each decimal, 0x-hex or leading-0 octal.
-	 * Decimal-only hosts are refused at any label count (as before); hex labels only within inet_aton's 4
+	 * Decimal-only hosts are refused at any label count (as before); hex labels only within inet_aton's 4: a hex host of 5+ labels
+	 * (0x1.1.1.1.1) is accepted because inet_aton rejects it, so it resolves as an ordinary name
 	 */
 	bool IsInetAtonNumber(const FString& Host)
 	{

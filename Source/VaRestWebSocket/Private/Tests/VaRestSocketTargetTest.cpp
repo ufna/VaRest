@@ -65,6 +65,8 @@ bool FVaRestSocketTargetValidTest::RunTest(const FString& Parameters)
 		{ TEXT("ws://[1:2:3:4:5:6:7:8]/"), TEXT("1:2:3:4:5:6:7:8"), 80, TEXT("[1:2:3:4:5:6:7:8]"), TEXT("/"), false, true, TEXT("http://[1:2:3:4:5:6:7:8]"), TEXT("ws://[1:2:3:4:5:6:7:8]") },
 		{ TEXT("ws://[::ffff:1.2.3.4]/"), TEXT("::ffff:1.2.3.4"), 80, TEXT("[::ffff:1.2.3.4]"), TEXT("/"), false, true, TEXT("http://[::ffff:1.2.3.4]"), TEXT("ws://[::ffff:1.2.3.4]") },
 		{ TEXT("ws://[1::1.2.3.4]/"), TEXT("1::1.2.3.4"), 80, TEXT("[1::1.2.3.4]"), TEXT("/"), false, true, TEXT("http://[1::1.2.3.4]"), TEXT("ws://[1::1.2.3.4]") },
+		{ TEXT("ws://0x.example.com/"), TEXT("0x.example.com"), 80, TEXT("0x.example.com"), TEXT("/"), false, false, TEXT("http://0x.example.com"), TEXT("ws://0x.example.com") },
+		{ TEXT("ws://1e100.net/"), TEXT("1e100.net"), 80, TEXT("1e100.net"), TEXT("/"), false, false, TEXT("http://1e100.net"), TEXT("ws://1e100.net") },
 		{ TEXT("ws://[fe80::1]/"), TEXT("fe80::1"), 80, TEXT("[fe80::1]"), TEXT("/"), false, true, TEXT("http://[fe80::1]"), TEXT("ws://[fe80::1]") },
 		{ TEXT("ws://[2001:db8::8a2e:370:7334]/"), TEXT("2001:db8::8a2e:370:7334"), 80, TEXT("[2001:db8::8a2e:370:7334]"), TEXT("/"), false, true, TEXT("http://[2001:db8::8a2e:370:7334]"), TEXT("ws://[2001:db8::8a2e:370:7334]") },
 	};
@@ -138,6 +140,7 @@ bool FVaRestSocketTargetInvalidTest::RunTest(const FString& Parameters)
 		TEXT("ws://01.1.1.1/"),             // ambiguous octal/decimal
 		TEXT("ws://1.2.3/"),                // inet_aton reads these as numbers (task 4 residual)
 		TEXT("ws://2130706433/"),
+		TEXT("ws://0x/"),                   // an empty hex number
 		TEXT("ws://0x7f.0.0.1/"),
 		TEXT("ws://0x7f000001/"),
 		TEXT("ws://0X7F.1/"),

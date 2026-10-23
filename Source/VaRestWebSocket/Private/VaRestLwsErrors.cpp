@@ -93,6 +93,11 @@ VaRest::WebSocket::Lws::FConnectionErrorClass VaRest::WebSocket::Lws::ClassifyCo
 		{
 			return Out;
 		}
+		// Only 100-599 is an HTTP status; HttpStatus 0 means "none", so a bogus number must not reach an error message
+		if (Status < 100 || Status > 599)
+		{
+			return Out;
+		}
 		// A 3xx that reached the parser is a redirect LWS did not follow, refused all the same (ruling Q2)
 		Out.Failure = Status >= 300 && Status <= 399 ? EVaRestSocketFailure::Redirect : EVaRestSocketFailure::UpgradeRefused;
 		Out.HttpStatus = Status;
@@ -121,10 +126,14 @@ VaRest::WebSocket::Lws::FConnectionErrorClass VaRest::WebSocket::Lws::ClassifyEm
 	// did not make. VaRest's own ConnectTimeout (at most timeout_secs) normally fires first, so only the time taken tells them apart
 	FConnectionErrorClass Out;
 	Out.bEmpty = true;
-	if (TookSeconds >= LwsConnectStageSeconds - 0.5)
+	// NaN and negative compare false here and fall to Unknown
+	if (TookSeconds >= LwsConnectStageSeconds - LwsStageToleranceSeconds)
 	{
 		Out.Failure = EVaRestSocketFailure::ConnectTimeout;
-		OutDetail = FString::Printf(TEXT("libwebsockets' own handshake timeout after %.1f s (its 20 s connect stage, or timeout_secs)"), TookSeconds);
+		// Within one more second of the stage it is the 20 s timer; later only timeout_secs can have fired
+		OutDetail = TookSeconds < LwsConnectStageSeconds + 1.0
+			? FString::Printf(TEXT("libwebsockets' own 20 s connect stage timed out after %.1f s"), TookSeconds)
+			: FString::Printf(TEXT("libwebsockets' own timeout_secs timed out after %.1f s"), TookSeconds);
 	}
 	else
 	{
