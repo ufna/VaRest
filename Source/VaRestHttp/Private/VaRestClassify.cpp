@@ -25,7 +25,8 @@ EVaRestErrorKind VaRest::Http::KindFor(EVaRestTransportFailure Failure, FName De
 	// The request itself (M3 reviews M14, N-4, task 7 M-1, I3; plan decision 15; ruling Q7's misconfigured built-in auth;
 	// ruling I-7's refresh refused by the configuration): sending it again fails again
 	if (IsOneOf(Detail, { TEXT("BodyRejected"), TEXT("InvalidHeader"), TEXT("UploadReadFailed"), TEXT("BodyFileMissing"),
-		TEXT("HttpDisabled"), TEXT("DomainNotAllowed"), TEXT("AuthInvalid"), TEXT("AuthRefreshConfig"), TEXT("PersistenceStopped") }))
+		TEXT("HttpDisabled"), TEXT("DomainNotAllowed"), TEXT("AuthInvalid"), TEXT("AuthRefreshConfig"), TEXT("PersistenceStopped"),
+		TEXT("QueueWriteFailed"), TEXT("QueueFull"), TEXT("PersistenceCredentials"), TEXT("QueueConfig"), TEXT("QueueOrigin") }))
 	{
 		return EVaRestErrorKind::Config;
 	}
@@ -35,9 +36,13 @@ EVaRestErrorKind VaRest::Http::KindFor(EVaRestTransportFailure Failure, FName De
 		return EVaRestErrorKind::Decode;
 	}
 	// The auth stages' own failures (Tasks 14-17): a rejected refresh, no credentials, a logout while parked
-	if (IsOneOf(Detail, { TEXT("AuthRejected"), TEXT("NoCredentials"), TEXT("SessionCleared") }))
+	if (IsOneOf(Detail, { TEXT("AuthRejected"), TEXT("NoCredentials"), TEXT("SessionCleared"), TEXT("QueueIdentity") }))
 	{
 		return EVaRestErrorKind::Auth;
+	}
+	if (IsOneOf(Detail, { TEXT("Offline"), TEXT("QueueExpired"), TEXT("AuthRefreshOffline") }))
+	{
+		return EVaRestErrorKind::Offline;
 	}
 	switch (Failure)
 	{

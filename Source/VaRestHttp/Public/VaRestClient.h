@@ -25,6 +25,7 @@ class FVaRestClient;
 enum class EVaRestAuthRefreshOutcome : uint8;
 class FVaRestRequestHandle;
 class IVaRestAuth;
+class FVaRestConnectivity;
 /** Declared here for FRequestSpec's friendship; the definition below carries [[nodiscard]] (allowed on a later declaration) */
 template <typename T>
 class TVaRestRequest;
@@ -91,6 +92,7 @@ namespace VaRest::Http
 		EVaRestAuthMode AuthMode = EVaRestAuthMode::Required;
 		/** A refresh request (FVaRestAuthRefreshContext::Request; plan decision 23) */
 		bool bAuthRefresh = false;
+		bool bConnectivityProbe = false;
 		/** Spec review I-2: the request id to use instead of a new one -- the refresh's own (FVaRestTrace::NewRequestId); 0 = a new one */
 		uint64 PresetRequestId = 0;
 		/** The current body is a struct, encoded with Naming: Naming() now fails. A later Body() or BodyFile() clears it. */
@@ -676,8 +678,14 @@ public:
 	 * (SetSecretValue). The session's expiry does not move (M4a final review B-m-5): FVaRestSessionData::ExpiresAt stays a
 	 * time on the old clock, so a session set before this refreshes at once or never, and ExportSession() writes a wrong
 	 * expiresAt. Set the clock first (a test's virtual clock), or set the session again after it.
+	 * Does not retime shared connectivity; inject a connectivity with the desired clock separately.
 	 */
 	FVaRestClient& WithClock(TSharedRef<IVaRestClock, ESPMode::ThreadSafe> Clock);
+	FVaRestClient& WithConnectivity(TSharedRef<FVaRestConnectivity, ESPMode::ThreadSafe> Connectivity);
+	/** Optional same-origin health URL; probes use bounded HEAD with no auth or retries. */
+	FVaRestClient& WithHealthUrl(FStringView Url);
+	/** Path-only configuration; mobile roots select physical writable app storage before normalization. */
+	FVaRestClient& WithStorageDirectories(FStringView CacheRoot, FStringView QueueRoot);
 	/** Game thread: seeds the stream retry jitter draws from (plan decision 26), so a test knows each delay */
 	FVaRestClient& WithRandomSeed(int32 Seed);
 	/**

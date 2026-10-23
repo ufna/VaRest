@@ -47,8 +47,8 @@ enum class EVaRestAuthRefreshOutcome : uint8
 	/**
 	 * Anything else -- no connection, a timeout, 408, 429, 5xx, a canceled or locally refused refresh request (HTTP
 	 * disabled, a domain not allowed): the session stays; parked requests fail with FailedKind -- except, after a proactive
-	 * refresh (a due expiry), one parked before its attempt whose token is still unexpired, which is sent with it (M4a
-	 * final review B6)
+	 * refresh (a due expiry), one parked before its attempt whose token is still unexpired, which is sent with it only
+	 * when effective connectivity currently permits another request
 	 */
 	Failed,
 	/**
@@ -76,7 +76,7 @@ struct VARESTHTTP_API FVaRestAuthRefreshResult
 	double ExpiresInSeconds = 0.0;
 	/**
 	 * Failed: what parked requests fail with -- Connection or Timeout (retryable: Retry and M4b's offline queue act on
-	 * them) or Config (not retryable: sending again fails again). ClassifyAttempt decides bRetryable, as for any attempt.
+	 * them) or Config/Offline (not retryable). ClassifyAttempt decides bRetryable, as for any attempt.
 	 */
 	EVaRestErrorKind FailedKind = EVaRestErrorKind::Connection;
 	/** Why, for the error message and the trace marker; never a token */
@@ -89,7 +89,7 @@ struct VARESTHTTP_API FVaRestAuthRefreshResult
 	 */
 	static FVaRestAuthRefreshResult Refreshed(FString InAccessToken, FString InRefreshToken = FString(), double InExpiresInSeconds = 0.0);
 	static FVaRestAuthRefreshResult Rejected(FString InMessage);
-	/** Ruling I-7: the session stays. InKind Timeout and Config are kept; any other kind is Connection. */
+	/** Ruling I-7: the session stays. InKind Timeout, Config and Offline are kept; any other kind is Connection. */
 	static FVaRestAuthRefreshResult Failed(EVaRestErrorKind InKind, FString InMessage);
 };
 
@@ -254,8 +254,9 @@ public:
 	 * redaction keys too). The endpoint's own "no" -- a 4xx other than 408 and 429, or a success that is not JSON or has no
 	 * access token -- expires the session; anything else keeps it
 	 * (no answer, a timeout, 408, 429, 5xx, a refusal by the configuration such as HTTP disabled), and the parked requests
-	 * fail with Connection, Timeout or Config (plan decision 3, ruling I-7) -- but after a proactive refresh, a request
-	 * parked before its attempt whose token has not expired yet is sent with it (M4a final review B6). A success that is
+	 * fail with Connection, Timeout, Config or Offline -- but after a proactive refresh, a request parked before its
+	 * attempt whose token has not expired yet is sent with it only if effective connectivity currently permits it.
+	 * Refresh requests themselves never enter an offline hold or durable queue. A success that is
 	 * not JSON from another host than the refresh URL's (a redirect: a captive portal's page) is no "no" either:
 	 * Connection, the session kept. The proactive lead is RefreshLeadSeconds, at most half the token's lifetime
 	 * (concurrency review M-7); an empty RefreshStatuses refreshes only then, before a known expiry. Each path's last

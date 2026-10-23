@@ -3,6 +3,7 @@
 #include "VaRestAuthInternal.h"
 
 #include "VaRestClientState.h"
+#include "VaRestConnectivity.h"
 #include "VaRestExchangeState.h"
 #include "VaRestHttpLog.h"
 #include "VaRestRetryInternal.h"
@@ -67,10 +68,15 @@ namespace VaRest::Http::AuthGatePrivate
 		{
 		case ERefreshEnd::Failed:
 			// Plan decision 3, ruling I-7: the session stays and the refresh's own kind comes through (FinishRefresh keeps
-			// Timeout and Config and makes the rest Connection, as the Failed() factory does: Task 16 review M-2) --
+			// Timeout, Config and Offline and makes the rest Connection, as the Failed() factory does: Task 16 review M-2) --
 			// Connection and Timeout retryable, so Retry (outside) and M4b's offline queue can act; Config not
 			// (ClassifyAttempt: AuthRefreshConfig)
-			if (End.Kind == EVaRestErrorKind::Config)
+			if (End.Kind == EVaRestErrorKind::Offline)
+			{
+				Out.Failure = EVaRestTransportFailure::Other;
+				Out.FailureDetail = TEXT("AuthRefreshOffline");
+			}
+			else if (End.Kind == EVaRestErrorKind::Config)
 			{
 				Out.Failure = EVaRestTransportFailure::Other;
 				Out.FailureDetail = TEXT("AuthRefreshConfig");
@@ -226,17 +232,18 @@ namespace VaRest::Http::AuthGatePrivate
 			Back.Config->Clock->ClearTimer(Run->DeadlineTimer);
 			// M4a final review B6 (ruling): a proactive refresh is an optimization. When one fails (not Rejected, not Cleared),
 			// a request parked before its attempt whose access token is still unexpired is sent with that token instead of
-			// failing -- a Wi-Fi blip inside the lead must not fail a request that would succeed; if the token is refused
+			// failing, provided connectivity now permits another request; if the token is refused
 			// after all, its 401 takes the reactive path. A replay's park (its token was refused) and a park behind a 401's
 			// or RefreshAuth's refresh keep spec 4.2's rule: they fail with the refresh's kind.
-			const bool bSendAnyway = End.End == ERefreshEnd::Failed && End.bProactive && !bReplay
+			const bool bFallbackCandidate = End.End == ERefreshEnd::Failed && End.bProactive && !bReplay
 				&& IsAccessTokenUnexpired(Back.State->GetSessionData(), Back.Config->Clock->Now());
+			const bool bSendAnyway = bFallbackCandidate && Back.Config->Connectivity->IsOnline();
 			if ((End.End != ERefreshEnd::Ready && !bSendAnyway) || IsOwnerGone(Back))
 			{
 				FVaRestAttemptOutcome Ended;
 				if (End.End != ERefreshEnd::Ready)
 				{
-					Ended = FailureFor(Back, End);
+					Ended = bFallbackCandidate && !Back.Config->Connectivity->IsOnline() ? MakeOfflineOutcome() : FailureFor(Back, End);
 				}
 				else
 				{

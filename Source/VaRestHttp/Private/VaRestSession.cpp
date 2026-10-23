@@ -583,12 +583,12 @@ void VaRest::Http::FClientState::FinishRefresh(uint64 RefreshId, FVaRestAuthRefr
 	else if (Result.Outcome == EVaRestAuthRefreshOutcome::Failed || Result.Outcome == EVaRestAuthRefreshOutcome::Unavailable)
 	{
 		// Plan decision 3, ruling I-7: the session stays; the waiters fail with the refresh's kind. Task 16 review M-2: kept
-		// as the Failed() factory keeps it (VaRestAuth.cpp:35) -- Timeout and Config, the rest Connection -- since the field
+		// as the Failed() factory keeps it (VaRestAuth.cpp:35) -- Timeout, Config and Offline, the rest Connection -- since the field
 		// is public and a result built by hand counts (Task 15 review M-5): a socket's RefreshAuth and a parked request
 		// (the auth gate's FailureFor) then agree about one refresh. Unavailable is RefreshAuth's answer, not an auth's: one
 		// that reports it anyway keeps the session as a Failed does (Task 15 review M-5's rule), never a logout.
 		End.End = ERefreshEnd::Failed;
-		End.Kind = Result.FailedKind == EVaRestErrorKind::Timeout || Result.FailedKind == EVaRestErrorKind::Config ? Result.FailedKind : EVaRestErrorKind::Connection;
+		End.Kind = Result.FailedKind == EVaRestErrorKind::Timeout || Result.FailedKind == EVaRestErrorKind::Config || Result.FailedKind == EVaRestErrorKind::Offline ? Result.FailedKind : EVaRestErrorKind::Connection;
 	}
 	else
 	{

@@ -1865,11 +1865,12 @@ bool FVaRestHttpRetryDeadlineIdleTest::RunTest(const FString& Parameters)
 	// caps the total, but the activity timeout stays the engine's idle default (30 s, HttpModule.cpp:98), not 300 -- so a
 	// stalled first attempt fails at that default, as a connection error, and is retried within the deadline.
 	FTestRig Rig;
+	FScopedTraceRecorder Trace;
 	Rig.Fake->EngineActivityTimeout = 30.f;
 	Rig.Client.WithRetry(Exact(3).WithDeadline(300.f));
 	Rig.Fake->SetResponder([](const FVaRestTransportRequest& Request) { return Request.Attempt == 1 ? FVaRestFakeResponse::Manual() : Json(200); });
 	auto Outcome = MakeOutcome<FVaRestJson>();
-	Observe(Rig.Client.Get(TEXT("/stall")), Outcome).Send();
+	const auto Handle = Observe(Rig.Client.Get(TEXT("/stall")), Outcome).Send();
 	if (!TestTrue(TEXT("the first attempt is on the wire"), PumpUntil([&Rig] { return Rig.Fake->NumCalls() == 1; })))
 	{
 		Abandon(Rig);
@@ -1881,9 +1882,11 @@ bool FVaRestHttpRetryDeadlineIdleTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("no timeout set: the time left is the total cap, 300 s"), FMath::IsNearlyEqual(FirstTotal, 300.f, 1e-3f));
 	TestEqual(TEXT("... and the activity timeout handed over is 0, the engine's default, not 300 s"), FirstActivity, 0.f);
 	Rig.Clock->Advance(30.0);
-	if (!TestTrue(TEXT("the stall ends at the idle default; a retry is armed"), PumpUntil([&Rig]
+	if (!TestTrue(TEXT("the stall ends at the idle default; a retry is armed"), PumpUntil([&Rig, &Trace, Handle]
 		{
-			return Rig.Fake->NumInFlight() == 0 && Rig.Clock->NumPendingTimers() == 1;
+			// Connectivity shares this clock: observe this request's installed backoff, not all subsystem timers.
+			return Rig.Fake->NumInFlight() == 0 && Trace.Recorder->For(Handle.GetId()).ContainsByPredicate([](const FVaRestTraceEvent& Event)
+			{ return Event.Kind == EVaRestTraceKind::Note && Event.Payload.Get<FVaRestTraceNote>().Kind == EVaRestTraceNoteKind::RetryScheduled; });
 		})))
 	{
 		Abandon(Rig);
@@ -1935,10 +1938,11 @@ bool FVaRestHttpRetryDeadlineActivityTest::RunTest(const FString& Parameters)
 	}
 
 	FTestRig Short;
+	FScopedTraceRecorder Trace;
 	Short.Client.WithRetry(Exact(3).WithDeadline(20.f)).WithTimeout(0.f, 15.f);
 	Short.Fake->SetResponder([](const FVaRestTransportRequest&) { return FVaRestFakeResponse::Manual(); });
 	auto Silent = MakeOutcome<FVaRestJson>();
-	Observe(Short.Client.Get(TEXT("/silent")), Silent).Send();
+	const auto Handle = Observe(Short.Client.Get(TEXT("/silent")), Silent).Send();
 	if (!TestTrue(TEXT("attempt 1 is on the wire"), PumpUntil([&Short] { return Short.Fake->NumCalls() == 1; })))
 	{
 		Abandon(Short);
@@ -1947,9 +1951,11 @@ bool FVaRestHttpRetryDeadlineActivityTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("attempt 1: the shorter activity timeout is kept, 15 s; the total is the time left, 20 s"),
 		FMath::IsNearlyEqual(Short.Fake->GetCall(0).Request.ActivityTimeout, 15.f, 1e-4f) && FMath::IsNearlyEqual(Short.Fake->GetCall(0).Request.Timeout, 20.f, 1e-4f));
 	Short.Clock->Advance(15.0);
-	if (!TestTrue(TEXT("its silence ends it at 15 s; a retry is armed"), PumpUntil([&Short]
+	if (!TestTrue(TEXT("its silence ends it at 15 s; a retry is armed"), PumpUntil([&Short, &Trace, Handle]
 		{
-			return Short.Fake->NumInFlight() == 0 && Short.Clock->NumPendingTimers() == 1;
+			// Connectivity also arms an offline timer. RetryScheduled follows the backoff timer's installation.
+			return Short.Fake->NumInFlight() == 0 && Trace.Recorder->For(Handle.GetId()).ContainsByPredicate([](const FVaRestTraceEvent& Event)
+			{ return Event.Kind == EVaRestTraceKind::Note && Event.Payload.Get<FVaRestTraceNote>().Kind == EVaRestTraceNoteKind::RetryScheduled; });
 		})))
 	{
 		Abandon(Short);

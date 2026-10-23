@@ -162,6 +162,7 @@ namespace VaRest::Http
 		EVaRestAuthMode AuthMode = EVaRestAuthMode::Required;
 		/** The refresh request itself (plan decision 23): the gate (Task 17), AuthApply and the limiter pass it through */
 		bool bIsAuthRefresh = false;
+		bool bConnectivityProbe = false;
 		/** The URL of the current attempt: Url (the attempt boundary) plus the auth's query pairs (AuthApply) */
 		FString AttemptUrl;
 		/**

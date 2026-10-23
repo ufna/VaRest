@@ -6,6 +6,8 @@
 #include "Misc/OutputDevice.h"
 #include "Templates/Function.h"
 #include "VaRestClient.h"
+#include "VaRestConnectivity.h"
+#include "HAL/PlatformMisc.h"
 #include "VaRestFakeTransport.h"
 #include "VaRestTrace.h"
 
@@ -179,6 +181,10 @@ namespace VaRest::Http::Testing
 		bool Drain(double TimeoutSeconds = 5.0) const;
 	};
 
+	/** GT test adapter: unset uses the actual platform hint; no override in production. */
+	VARESTHTTP_API void SetConnectivityHint(TOptional<ENetworkConnectionType> Hint);
+	VARESTHTTP_API TOptional<ENetworkConnectionType> GetConnectivityHint();
+
 	/** A client on the fake transport and the virtual clock (spec 7.1). Game thread. */
 	struct VARESTHTTP_API FTestRig
 	{
@@ -186,6 +192,7 @@ namespace VaRest::Http::Testing
 
 		TSharedRef<FVaRestVirtualClock, ESPMode::ThreadSafe> Clock;
 		TSharedRef<FVaRestFakeTransport, ESPMode::ThreadSafe> Fake;
+		TSharedRef<FVaRestConnectivity, ESPMode::ThreadSafe> Connectivity;
 		FVaRestClient Client;
 
 		template <typename T>

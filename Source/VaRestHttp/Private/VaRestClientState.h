@@ -7,6 +7,7 @@
 #include "Misc/ScopeRWLock.h"
 #include "VaRestAuth.h"
 #include "VaRestClient.h"
+#include "VaRestConnectivity.h"
 #include "VaRestEnvelope.h"
 #include "VaRestExchangeState.h"
 #include "VaRestHttpStatsInternal.h"
@@ -24,6 +25,11 @@ namespace VaRest::Http
 	struct FClientConfig
 	{
 		FString BaseUrl;
+		TSharedPtr<FVaRestConnectivity, ESPMode::ThreadSafe> Connectivity;
+		FString HealthUrl;
+		FString CacheRoot;
+		FString QueueRoot;
+		FString StorageConfigError;
 		/** WithName's text; empty: the client is named by its current BaseUrl (IN-8), which the trace URL-redacts */
 		FString DisplayName;
 		FVaRestHeaders DefaultHeaders;
@@ -62,6 +68,7 @@ namespace VaRest::Http
 		/** Builds the derived configuration and registers the client. Game thread. */
 		static TSharedRef<FClientState, ESPMode::ThreadSafe> Create(FClientConfig&& InConfig);
 
+		void AttachConnectivity();
 		uint64 GetClientId() const { return ClientId; }
 		/** Any thread */
 		TSharedRef<const FClientConfig, ESPMode::ThreadSafe> GetConfig() const;

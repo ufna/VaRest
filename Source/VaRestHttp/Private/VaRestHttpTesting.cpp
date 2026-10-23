@@ -120,13 +120,21 @@ TArray<FString> VaRest::Http::Testing::FLogCapture::GetLines() const
 	return Lines;
 }
 
+namespace VaRest::Http::Testing
+{
+    static TOptional<ENetworkConnectionType> ConnectivityHint;
+    void SetConnectivityHint(TOptional<ENetworkConnectionType> Hint) { check(IsInGameThread()); ConnectivityHint = Hint; }
+    TOptional<ENetworkConnectionType> GetConnectivityHint() { check(IsInGameThread()); return ConnectivityHint; }
+}
+
 VaRest::Http::Testing::FTestRig::FTestRig(FStringView BaseUrl)
 	: Clock(MakeShared<FVaRestVirtualClock, ESPMode::ThreadSafe>())
 	, Fake(MakeShared<FVaRestFakeTransport, ESPMode::ThreadSafe>(Clock))
+	, Connectivity(FVaRestConnectivity::Make(Clock))
 	, Client(FVaRestClient::Make(BaseUrl))
 {
 	// Logging is a test subject of its own (VaRest.Http.Log.*); elsewhere it would only add noise and warnings
-	Client.WithTransport(Fake).WithClock(Clock).WithLogLevel(EVaRestLogLevel::None);
+	Client.WithTransport(Fake).WithClock(Clock).WithConnectivity(Connectivity).WithLogLevel(EVaRestLogLevel::None);
 }
 
 bool VaRest::Http::Testing::FTestRig::Drain(double TimeoutSeconds) const

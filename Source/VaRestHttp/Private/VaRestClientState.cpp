@@ -2,6 +2,8 @@
 
 #include "VaRestClientState.h"
 #include "VaRestPersistenceGuard.h"
+#include "VaRestIdentity.h"
+#include "VaRestRequestSpec.h"
 
 #include "HAL/PlatformTime.h"
 #include "Misc/ScopeLock.h"
@@ -120,7 +122,11 @@ VaRest::Http::FClientState::~FClientState()
 		// refresh waiters: game code and its captures, concurrency review M-9) die on the game thread. Moved, not copied
 		// (review N-3), so this thread keeps no reference; the task body dies on the game thread right after it runs
 		// (TaskPrivate.h:871-877).
-		UE::Tasks::Launch(TEXT("VaRest.ReleaseConfig"), [Doomed = MoveTemp(Config), DoomedSession = MoveTemp(Session)] {}, UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
+		UE::Tasks::Launch(TEXT("VaRest.ReleaseConfig"), [Id = ClientId, Doomed = MoveTemp(Config), DoomedSession = MoveTemp(Session)] { Doomed->Connectivity->UnregisterProbe(Id); }, UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
+	}
+	else
+	{
+		Config->Connectivity->UnregisterProbe(ClientId);
 	}
 	ClientStatePrivate::FLiveRegistry& Registry = ClientStatePrivate::Live();
 	FScopeLock Lock(&Registry.Lock);
@@ -139,6 +145,7 @@ TSharedRef<VaRest::Http::FClientState, ESPMode::ThreadSafe> VaRest::Http::FClien
 	}
 	// IN-8, once the state is live (a sink added from this event's OnEvent finds it in its snapshot) and outside the lock:
 	// a sink's code runs here
+	Created->AttachConnectivity();
 	TracePoints::Client(Created->GetClientId(), *Created->GetConfig(), true);
 	return Created;
 }
@@ -439,4 +446,20 @@ void VaRest::Http::FClientState::ScheduleSecretExpiry()
 			Pinned->ScheduleSecretExpiry();
 		}
 	});
+}
+
+void VaRest::Http::FClientState::AttachConnectivity()
+{
+    const auto Reachability = GetConfig()->Connectivity;
+    const TWeakPtr<FClientState, ESPMode::ThreadSafe> Weak(AsShared());
+    Reachability->RegisterProbe(ClientId, [Weak]
+    {
+        const auto Pinned = Weak.Pin();
+        if (!Pinned.IsValid() || FClientState::IsShuttingDown()) return false;
+        const auto Current = Pinned->GetConfig();
+        if (Current->HealthUrl.IsEmpty() || !SameOrigin(Current->BaseUrl, Current->HealthUrl)) return false;
+        FRequestSpecAccess::SendProbe(Pinned.ToSharedRef(), Current->HealthUrl,
+            [Connectivity = Current->Connectivity] { Connectivity->ProbeFinished(); });
+        return true;
+    });
 }

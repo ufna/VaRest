@@ -17,5 +17,7 @@ namespace VaRest::Http
 		static FVaRestRequestHandle Send(TUniquePtr<FRequestSpec>&& Spec, const char* SourceFile, uint32 SourceLine);
 		/** Final review M7: Kind=Config to the callbacks of a builder made on an empty FVaRestClient */
 		static void DeliverWithoutClient(FRequestSpec& Spec);
+		static FVaRestRequestHandle SendProbe(const TSharedRef<FClientState, ESPMode::ThreadSafe>& State,
+			FStringView Url, TUniqueFunction<void()>&& Done);
 	};
 }

@@ -34,7 +34,7 @@ FVaRestAuthRefreshResult FVaRestAuthRefreshResult::Failed(EVaRestErrorKind InKin
 	FVaRestAuthRefreshResult Out;
 	Out.Outcome = EVaRestAuthRefreshOutcome::Failed;
 	// Ruling I-7: the kinds a parked request can fail with and keep its meaning; the rest is a network failure
-	Out.FailedKind = InKind == EVaRestErrorKind::Timeout || InKind == EVaRestErrorKind::Config ? InKind : EVaRestErrorKind::Connection;
+	Out.FailedKind = InKind == EVaRestErrorKind::Timeout || InKind == EVaRestErrorKind::Config || InKind == EVaRestErrorKind::Offline ? InKind : EVaRestErrorKind::Connection;
 	Out.Message = MoveTemp(InMessage);
 	return Out;
 }

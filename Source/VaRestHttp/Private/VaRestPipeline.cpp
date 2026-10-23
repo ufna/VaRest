@@ -2,6 +2,7 @@
 
 #include "Misc/Guid.h"
 #include "VaRestClientState.h"
+#include "VaRestConnectivity.h"
 #include "VaRestPersistence.h"
 
 #include "HAL/FileManager.h"
@@ -918,6 +919,11 @@ void VaRest::Http::FClientState::Enter(const FVaRestExchangeRef& Exchange)
 		Complete(Exchange, MoveTemp(Finish));
 		return;
 	}
+	if (Ex.bIsAuthRefresh && !Ex.Config->Connectivity->IsOnline())
+	{
+		OnChainDone(Exchange, MakeOfflineOutcome());
+		return;
+	}
 	FVaRestStageNext(Ex.Config->Chain.ToSharedRef(), 0).Proceed(Exchange, [Exchange](FVaRestAttemptOutcome&& Outcome)
 	{
 		Internals(*Exchange).State->OnChainDone(Exchange, MoveTemp(Outcome));
@@ -947,6 +953,17 @@ void VaRest::Http::FClientState::OnAttemptDone(const FVaRestExchangeRef& Exchang
 	{
 		// Seen as canceled by every stage the outcome passes on its way up (M4's retry stops here)
 		MarkOwnerGone(Ex);
+	}
+	// Only a live physical dispatch is evidence. A locally dropped completion and an overdue dispatch are not.
+	if (bCurrent && !Ex.bFinished && !Ex.bCompletionQueued && !Ex.IsCancelRequested() && !IsOwnerGone(Ex)
+		&& (Ex.DeadlineAt <= 0.0 || Ex.Config->Clock->Now() < Ex.DeadlineAt)
+		&& Result.FailureDetail != FName(TEXT("TransportDropped"))
+		&& Result.Failure != EVaRestTransportFailure::Canceled)
+	{
+		// A received status proves reachability even if its body hit a shorter wire timeout.
+		if (Result.Status > 0) Ex.Config->Connectivity->ReportOnline(Ex.RequestId);
+		else if (KindFor(Result.Failure, Result.FailureDetail) == EVaRestErrorKind::Connection)
+			Ex.Config->Connectivity->ReportOffline(Ex.RequestId);
 	}
 	if (!Ex.bFinished)
 	{

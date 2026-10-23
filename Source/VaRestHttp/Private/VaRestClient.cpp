@@ -3,6 +3,9 @@
 #include "VaRestClient.h"
 
 #include "Tasks/Task.h"
+#include "HAL/PlatformFileManager.h"
+#include "Misc/Paths.h"
+#include "VaRestConnectivity.h"
 #include "UObject/StrongObjectPtr.h"
 #include "VaRestAuth.h"
 #include "VaRestAuthInternal.h"
@@ -17,6 +20,21 @@
 
 namespace VaRest::Http::ClientPrivate
 {
+	bool NormalizeStorageRoot(FStringView Input, FString& Out)
+	{
+		if (Input.IsEmpty()) return false;
+		Out = FString(Input);
+#if PLATFORM_ANDROID || PLATFORM_IOS
+		// Preserve deployment-relative context for the physical writable target, before generic path collapse.
+		Out = FPlatformFileManager::Get().GetPlatformPhysical().ConvertToAbsolutePathForExternalAppForWrite(*Out);
+#endif
+		if (Out.IsEmpty()) return false;
+		Out = FPaths::ConvertRelativePathToFull(Out);
+		FPaths::NormalizeDirectoryName(Out);
+		return FPaths::CollapseRelativeDirectories(Out) && !FPaths::IsRelative(Out)
+			&& !Out.Contains(TEXT("/../")) && !Out.EndsWith(TEXT("/.."));
+	}
+
 	/** Decision 33 (review M22): said once, where the base URL is set; each request then fails with Kind=Config */
 	void WarnIfFragment(const FString& BaseUrl)
 	{
@@ -200,6 +218,7 @@ FVaRestRequestHandle VaRest::Http::FRequestSpecAccess::Send(TUniquePtr<FRequestS
 	Ex.bNoEnvelope = Spec->bNoEnvelope;
 	Ex.AuthMode = Spec->AuthMode;
 	Ex.bIsAuthRefresh = Spec->bAuthRefresh;
+	Ex.bConnectivityProbe = Spec->bConnectivityProbe;
 	Ex.Owner = Spec->Owner;
 	Ex.bHasOwner = Spec->bHasOwner;
 	Ex.SourceFile = SourceFile;
@@ -281,6 +300,10 @@ FVaRestClient FVaRestClient::Make(FStringView BaseUrl)
 	VaRest::Http::AppendRedactKeys(Initial.RedactedKeys, Settings->RedactedKeys);
 	Initial.Transport = VaRest::Http::GetDefaultTransport();
 	Initial.Clock = FVaRestRealClock::Get();
+	Initial.Connectivity = FVaRestConnectivity::GetDefault();
+	const bool bCacheRoot = VaRest::Http::ClientPrivate::NormalizeStorageRoot(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("VaRest/Cache")), Initial.CacheRoot);
+	const bool bQueueRoot = VaRest::Http::ClientPrivate::NormalizeStorageRoot(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("VaRest/Queue")), Initial.QueueRoot);
+	if (!bCacheRoot || !bQueueRoot) Initial.StorageConfigError = TEXT("invalid persistence directory");
 	VaRest::Http::ClientPrivate::WarnIfFragment(Initial.BaseUrl);
 	return FVaRestClient(VaRest::Http::FClientState::Create(MoveTemp(Initial)));
 }
@@ -789,4 +812,52 @@ FVaRestClient& FVaRestClient::Use(FVaRestStageRef Stage, EVaRestStageSlot Slot)
 		State->EditConfig([&Stage, Slot](VaRest::Http::FClientConfig& Edited) { Edited.CustomStages.Emplace(Stage, Slot); });
 	}
 	return *this;
+}
+
+FVaRestClient& FVaRestClient::WithConnectivity(TSharedRef<FVaRestConnectivity, ESPMode::ThreadSafe> Connectivity)
+{
+    check(IsInGameThread());
+    if (State.IsValid())
+    {
+        const auto Keep = State;
+        Keep->GetConfig()->Connectivity->UnregisterProbe(Keep->GetClientId());
+        Keep->EditConfig([&](VaRest::Http::FClientConfig& Edited) { Edited.Connectivity = Connectivity; });
+        Keep->AttachConnectivity();
+    }
+    return *this;
+}
+FVaRestClient& FVaRestClient::WithHealthUrl(FStringView Url)
+{
+    check(IsInGameThread());
+    if (State.IsValid()) State->EditConfig([Url](VaRest::Http::FClientConfig& Edited) { Edited.HealthUrl = FString(Url); });
+    return *this;
+}
+FVaRestClient& FVaRestClient::WithStorageDirectories(FStringView CacheRoot, FStringView QueueRoot)
+{
+    check(IsInGameThread());
+    if (!State.IsValid()) return *this;
+    FString Cache;
+    FString Queue;
+    const bool bValid = VaRest::Http::ClientPrivate::NormalizeStorageRoot(CacheRoot, Cache)
+        && VaRest::Http::ClientPrivate::NormalizeStorageRoot(QueueRoot, Queue);
+    State->EditConfig([&](VaRest::Http::FClientConfig& Edited)
+    {
+        Edited.StorageConfigError = bValid ? FString() : FString(TEXT("invalid persistence directory"));
+        if (bValid) { Edited.CacheRoot = Cache; Edited.QueueRoot = Queue; }
+    });
+    return *this;
+}
+FVaRestRequestHandle VaRest::Http::FRequestSpecAccess::SendProbe(
+    const TSharedRef<FClientState, ESPMode::ThreadSafe>& State, FStringView Url, TUniqueFunction<void()>&& Done)
+{
+    TUniquePtr<FRequestSpec> Spec(new FRequestSpec(State, TEXT("HEAD"), Url));
+    Spec->AuthMode = EVaRestAuthMode::None;
+    // Bound the limiter wait as well as the physical HEAD; no retries are enabled.
+    Spec->Retry = FVaRestRetryPolicy::Disabled().WithDeadline(10.f);
+    Spec->Timeout = 10.f;
+    Spec->bConnectivityProbe = true;
+    auto Handler = MakeUnique<TResultHandler<void>>();
+    Handler->OnComplete = [Callback = MoveTemp(Done)](const TVaRestResult<void>&) { Callback(); };
+    Spec->Handler = MoveTemp(Handler);
+    return Send(MoveTemp(Spec), __FILE__, __LINE__);
 }
