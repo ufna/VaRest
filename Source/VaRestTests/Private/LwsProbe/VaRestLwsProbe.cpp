@@ -154,6 +154,12 @@ VaRest::LwsProbe::FRig::FRig(const FServer& InServer, FRigOptions InOptions)
 	Info.timeout_secs = Options.TimeoutSecs;
 	// Callback() finds the rig through lws_context_user(lws_get_context(wsi))
 	Info.user = this;
+	check(Options.MaxRecordedEvents > 0);
+	if (Options.ProxyAddress.IsSet())
+	{
+		check(!Options.ProxyAddress.GetValue().IsEmpty());
+		Info.http_proxy_address = VaRestLwsProbePrivate::Utf8Copy(Options.ProxyAddress.GetValue(), ProxyUtf8);
+	}
 	switch (Options.Tls)
 	{
 	case ETls::None:
@@ -314,7 +320,9 @@ void VaRest::LwsProbe::FRig::ConnectNow(FConn& Conn)
 	// The wsi early, so a command (a kill) can reach a connection that has not opened yet (libwebsockets.h:3441-3451)
 	Info.pwsi = &Conn.Wsi;
 	Record(Conn.Id, ConnectCalling, 0, Host);
+	ConnectingId = Conn.Id;
 	lws* Made = lws_client_connect_via_info(&Info);
+	ConnectingId = 0;
 	if (!Made)
 	{
 		// NULL: the connection was "scrubbed" (libwebsockets.h:3442-3446), and nothing says LWS cleared *pwsi, so the early
@@ -523,7 +531,10 @@ int32 VaRest::LwsProbe::FRig::Handle(lws* Wsi, int32 Reason, void* User, void* I
 
 	FConn* Conn = FindConn(Wsi, User);
 	FEvent Event;
-	Event.Conn = Conn ? Conn->Id : 0;
+	const FTraceIdentity::FToken Identity = TraceIdentity.Observe(Wsi, Conn ? Conn->Id : ConnectingId,
+		Reason == LWS_CALLBACK_WSI_DESTROY);
+	Event.Conn = Identity.Conn;
+	Event.WsiToken = Identity.Id;
 	Event.Reason = Reason;
 	Event.Time = FPlatformTime::Seconds();
 	Event.Len = static_cast<int64>(Len);
@@ -536,7 +547,7 @@ int32 VaRest::LwsProbe::FRig::Handle(lws* Wsi, int32 Reason, void* User, void* I
 	{
 	case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
 		// in: an error string of len bytes, when not null (libwebsockets.h:1255-1299)
-		Event.Note = Utf8Text(In, Len);
+		CaptureErrorInput(Event, In, Len);
 		break;
 	case LWS_CALLBACK_CLIENT_FILTER_PRE_ESTABLISH:
 	{
@@ -575,6 +586,9 @@ int32 VaRest::LwsProbe::FRig::Handle(lws* Wsi, int32 Reason, void* User, void* I
 	{
 		// user: the X509_STORE_CTX*, in: the SSL*, len: preverify_ok (libwebsockets.h:1015-1044)
 		X509_STORE_CTX* Store = static_cast<X509_STORE_CTX*>(User);
+		Event.CertDepth = X509_STORE_CTX_get_error_depth(Store);
+		Event.CertError = X509_STORE_CTX_get_error(Store);
+		Event.Preverify = static_cast<int32>(Len);
 		Event.Note = FString::Printf(TEXT("preverify=%d error=%d depth=%d"), static_cast<int32>(Len), X509_STORE_CTX_get_error(Store), X509_STORE_CTX_get_error_depth(Store));
 		break;
 	}
@@ -652,10 +666,35 @@ void VaRest::LwsProbe::FRig::CopyBytes(FEvent& Event, const void* In, size_t Len
 	}
 }
 
+void VaRest::LwsProbe::CaptureErrorInput(FEvent& OutEvent, const void* Input, size_t InputLength)
+{
+	OutEvent.bInputPresent = Input != nullptr;
+	OutEvent.Len = static_cast<int64>(InputLength);
+	OutEvent.Bytes.Reset();
+	const int32 Take = static_cast<int32>(FMath::Min<size_t>(InputLength, 256));
+	if (Input && Take > 0)
+	{
+		OutEvent.Bytes.Append(static_cast<const uint8*>(Input), Take);
+	}
+	OutEvent.Note = Utf8Text(Input, Input ? Take : 0);
+}
+
 void VaRest::LwsProbe::FRig::Append(FEvent&& Event)
 {
 	FScopeLock Lock(&EventsLock);
+	Event.Sequence = NextSequence++;
+	if (Recorded.Num() >= Options.MaxRecordedEvents)
+	{
+		++DroppedEvents;
+		return;
+	}
 	Recorded.Add(MoveTemp(Event));
+}
+
+int32 VaRest::LwsProbe::FRig::DroppedEventCount() const
+{
+	FScopeLock Lock(&EventsLock);
+	return DroppedEvents;
 }
 
 void VaRest::LwsProbe::FRig::Record(int32 ConnId, int32 Reason, int64 Len, const FString& Note)

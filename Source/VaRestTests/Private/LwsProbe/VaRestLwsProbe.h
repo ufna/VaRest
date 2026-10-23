@@ -9,7 +9,8 @@
 // spec 2.1), and every callback recorded in order. Test-only: VaRestTests is UncookedOnly, never in a game target.
 //
 // One constraint for every test (WS W0 decision 16, review I-3): never create an FRig while another FRig has a TLS
-// connection that has neither opened nor ended. Each lws_create_context re-allocates this LWS copy's process-global
+// connection not yet destroyed by LWS; stop/join/destroy the earlier rig before creating another context.
+// Each lws_create_context re-allocates this LWS copy's process-global
 // openssl_websocket_private_data_index (ssl.c.o lws_context_init_ssl_library, stores at 0x1f4 and 0x23a), and the
 // client verify callback dereferences what SSL_get_ex_data returns under it without a null check (openssl-client.c.o
 // 0x1c8-0x1d6), so a handshake in flight across a context creation crashes.
@@ -57,6 +58,12 @@ namespace VaRest::LwsProbe
 	/** One callback, or one rig action, in service-thread order */
 	struct FEvent
 	{
+		int64 Sequence = 0;   // global append order, including pseudo events
+		int32 WsiToken = 0;   // stable for one WSI lifetime; never an address
+		bool bInputPresent = false; // CONNECTION_ERROR's input is non-null, even when Len is zero
+		int32 CertDepth = -1;
+		int32 CertError = -1;
+		int32 Preverify = -1; // certificate callback's len is preverify_ok, not a byte count
 		int32 Conn = 0;       // the rig's connection id; 0 when the callback belongs to no connection
 		int32 Reason = 0;     // lws_callback_reasons or EPseudoReason
 		double Time = 0.0;    // FPlatformTime::Seconds() when recorded
@@ -65,6 +72,27 @@ namespace VaRest::LwsProbe
 		int64 Remaining = -1; // lws_remaining_packet_payload, on CLIENT_RECEIVE
 		TArray<uint8> Bytes;  // a copy of in for reasons that carry bytes (at most 64 KiB each, 64 MiB per rig)
 		FString Note;
+	};
+
+	/** Service thread (or stopped-context destruction): bounded input capture, no addresses logged. */
+	void CaptureErrorInput(FEvent& OutEvent, const void* Input, size_t InputLength);
+
+	/** Service thread, then game thread only after join. Keys never leave this object. */
+	struct FTraceIdentity
+	{
+		struct FToken { int32 Id = 0; int32 Conn = 0; };
+		TMap<const void*, FToken> Live;
+		int32 Next = 1;
+		FToken Observe(const void* Pointer, int32 ConnectionId, bool bDestroy)
+		{
+			if (!Pointer) { return {}; }
+			FToken& Token = Live.FindOrAdd(Pointer);
+			if (Token.Id == 0) { Token.Id = Next++; }
+			if (ConnectionId != 0) { Token.Conn = ConnectionId; }
+			const FToken Result = Token;
+			if (bDestroy) { Live.Remove(Pointer); }
+			return Result;
+		}
 	};
 
 	/** The runner's test server: -VaRestTestServer=http://host:port and -VaRestTestServerTls=https://host:port */
@@ -173,6 +201,10 @@ namespace VaRest::LwsProbe
 
 	struct FRigOptions
 	{
+		/** Unset: null proxy address (LWS may use the environment); set: nonempty host:port. */
+		TOptional<FString> ProxyAddress;
+		/** Explicit event cap; every omitted event increments DroppedEventCount(). */
+		int32 MaxRecordedEvents = MAX_int32;
 		/** lws_service's wait; the production shape is a long wait woken by lws_cancel_service (WebSocket spec 2.1) */
 		int32 ServiceTimeoutMs = 10000;
 		/** The engine's options (LwsWebSocketsManager.cpp:184) plus JUST_USE_RAW_ORIGIN (WebSocket spec 2.1) */
@@ -232,6 +264,8 @@ namespace VaRest::LwsProbe
 		bool WaitEnded(int32 ConnId, double Seconds = 15.0);
 		/** A copy of the events; 0: all of them */
 		TArray<FEvent> Events(int32 ConnId = 0) const;
+		/** Any thread: number omitted by the explicit event cap; nonzero invalidates evidence. */
+		int32 DroppedEventCount() const;
 		/** The first event of ConnId with Reason (and a Note starting with NotePrefix) */
 		bool Find(int32 ConnId, int32 Reason, FEvent& Out, const TCHAR* NotePrefix = nullptr) const;
 
@@ -258,6 +292,11 @@ namespace VaRest::LwsProbe
 
 		FServer Server;
 		FRigOptions Options;
+		TArray<ANSICHAR> ProxyUtf8;
+		FTraceIdentity TraceIdentity;
+		int32 ConnectingId = 0;
+		int64 NextSequence = 1;
+		int32 DroppedEvents = 0;
 		lws_context* Context = nullptr;
 		lws_protocols Protocols[2] = {};
 		FRunnableThread* Thread = nullptr;
