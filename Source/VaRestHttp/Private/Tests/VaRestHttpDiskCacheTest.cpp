@@ -11,6 +11,9 @@
 #if PLATFORM_LINUX
 #include <unistd.h>
 #include <sys/stat.h>
+#include <fcntl.h>
+#include <dirent.h>
+#include <cerrno>
 #endif
 
 namespace VaRest::Http::CacheStoreTestPrivate
@@ -778,6 +781,123 @@ bool FVaRestCacheRootCaseTest::RunTest(const FString& Parameters)
     if (!TestTrue(TEXT("complete reopen observation"),Disk.Drain())) return false;
     TestFalse(TEXT("first stays empty after complete reopen"),ReadA->Value.IsValid());
     TestTrue(TEXT("other root bytes survive clear release and reopen"),ReadB->Value.IsValid() && ReadB->Value->Body==Second.Body);
+#endif
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestCacheSpecialFilesTest,"VaRest.Http.CacheStore.SpecialFiles",
+ EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+bool FVaRestCacheSpecialFilesTest::RunTest(const FString& Parameters)
+{
+#if PLATFORM_LINUX
+    using namespace VaRest::Http;
+    using namespace VaRest::Http::Testing;
+    using namespace VaRest::Http::CacheStoreTestPrivate;
+    FScopedPersistenceTest Disk;
+    FScopedCacheControls Controls;
+    const FString Root=FPaths::Combine(FPaths::ConvertRelativePathToFull(Disk.Root),TEXT("Store"));
+    const auto Value=Entry(TEXT("fifo"));
+    const FString Path=FPaths::Combine(Root,Value.Key+TEXT(".")+Value.Generation.ToString(EGuidFormats::DigitsLower)+TEXT(".json"));
+    struct FFixture { int Descriptor=-1; bool Witness=false,Listed=false,Preserved=false; };
+    const auto Fixture=MakeShared<FFixture,ESPMode::ThreadSafe>();
+    ON_SCOPE_EXIT
+    {
+        LaunchPersistence([Path,Fixture] { if (Fixture->Descriptor>=0) close(Fixture->Descriptor); unlink(TCHAR_TO_UTF8(*Path)); return FIoResult(); },[](FIoResult&&){});
+        Disk.Drain();
+    };
+    LaunchPersistence([Root,Path,Fixture]
+    {
+        FPlatformFileManager::Get().GetPlatformFile().CreateDirectoryTree(*Root);
+        struct stat Info;
+        Fixture->Witness=mkfifo(TCHAR_TO_UTF8(*Path),0600)==0 && lstat(TCHAR_TO_UTF8(*Path),&Info)==0 && S_ISFIFO(Info.st_mode);
+        if (!Fixture->Witness) return FIoResult();
+        Fixture->Descriptor=open(TCHAR_TO_UTF8(*Path),O_RDWR|O_NONBLOCK|O_CLOEXEC);
+        Fixture->Witness=Fixture->Descriptor>=0;
+        const auto Listed=ListFiles(Root); Fixture->Listed=Listed.bOk && Listed.Names.IsEmpty();
+        return FIoResult();
+    },[](FIoResult&&){});
+    if (!TestTrue(TEXT("bounded FIFO fixture drain"),Disk.Drain()) || !TestTrue(TEXT("actual FIFO held open without blocking"),Fixture->Witness)) return false;
+    auto Store=FDiskCache::Open(Root,1024*1024);
+    if (!TestTrue(TEXT("initial FIFO namespace maintenance"),Disk.Drain())) return false;
+    auto Found=Find(Store,Value.Key);
+    Store->Clear();
+    if (!TestTrue(TEXT("lookup and control drain after special node"),Disk.Drain())) return false;
+    TestTrue(TEXT("special cache leaf excluded by listing"),Fixture->Listed);
+    TestFalse(TEXT("special cache leaf is a miss"),Found->Value.IsValid());
+    TestFalse(TEXT("ignored special node does not quarantine healthy namespace"),Store->IsQuarantined());
+    LaunchPersistence([Path,Fixture] { struct stat Info; Fixture->Preserved=lstat(TCHAR_TO_UTF8(*Path),&Info)==0 && S_ISFIFO(Info.st_mode); return FIoResult(); },[](FIoResult&&){});
+    Store->Put(Value,FPersistenceGuard());
+    if (!TestTrue(TEXT("regular put after FIFO"),Disk.Drain())) return false;
+    Found=Find(Store,Value.Key); if (!TestTrue(TEXT("regular read after FIFO"),Disk.Drain())) return false;
+    TestTrue(TEXT("special cache node preserved"),Fixture->Preserved);
+    TestTrue(TEXT("ordinary record works alongside special node"),Found->Value.IsValid() && Found->Value->Body==Value.Body);
+#endif
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestCachePathErrorsTest,"VaRest.Http.CacheStore.PathErrors",
+ EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+bool FVaRestCachePathErrorsTest::RunTest(const FString& Parameters)
+{
+#if PLATFORM_LINUX
+    using namespace VaRest::Http;
+    using namespace VaRest::Http::Testing;
+    using namespace VaRest::Http::CacheStoreTestPrivate;
+    FScopedPersistenceTest Disk;
+    FScopedCacheControls Controls;
+    for (bool bRootError : {true,false}) for (bool bCapacity : {false,true})
+    {
+        const FString Parent=FPaths::Combine(FPaths::ConvertRelativePathToFull(Disk.Root),FString::Printf(TEXT("parent-%d-%d"),bRootError,bCapacity));
+        const FString Root=FPaths::Combine(Parent,TEXT("namespace"));
+        ON_SCOPE_EXIT
+        {
+            LaunchPersistence([Parent,Root] { chmod(TCHAR_TO_UTF8(*Parent),0700); chmod(TCHAR_TO_UTF8(*Root),0700); return FIoResult(); },[](FIoResult&&){});
+            Disk.Drain();
+        };
+        TSharedPtr<FDiskCache,ESPMode::ThreadSafe> Store=FDiskCache::Open(Root,1024*1024);
+        const auto Value=Entry(TEXT("permission"));
+        Store->Put(Value,FPersistenceGuard()); if (!TestTrue(TEXT("permission seed"),Disk.Drain())) return false;
+        const auto Witness=MakeShared<bool,ESPMode::ThreadSafe>(false);
+        LaunchPersistence([Parent,Root,bRootError,Witness]
+        {
+            const auto Names=ListFiles(Root); if (!Names.bOk || Names.Names.Num()!=1) return FIoResult();
+            const FString File=FPaths::Combine(Root,Names.Names[0]);
+            const FString Changed=bRootError ? Parent : Root;
+            if (geteuid()==0 || chmod(TCHAR_TO_UTF8(*Changed),0400)!=0) return FIoResult();
+            struct stat Info; errno=0;
+            const FString Probe=bRootError ? Root : File;
+            *Witness=lstat(TCHAR_TO_UTF8(*Probe),&Info)==-1 && errno==EACCES;
+            if (!bRootError)
+            {
+                DIR* Directory=opendir(TCHAR_TO_UTF8(*Root)); bool Found=false;
+                if (Directory) { while (const dirent* Item=readdir(Directory)) if (FString(UTF8_TO_TCHAR(Item->d_name))==Names.Names[0]) Found=true; closedir(Directory); }
+                *Witness&=Found; // Native enumeration succeeds while native child stat fails.
+            }
+            return FIoResult();
+        },[](FIoResult&&){});
+        if (!TestTrue(TEXT("permission witness drain"),Disk.Drain()) || !TestTrue(TEXT("actual EACCES route independently witnessed"),*Witness)) return false;
+        if (bCapacity) Store=FDiskCache::Open(Root,1); else Store->Clear();
+        if (!TestTrue(TEXT("failed mandatory control drain"),Disk.Drain())) return false;
+        TestTrue(TEXT("unknown filesystem keeps quarantine"),Store->IsQuarantined());
+        Store.Reset(); TestEqual(TEXT("failed control retained without holder"),DirtyCacheControlsForTest(),1);
+        Store=FDiskCache::Open(Root,bCapacity ? 1 : 1024*1024);
+        auto Found=Find(Store.ToSharedRef(),Value.Key);
+        if (!TestTrue(TEXT("inaccessible reopen drains"),Disk.Drain())) return false;
+        TestTrue(TEXT("unknown filesystem stays quarantined after reopen"),Store->IsQuarantined());
+        TestFalse(TEXT("no stale reuse while inaccessible"),Found->Value.IsValid());
+        LaunchPersistence([Parent,Root] { chmod(TCHAR_TO_UTF8(*Parent),0700); chmod(TCHAR_TO_UTF8(*Root),0700); return FIoResult(); },[](FIoResult&&){});
+        if (!TestTrue(TEXT("restore permissions"),Disk.Drain())) return false;
+        Found=Find(Store.ToSharedRef(),Value.Key);
+        if (!TestTrue(TEXT("successful mandatory retry"),Disk.Drain())) return false;
+        TestFalse(TEXT("old bytes never resurrect after access returns"),Found->Value.IsValid());
+        TestFalse(TEXT("successful retry clears quarantine"),Store->IsQuarantined());
+        TestEqual(TEXT("successful retry retires dirty intent"),DirtyCacheControlsForTest(),0);
+        Store.Reset(); if (!TestTrue(TEXT("complete release"),Disk.Drain())) return false;
+        Store=FDiskCache::Open(Root,1024*1024); Store->Put(Value,FPersistenceGuard());
+        if (!TestTrue(TEXT("healthy replacement write"),Disk.Drain())) return false;
+        Found=Find(Store.ToSharedRef(),Value.Key); if (!TestTrue(TEXT("healthy replacement read"),Disk.Drain())) return false;
+        TestTrue(TEXT("ordinary storage works after access recovery"),Found->Value.IsValid() && Found->Value->Body==Value.Body);
+    }
 #endif
     return true;
 }

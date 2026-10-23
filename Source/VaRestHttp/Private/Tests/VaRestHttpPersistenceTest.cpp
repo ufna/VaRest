@@ -15,6 +15,8 @@
 #if PLATFORM_LINUX
 #include <unistd.h>
 #include <sys/stat.h>
+#include <fcntl.h>
+#include <cerrno>
 #endif
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestPersistenceOrderingTest, "VaRest.Http.Persistence.WorkerOrdering",
@@ -727,6 +729,100 @@ bool FVaRestPersistenceKnownSymlinkTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("linked root refused and leaf skipped in parent listing"),Seen->bList);
     TestTrue(TEXT("write through linked root refused"),Seen->bWrite);
     TestTrue(TEXT("outside original and link unchanged"),Seen->bUnchanged);
+#endif
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestPersistencePathKindsTest,"VaRest.Http.Persistence.PathKinds",
+ EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+bool FVaRestPersistencePathKindsTest::RunTest(const FString& Parameters)
+{
+#if PLATFORM_LINUX
+    using namespace VaRest::Http;
+    using namespace VaRest::Http::Testing;
+    FScopedPersistenceTest Disk;
+    struct FSeen { bool Fixture=false,List=false,Read=false,Delete=false,Write=false,Preserved=false,Regular=false,Missing=false; };
+    const auto Seen=MakeShared<FSeen,ESPMode::ThreadSafe>();
+    const FString Root=FPaths::ConvertRelativePathToFull(Disk.Root);
+    LaunchPersistence([Root,Seen]
+    {
+        FPlatformFileManager::Get().GetPlatformFile().CreateDirectoryTree(*Root);
+        const FString Fifo=FPaths::Combine(Root,TEXT("unexpected-fifo"));
+        int Descriptor=-1;
+        ON_SCOPE_EXIT { if (Descriptor>=0) close(Descriptor); unlink(TCHAR_TO_UTF8(*Fifo)); };
+        struct stat Info;
+        Seen->Fixture=mkfifo(TCHAR_TO_UTF8(*Fifo),0600)==0 && lstat(TCHAR_TO_UTF8(*Fifo),&Info)==0 && S_ISFIFO(Info.st_mode);
+        if (!Seen->Fixture) return FIoResult();
+        // Keep a writer alive even for the historical O_RDONLY path. Size is zero,
+        // so it cannot block on data; this fixture does not prove old no-writer safety.
+        Descriptor=open(TCHAR_TO_UTF8(*Fifo),O_RDWR|O_NONBLOCK|O_CLOEXEC);
+        Seen->Fixture=Descriptor>=0; if (!Seen->Fixture) return FIoResult();
+        const auto Listed=ListFiles(Root);
+        Seen->List=Listed.bOk && Listed.Names.IsEmpty();
+        Seen->Read=!ReadBoundedFile(Fifo,1024).bOk;
+        Seen->Delete=!VaRest::Http::DeleteFile(Fifo).bOk;
+        Seen->Write=!WriteNewFile(Fifo,TArray<uint8>{9}).bOk;
+        Seen->Preserved=lstat(TCHAR_TO_UTF8(*Fifo),&Info)==0 && S_ISFIFO(Info.st_mode);
+        const FString Regular=FPaths::Combine(Root,TEXT("regular"));
+        const auto Written=WriteNewFile(Regular,TArray<uint8>{1,2,3});
+        const auto Read=ReadBoundedFile(Regular,3);
+        Seen->Regular=Written.bOk && Read.bOk && Read.Bytes==TArray<uint8>({1,2,3}) && VaRest::Http::DeleteFile(Regular).bOk;
+        const auto Missing=ListFiles(FPaths::Combine(Root,TEXT("missing-root")));
+        Seen->Missing=Missing.bOk && Missing.Names.IsEmpty() && VaRest::Http::DeleteFile(Regular).bOk && !ReadBoundedFile(Regular,3).bOk;
+        return FIoResult();
+    },[](FIoResult&&){});
+    if (!TestTrue(TEXT("bounded special-file worker drained"),Disk.Drain())) return false;
+    TestTrue(TEXT("native FIFO and held nonblocking descriptor"),Seen->Fixture);
+    TestTrue(TEXT("list admits only regular files"),Seen->List);
+    TestTrue(TEXT("direct bounded read refuses special file"),Seen->Read);
+    TestTrue(TEXT("delete refuses special file"),Seen->Delete);
+    TestTrue(TEXT("write refuses special destination"),Seen->Write);
+    TestTrue(TEXT("special node preserved"),Seen->Preserved);
+    TestTrue(TEXT("ordinary file still works after special node"),Seen->Regular);
+    TestTrue(TEXT("positive missing root file and idempotent delete"),Seen->Missing);
+#endif
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestPersistencePathErrorsTest,"VaRest.Http.Persistence.PathErrors",
+ EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+bool FVaRestPersistencePathErrorsTest::RunTest(const FString& Parameters)
+{
+#if PLATFORM_LINUX
+    using namespace VaRest::Http;
+    using namespace VaRest::Http::Testing;
+    FScopedPersistenceTest Disk;
+    struct FSeen { bool Fixture=false,RootList=false,RootDelete=false,LeafList=false,LeafDelete=false,Restored=false; };
+    const auto Seen=MakeShared<FSeen,ESPMode::ThreadSafe>();
+    const FString Parent=FPaths::Combine(FPaths::ConvertRelativePathToFull(Disk.Root),TEXT("parent"));
+    const FString Root=FPaths::Combine(Parent,TEXT("namespace"));
+    LaunchPersistence([Parent,Root,Seen]
+    {
+        const FString File=FPaths::Combine(Root,TEXT("regular"));
+        ON_SCOPE_EXIT { chmod(TCHAR_TO_UTF8(*Parent),0700); chmod(TCHAR_TO_UTF8(*Root),0700); };
+        if (!WriteNewFile(File,TArray<uint8>{1,2,3}).bOk) return FIoResult();
+        struct stat Info;
+        bool Witness=geteuid()!=0 && chmod(TCHAR_TO_UTF8(*Parent),0400)==0;
+        errno=0; Witness&=lstat(TCHAR_TO_UTF8(*Root),&Info)==-1 && errno==EACCES;
+        Seen->RootList=!ListFiles(Root).bOk;
+        Seen->RootDelete=!VaRest::Http::DeleteFile(File).bOk;
+        Witness&=chmod(TCHAR_TO_UTF8(*Parent),0700)==0 && chmod(TCHAR_TO_UTF8(*Root),0400)==0;
+        errno=0; Witness&=lstat(TCHAR_TO_UTF8(*File),&Info)==-1 && errno==EACCES;
+        Seen->LeafList=!ListFiles(Root).bOk;
+        Seen->LeafDelete=!VaRest::Http::DeleteFile(File).bOk;
+        Seen->Fixture=Witness;
+        chmod(TCHAR_TO_UTF8(*Root),0700);
+        const auto Read=ReadBoundedFile(File,3);
+        Seen->Restored=Read.bOk && Read.Bytes==TArray<uint8>({1,2,3}) && VaRest::Http::DeleteFile(File).bOk && VaRest::Http::DeleteFile(File).bOk;
+        return FIoResult();
+    },[](FIoResult&&){});
+    if (!TestTrue(TEXT("path error worker drained and modes restored"),Disk.Drain())) return false;
+    TestTrue(TEXT("actual unprivileged root and child EACCES witnesses"),Seen->Fixture);
+    TestTrue(TEXT("inaccessible root is failed listing"),Seen->RootList);
+    TestTrue(TEXT("inaccessible root does not acknowledge deletion"),Seen->RootDelete);
+    TestTrue(TEXT("inaccessible enumerated child is failed listing"),Seen->LeafList);
+    TestTrue(TEXT("inaccessible child does not acknowledge deletion"),Seen->LeafDelete);
+    TestTrue(TEXT("restored ordinary file and absent deletion work"),Seen->Restored);
 #endif
     return true;
 }

@@ -12,8 +12,11 @@
 #include "Tasks/Pipe.h"
 #include "VaRestDecode.h"
 
-#if PLATFORM_LINUX
+#if PLATFORM_LINUX || PLATFORM_ANDROID || PLATFORM_APPLE
 #include <sys/stat.h>
+#include <cerrno>
+#elif PLATFORM_WINDOWS
+#include "Windows/WindowsHWrapper.h"
 #endif
 
 namespace VaRest::Http
@@ -424,29 +427,96 @@ namespace VaRest::Http::PersistencePrivate
 		return Result;
 	}
 } // namespace VaRest::Http::PersistencePrivate
-bool VaRest::Http::IsKnownSymlink(const FString& Path)
+FString VaRest::Http::PersistencePathForIo(const FString& Path)
 {
     PersistencePrivate::CheckWorker();
-#if PLATFORM_LINUX
-    // UE 5.8 UnixPlatformFile.cpp:1217-1236 uses stat, which follows the link.
-    // lstat identifies the actual leaf. This is not a race-proof openat/nofollow sandbox.
-    struct stat Info;
-    const FString Absolute=FPaths::ConvertRelativePathToFull(Path);
-    if (lstat(TCHAR_TO_UTF8(*Absolute),&Info)==0) return S_ISLNK(Info.st_mode);
+    FString Native=Path;
+#if PLATFORM_ANDROID || PLATFORM_IOS
+    // Resolve writable storage before generic normalization loses mobile ../ mapping.
+    Native=FPlatformFileManager::Get().GetPlatformPhysical().ConvertToAbsolutePathForExternalAppForWrite(*Native);
 #endif
-    // Unimplemented is not a containment guarantee. Subsequent IO retains its own
-    // missing/access/error result; this helper only reports a positively known link.
-    return FPlatformFileManager::Get().GetPlatformFile().IsSymlink(*Path)==ESymlinkResult::Symlink;
+    Native=FPaths::ConvertRelativePathToFull(Native);
+    FPaths::NormalizeFilename(Native);
+    if (!FPaths::CollapseRelativeDirectories(Native)) return {};
+    while (Native.Len()>1 && Native.EndsWith(TEXT("/")) && !Native.EndsWith(TEXT(":/"))) Native.LeftChopInline(1);
+    return Native;
 }
-VaRest::Http::FIoResult VaRest::Http::PersistencePrivate::ReadFile(const FString& Path, int64 MaxBytes, const FFileAdapter& Ops)
+VaRest::Http::FPathStatus VaRest::Http::InspectPersistencePath(const FString& Path)
+{
+    PersistencePrivate::CheckWorker();
+    FPathStatus Result;
+    const FString Absolute=PersistencePathForIo(Path);
+    if (Absolute.IsEmpty()) return Result;
+#if PLATFORM_LINUX || PLATFORM_ANDROID || PLATFORM_APPLE
+    struct stat Info;
+    if (lstat(TCHAR_TO_UTF8(*Absolute),&Info)!=0)
+    {
+        const int Error=errno;
+        Result.Kind=Error==ENOENT ? EPathKind::Missing : EPathKind::Error;
+        return Result;
+    }
+    if (S_ISLNK(Info.st_mode)) Result.Kind=EPathKind::Symlink;
+    else if (S_ISDIR(Info.st_mode)) Result.Kind=EPathKind::Directory;
+    else if (S_ISREG(Info.st_mode)) Result.Kind=EPathKind::Regular;
+    else Result.Kind=EPathKind::Other;
+#elif PLATFORM_WINDOWS
+    // Only ordinary drive/UNC filesystem paths. Device namespaces and alternate
+    // streams are not app-owned persistence files. Reparse points are refused.
+    const bool bUnc=Absolute.StartsWith(TEXT("//"));
+    if (Absolute.StartsWith(TEXT("//?/")) || Absolute.StartsWith(TEXT("//./"))) return Result;
+    const bool bDrive=Absolute.Len()>=3 && FChar::IsAlpha(Absolute[0]) && Absolute[1]==TEXT(':') && Absolute[2]==TEXT('/');
+    if (!bUnc && !bDrive) return Result;
+    for (int32 Index=0;Index<Absolute.Len();++Index)
+        if (Absolute[Index]==TEXT(':') && !(bDrive && Index==1)) return Result;
+    FString Native=Absolute;
+    FPaths::RemoveDuplicateSlashes(Native);
+    if (bUnc && !Native.StartsWith(TEXT("//"))) Native=TEXT("/")+Native;
+    FPaths::MakePlatformFilename(Native);
+    Native=bUnc ? TEXT("\\\\?\\UNC\\")+Native.Mid(2) : TEXT("\\\\?\\")+Native;
+    WIN32_FILE_ATTRIBUTE_DATA Info;
+    if (!GetFileAttributesExW(*Native,GetFileExInfoStandard,&Info))
+    {
+        const uint32 Error=GetLastError();
+        Result.Kind=(Error==ERROR_FILE_NOT_FOUND || Error==ERROR_PATH_NOT_FOUND) ? EPathKind::Missing : EPathKind::Error;
+        return Result;
+    }
+    if (Info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) Result.Kind=EPathKind::Symlink;
+    else if (Info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) Result.Kind=EPathKind::Directory;
+    else if (Info.dwFileAttributes & FILE_ATTRIBUTE_DEVICE) Result.Kind=EPathKind::Other;
+    else Result.Kind=EPathKind::Regular;
+#else
+    if (FPlatformFileManager::Get().GetPlatformPhysical().IsSymlink(*Absolute)==ESymlinkResult::Symlink)
+        Result.Kind=EPathKind::Symlink;
+#endif
+    if (Result.Kind==EPathKind::Regular)
+    {
+        const auto Stat=FPlatformFileManager::Get().GetPlatformPhysical().GetStatData(*Absolute);
+        if (!Stat.bIsValid || Stat.bIsDirectory || Stat.FileSize<0) Result.Kind=EPathKind::Error;
+        else { Result.Size=Stat.FileSize; Result.Modified=Stat.ModificationTime; }
+    }
+    return Result;
+}
+bool VaRest::Http::IsKnownSymlink(const FString& Path)
+{
+    return InspectPersistencePath(Path).Kind==EPathKind::Symlink;
+}
+VaRest::Http::FIoResult VaRest::Http::PersistencePrivate::ReadFile(const FString& InPath, int64 MaxBytes, const FFileAdapter& Ops)
 {
 	PersistencePrivate::CheckWorker();
-	IPlatformFile& Platform = FPlatformFileManager::Get().GetPlatformFile();
-	if (IsKnownSymlink(Path) || IsKnownSymlink(FPaths::GetPath(Path)))
+	const FString Path=PersistencePathForIo(InPath);
+	if (Path.IsEmpty()) return PersistencePrivate::Failure(TEXT("Path"));
+	IPlatformFile& Platform = FPlatformFileManager::Get().GetPlatformPhysical();
+	const auto Status=InspectPersistencePath(Path);
+	const auto Parent=InspectPersistencePath(FPaths::GetPath(Path));
+	if (Status.Kind==EPathKind::Symlink || Parent.Kind==EPathKind::Symlink)
 		return PersistencePrivate::Failure(TEXT("Symlink"));
+	if (Status.Kind==EPathKind::Missing && (Parent.Kind==EPathKind::Missing || Parent.Kind==EPathKind::Directory))
+		return PersistencePrivate::Failure(TEXT("Missing"));
+	if (Status.Kind!=EPathKind::Regular || Parent.Kind!=EPathKind::Directory)
+		return PersistencePrivate::Failure(TEXT("FileTypeOrStatus"));
 	TUniquePtr<IFileHandle> File(Platform.OpenRead(*Path));
 	if (!File.IsValid())
-		return PersistencePrivate::Failure(TEXT("Missing"));
+		return PersistencePrivate::Failure(TEXT("Open"));
 	const int64 Size = File->Size();
 	if (Size < 0 || Size > MaxBytes || Size > MAX_int32)
 		return PersistencePrivate::Failure(TEXT("Size"));
@@ -457,15 +527,21 @@ VaRest::Http::FIoResult VaRest::Http::PersistencePrivate::ReadFile(const FString
 	Result.bOk = true;
 	return Result;
 }
-VaRest::Http::FIoResult VaRest::Http::PersistencePrivate::WriteFile(const FString& Path, TConstArrayView<uint8> Bytes, const FFileAdapter& Ops)
+VaRest::Http::FIoResult VaRest::Http::PersistencePrivate::WriteFile(const FString& InPath, TConstArrayView<uint8> Bytes, const FFileAdapter& Ops)
 {
 	PersistencePrivate::CheckWorker();
-	IPlatformFile& Platform = FPlatformFileManager::Get().GetPlatformFile();
-	if (IsKnownSymlink(FPaths::GetPath(Path)) || IsKnownSymlink(Path))
+	const FString Path=PersistencePathForIo(InPath);
+	if (Path.IsEmpty()) return PersistencePrivate::Failure(TEXT("Path"));
+	IPlatformFile& Platform = FPlatformFileManager::Get().GetPlatformPhysical();
+	const auto Status=InspectPersistencePath(Path);
+	const auto Parent=InspectPersistencePath(FPaths::GetPath(Path));
+	if (Status.Kind==EPathKind::Symlink || Parent.Kind==EPathKind::Symlink)
 		return PersistencePrivate::Failure(TEXT("Symlink"));
-	if (Platform.FileExists(*Path) || Platform.DirectoryExists(*Path))
+	if (Status.Kind==EPathKind::Regular || Status.Kind==EPathKind::Directory)
 		return PersistencePrivate::Failure(TEXT("Exists"));
-	if (!Platform.CreateDirectoryTree(*FPaths::GetPath(Path)))
+	if (Status.Kind!=EPathKind::Missing || (Parent.Kind!=EPathKind::Missing && Parent.Kind!=EPathKind::Directory))
+		return PersistencePrivate::Failure(TEXT("FileTypeOrStatus"));
+	if (!Platform.CreateDirectoryTree(*FPaths::GetPath(Path)) || InspectPersistencePath(FPaths::GetPath(Path)).Kind!=EPathKind::Directory)
 		return PersistencePrivate::Failure(TEXT("Directory"));
 	const FString Temporary = MakeTempFileName(Path, 0);
 	ON_SCOPE_EXIT
@@ -486,41 +562,48 @@ VaRest::Http::FIoResult VaRest::Http::PersistencePrivate::WriteFile(const FStrin
 	Result.bOk = true;
 	return Result;
 }
-VaRest::Http::FIoResult VaRest::Http::DeleteFile(const FString& Path)
+VaRest::Http::FIoResult VaRest::Http::DeleteFile(const FString& InPath)
 {
 	PersistencePrivate::CheckWorker();
-	if (IsKnownSymlink(Path) || IsKnownSymlink(FPaths::GetPath(Path)))
+	const FString Path=PersistencePathForIo(InPath);
+	if (Path.IsEmpty()) return PersistencePrivate::Failure(TEXT("Path"));
+	const auto Status=InspectPersistencePath(Path);
+	const auto Parent=InspectPersistencePath(FPaths::GetPath(Path));
+	if (Status.Kind==EPathKind::Symlink || Parent.Kind==EPathKind::Symlink)
 		return PersistencePrivate::Failure(TEXT("Symlink"));
-	IPlatformFile& Platform = FPlatformFileManager::Get().GetPlatformFile();
+	if ((Status.Kind!=EPathKind::Missing && Status.Kind!=EPathKind::Regular)
+	    || (Parent.Kind!=EPathKind::Directory && Parent.Kind!=EPathKind::Missing))
+		return PersistencePrivate::Failure(TEXT("FileTypeOrStatus"));
 	FIoResult Result;
-	Result.bOk = !Platform.FileExists(*Path) || Platform.DeleteFile(*Path);
-	if (!Result.bOk)
-		Result.Detail = TEXT("Delete");
+	Result.bOk=Status.Kind==EPathKind::Missing || FPlatformFileManager::Get().GetPlatformPhysical().DeleteFile(*Path);
+	if (!Result.bOk) Result.bOk=InspectPersistencePath(Path).Kind==EPathKind::Missing;
+	if (!Result.bOk) Result.Detail=TEXT("Delete");
 	return Result;
 }
-VaRest::Http::FIoResult VaRest::Http::ListFiles(const FString& Directory)
+VaRest::Http::FIoResult VaRest::Http::ListFiles(const FString& InDirectory)
 {
 	PersistencePrivate::CheckWorker();
-	IPlatformFile& Platform = FPlatformFileManager::Get().GetPlatformFile();
+	const FString Directory=PersistencePathForIo(InDirectory);
+	if (Directory.IsEmpty()) return PersistencePrivate::Failure(TEXT("Path"));
+	IPlatformFile& Platform = FPlatformFileManager::Get().GetPlatformPhysical();
 	FIoResult Result;
-	if (IsKnownSymlink(Directory))
-		return PersistencePrivate::Failure(TEXT("Symlink"));
-	if (!Platform.DirectoryExists(*Directory))
-	{
-		Result.bOk = true;
-		return Result;
-	}
+	const auto Root=InspectPersistencePath(Directory);
+	if (Root.Kind==EPathKind::Symlink) return PersistencePrivate::Failure(TEXT("Symlink"));
+	if (Root.Kind==EPathKind::Missing) { Result.bOk=true; return Result; }
+	if (Root.Kind!=EPathKind::Directory) return PersistencePrivate::Failure(TEXT("DirectoryStatus"));
 	int64 NameChars = 0, NameBytes = 0;
 	Result.bOk =
 	    Platform.IterateDirectory(*Directory,
-		                          [&Result, &Platform, &NameChars, &NameBytes](const TCHAR* Path, bool bDirectory)
+		                          [&Result, &NameChars, &NameBytes](const TCHAR* Path, bool)
 		                          {
 		                              if (Result.Names.Num() >= 8192)
 		                              {
 			                              Result.Detail = TEXT("DirectoryLimit");
 			                              return false;
 		                              }
-		                              if (!bDirectory && !IsKnownSymlink(Path))
+		                              const auto Status=InspectPersistencePath(Path);
+		                              if (Status.Kind==EPathKind::Error) { Result.Detail=TEXT("EntryStatus"); return false; }
+		                              if (Status.Kind==EPathKind::Regular)
 		                              {
 			                              FString Name = FPaths::GetCleanFilename(Path);
 			                              if (Name.Len() > 256 || NameChars + Name.Len() > 524288 || NameBytes + Name.GetAllocatedSize() > 2 * 1024 * 1024)

@@ -35,7 +35,18 @@ namespace VaRest::Http
 	void ReleasePersistenceCompletion(uint64 Ticket); // GT, idempotent, destroys pending completion on GT
 	void StopPersistence();                           // worker drain + silent internal commit accounting; suppresses user handbacks at pre-exit
 	FIoCounters& PersistenceCounters();
-	/** Worker-only known-link check; Linux needs lstat because UE 5.8 uses stat. */
+	enum class EPathKind : uint8 { Missing, Regular, Directory, Symlink, Other, Error };
+	struct FPathStatus
+	{
+		EPathKind Kind = EPathKind::Error;
+		int64 Size = 0;
+		FDateTime Modified;
+	};
+	/** Worker-only physical writable-file status; Missing is positive absence, never unknown IO failure. */
+	FPathStatus InspectPersistencePath(const FString& Path);
+	/** Worker-only writable native path; preserves mobile platform mapping before absolute normalization. */
+	FString PersistencePathForIo(const FString& Path);
+	/** Worker-only known-link check; uses the same physical status boundary. */
 	bool IsKnownSymlink(const FString& Path);
 	FIoResult ReadBoundedFile(const FString& Path, int64 MaxBytes);
 	FIoResult WriteNewFile(const FString& Path, TConstArrayView<uint8> Bytes);

@@ -227,7 +227,6 @@ namespace VaRest::Http::DiskCachePrivate
         FScan Result;
         Result.Status=List(Root,Hooks);
         if (!Result.Status.bOk) return Result;
-        IPlatformFile& Platform=FPlatformFileManager::Get().GetPlatformFile();
         for (const FString& Name : Result.Status.Names)
         {
             const FString Path=FPaths::Combine(Root,Name);
@@ -237,14 +236,10 @@ namespace VaRest::Http::DiskCachePrivate
                 continue;
             }
             if (!RecordName(Name)) continue;
-            const auto Stat=Platform.GetStatData(*Path);
-            if (!Stat.bIsValid)
-            {
-                if (Platform.FileExists(*Path)) { Result.Status=Failure(TEXT("Stat")); return Result; }
-                continue; // A file removed between listing/stat contributes no retained bytes.
-            }
-            if (Stat.bIsDirectory || IsKnownSymlink(Path)) continue;
-            FRecord Record; Record.Name=Name; Record.Size=Stat.FileSize; Record.Accessed=Stat.ModificationTime;
+            const auto Stat=InspectPersistencePath(Path);
+            if (Stat.Kind==EPathKind::Error) { Result.Status=Failure(TEXT("Stat")); return Result; }
+            if (Stat.Kind!=EPathKind::Regular) continue; // Known absence/type; never infer absence from an error.
+            FRecord Record; Record.Name=Name; Record.Size=Stat.Size; Record.Accessed=Stat.Modified;
             if (Record.Size<0) { Result.Status=Failure(TEXT("Stat")); return Result; }
             Result.Records.Add(MoveTemp(Record));
         }
@@ -303,7 +298,7 @@ namespace VaRest::Http::DiskCachePrivate
             auto Entry=Loaded.bOk ? DecodeCacheRecord(Loaded.Bytes,Key,Now,Utc,FMath::Min(Capacity,MaxBodyBytes)) : TOptional<FCacheEntry>();
             if (!Entry.IsSet() || Record.Name!=Key+TEXT(".")+Entry->Generation.ToString(EGuidFormats::DigitsLower)+TEXT(".json"))
             { Delete(Path,Hooks); continue; }
-            FPlatformFileManager::Get().GetPlatformFile().SetTimeStamp(*Path,Utc);
+            FPlatformFileManager::Get().GetPlatformPhysical().SetTimeStamp(*PersistencePathForIo(Path),Utc);
             for (const auto& Other : Scanned.Records)
                 if (FStringView(*Other.Name,64)==Key && Other.Name!=Record.Name) Delete(FPaths::Combine(Root,Other.Name),Hooks);
 #if WITH_DEV_AUTOMATION_TESTS
@@ -416,6 +411,10 @@ void VaRest::Http::FDiskCache::TryMaintenance()
 TSharedRef<VaRest::Http::FDiskCache,ESPMode::ThreadSafe> VaRest::Http::FDiskCache::Open(FString Root,int64 Capacity)
 {
     check(IsInGameThread());
+#if PLATFORM_ANDROID || PLATFORM_IOS
+    // Physical platform translation is path-only; no worker IO/status query on GT.
+    Root=FPlatformFileManager::Get().GetPlatformPhysical().ConvertToAbsolutePathForExternalAppForWrite(*Root);
+#endif
     FPaths::NormalizeDirectoryName(Root);
     Root=FPaths::ConvertRelativePathToFull(Root);
     const bool bCanonical=FPaths::CollapseRelativeDirectories(Root);
@@ -541,6 +540,9 @@ VaRest::Http::Testing::FScopedCacheStoreHooks::FScopedCacheStoreHooks(FString In
     : Root(MoveTemp(InRoot)),Hooks(MakeShared<FCacheStoreHooks,ESPMode::ThreadSafe>())
 {
     check(IsInGameThread());
+#if PLATFORM_ANDROID || PLATFORM_IOS
+    Root=FPlatformFileManager::Get().GetPlatformPhysical().ConvertToAbsolutePathForExternalAppForWrite(*Root);
+#endif
     FPaths::NormalizeDirectoryName(Root); Root=FPaths::ConvertRelativePathToFull(Root); FPaths::CollapseRelativeDirectories(Root);
     DiskCachePrivate::HookRegistry().Add(Root,Hooks);
 }
