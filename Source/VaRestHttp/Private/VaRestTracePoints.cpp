@@ -42,7 +42,12 @@ namespace VaRest::Http::TracePointsPrivate
 		const FVaRestRedactor& Redactor = *Held;
 		FVaRestTraceStarted Out;
 		Out.RequestId = Ex.RequestId;
-        Out.QueueReplayOf = Ex.QueueReplayOf;
+		Out.QueueReplayOf = Ex.QueueReplayOf;
+		Out.CachePolicy = Ex.CachePolicy.Mode == EVaRestCacheMode::Memory ? TEXT("Memory")
+			: Ex.CachePolicy.Mode == EVaRestCacheMode::MemoryAndDisk ? TEXT("MemoryAndDisk") : TEXT("None");
+		Out.CacheLookup = Ex.CacheLookup;
+		Out.bCacheLookupPending = Ex.bCacheLookupPending;
+		if (Ex.bQueueWhenOffline) Out.Flags |= EVaRestTraceRequestFlags::QueueWhenOffline;
 		Out.ScopeId = FVaRestTrace::ProcessScopeId;
 		Out.ClientId = Ex.ClientId;
 		Out.Verb = Redactor.ScrubText(Ex.Verb);
@@ -184,6 +189,7 @@ void VaRest::Http::TracePoints::AttemptDispatched(const FExchangeState& Ex)
 	FVaRestTraceAttemptDispatched Payload;
 	Payload.RequestId = Ex.RequestId;
 	Payload.Attempt = Ex.Attempt;
+	Payload.bConditional = Ex.bCacheConditional;
 	Payload.AttemptStart = Ex.AttemptStartedAt;
 	Payload.LimiterWait = Ex.LimiterWait;
 	Payload.GapKind = Ex.NextGap;
@@ -277,6 +283,8 @@ void VaRest::Http::TracePoints::Completed(FExchangeState& Ex, const FFinish& Fin
 	const FVaRestRedactor& Redactor = *Held;
 	FVaRestTraceCompleted Payload;
 	Payload.RequestId = Ex.RequestId;
+	Payload.CacheLookup = Ex.CacheLookup;
+	Payload.bFromCache = Finish.Response.bFromCache;
 	if (Finish.bQueued)
     {
         Payload.Outcome = EVaRestTraceOutcome::Queued;

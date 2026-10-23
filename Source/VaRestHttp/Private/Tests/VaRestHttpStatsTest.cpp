@@ -10,6 +10,8 @@
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/Parse.h"
 #include "Misc/ScopeExit.h"
+#include "Misc/Paths.h"
+#include "VaRestPersistence.h"
 #include "Misc/ScopeLock.h"
 #include "Tasks/Task.h"
 #include "UObject/Package.h"
@@ -820,6 +822,37 @@ bool FVaRestHttpStatsLlmTagsTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("an OnHttpThread() callback under the sender's tag"), Log->Get(TEXT("worker")), Sender);
 	TestEqual(TEXT("OnProgress under the sender's tag"), Log->Get(TEXT("progress")), Sender);
 	TestEqual(TEXT("an empty client's callback under the sender's tag"), Log->Get(TEXT("empty")), Sender);
+    // Cache and queue handbacks return to GT under VaRest; user callbacks restore the sender.
+    // Worker tags are established by the owned launch scopes and UE::Tasks inherited context.
+    FScopedPersistenceTest Disk;
+    FTestRig StoreRig;
+    StoreRig.Client.WithStorageDirectories(FPaths::Combine(Disk.Root,TEXT("Cache")),FPaths::Combine(Disk.Root,TEXT("Queue")))
+        .WithCache(FVaRestCachePolicy::MemoryAndDisk())
+        .Use(MakeShared<FTagOutcomes,ESPMode::ThreadSafe>(Log),EVaRestStageSlot::Outer);
+    ON_SCOPE_EXIT {StoreRig.Client.CancelAll(); TestTrue(TEXT("LLM store cleanup"),StoreRig.Drain());};
+    StoreRig.Fake->Enqueue(FVaRestFakeResponse::Text(200,TEXT("safe-body")));
+    {
+        LLM_SCOPE_BYTAG(VaRestTests_Sender);
+        StoreRig.Client.WithOfflineQueue(TEXT("llm-queue"));
+        StoreRig.Client.Get<FString>(TEXT("/cache")).OnSuccess([Log](const FString&){Log->Note(TEXT("cache-callback"));}).Send();
+        StoreRig.Client.OnQueuedResult().AddLambda([Log](const FVaRestQueuedResult&){Log->Note(TEXT("queued-result"));});
+    }
+    if (!TestTrue(TEXT("cache tagged callback"),PumpUntil([Log]{return Log->Has(TEXT("cache-callback"));}) && StoreRig.Drain())) return false;
+    TestEqual(TEXT("cache GT outcome tag"),Log->Get(TEXT("up:cache")),LLM_TAG_NAME(VaRest));
+    TestEqual(TEXT("cache callback sender tag"),Log->Get(TEXT("cache-callback")),Sender);
+    StoreRig.Connectivity->ReportOffline();
+    {
+        LLM_SCOPE_BYTAG(VaRestTests_Sender);
+        StoreRig.Client.Put<void>(TEXT("/queued")).Body(TEXT("safe-body")).QueueWhenOffline()
+            .OnQueued([Log](const FString&){Log->Note(TEXT("queued-callback"));}).Send();
+    }
+    if (!TestTrue(TEXT("queue tagged callback"),PumpUntil([Log]{return Log->Has(TEXT("queued-callback"));}))) return false;
+    TestEqual(TEXT("queue GT outcome tag"),Log->Get(TEXT("up:queued")),LLM_TAG_NAME(VaRest));
+    TestEqual(TEXT("OnQueued sender tag"),Log->Get(TEXT("queued-callback")),Sender);
+    StoreRig.Fake->Enqueue(FVaRestFakeResponse::Text(200,TEXT("ok"))); StoreRig.Connectivity->ReportOnline();
+    if (!TestTrue(TEXT("result tagged callback"),PumpUntil([Log]{return Log->Has(TEXT("queued-result"));}) && StoreRig.Drain())) return false;
+    TestEqual(TEXT("OnQueuedResult sender tag"),Log->Get(TEXT("queued-result")),Sender);
+
 #else
 	AddInfo(TEXT("LLM is compiled out: nothing to check"));
 #endif
@@ -952,6 +985,38 @@ bool FVaRestHttpStatsLlmReentryTest::RunTest(const FString& Parameters)
 	AddInfo(TEXT("LLM is compiled out: nothing to check"));
 #endif
 	return true;
+}
+
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpStatsCacheRatioTest,"VaRest.Http.Stats.CacheRatio",
+    EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+bool FVaRestHttpStatsCacheRatioTest::RunTest(const FString& Parameters)
+{
+    using namespace VaRest::Http;
+    using namespace VaRest::Http::Testing;
+    FTestRig Rig; auto Policy=FVaRestCachePolicy::Memory(); Policy.DefaultTtlSeconds=60; Rig.Client.WithCache(Policy);
+    const auto State=FClientAccess::State(Rig.Client); const auto& Mine=State->GetCounters();
+    TestEqual(TEXT("empty ratio"),FHttpStats::CacheRatio(Mine),0.0);
+    Rig.Fake->Enqueue(FVaRestFakeResponse::Text(200,TEXT("counted-body")));
+    const auto First=MakeOutcome<FString>(); Observe(Rig.Client.Get<FString>(TEXT("/ratio")),First).Send();
+    if (!TestTrue(TEXT("miss completed"),Rig.Wait(First))) return false;
+    const int64 BytesAfterWire=Mine.BytesDown.load();
+    for (int32 Pass=0;Pass<3;++Pass)
+    {
+        const auto Hit=MakeOutcome<FString>(); Observe(Rig.Client.Get<FString>(TEXT("/ratio")),Hit).Send();
+        if (!TestTrue(TEXT("hit completed"),Rig.Wait(Hit))) return false;
+        TestEqual(TEXT("hit transferred no body bytes"),Hit->Response.BytesDown,int64(0));
+    }
+    TestEqual(TEXT("eligible logical lookups"),Mine.CacheLookups.load(),int64(4));
+    TestEqual(TEXT("served hits"),Mine.CacheHits.load(),int64(3));
+    TestEqual(TEXT("ratio three quarters"),FHttpStats::CacheRatio(Mine),0.75);
+    TestEqual(TEXT("hits add no transfer stats"),Mine.BytesDown.load(),BytesAfterWire);
+    const auto Bypass=MakeOutcome<FString>(); Rig.Fake->Enqueue(FVaRestFakeResponse::Text(200,TEXT("bypass")));
+    Observe(Rig.Client.Get<FString>(TEXT("/ratio")).NoCache(),Bypass).Send();
+    if (!TestTrue(TEXT("bypass completed"),Rig.Wait(Bypass))) return false;
+    TestEqual(TEXT("bypass does not count lookup"),Mine.CacheLookups.load(),int64(4));
+    TestEqual(TEXT("bypass does not change ratio"),FHttpStats::CacheRatio(Mine),0.75);
+    TestTrue(TEXT("drained"),Rig.Drain()); return true;
 }
 
 #endif

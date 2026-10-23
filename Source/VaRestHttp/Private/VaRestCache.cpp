@@ -114,6 +114,7 @@ void FCacheOperation::Proceed()
 }
 void FCacheOperation::ServeStale()
 {
+    LLM_SCOPE_BYTAG(VaRest);
     auto& Ex=Internals(*Exchange);
     if (!CanContinue()) return;
     Ex.CacheLookup=EVaRestTraceCacheLookup::Stale;
@@ -126,9 +127,11 @@ void FCacheOperation::ServeStale()
 }
 void FCacheOperation::Start()
 {
+    LLM_SCOPE_BYTAG(VaRest);
     auto& Ex=Internals(*Exchange);
     if (!CanContinue()) return;
     Ex.bCacheLookupPending=false;
+    Ex.CacheLookup=EVaRestTraceCacheLookup::None;
     if (!BuildCacheKey(Ex,Key,Identity))
     {
         if (!Ex.Config->Connectivity->IsOnline() && !Ex.bConnectivityProbe && !Ex.bIsAuthRefresh)
@@ -174,6 +177,7 @@ void FCacheOperation::Start()
 }
 void FCacheOperation::OnResult(FVaRestAttemptOutcome&& Outcome)
 {
+    LLM_SCOPE_BYTAG(VaRest);
     auto& Ex=Internals(*Exchange);
     if (!CanContinue()) return;
     FString CurrentKey,CurrentIdentity;
@@ -261,6 +265,7 @@ public:
     virtual FName GetStageName() const override { return TEXT("Cache"); }
     virtual void Process(const FVaRestExchangeRef& Exchange,const FVaRestStageNext& Next,FVaRestOutcomeCallback&& Done) override
     {
+        LLM_SCOPE_BYTAG(VaRest);
         auto Operation=MakeShared<FCacheOperation,ESPMode::ThreadSafe>(Exchange,Next,MoveTemp(Done));
         Operation->Start();
     }
@@ -288,6 +293,7 @@ bool FCacheOperation::CanContinue()
 }
 void FCacheOperation::AfterLookup(TSharedPtr<const FCacheEntry,ESPMode::ThreadSafe> Candidate, bool bDisk)
 {
+    LLM_SCOPE_BYTAG(VaRest);
     FExchangeState& Ex = Internals(*Exchange);
     if (!CanContinue()) return;
     FString CurrentKey, CurrentIdentity;

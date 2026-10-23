@@ -191,8 +191,9 @@ struct FVaRestTraceStarted
 	FVaRestTraceInitiator Initiator;
 	/** M4 */
 	FName CachePolicy;
-	/** M4 */
+	/** Initial state in Started; current state in an attach snapshot. */
 	EVaRestTraceCacheLookup CacheLookup = EVaRestTraceCacheLookup::None;
+	bool bCacheLookupPending = false;
 	/** As built, redacted; empty unless a sink wants Headers */
 	FVaRestHeaders Headers;
 	FVaRestTraceBody Body;
@@ -305,6 +306,9 @@ struct FVaRestTraceCompleted
 
 	uint64 RequestId = 0;
 	EVaRestTraceOutcome Outcome = EVaRestTraceOutcome::Success;
+	/** Final lookup history and actual delivered response provenance are independent. */
+	EVaRestTraceCacheLookup CacheLookup = EVaRestTraceCacheLookup::None;
+	bool bFromCache = false;
 	EVaRestCancelReason CancelReason = EVaRestCancelReason::None;
 	FVaRestTraceError Error;
 	FName ResultType;
@@ -362,7 +366,8 @@ struct FVaRestTraceNote
 	uint64 RequestId = 0;
 	/**
 	 * The attempt the note is about; for RetryScheduled the one that ended, which may be one a park behind a refresh or
-	 * the limiter ended before any dispatch (M4a final review C-I-1: such an attempt has its number, so this is never 0)
+	 * the limiter ended before any dispatch. Pre-attempt CacheServedStale, Queued and QueueExpired notes use 0;
+	 * no attempt was entered. RequestId is always the actual nonzero logical request identity.
 	 */
 	int32 Attempt = 0;
 	EVaRestTraceNoteKind Kind = EVaRestTraceNoteKind::RetryScheduled;

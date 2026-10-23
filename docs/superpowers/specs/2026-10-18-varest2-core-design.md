@@ -103,6 +103,15 @@ HTTP thread (`EHttpRequestDelegateThreadPolicy::CompleteOnHttpThread`); the comp
 bytes and dispatches work. A request may be **sent** from any thread; it is marshalled to the game
 thread before entering the pipeline.
 
+Queue admission has one bounded metadata-only GT exception: canonical normalization of encoded
+metadata up to64KiB, depth8 and2048 lexical units, with temporary logical allocation at most2MiB.
+Length/count gates precede copies. This body-free work establishes allocation parity with recovery
+before payload ownership. Payload parse/scan/encoding and disk IO remain off GT. The exception
+costs bounded work per admission; no frame-time guarantee is implied, and M7 measures the cap case.
+Connectivity OnChanged is a synchronous GT observer as specified in §4.4; request/queue/flush
+callbacks retain their noninline delivery contract.
+
+
 ---
 
 ## 2. JSON layer (`VaRestJson`)
@@ -410,34 +419,125 @@ that persist sessions themselves; the docs carry the security caveat).
 
 ### 4.3 Cache
 
-`FVaRestCachePolicy`: `None` | `Memory` | `MemoryAndDisk`; 8 MiB memory and 64 MiB disk LRU caps;
-`Saved/VaRest/Cache`; respects `Cache-Control` (`max-age`, `no-store`, `no-cache`); optional default
-TTL; `bServeStaleOnError` (serve stale when offline). Only GET/HEAD with status 200 are stored.
-Revalidation sends `If-None-Match`/`If-Modified-Since`; a 304 refreshes metadata and serves the
-cached body. **The cache key includes a hash of the auth identity** (SHA-256 of the applied
-`Authorization` value), so after logout/login one user never sees another's cached data. Bytes are
-cached, not decoded values; disk IO is on background tasks. `ClearCache()`.
+`FVaRestCachePolicy`: `None` | `Memory` | `MemoryAndDisk`; disabled by default, with 8 MiB memory
+and 64 MiB disk LRU caps when enabled. Default root: `Saved/VaRest/Cache`. Only eligible GET/HEAD
+status 200 representations are retained; GET and HEAD have separate keys. `.NoCache()` bypasses
+reads and writes. Request bodies, Range/If-Range, caller conditionals, SaveTo, auth refresh,
+connectivity probes and custom PerAttempt stages bypass caching. Unknown custom auth identity
+also bypasses it. Bytes are retained and decoded afresh for each result type and MaxJsonBytes.
+
+Keys hash length-framed UTF-8 verb, resolved URL without fragment, stable auth identity and all
+canonical built/request session headers (case-folded names, case-sensitive values, sorted pairs).
+They contain no raw URL, header or credential text. `Vary:*` and Vary on a header absent from those
+known inputs refuse retention. No transport-synthesized header value is guessed.
+
+Bearer/BearerRefresh use an opaque session identity, separate from credential generation. Real
+replacement, clear and expiry mint a new identity; identical session data and refresh preserve it.
+Session headers are separately hashed, so tenant changes cannot expose another tenant's bytes.
+Exported sessions carry a consistency binding validated before import applies the identity; a bad
+binding mints a fresh identity. The unkeyed binding is not authentication: caller-owned exported
+credential state is trusted. API key and Basic use stable credential-material hashes. NoAuth uses a
+separate anonymous domain, independent of configured provider/session, while explicit request
+Authorization/Cookie still participate in the key. Custom `GetIdentity` is a pure GT query against
+the real current session; it must change with account and remain stable through refresh. It never
+calls Apply speculatively. Identity/key are rechecked before disk handoff and storage. A changed
+identity removes cache-injected validators before dispatch; another identity's 304 cannot join old bytes.
+
+Freshness honors strict nonnegative max-age, no-store, no-cache, must-revalidate, Expires/Date,
+Age and apparent age; equality at expiry is stale and future timestamps do not extend freshness.
+Default TTL is the final fallback. `bServeStaleOnError` applies only to Connection/Offline and known
+offline, excluding no-cache/must-revalidate, Timeout, HTTP errors, auth, decode and Config failures.
+A hit has zero transport bytes and enters no attempt. Synthetic success does not establish online.
+
+Conditional 304 serves the captured body as status 200/from-cache while AttemptEnded records the
+actual wire 304. Allowed end-to-end metadata merges; credentials, Set-Cookie, hop-by-hop headers,
+Transfer-Encoding and stale Content-Length are excluded. HEAD preserves representation length.
+A metadata-free 304 preserves parsed policy and original age anchor, so it may immediately require
+validation again. Missing/ambiguous inherited Cache-Control provenance refuses future retention;
+incomplete new age provenance retains a conservative age floor. Only valid explicit Date/Age
+updates can replace it. A no-store 304 can satisfy the current request but invalidates retained
+memory/disk bytes. A 304 does not unconditionally renew TTL; conservative cases cost extra wire.
+
+`ClearCache()` immediately invalidates client memory and queues the configured disk namespace
+clear; epochs and serial order reject late results. Shared disk-store capacity is the minimum ever
+requested during that live instance, recovering only after every holder releases it and it reopens.
+Writable physical roots are normalized before registry use (mobile writable-target conversion before
+lexical normalization); virtual/package roots and arbitrary physical aliases are not a sandbox promise.
+Optional cache-read reservation contention becomes a miss while persistence accepts work; closed
+admission remains Config. Cache lookups/hits count eligible logical requests once even if an Outer
+stage proceeds repeatedly; ratio is bounded 0..1. Cache/store buffers and worker launches use LLM
+VaRest; trace copies use VaRest_Trace and user callbacks restore sender tags.
 
 ### 4.4 Offline queue and connectivity
 
-* Per-request opt-in `.QueueWhenOffline()` (or endpoint flag). Eligible only if idempotent or
-  `.Idempotent()`; streamed/multipart-file bodies are not queueable (config error).
-* When a request fails with `Connection` after its retries, or when the Hub already knows it is
-  offline, the request is persisted (verb, resolved URL, non-auth headers, body bytes,
-  idempotency key, tag, created time) under `Saved/VaRest/Queue/<client id>`. The original
-  completion fires **`OnQueued(QueueId)`** (BP: `On Queued` pin), not success or error.
-* Replay is FIFO per client, one at a time (preserves order). Auth is re-applied, and the request goes through the normal
-  pipeline minus the offline stage. The final outcome is delivered **only** through the client event
-  `OnQueuedResult(QueueId, Tag, bSuccess, Response, Error)`. This works the same after an app
-  restart, when the original callbacks no longer exist.
-* Client identity: the API asset path, or the explicit name in `.WithOfflineQueue(Name)` for
-  code-first clients. Limits: `MaxQueued` 256, `MaxAge` 24 h (expired → `OnQueuedResult` with
-  `Kind=Offline`).
-* Connectivity (Hub-wide): offline after a transport connection failure; online after any success or
-  a probe success (`ProbeInterval` 10 s; probe = head of a queue or an optional `HealthUrl`); on
-  mobile also uses `FPlatformMisc::GetNetworkConnectionType()` as a hint. Fires
-  `OnConnectivityChanged`. While offline, `QueueWhenOffline` requests queue immediately without
-  wasting attempts.
+* `.QueueWhenOffline()` requires an explicit `.WithOfflineQueue(Name)`, idempotent verb or
+  `.Idempotent()`, no stream/file multipart body, SaveTo or OnHttpThread. Invalid options fail
+  Config even online. Refresh never queues. Initial GT Resolve anchors the operation's account
+  and tenant scope before any stage, load or limiter wait. Later scope changes refuse the original
+  operation with Auth, rather than relabeling it; same-identity refresh remains valid.
+* Named queues share one coordinator/FIFO under `<QueueRoot>/<SHA256(domain, exact name)>`.
+  Compatible live registrants agree on canonical origin, connectivity, policy and identity-provider
+  semantics. Configuration publications contain either a complete matching registration or an
+  explicitly unavailable Config state during re-registration. Sends that captured an old complete
+  snapshot keep it; mixed snapshots cannot enqueue into the old domain. Current Count/Flush
+  do not expose an unavailable registration's old coordinator.
+* The optional pure GT `GetIdentityContractName()` declares nonsecret stable provider semantics
+  independently of current credentials. Matching non-None contract plus GetAuthName allows
+  declared-compatible instances/restarts to interpret the same real opaque identity. Builtins
+  declare fixed contracts. Default-None custom providers share only the same live instance;
+  a weak registry gives each instance a random opaque GUID namespace, never a raw address.
+  Replacement/restart changes that scope and retires old work with the normal Auth result,
+  without silent deletion. Declare compatibility for restart continuity. Provider and contract
+  FName labels use case-insensitive canonical text; opaque identities and exact queue names do
+  not. A declaration never substitutes for usable GetIdentity. NoAuth ignores provider/session.
+* Known-offline operations or final Connection/Offline outcomes persist safe verb/absolute URL,
+  headers/body/type, stable idempotency key, tag, created UTC, auth mode/scope, sequence and
+  distinct QueueId. Original request identity includes process-run GUID plus numeric id. Request
+  callbacks, owner and result type are never serialized. Defaults: MaxQueued256, MaxAge24h,
+  32MiB per item, 64MiB aggregate body; encoded metadata64KiB and retained metadata10MiB.
+  Admission reserves count/body/metadata before copying payload. Over-limit recovery exposes
+  no partial queue and preserves acknowledged files for a compatible reopen.
+* Admission is two-phase: a worker prepares and flushes nonreplayable `.pending`; GT rechecks
+  scope/origin/owner/deadline and races cancellation through one atomic commit gate; only the
+  winner schedules rename to `.json`. Before the gate cancellation wins promptly. After commit
+  selection IO is irreversible and actual success/failure determines delivery. IsActive becomes
+  false at selection while completion is still pending. OnQueued occurs only after successful
+  rename, with no original success/error/complete callback. Actual committed work survives an
+  early Outer completion, but a sealed request receives no late Queued Note or callback.
+* Replay is at-least-once across crashes, one FIFO head at a time after durable prior retirement,
+  using the oldest live compatible client and current credentials/envelope. It enters the normal
+  pipeline with replay guards and disabled cache reads/writes, even for GET/HEAD; it must reach
+  wire before a successful network replay can retire. The idempotency key survives replay.
+  Original callbacks remain absent; one OnQueuedResult per live registration broadcasts after
+  durable removal from a snapshotted subscriber list. An active exchange owns its client until
+  completion; future work selects a surviving registrant.
+* Stored replay origin mismatch ends Config, identity/provider/scope mismatch ends Auth, expiry
+  ends Offline, all without transport. Each terminal replay has a fresh real RequestId and
+  QueueReplayOf; OriginalRequestId is zero across process runs, while QueueId stays durable.
+  Expiry alone emits QueueExpired with actual Attempt0. Connection/Offline network outcomes
+  retain the head and pause replay; other final outcomes consume it. No exactly-once remote
+  execution is promised: a crash before tombstone can repeat an acknowledged server operation.
+* Persistence excludes configured auth/session fields and registered known-secret byte forms,
+  with full off-GT body/metadata checks independent of trace excerpt caps/minimum lengths.
+  Applications must register additional secrets; arbitrary unknown payload secrets cannot be
+  inferred. Refused persistence never rewrites a payload into a different operation. Credentials
+  are not stored on the application's behalf; ExportSession/ImportSession remain caller-owned.
+* `bool FlushQueue(callback={})` flushes admitted persistence work, not network replay. False
+  means no callback (invalid registration, shutdown or bounded slot/waiter refusal); true delivers
+  asynchronously after the serial barrier, subject to shutdown/owner suppression. Failed cleanup
+  conservatively marks storage unavailable and Flush failed; prompt logical cancel may precede
+  release of the still-owned admission accounting. Repair permissions, drain and fully release
+  a failed coordinator before reopening for recovery. Disabling/re-enabling one client cannot
+  reset a coordinator retained by other clients or old snapshots. No public reset is promised.
+* Connectivity is process-scoped by default and injectable per client/Hub. A current live physical
+  Connection failure means offline; a positive physical status proves online, including HTTP
+  errors or a body timeout before the logical deadline. Cache results, stale/closed replies and
+  status-zero timeout alone do not prove reachability. Timed offline probes prefer a queue head,
+  otherwise optional HealthUrl, with no network request if neither exists; ForceOffline suppresses
+  probes. Mobile network type supplies a hint. `OnChanged` is the narrow synchronous GT
+  observer exception: state changes first, FIFO edges broadcast nonrecursively, nested changes
+  enqueue, and final state reconciles probes. Request outcomes, OnQueued, OnQueuedResult and
+  accepted Flush callbacks remain noninline with Send/Cancel/setters/connectivity transitions.
 
 ### 4.5 Logging and redaction
 
@@ -519,6 +619,11 @@ when there is no game instance. `GetClient(UVaRestApi*)` (lazy), `MakeClient(Bas
 `IsOnline()`, `OnConnectivityChanged`. On `Deinitialize` it cancels in-flight requests and flushes
 offline queues to disk. C++: `UVaRestHub::Get(this)->Api(GameApi)` returns the asset's
 `FVaRestClient` handle (by value; handles are cheap).
+The Hub handles immediate FlushQueue admission refusal explicitly before teardown and does not
+block or run a nested GT pump. Module shutdown drains owned persistence results/continuations
+with user callbacks suppressed. Queue admission follows §1's bounded body-free GT normalization
+exception; payload and disk work stay on workers.
+
 
 ### 5.3 `UVaRestApiClient` (BP)
 

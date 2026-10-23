@@ -1,6 +1,5 @@
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 
-#include "VaRestIdentity.h"
 #include "VaRestAuth.h"
 #include "VaRestOfflineInternal.h"
 

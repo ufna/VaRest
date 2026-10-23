@@ -1246,6 +1246,12 @@ void VaRest::Http::FClientState::Complete(const FVaRestExchangeRef& Exchange, FF
 		Canceled.Error.Message = FVaRestError::DefaultMessage(EVaRestErrorKind::Canceled, 0);
 		Finish = MoveTemp(Canceled);
 	}
+	// A canceled/Outer-completed read has no validated disposition. Preserve established results.
+	if (Ex.bCacheLookupPending)
+	{
+		Ex.bCacheLookupPending = false;
+		Ex.CacheLookup = EVaRestTraceCacheLookup::None;
+	}
 	Ex.bFinished = true;
 	Ex.Phase = EVaRestExchangePhase::Done;
 	// Concurrency review M-3: something other than Cancel finished a request a stage holds waiting (a custom Outer stage in

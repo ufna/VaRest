@@ -14,6 +14,7 @@
 #include "VaRestClassify.h"
 #include "VaRestTracePoints.h"
 #include "VaRestHttpTesting.h"
+#include "VaRestHttpStatsInternal.h"
 #include "VaRestJson.h"
 #include "VaRestUrl.h"
 #include "Misc/Paths.h"
@@ -77,6 +78,7 @@ bool VaRest::Http::QueueIdentityStillCurrent(const FExchangeState& Ex)
 TSharedPtr<VaRest::Http::FOfflineQueue,ESPMode::ThreadSafe> VaRest::Http::FOfflineQueue::Join(
     const TSharedRef<FClientState,ESPMode::ThreadSafe>& Client,FString& OutConfigError)
 {
+    LLM_SCOPE_BYTAG(VaRest);
     check(IsInGameThread()); OutConfigError.Reset();
     const auto Config=Client->GetConfig();
     if (Config->QueueName.IsEmpty()) return nullptr;
@@ -125,8 +127,10 @@ FDateTime VaRest::Http::FOfflineQueue::UtcNow() const
 { return UtcOrigin+FTimespan::FromSeconds(FMath::Max(0.0,QueueClock->Now()-MonotonicOrigin)); }
 void VaRest::Http::FOfflineQueue::Load()
 {
+    LLM_SCOPE_BYTAG(VaRest);
     FQueueStore::Load(Directory,Origin,Policy,[Self=AsShared()](FQueueLoad&& Loaded)
     {
+        LLM_SCOPE_BYTAG(VaRest);
         if (Self->bStopped) return;
         Self->Items=MoveTemp(Loaded.Items); Self->NextSequence=Loaded.NextSequence;
         Self->bStorageFailed=!Loaded.bOk; Self->CommittedBodyBytes=0; Self->CommittedMetadataBytes=0;
@@ -144,6 +148,7 @@ void VaRest::Http::FOfflineQueue::Load()
 
 void VaRest::Http::FOfflineQueue::DrainLoadedWaiters()
 {
+    LLM_SCOPE_BYTAG(VaRest);
     // Keep pending admissions visible and append reentrant work behind every older waiter.
     while (!bStopped && !AfterLoad.IsEmpty())
     {
@@ -239,6 +244,7 @@ public:
     }
     void AbortPrepared()
     {
+        LLM_SCOPE_BYTAG(VaRest);
         // Keep the job, admission ticket and reservation until the actual owned cleanup result.
         FQueueStore::Abort(Queue->GetDirectory(),Item.Sequence,Item.QueueId,
             [Self=AsShared()](bool bClean){ Self->ResolveCleanup(bClean); });
@@ -263,8 +269,17 @@ public:
 void FOfflineStage::Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next,
     FVaRestOutcomeCallback&& OnOutcome)
 {
+    LLM_SCOPE_BYTAG(VaRest);
     auto& Ex = Internals(*Exchange);
-    if (!Ex.QueueTerminalDetail.IsNone()) { OnOutcome(LocalFailure(Ex.QueueTerminalDetail)); return; }
+    if (!Ex.QueueTerminalDetail.IsNone())
+    {
+        if (Ex.QueueTerminalDetail==TEXT("QueueExpired"))
+        {
+            FVaRestTraceNote Note; Note.Kind=EVaRestTraceNoteKind::QueueExpired; Note.QueueId=Ex.QueueReplayOf.QueueId;
+            TracePoints::Note(Ex,MoveTemp(Note));
+        }
+        OnOutcome(LocalFailure(Ex.QueueTerminalDetail)); return;
+    }
     if (!Ex.QueueReplayOf.QueueId.IsEmpty()) { GuardReplay(Exchange,Next,MoveTemp(OnOutcome)); return; }
     if (Ex.bIsAuthRefresh || Ex.bConnectivityProbe || !Ex.bQueueWhenOffline)
     {
@@ -290,6 +305,7 @@ void FOfflineStage::Process(const FVaRestExchangeRef& Exchange, const FVaRestSta
 }
 void VaRest::Http::GuardReplay(const FVaRestExchangeRef& Exchange,const FVaRestStageNext& Next,FVaRestOutcomeCallback&& Done)
 {
+    LLM_SCOPE_BYTAG(VaRest);
     auto& Ex=Internals(*Exchange);
     auto Wait=FPersistenceWait::Begin(Exchange,MoveTemp(Done));
     if (!Wait->IsPending()) return;
@@ -315,6 +331,7 @@ void VaRest::Http::GuardReplay(const FVaRestExchangeRef& Exchange,const FVaRestS
         return Result;
     },[Exchange,Next,Wait](FIoResult&& Result) mutable
     {
+        LLM_SCOPE_BYTAG(VaRest);
         if (!Wait->IsPending()) return;
         if (!Result.bOk) { Wait->Finish(LocalFailure(TEXT("PersistenceCredentials"))); return; }
         FVaRestOutcomeCallback Resume=Wait->Resume();
@@ -335,6 +352,7 @@ TArray<uint8> VaRest::Http::CopyQueueAdmissionBytes(TConstArrayView<uint8> Bytes
 
 void VaRest::Http::FOfflineQueue::Enqueue(const FVaRestExchangeRef& Exchange,FVaRestOutcomeCallback&& Done)
 {
+    LLM_SCOPE_BYTAG(VaRest);
     auto Wait=FPersistenceWait::Begin(Exchange,MoveTemp(Done));
     if (!Wait->IsPending()) return;
     if (LastAdmission==MAX_uint64) { Wait->Finish(LocalFailure(TEXT("QueueFull"))); return; }
@@ -342,6 +360,7 @@ void VaRest::Http::FOfflineQueue::Enqueue(const FVaRestExchangeRef& Exchange,FVa
     const auto Admission=MakeShared<FQueueAdmissionToken,ESPMode::ThreadSafe>(AsShared(),Ticket);
     const auto Start=[Self=AsShared(),Exchange,Wait,Admission]
     {
+        LLM_SCOPE_BYTAG(VaRest);
         if (!Wait->CanHandoff()) return;
         auto& Ex=Internals(*Exchange);
         FString Scope,Error;
@@ -420,6 +439,7 @@ void VaRest::Http::FOfflineQueue::AcceptCommitted(FQueueItem Item)
 
 void VaRest::Http::FQueueAdmissionJob::Prepared(bool bOk)
 {
+    LLM_SCOPE_BYTAG(VaRest);
     auto& Ex=Internals(*Exchange);
     if (!bOk)
     {
@@ -460,6 +480,7 @@ void VaRest::Http::FQueueAdmissionJob::Prepared(bool bOk)
     FQueueStore::Commit(Queue->GetDirectory(),Item.Sequence,Item.QueueId,
         [Self=AsShared(),Done=MoveTemp(Accepted)](FQueueCommitResult Result) mutable
         {
+            LLM_SCOPE_BYTAG(VaRest);
             auto& AcceptedEx=Internals(*Self->Exchange);
             Self->ResolveCleanup(Result.bCleanupOk);
             if (!Result.bCommitted)
@@ -492,6 +513,7 @@ TSharedPtr<VaRest::Http::FClientState,ESPMode::ThreadSafe> VaRest::Http::FOfflin
 }
 void VaRest::Http::FOfflineQueue::ScheduleReplay()
 {
+    LLM_SCOPE_BYTAG(VaRest);
     if (bStopped || bReplayScheduled || !bLoaded || bStorageFailed || Items.IsEmpty() || FClientState::IsShuttingDown()) return;
     bReplayScheduled=true;
     const TWeakPtr<FOfflineQueue,ESPMode::ThreadSafe> Weak(AsShared());
@@ -502,6 +524,7 @@ void VaRest::Http::FOfflineQueue::ScheduleReplay()
 }
 bool VaRest::Http::FOfflineQueue::TryReplay(bool bProbe)
 {
+    LLM_SCOPE_BYTAG(VaRest);
     check(IsInGameThread());
     if (bStopped || !bLoaded || bStorageFailed || bReplayActive || Items.IsEmpty() || FClientState::IsShuttingDown()
         || QueueClock->Now()<ReplayNotBefore) return false;
@@ -532,6 +555,7 @@ bool VaRest::Http::FOfflineQueue::TryReplay(bool bProbe)
 }
 void VaRest::Http::FOfflineQueue::ReplayFinished(FString QueueId,FVaRestQueuedResult Result,bool bKeep)
 {
+    LLM_SCOPE_BYTAG(VaRest);
     if (bKeep)
     {
         bReplayActive=false;
@@ -553,10 +577,12 @@ void VaRest::Http::FOfflineQueue::ReplayFinished(FString QueueId,FVaRestQueuedRe
 }
 void VaRest::Http::FOfflineQueue::RetireAndNotify(FString QueueId,FVaRestQueuedResult Result)
 {
+    LLM_SCOPE_BYTAG(VaRest);
     if (Items.IsEmpty() || Items[0].QueueId!=QueueId) { bStorageFailed=true; bReplayActive=false; return; }
     FQueueStore::Retire(Directory,Items[0].Sequence,QueueId,
         [Self=AsShared(),QueueId=MoveTemp(QueueId),Result=MoveTemp(Result)](bool bOk) mutable
         {
+            LLM_SCOPE_BYTAG(VaRest);
             if (bOk && !Self->Items.IsEmpty() && Self->Items[0].QueueId==QueueId)
             {
                 Self->CommittedBodyBytes-=Self->Items[0].Body.Bytes.Num();
@@ -572,6 +598,7 @@ void VaRest::Http::FOfflineQueue::RetireAndNotify(FString QueueId,FVaRestQueuedR
 }
 void VaRest::Http::FOfflineQueue::BroadcastLater(FVaRestQueuedResult Result)
 {
+    LLM_SCOPE_BYTAG(VaRest);
     // Called only from the asynchronous retirement handback: already later than Send/network completion.
     if (bStopped || FClientState::IsShuttingDown()) return;
     const auto Keep=AsShared();
@@ -586,6 +613,7 @@ void VaRest::Http::FOfflineQueue::BroadcastLater(FVaRestQueuedResult Result)
 
 bool VaRest::Http::FOfflineQueue::Flush(TUniqueFunction<void(bool)>&& Done)
 {
+    LLM_SCOPE_BYTAG(VaRest);
     check(IsInGameThread());
     if (bStopped || FClientState::IsShuttingDown() || FlushWaiters.Num()>=4096) return false;
     auto Waiter=MakeShared<FFlushWaiter,ESPMode::ThreadSafe>();
@@ -612,6 +640,7 @@ bool VaRest::Http::FOfflineQueue::PollFlush(const TSharedRef<FFlushWaiter,ESPMod
         if (Callback) Callback(bOk);
         return true;
     }
+    LLM_SCOPE_BYTAG(VaRest);
     if (!bLoaded || Waiter->bBarrierStarted) return false;
     for (uint64 Ticket : ActiveAdmissions) if (Ticket<=Waiter->Through) return false;
     Waiter->bBarrierStarted=true;

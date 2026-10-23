@@ -56,6 +56,7 @@ namespace VaRest::Http
 		static void Retried(FHttpCounters& Client);
 		static void CacheLookup(FHttpCounters& Client);
 		static void CacheHit(FHttpCounters& Client);
+		static double CacheRatio(const FHttpCounters& Client);
 	};
 
 	/**

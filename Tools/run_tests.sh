@@ -143,7 +143,7 @@ set +e
 timeout --foreground --kill-after=30 "$TIMEOUT" bash -c 'echo $$ > "$0"; exec "$@"' "$PIDFILE" \
 	"${PROXY_CHILD_ENV[@]}" "$ENGINE/Engine/Binaries/Linux/UnrealEditor-Cmd" "$PROJECT" \
 	-ExecCmds="Automation RunTests $FILTER; Quit" \
-	-unattended -nullrhi -nosplash -nopause -abslog="$LOG" ${SERVER_ARGS[@]+"${SERVER_ARGS[@]}"} ${VAREST_EXTRA_ARGS:-} >/dev/null 2>&1
+	-unattended -ForceDPCVars=HomeScreen.EnableHomeScreen=0 -nullrhi -nosplash -nopause -abslog="$LOG" ${SERVER_ARGS[@]+"${SERVER_ARGS[@]}"} ${VAREST_EXTRA_ARGS:-} >/dev/null 2>&1
 STATUS=$?
 set -e
 # timeout exits 124 after TERM, 137 when it had to KILL; an editor killed by someone else also

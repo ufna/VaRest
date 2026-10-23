@@ -437,7 +437,11 @@ FVaRestClient& FVaRestClient::WithCache(const FVaRestCachePolicy& Policy)
     });
     return *this;
 }
-void FVaRestClient::ClearCache() { if (State.IsValid()) State->ClearCacheState(); }
+void FVaRestClient::ClearCache()
+{
+    LLM_SCOPE_BYTAG(VaRest);
+    if (State.IsValid()) State->ClearCacheState();
+}
 
 FVaRestClient& FVaRestClient::WithRetry(const FVaRestRetryPolicy& Policy)
 {

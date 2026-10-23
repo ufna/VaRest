@@ -22,6 +22,7 @@ DECLARE_DWORD_ACCUMULATOR_STAT(TEXT("Bytes down"), STAT_VaRestBytesDown, STATGRO
 DECLARE_DWORD_ACCUMULATOR_STAT(TEXT("Retries"), STAT_VaRestRetries, STATGROUP_VaRest);
 DECLARE_DWORD_ACCUMULATOR_STAT(TEXT("Cache lookups"), STAT_VaRestCacheLookups, STATGROUP_VaRest);
 DECLARE_DWORD_ACCUMULATOR_STAT(TEXT("Cache hits"), STAT_VaRestCacheHits, STATGROUP_VaRest);
+DECLARE_FLOAT_ACCUMULATOR_STAT(TEXT("Cache hit ratio"), STAT_VaRestCacheHitRatio, STATGROUP_VaRest);
 
 VaRest::Http::FHttpCounters& VaRest::Http::FHttpStats::Global()
 {
@@ -74,9 +75,18 @@ void VaRest::Http::FHttpStats::CacheLookup(FHttpCounters& Client)
 {
     for (FHttpCounters* Set : {&Global(), &Client}) Set->CacheLookups.fetch_add(1, std::memory_order_relaxed);
     INC_DWORD_STAT(STAT_VaRestCacheLookups);
+    SET_FLOAT_STAT(STAT_VaRestCacheHitRatio,static_cast<float>(CacheRatio(Global())));
 }
 void VaRest::Http::FHttpStats::CacheHit(FHttpCounters& Client)
 {
     for (FHttpCounters* Set : {&Global(), &Client}) Set->CacheHits.fetch_add(1, std::memory_order_relaxed);
     INC_DWORD_STAT(STAT_VaRestCacheHits);
+    SET_FLOAT_STAT(STAT_VaRestCacheHitRatio,static_cast<float>(CacheRatio(Global())));
+}
+
+double VaRest::Http::FHttpStats::CacheRatio(const FHttpCounters& Client)
+{
+    const int64 Lookups=Client.CacheLookups.load(std::memory_order_relaxed);
+    const int64 Hits=Client.CacheHits.load(std::memory_order_relaxed);
+    return Lookups>0 ? FMath::Clamp(static_cast<double>(Hits)/Lookups,0.0,1.0) : 0.0;
 }
