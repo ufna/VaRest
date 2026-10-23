@@ -104,6 +104,13 @@ void VaRest::WebSocket::Lws::FConn::Prepare(const FServiceOptions& Options)
 		UE_LOG(LogVaRestSocket, Warning, TEXT("%s: ConnectTimeout %g s is outside (0, %g]; %g s is used"), *GetLabel(), Request.ConnectTimeout, MaxConnectTimeoutSeconds, Clamped.Seconds);
 	}
 	Request.ConnectTimeout = Clamped.Seconds;
+	// A TArray holds the assembly (plan decision 17)
+	if (Request.MaxMessageBytes < 1 || Request.MaxMessageBytes > static_cast<int64>(MAX_int32) - 1)
+	{
+		const int64 ClampedMessageLimit = FMath::Clamp<int64>(Request.MaxMessageBytes, 1, static_cast<int64>(MAX_int32) - 1);
+		UE_LOG(LogVaRestSocket, Warning, TEXT("%s: MaxMessageBytes %lld is outside [1, %d]; %lld is used"), *GetLabel(), static_cast<long long>(Request.MaxMessageBytes), MAX_int32 - 1, static_cast<long long>(ClampedMessageLimit));
+		Request.MaxMessageBytes = ClampedMessageLimit;
+	}
 	TValueOrError<FSocketTarget, FTargetError> Made = PrepareTarget(Request);
 	if (Made.HasError())
 	{
@@ -208,6 +215,9 @@ int32 VaRest::WebSocket::Lws::FConn::OnCallback(FService& Service, lws* InWsi, i
 	case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
 		OnConnectionError(In, Len);
 		return 0;
+	case LWS_CALLBACK_CLIENT_RECEIVE:
+		// in: a chunk of a data frame, len its size: every frame end and every rx_buffer_size (T8, libwebsockets.h:1345)
+		return OnReceive(Service, InWsi, In, Len);
 	case LWS_CALLBACK_CLIENT_WRITEABLE:
 		return OnWriteable(InWsi);
 	case LWS_CALLBACK_WS_PEER_INITIATED_CLOSE:

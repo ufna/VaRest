@@ -111,6 +111,10 @@ namespace VaRest::WebSocket::Lws
 		 * (libwebsockets.h:1029-1037)
 		 */
 		int32 OnVerifyServerCertificate(FService& Service, X509_STORE_CTX* Store, int32 PreverifyOk);
+		/** Service thread: append a data chunk and publish only complete, valid messages (spec 2.3) */
+		int32 OnReceive(FService& Service, lws* InWsi, const void* In, size_t Len);
+		/** Service thread: a protocol failure (1007, 1009): VaRest closes the connection itself, By Transport (spec 2.3) */
+		void Fail(FService& Service, int32 Code, const TCHAR* Reason, EVaRestSocketFailure Failure);
 		void OnConnectionError(const void* In, size_t Len);
 		/** WSI_CREATE: one after the attempt's first APPEND_HANDSHAKE_HEADER is LWS following a 3xx (Task 10 review M-2) */
 		void OnWsiCreate();
@@ -210,5 +214,9 @@ namespace VaRest::WebSocket::Lws
 		// ---- the peer's close (spec 2.5)
 		bool bPeerClosed = false;
 		VaRest::WebSocket::FPeerClose Peer;
+		// ---- receive (spec 2.3)
+		TArray<uint8> Assembly;
+		EVaRestSocketFrameKind AssemblyKind = EVaRestSocketFrameKind::Text;
+		bool bAssembling = false;
 	};
 }
