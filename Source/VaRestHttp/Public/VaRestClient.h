@@ -480,10 +480,11 @@ public:
 	/** Replace the client cache policy for this request. */
 	TVaRestRequest Cache(const FVaRestCachePolicy& Policy) &&
 	{ Spec->Cache = Policy; return MoveTemp(*this); }
-	/** Bypass both cache reads and writes. */
+	/** Opt into a named durable queue for an eligible idempotent request when offline. */
     TVaRestRequest QueueWhenOffline() && { Spec->bQueueWhenOffline = true; return MoveTemp(*this); }
     TVaRestRequest OnQueued(TUniqueFunction<void(const FString&)>&& Callback) &&
     { Spec->OnQueued = MoveTemp(Callback); return MoveTemp(*this); }
+	/** Bypass both cache reads and writes. */
 	TVaRestRequest NoCache() &&
 	{ Spec->Cache = FVaRestCachePolicy(); return MoveTemp(*this); }
 

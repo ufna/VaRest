@@ -350,12 +350,14 @@ void VaRest::Http::FQueueStore::Prepare(FString Directory,FString Origin,FVaRest
     },MoveTemp(Done),Reservation);
 }
 void VaRest::Http::FQueueStore::Commit(FString Directory,uint64 Sequence,FString QueueId,
-    TUniqueFunction<void(bool)>&& Done)
+    TUniqueFunction<void(FQueueCommitResult)>&& Done)
 {
 #if WITH_DEV_AUTOMATION_TESTS
     const auto Hooks=Testing::PersistenceHooksFor(Directory);
 #endif
-    QueueStorePrivate::AsyncBool([Directory=MoveTemp(Directory),Sequence,QueueId=MoveTemp(QueueId)
+    const auto Result=MakeShared<FQueueCommitResult,ESPMode::ThreadSafe>();
+    const auto Callback=MakeShared<TUniqueFunction<void(FQueueCommitResult)>,ESPMode::ThreadSafe>(MoveTemp(Done));
+    if (!LaunchPersistence([Result,Directory=MoveTemp(Directory),Sequence,QueueId=MoveTemp(QueueId)
 #if WITH_DEV_AUTOMATION_TESTS
         ,Hooks
 #endif
@@ -367,26 +369,27 @@ void VaRest::Http::FQueueStore::Commit(FString Directory,uint64 Sequence,FString
         auto& Platform=FPlatformFileManager::Get().GetPlatformPhysical();
         const FString From=QueueStorePrivate::PendingPath(Directory,Sequence,QueueId);
         const FString To=FPaths::Combine(Directory,QueueFileName(Sequence,QueueId));
-        FIoResult Result;
+
 #if WITH_DEV_AUTOMATION_TESTS
         const bool bInjectedFailure=Hooks.IsValid() && Hooks->bFailCommit;
 #else
         const bool bInjectedFailure=false;
 #endif
         const FString NativeFrom=PersistencePathForIo(From),NativeTo=PersistencePathForIo(To);
-        Result.bOk=!bInjectedFailure && !NativeFrom.IsEmpty() && !NativeTo.IsEmpty()
+        Result->bCommitted=!bInjectedFailure && !NativeFrom.IsEmpty() && !NativeTo.IsEmpty()
             && InspectPersistencePath(Directory).Kind==EPathKind::Directory
             && InspectPersistencePath(From).Kind==EPathKind::Regular
             && InspectPersistencePath(To).Kind==EPathKind::Missing
             && Platform.MoveFile(*NativeTo,*NativeFrom);
-        if (!Result.bOk) VaRest::Http::DeleteFile(From);
-        return Result;
-    },MoveTemp(Done),0,true);
+        Result->bCleanupOk=Result->bCommitted || VaRest::Http::DeleteFile(From).bOk;
+        FIoResult Finished; Finished.bOk=true; return Finished;
+    },[Result,Callback](FIoResult&&){ (*Callback)(*Result); },0,true))
+        (*Callback)(FQueueCommitResult());
 }
-void VaRest::Http::FQueueStore::Abort(FString Directory,uint64 Sequence,FString QueueId)
+void VaRest::Http::FQueueStore::Abort(FString Directory,uint64 Sequence,FString QueueId,TUniqueFunction<void(bool)>&& Done)
 {
-    LaunchPersistence([Path=QueueStorePrivate::PendingPath(Directory,Sequence,QueueId)]
-        { return VaRest::Http::DeleteFile(Path); },[](FIoResult&&){});
+    QueueStorePrivate::AsyncBool([Path=QueueStorePrivate::PendingPath(Directory,Sequence,QueueId)]
+        { return VaRest::Http::DeleteFile(Path); },MoveTemp(Done),0,true);
 }
 void VaRest::Http::FQueueStore::Retire(FString Directory,uint64 Sequence,FString QueueId,
     TUniqueFunction<void(bool)>&& Done)
@@ -472,7 +475,9 @@ void VaRest::Http::FQueueStore::Load(FString Directory,FString Origin,FVaRestOff
                     VaRest::Http::DeleteFile(FPaths::Combine(Directory,Name));
             }
             else if (Name.EndsWith(TEXT(".pending")) || Name.Contains(TEXT(".part")))
-                VaRest::Http::DeleteFile(FPaths::Combine(Directory,Name));
+            {
+                if (!VaRest::Http::DeleteFile(FPaths::Combine(Directory,Name)).bOk) Result.bOk=false;
+            }
         }
         for (FString& Name : Listing.Names)
         {

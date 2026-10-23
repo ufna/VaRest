@@ -51,6 +51,7 @@ public:
     bool TryReplay(bool bProbe);
     bool Flush(TUniqueFunction<void(bool)>&& Done);
 #if WITH_DEV_AUTOMATION_TESTS
+    int32 NumAdmissionsForTest() const { check(IsInGameThread()); return ActiveAdmissions.Num(); }
     int32 NumFlushWaitersForTest() const { check(IsInGameThread()); return FlushWaiters.Num(); }
     int64 MetadataBytesForTest() const { check(IsInGameThread()); return CommittedMetadataBytes+ReservedMetadataBytes; }
 #endif

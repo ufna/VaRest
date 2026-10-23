@@ -21,6 +21,11 @@ TArray<uint8> EncodeQueueRecord(const FQueueItem& Item);
 TValueOrError<FQueueItem,FString> DecodeQueueRecord(TConstArrayView<uint8> Bytes,
     FStringView ExpectedOrigin, const FVaRestOfflinePolicy& Policy,
     int64 AvailableBody=MAX_int64,bool* bCapacityRefused=nullptr);
+struct FQueueCommitResult
+{
+    bool bCommitted=false;
+    bool bCleanupOk=false; // failed/refused cleanup leaves physical occupancy; caller must fail storage closed
+};
 class FQueueStore
 {
 public:
@@ -28,8 +33,8 @@ public:
         TUniqueFunction<void(FQueueLoad&&)>&& Done);
     static void Prepare(FString Directory, FString Origin, FVaRestOfflinePolicy Policy, FQueueItem Item, FPersistenceGuard Guard,
         TUniqueFunction<void(bool)>&& Done);
-    static void Commit(FString Directory,uint64 Sequence,FString QueueId,TUniqueFunction<void(bool)>&& Done);
-    static void Abort(FString Directory,uint64 Sequence,FString QueueId);
+    static void Commit(FString Directory,uint64 Sequence,FString QueueId,TUniqueFunction<void(FQueueCommitResult)>&& Done);
+    static void Abort(FString Directory,uint64 Sequence,FString QueueId,TUniqueFunction<void(bool)>&& Done);
     static void Retire(FString Directory, uint64 Sequence, FString QueueId,
         TUniqueFunction<void(bool)>&& Done);
 };

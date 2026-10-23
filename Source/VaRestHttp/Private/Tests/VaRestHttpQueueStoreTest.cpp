@@ -130,7 +130,7 @@ bool FVaRestQueueStoreRecoveryTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("pending never replayed"),Loaded->bOk && Loaded->Items.IsEmpty());
     FQueueStore::Prepare(Directory,TEXT("https://api.test"),FVaRestOfflinePolicy(),Item,FPersistenceGuard(),[Status](bool bOk){*Status=bOk;});
     if (!TestTrue(TEXT("second prepare"),Disk.Drain()) || !TestTrue(TEXT("second prepared"),Status->Get(false))) return false;
-    FQueueStore::Commit(Directory,Item.Sequence,Item.QueueId,[Status](bool bOk){*Status=bOk;});
+    FQueueStore::Commit(Directory,Item.Sequence,Item.QueueId,[Status](FQueueCommitResult R){*Status=R.bCommitted;});
     if (!TestTrue(TEXT("commit drains"),Disk.Drain()) || !TestTrue(TEXT("commit success"),Status->Get(false))) return false;
     auto Small=FVaRestOfflinePolicy(); Small.MaxItemBytes=2;
     FQueueStore::Load(Directory,TEXT("https://api.test"),Small,[Loaded](FQueueLoad&& Value){*Loaded=MoveTemp(Value);});
@@ -167,7 +167,7 @@ bool FVaRestQueueStorePhysicalErrorsTest::RunTest(const FString& Parameters)
     if (!TestTrue(TEXT("permission fixture prepared"),Disk.Drain()) || !TestTrue(TEXT("prepared"),Status->Get(false))) return false;
     LaunchPersistence([Parent,Pending]{ FIoResult R; R.bOk=chmod(TCHAR_TO_UTF8(*Parent),0)==0 && InspectPersistencePath(Pending).Kind==EPathKind::Error; return R; },[Witness](FIoResult&& R){*Witness=R.bOk;});
     if (!TestTrue(TEXT("permission witness drains"),Disk.Drain()) || !TestTrue(TEXT("actual inaccessible parent witnessed"),*Witness)) return false;
-    FQueueStore::Commit(Directory,Item.Sequence,Item.QueueId,[Status](bool bOk){*Status=bOk;});
+    FQueueStore::Commit(Directory,Item.Sequence,Item.QueueId,[Status](FQueueCommitResult R){*Status=R.bCommitted;});
     if (!TestTrue(TEXT("inaccessible commit drains"),Disk.Drain())) return false;
     TestFalse(TEXT("unknown destination never committed"),Status->Get(true));
     FQueueStore::Retire(Directory,Item.Sequence,Item.QueueId,[Status](bool bOk){*Status=bOk;});
@@ -175,19 +175,60 @@ bool FVaRestQueueStorePhysicalErrorsTest::RunTest(const FString& Parameters)
     TestFalse(TEXT("unknown source never acknowledged missing"),Status->Get(true));
     LaunchPersistence([Parent,Pending]{ FIoResult R; R.bOk=chmod(TCHAR_TO_UTF8(*Parent),0700)==0 && InspectPersistencePath(Pending).Kind==EPathKind::Regular; return R; },[Witness](FIoResult&& R){*Witness=R.bOk;});
     if (!TestTrue(TEXT("restore permission drain"),Disk.Drain()) || !TestTrue(TEXT("failed cleanup preserved inaccessible source"),*Witness)) return false;
-    FQueueStore::Commit(Directory,Item.Sequence,Item.QueueId,[Status](bool bOk){*Status=bOk;});
+    FQueueStore::Commit(Directory,Item.Sequence,Item.QueueId,[Status](FQueueCommitResult R){*Status=R.bCommitted;});
     if (!TestTrue(TEXT("positive commit drains"),Disk.Drain()) || !TestTrue(TEXT("regular source commits"),Status->Get(false))) return false;
     FQueueStore::Retire(Directory,Item.Sequence,Item.QueueId,[Status](bool bOk){*Status=bOk;});
     if (!TestTrue(TEXT("positive retirement drains"),Disk.Drain()) || !TestTrue(TEXT("regular source retires"),Status->Get(false))) return false;
     LaunchPersistence([Pending]{ FIoResult R; R.bOk=mkfifo(TCHAR_TO_UTF8(*Pending),0600)==0; return R; },[Witness](FIoResult&& R){*Witness=R.bOk;});
     if (!TestTrue(TEXT("special fixture drain"),Disk.Drain()) || !TestTrue(TEXT("native FIFO created"),*Witness)) return false;
-    FQueueStore::Commit(Directory,Item.Sequence,Item.QueueId,[Status](bool bOk){*Status=bOk;});
+    FQueueStore::Commit(Directory,Item.Sequence,Item.QueueId,[Status](FQueueCommitResult R){*Status=R.bCommitted;});
     if (!TestTrue(TEXT("special commit drain"),Disk.Drain())) return false;
     TestFalse(TEXT("special source not moved"),Status->Get(true));
     LaunchPersistence([Pending]{ FIoResult R; R.bOk=InspectPersistencePath(Pending).Kind==EPathKind::Other; unlink(TCHAR_TO_UTF8(*Pending)); return R; },[Witness](FIoResult&& R){*Witness=R.bOk;});
     if (!TestTrue(TEXT("special preservation drain"),Disk.Drain())) return false;
     TestTrue(TEXT("special source not unlinked by failed cleanup"),*Witness);
     return true;
+}
+#endif
+
+#if PLATFORM_LINUX
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestQueueStoreCleanupLoadTest,"VaRest.Http.QueueStore.CleanupLoad",EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+bool FVaRestQueueStoreCleanupLoadTest::RunTest(const FString& Parameters)
+{
+    using namespace VaRest::Http;using namespace VaRest::Http::Testing;
+    FScopedPersistenceTest Disk;const FString Directory=FPaths::Combine(Disk.Root,TEXT("cleanup-load"));
+    auto Item=QueueStoreTestPrivate::Item();const auto Status=MakeShared<bool,ESPMode::ThreadSafe>(false);
+    ON_SCOPE_EXIT {LaunchPersistence([Directory]{chmod(TCHAR_TO_UTF8(*PersistencePathForIo(Directory)),0700);return FIoResult();},[](FIoResult&&){});Disk.Drain();};
+    FQueueStore::Prepare(Directory,TEXT("https://api.test"),{},Item,{},[Status](bool bOk){*Status=bOk;});
+    if (!TestTrue(TEXT("prepare drain"),Disk.Drain()) || !TestTrue(TEXT("acknowledged fixture prepared"),*Status)) return false;
+    FQueueStore::Commit(Directory,Item.Sequence,Item.QueueId,[Status](FQueueCommitResult R){*Status=R.bCommitted;});
+    if (!TestTrue(TEXT("commit drain"),Disk.Drain()) || !TestTrue(TEXT("acknowledged fixture committed"),*Status)) return false;
+    const FString Json=FPaths::Combine(Directory,QueueFileName(Item.Sequence,Item.QueueId));
+    ++Item.Sequence;Item.QueueId=FGuid::NewGuid().ToString(EGuidFormats::DigitsLower);
+    const FString Pending=FPaths::ChangeExtension(FPaths::Combine(Directory,QueueFileName(Item.Sequence,Item.QueueId)),TEXT("pending"));
+    FQueueStore::Prepare(Directory,TEXT("https://api.test"),{},Item,{},[Status](bool bOk){*Status=bOk;});
+    if (!TestTrue(TEXT("pending prepare drain"),Disk.Drain()) || !TestTrue(TEXT("pending prepared"),*Status)) return false;
+    LaunchPersistence([Directory,Pending]
+    {
+        FIoResult R;R.bOk=chmod(TCHAR_TO_UTF8(*PersistencePathForIo(Directory)),0500)==0
+            && !DeleteFile(Pending).bOk && InspectPersistencePath(Pending).Kind==EPathKind::Regular;return R;
+    },[Status](FIoResult&& R){*Status=R.bOk;});
+    if (!TestTrue(TEXT("denial witness drain"),Disk.Drain()) || !TestTrue(TEXT("actual unlink denial witnessed"),*Status)) return false;
+    const auto Loaded=MakeShared<FQueueLoad,ESPMode::ThreadSafe>();
+    FQueueStore::Load(Directory,TEXT("https://api.test"),{},[Loaded](FQueueLoad&& R){*Loaded=MoveTemp(R);});
+    if (!TestTrue(TEXT("failed cleanup load drains"),Disk.Drain())) return false;
+    TestFalse(TEXT("load fails closed on pending cleanup error"),Loaded->bOk);TestTrue(TEXT("no partial acknowledged replay on failed recovery"),Loaded->Items.IsEmpty());
+    LaunchPersistence([Directory,Pending,Json]
+    {
+        FIoResult R;R.bOk=InspectPersistencePath(Pending).Kind==EPathKind::Regular && InspectPersistencePath(Json).Kind==EPathKind::Regular;
+        R.bOk=chmod(TCHAR_TO_UTF8(*PersistencePathForIo(Directory)),0700)==0 && R.bOk;return R;
+    },[Status](FIoResult&& R){*Status=R.bOk;});
+    if (!TestTrue(TEXT("restore drain"),Disk.Drain()) || !TestTrue(TEXT("failed cleanup preserved pending and acknowledged record"),*Status)) return false;
+    FQueueStore::Load(Directory,TEXT("https://api.test"),{},[Loaded](FQueueLoad&& R){*Loaded=MoveTemp(R);});
+    if (!TestTrue(TEXT("normal recovered load drains"),Disk.Drain())) return false;
+    TestTrue(TEXT("recovery succeeds after actual cleanup"),Loaded->bOk);TestEqual(TEXT("acknowledged record preserved"),Loaded->Items.Num(),1);
+    LaunchPersistence([Pending]{FIoResult R;R.bOk=InspectPersistencePath(Pending).Kind==EPathKind::Missing;return R;},[Status](FIoResult&& R){*Status=R.bOk;});
+    TestTrue(TEXT("missing witness drains"),Disk.Drain());TestTrue(TEXT("recovery actually removed pending"),*Status);return true;
 }
 #endif
 

@@ -225,13 +225,31 @@ public:
     FQueueAdmissionJob(FVaRestExchangeRef InExchange,TSharedRef<FPersistenceWait,ESPMode::ThreadSafe> InWait,
         FQueueItem InItem,TSharedRef<FOfflineQueue,ESPMode::ThreadSafe> InQueue,int64 InReservedBytes,int64 InReservedMetadata)
         : Exchange(MoveTemp(InExchange)),Wait(MoveTemp(InWait)),Item(MoveTemp(InItem)),Queue(MoveTemp(InQueue)),ReservedBytes(InReservedBytes),ReservedMetadata(InReservedMetadata) {}
+    ~FQueueAdmissionJob()
+    {
+        // Stop may discard Prepare's ordinary handback. Release its bounded accounting on GT,
+        // conservatively leaving storage unavailable until normal recovery cleans any pending bytes.
+        if (bReserved) ResolveCleanup(false);
+    }
+    void ResolveCleanup(bool bClean)
+    {
+        if (!bClean) { Queue->bStorageFailed=true; Queue->bFlushFailed=true; }
+        check(bReserved); bReserved=false;
+        Queue->ReleaseReservation(ReservedBytes,ReservedMetadata);
+    }
+    void AbortPrepared()
+    {
+        // Keep the job, admission ticket and reservation until the actual owned cleanup result.
+        FQueueStore::Abort(Queue->GetDirectory(),Item.Sequence,Item.QueueId,
+            [Self=AsShared()](bool bClean){ Self->ResolveCleanup(bClean); });
+    }
     void Prepared(bool bOk);
     FVaRestExchangeRef Exchange;
     TSharedRef<FPersistenceWait,ESPMode::ThreadSafe> Wait;
     FQueueItem Item;
     TSharedRef<FOfflineQueue,ESPMode::ThreadSafe> Queue;
     int64 ReservedBytes,ReservedMetadata;
-    bool bPrepared=false;
+    bool bPrepared=false,bReserved=true;
     TSharedPtr<FQueueAdmissionToken,ESPMode::ThreadSafe> Admission;
 };
 
@@ -406,7 +424,7 @@ void VaRest::Http::FQueueAdmissionJob::Prepared(bool bOk)
     if (!bOk)
     {
         Queue->bFlushFailed=true;
-        Queue->ReleaseReservation(ReservedBytes,ReservedMetadata);
+        ResolveCleanup(true);
         if (Wait->IsPending()) Wait->Finish(LocalFailure(TEXT("QueueWriteFailed")));
         return;
     }
@@ -420,8 +438,7 @@ void VaRest::Http::FQueueAdmissionJob::Prepared(bool bOk)
     {
         EQueueAdmission Expected=EQueueAdmission::Open;
         Ex.QueueAdmission.compare_exchange_strong(Expected,EQueueAdmission::Aborted,std::memory_order_acq_rel);
-        FQueueStore::Abort(Queue->GetDirectory(),Item.Sequence,Item.QueueId);
-        Queue->ReleaseReservation(ReservedBytes,ReservedMetadata);
+        AbortPrepared();
         if (Wait->IsPending())
         {
             if (bDeadline) Wait->Finish(MakeDeadlineOutcome());
@@ -434,19 +451,18 @@ void VaRest::Http::FQueueAdmissionJob::Prepared(bool bOk)
     EQueueAdmission Expected=EQueueAdmission::Open;
     if (!Ex.QueueAdmission.compare_exchange_strong(Expected,EQueueAdmission::Committing,std::memory_order_acq_rel))
     {
-        FQueueStore::Abort(Queue->GetDirectory(),Item.Sequence,Item.QueueId);
-        Queue->ReleaseReservation(ReservedBytes,ReservedMetadata);
+        AbortPrepared();
         if (Wait->IsPending()) Wait->Finish(FVaRestAttemptOutcome::Canceled());
         return;
     }
     // The deadline/interrupt are disarmed at the same acceptance point; no yield before Resume.
     FVaRestOutcomeCallback Accepted=Wait->TakeCompletion(); // already past the shared commit CAS; no later deadline override
     FQueueStore::Commit(Queue->GetDirectory(),Item.Sequence,Item.QueueId,
-        [Self=AsShared(),Done=MoveTemp(Accepted)](bool bCommitted) mutable
+        [Self=AsShared(),Done=MoveTemp(Accepted)](FQueueCommitResult Result) mutable
         {
             auto& AcceptedEx=Internals(*Self->Exchange);
-            Self->Queue->ReleaseReservation(Self->ReservedBytes,Self->ReservedMetadata);
-            if (!bCommitted)
+            Self->ResolveCleanup(Result.bCleanupOk);
+            if (!Result.bCommitted)
             {
                 Self->Queue->bFlushFailed=true;
                 Done(LocalFailure(TEXT("QueueWriteFailed")));
@@ -454,9 +470,12 @@ void VaRest::Http::FQueueAdmissionJob::Prepared(bool bOk)
             }
             Self->Queue->AcceptCommitted(Self->Item);
             AcceptedEx.bQueueCommitted=true;
-            FVaRestTraceNote Note; Note.Kind=EVaRestTraceNoteKind::Queued;
-            Note.QueueId=Self->Item.QueueId; Note.Reason=TEXT("Offline");
-            TracePoints::Note(AcceptedEx,MoveTemp(Note));
+            if (!AcceptedEx.bFinished && !AcceptedEx.bCompletionQueued && AcceptedEx.Phase==EVaRestExchangePhase::InChain)
+            {
+                FVaRestTraceNote Note; Note.Kind=EVaRestTraceNoteKind::Queued;
+                Note.QueueId=Self->Item.QueueId; Note.Reason=TEXT("Offline");
+                TracePoints::Note(AcceptedEx,MoveTemp(Note));
+            }
             FVaRestAttemptOutcome Outcome; Outcome.bQueued=true; Outcome.QueueId=Self->Item.QueueId;
             Done(MoveTemp(Outcome));
             Self->Queue->ScheduleReplay();

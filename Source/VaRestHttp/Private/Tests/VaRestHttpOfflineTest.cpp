@@ -11,6 +11,10 @@
 #include "Misc/AutomationTest.h"
 #include "Misc/ScopeExit.h"
 #include "Misc/Paths.h"
+#include "Tasks/Task.h"
+#if PLATFORM_LINUX
+#include <sys/stat.h>
+#endif
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestOfflineQueuedOnlyAfterCommitTest,"VaRest.Http.Offline.QueuedOnlyAfterCommit", EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
 bool FVaRestOfflineQueuedOnlyAfterCommitTest::RunTest(const FString& Parameters)
@@ -584,6 +588,173 @@ bool FVaRestOfflineRefreshBypassTest::RunTest(const FString& Parameters)
     TestEqual(TEXT("refresh never adds wire while offline"),Rig.Fake->NumCalls(),1); TestEqual(TEXT("no premature durable ack"),*Q,0);
     Barrier->Released=true; if (!TestTrue(TEXT("both originals durable after release"),PumpUntil([Q]{return *Q==2;}))) return false;
     TestEqual(TEXT("refresh did not create third queue record"),Rig.Client.GetQueuedCount(),2); return true;
+}
+
+#if PLATFORM_LINUX
+namespace VaRest::Http::OfflineTestPrivate
+{
+    // One owned, joined test task; permission work cannot sit behind the held serial IO pipe.
+    bool FileTask(TUniqueFunction<void()>&& Work)
+    {
+        auto Task=UE::Tasks::Launch(TEXT("VaRest.QueuePermissionTest"),[Job=MoveTemp(Work)]() mutable {check(!IsInGameThread());Job();});
+        return Testing::PumpUntil([&Task]{return Task.IsCompleted();});
+    }
+}
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestOfflineCleanupFailureTest,"VaRest.Http.Offline.CleanupFailure",EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+bool FVaRestOfflineCleanupFailureTest::RunTest(const FString& Parameters)
+{
+    using namespace VaRest::Http; using namespace VaRest::Http::Testing; using namespace VaRest::Http::OfflineTestPrivate;
+    // Successful abort, true-missing abort, denied abort, denied commit cleanup, known-clean failed commit.
+    for (int32 Mode=0;Mode<5;++Mode)
+    {
+        AddInfo(FString::Printf(TEXT("cleanup mode %d"),Mode));
+        FScopedPersistenceTest Disk; FTestRig Rig; FCleanup Cleanup(Rig); FScopedPersistenceHooks Hooks(Disk.Root);
+        FVaRestOfflinePolicy Policy; Policy.MaxQueued=1; Configure(Rig,Disk,TEXT("cleanup"),Policy);
+        if (!TestTrue(TEXT("loaded"),Disk.Drain())) return false;
+        const FString Directory=FClientAccess::State(Rig.Client)->Queue->GetDirectory();
+        const auto Barrier=MakeShared<FPersistenceBarrier,ESPMode::ThreadSafe>();
+        if (Mode<3) Hooks.Hooks->AfterPrepare=Barrier; else Hooks.Hooks->BeforeRename=Barrier;
+        Hooks.Hooks->bFailCommit=Mode==4;
+        ON_SCOPE_EXIT {FileTask([Directory]{chmod(TCHAR_TO_UTF8(*PersistencePathForIo(Directory)),0700);});Barrier->Released=true;Rig.Drain();};
+        const auto Outcome=MakeOutcome<void>(); const auto Ack=MakeShared<int32,ESPMode::ThreadSafe>(0);
+        const auto H=Observe(Rig.Client.Put<void>(TEXT("/cleanup")).Body(TEXT("safe")).QueueWhenOffline(),Outcome).OnQueued([Ack](const FString&){++*Ack;}).Send();
+        if (!TestTrue(TEXT("real pending held"),PumpUntil([Barrier]{return Barrier->Entered.load();}))) return false;
+        const auto Pending=MakeShared<FString,ESPMode::ThreadSafe>(); const auto Witness=MakeShared<bool,ESPMode::ThreadSafe>(false);
+        FileTask([Directory,Pending,Witness,Mode]
+        {
+            const auto Files=ListFiles(Directory); if (!Files.bOk || Files.Names.Num()!=1 || !Files.Names[0].EndsWith(TEXT(".pending"))) return;
+            *Pending=FPaths::Combine(Directory,Files.Names[0]);
+            if (Mode==1) {*Witness=DeleteFile(*Pending).bOk && InspectPersistencePath(*Pending).Kind==EPathKind::Missing;return;}
+            if (Mode==2 || Mode==3)
+            {
+                *Witness=chmod(TCHAR_TO_UTF8(*PersistencePathForIo(Directory)),0500)==0
+                    && !DeleteFile(*Pending).bOk && InspectPersistencePath(*Pending).Kind==EPathKind::Regular;
+            }
+            else *Witness=InspectPersistencePath(*Pending).Kind==EPathKind::Regular;
+        });
+        if (!TestTrue(TEXT("actual physical pending/denied-unlink witness"),*Witness)) return false;
+        if (Mode<3)
+        {
+            H.Cancel(); if (!TestTrue(TEXT("logical cancellation prompt before IO release"),Rig.Wait(Outcome))) return false;
+            TestTrue(TEXT("one canceled outcome"),Outcome->Error.Kind==EVaRestErrorKind::Canceled);
+        }
+        const auto Flushed=MakeShared<TOptional<bool>,ESPMode::ThreadSafe>();
+        TestTrue(TEXT("flush admitted while cleanup pending"),Rig.Client.FlushQueue([Flushed](bool bOk){*Flushed=bOk;}));
+        TestFalse(TEXT("flush not inline"),Flushed->IsSet());
+        Barrier->Released=true; if (!TestTrue(TEXT("physical cleanup drains"),Rig.Drain())) return false;
+        if (!TestTrue(TEXT("flush result delivered"),Flushed->IsSet())) return false;
+        TestEqual(TEXT("cleanup failure reaches accepted Flush"),Flushed->GetValue(),Mode<2);
+        TestEqual(TEXT("no acknowledgement"),*Ack,0);TestEqual(TEXT("one original result"),Outcome->CompleteCalls.load(),1);
+        TestEqual(TEXT("resolved physical reservation"),Rig.Client.GetQueuedCount(),0);
+        FileTask([Directory,Pending,Witness,Mode]
+        {
+            const auto Files=ListFiles(Directory);*Witness=Files.bOk;
+            for (const FString& Name:Files.Names) if (Name.EndsWith(TEXT(".json"))) *Witness=false;
+            *Witness=*Witness && (InspectPersistencePath(*Pending).Kind==((Mode==2 || Mode==3)?EPathKind::Regular:EPathKind::Missing));
+            chmod(TCHAR_TO_UTF8(*PersistencePathForIo(Directory)),0700);
+        });
+        TestTrue(TEXT("no replayable file; failed cleanup remains physically present"),*Witness);
+        const uint64 Before=PersistenceCounters().Launched.load();
+        const auto Next=MakeOutcome<void>(); const auto NextAck=MakeShared<int32,ESPMode::ThreadSafe>(0);
+        Hooks.Hooks->bFailCommit=false;
+        Observe(Rig.Client.Put<void>(TEXT("/next")).Body(TEXT("safe")).QueueWhenOffline(),Next).OnQueued([NextAck](const FString&){++*NextAck;}).Send();
+        if (!TestTrue(TEXT("next operation resolves"),Rig.Drain())) return false;
+        if (Mode==2 || Mode==3)
+        {
+            TestTrue(TEXT("cleanup error makes storage unavailable"),Next->Error.Kind==EVaRestErrorKind::Config);
+            TestEqual(TEXT("unavailable queue launches no new IO"),PersistenceCounters().Launched.load(),Before);
+            TestEqual(TEXT("unavailable queue cannot acknowledge"),*NextAck,0);
+            if (*NextAck!=0) continue; // the failed availability assertion is already decisive; avoid a full-queue recovery timeout
+            Rig.Client.WithOfflineQueue(TEXT("")); Rig.Client.WithOfflineQueue(TEXT("cleanup"),Policy);
+            if (!TestTrue(TEXT("normal reopen recovery drains"),Rig.Drain())) return false;
+            const auto Recovered=MakeShared<int32,ESPMode::ThreadSafe>(0);
+            Rig.Client.Put<void>(TEXT("/recovered")).Body(TEXT("safe")).QueueWhenOffline().OnQueued([Recovered](const FString&){++*Recovered;}).Send();
+            if (!TestTrue(TEXT("reopen removes pending and allows admission"),PumpUntil([Recovered]{return *Recovered==1;}))) return false;
+        }
+        else TestEqual(TEXT("known-clean cleanup leaves admission usable"),*NextAck,1);
+    }
+    return true;
+}
+#endif
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestOfflineCommittedOuterTest,"VaRest.Http.Offline.CommittedOuter",EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+bool FVaRestOfflineCommittedOuterTest::RunTest(const FString& Parameters)
+{
+    using namespace VaRest::Http; using namespace VaRest::Http::Testing; using namespace VaRest::Http::OfflineTestPrivate;
+    for (bool bOuter : {true,false})
+    {
+        FScopedPersistenceTest Disk; FTestRig Rig; FCleanup Cleanup(Rig); FScopedPersistenceHooks Hooks(Disk.Root);FScopedTraceRecorder Trace;
+        Configure(Rig,Disk);if (!TestTrue(TEXT("loaded"),Disk.Drain())) return false;
+        const auto Barrier=MakeShared<FPersistenceBarrier,ESPMode::ThreadSafe>();Hooks.Hooks->BeforeRename=Barrier;
+        ON_SCOPE_EXIT {Barrier->Released=true;Rig.Drain();};
+        const auto Outer=MakeShared<FAnswer,ESPMode::ThreadSafe>();if (bOuter) Rig.Client.Use(Outer,EVaRestStageSlot::Outer);
+        const auto Outcome=MakeOutcome<void>();const auto Ack=MakeShared<int32,ESPMode::ThreadSafe>(0);
+        const auto H=Observe(Rig.Client.Put<void>(TEXT("/committed-outer")).Body(TEXT("safe")).QueueWhenOffline(),Outcome).OnQueued([Ack](const FString&){++*Ack;}).Send();
+        if (!TestTrue(TEXT("postcutoff rename held"),PumpUntil([Barrier]{return Barrier->Entered.load();}))) return false;
+        TestFalse(TEXT("committing handle inactive"),H.IsActive());
+        if (bOuter) {Outer->Answer();if (!TestTrue(TEXT("outer completes before rename"),Rig.Wait(Outcome))) return false;}
+        else H.Cancel(); // postcutoff cancellation must not suppress truthful normal acknowledgement
+        const int32 Before=Trace.Recorder->For(H.GetId()).Num();
+        Barrier->Released=true;if (!TestTrue(TEXT("committed handback drains"),Rig.Drain())) return false;
+        TestEqual(TEXT("real committed item retained"),Rig.Client.GetQueuedCount(),1);
+        TestEqual(TEXT("one selected original outcome"),Outcome->CompleteCalls.load(),bOuter?1:0);
+        TestEqual(TEXT("only normal admission acknowledges"),*Ack,bOuter?0:1);
+        const auto Events=Trace.Recorder->For(H.GetId());
+        if (bOuter) TestEqual(TEXT("no request metadata after sealed Outer completion"),Events.Num(),Before);
+        int32 Notes=0,Completed=0;bool bSeenCompleted=false;
+        for (const auto& Event:Events)
+        {
+            if (Event.Kind==EVaRestTraceKind::Completed)
+            {++Completed;bSeenCompleted=true;if (!bOuter) TestTrue(TEXT("normal completed queued outcome"),Event.Payload.Get<FVaRestTraceCompleted>().Outcome==EVaRestTraceOutcome::Queued);}
+            if (Event.Kind==EVaRestTraceKind::Note && Event.Payload.Get<FVaRestTraceNote>().Kind==EVaRestTraceNoteKind::Queued)
+            {++Notes;TestFalse(TEXT("Queued precedes Completed"),bSeenCompleted);}
+        }
+        TestEqual(TEXT("one terminal metadata"),Completed,1);TestEqual(TEXT("Queued note only for open logical request"),Notes,bOuter?0:1);
+        const auto Loaded=MakeShared<FQueueLoad,ESPMode::ThreadSafe>();
+        FQueueStore::Load(FClientAccess::State(Rig.Client)->Queue->GetDirectory(),TEXT("https://api.test"),{},[Loaded](FQueueLoad&& R){*Loaded=MoveTemp(R);});
+        TestTrue(TEXT("recovery drains"),Disk.Drain());TestTrue(TEXT("committed data recovers"),Loaded->bOk && Loaded->Items.Num()==1);
+    }
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestOfflineCleanupStopTest,"VaRest.Http.Offline.CleanupStop",EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+bool FVaRestOfflineCleanupStopTest::RunTest(const FString& Parameters)
+{
+    using namespace VaRest::Http;using namespace VaRest::Http::Testing;using namespace VaRest::Http::OfflineTestPrivate;
+    for (bool bAbortAdmitted : {false,true})
+    {
+        FScopedPersistenceTest Disk;
+        {
+            FScopedPersistenceRuntime Runtime;FTestRig Rig;FCleanup Cleanup(Rig);FScopedPersistenceHooks Hooks(Disk.Root);
+            Configure(Rig,Disk);if (!TestTrue(TEXT("isolated load drains"),Disk.Drain())) return false;
+            const auto Queue=FClientAccess::State(Rig.Client)->Queue;
+            const auto Prepared=MakeShared<FPersistenceBarrier,ESPMode::ThreadSafe>();Hooks.Hooks->AfterPrepare=Prepared;
+            const auto Block=MakeShared<FPersistenceBarrier,ESPMode::ThreadSafe>();
+            ON_SCOPE_EXIT {Prepared->Released=true;Block->Released=true;Rig.Drain();};
+            const auto Outcome=MakeOutcome<void>();const auto Ack=MakeShared<int32,ESPMode::ThreadSafe>(0);
+            const auto H=Observe(Rig.Client.Put<void>(TEXT("/stop-cleanup")).Body(TEXT("safe")).QueueWhenOffline(),Outcome).OnQueued([Ack](const FString&){++*Ack;}).Send();
+            if (!TestTrue(TEXT("prepared before isolated stop"),PumpUntil([Prepared]{return Prepared->Entered.load();}))) return false;
+            H.Cancel();if (!TestTrue(TEXT("logical cancel resolved independently"),Rig.Wait(Outcome))) return false;
+            if (bAbortAdmitted)
+            {
+                TestTrue(TEXT("owned pipe blocker admitted"),LaunchPersistence([Block]{WaitPersistenceBarrier(Block);FIoResult R;R.bOk=true;return R;},[](FIoResult&&){}));
+                const uint64 Before=PersistenceCounters().Launched.load();Prepared->Released=true;
+                if (!TestTrue(TEXT("abort admitted behind real held pipe"),PumpUntil([Block,Before]{return Block->Entered.load() && PersistenceCounters().Launched.load()>Before;}))) return false;
+                TestEqual(TEXT("cleanup reservation retained until handback"),Queue->Count(),1);
+                TestEqual(TEXT("cleanup admission ticket retained"),Queue->NumAdmissionsForTest(),1);
+            }
+            Queue->StopForShutdown();Prepared->Released=true;Block->Released=true;Runtime.Stop();
+            TestEqual(TEXT("Stop resolves physical reservation"),Queue->Count(),0);
+            TestEqual(TEXT("Stop resolves admission ticket"),Queue->NumAdmissionsForTest(),0);
+            TestTrue(TEXT("isolated executor fully drained"),PersistenceIdle());
+            TestEqual(TEXT("all worker results consumed or discarded"),PersistenceCounters().Delivered.load(),PersistenceCounters().Launched.load());
+            TestEqual(TEXT("no late acknowledgement during Stop"),*Ack,0);TestEqual(TEXT("one prompt canceled result"),Outcome->CompleteCalls.load(),1);
+            const auto Abort=MakeShared<TOptional<bool>,ESPMode::ThreadSafe>();
+            FQueueStore::Abort(Queue->GetDirectory(),99,TEXT("stopped"),[Abort](bool bOk){*Abort=bOk;});
+            TestTrue(TEXT("refused cleanup returns explicit failure"),Abort->IsSet() && !Abort->GetValue());
+        }
+    }
+    return true;
 }
 
 #endif
