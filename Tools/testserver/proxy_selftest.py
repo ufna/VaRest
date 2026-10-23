@@ -2,12 +2,15 @@
 # Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 import contextlib
 import pathlib
+import select
 import socket
 import socketserver
 import sys
 import threading
 import time
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 sys.dont_write_bytecode = True
@@ -108,6 +111,84 @@ class ProxyTest(unittest.TestCase):
                 finally:
                     sock.close()
                     proxy.__exit__(None, None, None)
+
+    def test_silent_shutdown_is_not_peer_eof(self):
+        for phase in ('before_select', 'inside_recv'):
+            with self.subTest(phase=phase), Proxy('silent', [1]) as proxy:
+                entered = threading.Event()
+                resume = threading.Event()
+                errors = []
+                closer = None
+                real_handle = proxy.handle
+
+                def gate():
+                    entered.set()
+                    if not resume.wait(3):
+                        errors.append('handler gate timed out')
+
+                class GatedSocket:
+                    def __init__(self, raw):
+                        self.raw = raw
+
+                    def __getattr__(self, name):
+                        return getattr(self.raw, name)
+
+                    def recv(self, size):
+                        # Only the silent read uses 4096; header reads use 1.
+                        if phase == 'inside_recv' and size == 4096:
+                            gate()
+                        return self.raw.recv(size)
+
+                def gated_select(*args):
+                    if phase == 'before_select' and any(
+                            e['ev'] == 'silent' for e in proxy.snapshot()['events']):
+                        gate()
+                    return select.select(*args)
+
+                def stop():
+                    try:
+                        proxy.__exit__(None, None, None)
+                    except BaseException as error:
+                        errors.append(repr(error))
+
+                with patch.object(proxy, 'handle', lambda raw: real_handle(GatedSocket(raw))), \
+                        patch('proxy.select', SimpleNamespace(select=gated_select)), dial(proxy) as sock:
+                    try:
+                        sock.sendall(b'CONNECT 127.0.0.1:1 HTTP/1.1\r\n\r\n')
+                        if phase == 'inside_recv':
+                            # Real EOF makes select ready. Pause within recv so
+                            # stop begins AFTER the post-select check, before
+                            # the real read. An overlapping stop must dominate.
+                            sock.shutdown(socket.SHUT_WR)
+                        self.assertTrue(entered.wait(2), 'silent handler did not reach gate')
+                        closer = threading.Thread(target=stop)
+                        closer.start()
+                        # Wait for real fixture socket shutdown, not a delay.
+                        # The client is still open (fully open in before_select).
+                        self.assertEqual(sock.recv(1), b'')
+                    finally:
+                        resume.set()
+                        if closer is not None:
+                            closer.join(3)
+                    if closer is not None:
+                        self.assertFalse(closer.is_alive(), 'fixture stop did not join')
+                    self.assertEqual(errors, [])
+                    self.assertTrue(proxy.wait_idle(0))
+                    self.assertEqual([e['ev'] for e in proxy.snapshot()['events']],
+                                     ['connect', 'silent', 'stopped', 'end'])
+
+    def test_silent_client_eof_before_fixture_stop(self):
+        with Proxy('silent', [1]) as proxy, dial(proxy) as sock:
+            sock.sendall(b'CONNECT 127.0.0.1:1 HTTP/1.1\r\n\r\n')
+            with proxy.lock:
+                self.assertTrue(proxy.lock.wait_for(
+                    lambda: any(e['ev'] == 'silent' for e in proxy.events), timeout=2))
+            sock.shutdown(socket.SHUT_RDWR)
+            self.assertTrue(proxy.wait_idle(1))
+            self.assertFalse(proxy.stopping.is_set())
+            events = proxy.snapshot()['events']
+            self.assertEqual([e['ev'] for e in events], ['connect', 'silent', 'peer_eof', 'end'])
+            self.assertEqual(len({e['id'] for e in events}), 1)
 
     def test_bad_authority_header_limit_and_slow_header(self):
         with target() as port, Proxy('tunnel', [port]) as proxy:

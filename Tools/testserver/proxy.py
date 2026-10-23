@@ -176,9 +176,17 @@ class Proxy:
                 self.add(ident, 'silent', lifetime_seconds=self.lifetime_seconds)
                 while not self.stopping.is_set() and time.monotonic() < deadline:
                     ready, _, _ = select.select([sock], [], [], .05)
-                    if ready and not sock.recv(4096):
-                        self.add(ident, 'peer_eof')
-                        return
+                    if self.stopping.is_set():
+                        break
+                    if ready:
+                        payload = sock.recv(4096)
+                        # Fixture shutdown can cause this EOF after readiness.
+                        # It must never serve as a natural client-EOF witness.
+                        if self.stopping.is_set():
+                            break
+                        if not payload:
+                            self.add(ident, 'peer_eof')
+                            return
                 self.add(ident, 'hold_deadline' if not self.stopping.is_set() else 'stopped')
                 return
             with socket.create_connection(('127.0.0.1', port), timeout=1) as upstream:
