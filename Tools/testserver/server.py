@@ -701,9 +701,14 @@ class SilentHandler(socketserver.BaseRequestHandler):
             SILENT["accepted"] += 1
             SILENT["open"] += 1
         try:
-            self.request.settimeout(SILENT_HOLD)
-            while self.request.recv(65536):
-                pass
+            deadline = time.monotonic() + self.server.hold_seconds
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self.request.settimeout(remaining)
+                if not self.request.recv(65536):
+                    break
         except OSError:
             # socket.timeout and a reset are both OSErrors: either way the connection is done
             pass
@@ -713,6 +718,7 @@ class SilentHandler(socketserver.BaseRequestHandler):
 
 
 class SilentServer(socketserver.ThreadingTCPServer):
+    hold_seconds = SILENT_HOLD
     daemon_threads = True
     request_queue_size = 64
 

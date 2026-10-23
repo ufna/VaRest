@@ -177,7 +177,18 @@ static library, so there are two copies. Why it is safe:
   context created while another context of the same copy has a TLS handshake in flight crashes that
   handshake (read from the disassembly; W0 did not provoke it). In a monolithic build VaRest's
   context shares the copy with `WebSockets`, `WebSocketServer`, `WebSocketNetworking` and
-  `HttpNetworkReplayStreaming`, so W1 decides how VaRest's context creation stays out of that window.
+  `HttpNetworkReplayStreaming`. W1 (VaRest-rti, ruling Q2): VaRest makes one context per process and
+  keeps it to engine exit; in a shared copy where any of those modules is linked, `VaRestWebSocket`'s
+  `StartupModule` makes it, after loading the engine's `WebSockets` module, whose one context is made
+  at its own startup (`WebSocketsModule.cpp:29-44`), so neither creation crosses the other's
+  handshakes. In a shared copy where none of them is linked, nobody else makes a context, and VaRest
+  makes its own at the first attempt, as in modular builds. A failed start is never retried (a retry
+  could run under an engine handshake), and no VaRest context is made while a VaRest wss attempt
+  that LWS has not destroyed exists. Residual risk: `WebSocketServer`, `WebSocketNetworking` and
+  `HttpNetworkReplayStreaming` create contexts when game code starts them, and a module that starts
+  before `VaRestWebSocket` (`PreDefault`, or earlier in `Default`) can already have an engine wss
+  handshake in flight when VaRest's `StartupModule` runs; a VaRest or engine wss handshake in flight
+  at such a creation can crash, and VaRest cannot see or serialise those creations.
 * **Each module keeps its own copy, on Linux too.** `libUnrealEditor-WebSockets.so` exports 185
   `lws_*` functions (`nm -D --defined-only`), but each module's LWS calls stay in its own copy. That
   rests on what W0 measured: VaRestTests' lws_create_context is in libUnrealEditor-VaRestTests.so;
@@ -205,10 +216,16 @@ static library, so there are two copies. Why it is safe:
   "yes" is the probe's own coexistence test loading it,
   `Source/VaRestTests/Private/LwsProbe/VaRestLwsProbeTlsTest.cpp:443`, which found it not loaded
   before [coexist.shared_lws_state]). Never both in one copy, so no one's logs are hijacked.
-* **OpenSSL** follows the engine pattern exactly: static OpenSSL in our module plus an `SSL_CTX`
-  from the engine `SSL` module (`LwsWebSocketsManager.cpp:205-225`), as `WebSockets` ships today.
-* W0 verifies it: an engine `IWebSocket` and a VaRest socket open at once (ws and wss) in the editor
-  and in a monolithic Development game, with both modules' logs still in place.
+* **OpenSSL** follows the engine pattern (`LwsWebSocketsManager.cpp:205-225`, §2.1): the `SSL`
+  module's `SSL_CTX` where `InitializeSsl` succeeds (monolithic and merged builds,
+  `SslManager.cpp:26-55`), else LWS's own with `LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT`, its roots
+  added in `LOAD_EXTRA_CLIENT_VERIFY_CERTS` [tls.ssl_module_ctx, tls.load_extra_fired]. In the Linux
+  editor the OpenSSL calls bind to the copy in the executable's global scope
+  (`libUnrealEditor-DerivedDataCache.so` [env.openssl_version]), not one in our module.
+* Verified in the editor: by W0's probe [coexist.both_ws, coexist.both_wss,
+  coexist.engine_lws_log_routed] and by W1 with `VaRestWebSocket` itself
+  (`VaRest.Integration.WebSocket.Transport.Coexist.EngineWebSocket`); the monolithic Development
+  game is W1b's run (VaRest-5ia).
 
 ### 1.3 Object model
 
@@ -257,7 +274,7 @@ are rows of the W0 passport, `docs/passport/2026-10-22-lws30-probe.md` (§0.3).
 
 ### 2.1 Context and service thread
 
-* **One `lws_context` per process**, created lazily at the first attempt and destroyed at module
+* **One `lws_context` per process**, created lazily at the first attempt (in a shared LWS copy, at module startup: §1.2) and destroyed at module
   shutdown or `FCoreDelegates::OnEnginePreExit` (`Runtime/Core/Public/Misc/CoreDelegates.h:261-262`)
   — `ShutdownModule` does not run in automation runs. Options as the engine
   (`LwsWebSocketsManager.cpp:178-225`): `CONTEXT_PORT_NO_LISTEN`,
@@ -269,7 +286,7 @@ are rows of the W0 passport, `docs/passport/2026-10-22-lws30-probe.md` (§0.3).
   adds the engine's roots, as the engine does (`LwsWebSocketsManager.cpp:205-225`, `:441-446`)
   [tls.ssl_module_ctx, tls.load_extra_fired], `max_http_header_data2 = pt_serv_buf_size = 32 KiB`,
   `http_proxy_address` from `FPlatformHttp::GetConfiguredProxyAddress()`
-  (`LwsWebSocketsManager.cpp:196-203`). Different: `JUST_USE_RAW_ORIGIN` (T4);
+  (`LwsWebSocketsManager.cpp:196-203`); with none configured, LWS 3.0 reads `http_proxy` from the environment itself, as the engine's `IWebSocket` does (ruling Q7). Different: `JUST_USE_RAW_ORIGIN` (T4);
   `ws_ping_pong_interval = 0` (our ping is per connection, §5); one protocol entry `varest` with
   `rx_buffer_size` 64 KiB.
 * **One service thread** (`FForkProcessHelper::CreateForkableThread`, 128 KiB stack, BelowNormal,
@@ -280,13 +297,20 @@ are rows of the W0 passport, `docs/passport/2026-10-22-lws30-probe.md` (§0.3).
   (a kill took 10049.6 ms with a 10 s wait, at most about 1 s with 100 ms
   [svc.kill_async_ms, svc.kill_async_ms_short_wait]), so the wait is capped at 1 s. LWS walks its
   timeout list only when the wall-clock second changed since the last walk (T26), so with a 1 s cap a
-  kill can land up to about 2 s late; W0 measured only the 10 s and 100 ms waits, and W1 measures the
-  chosen cap (VaRest-wcv). Where multithreading is unavailable it is polled from a core ticker
-  instead (`:109-119`). LLM tag `VaRest`.
+  kill can land up to about 2 s late; W0 measured only the 10 s and 100 ms waits. W1 (VaRest-wcv):
+  the wait is capped at 100 ms while a kill is in flight, and a kill that has not landed 1.25 s
+  after it was armed is armed again, because LWS's own stage timers can replace a pending timeout (never on
+  every return: each `lws_set_timeout` restarts the timeout at the current second). Where multithreading is
+  unavailable the forkable thread is ticked through `FSingleThreadRunnable` instead (`Fork.h:86-102`,
+  as `:341-358`). At shutdown the running thread first writes the close frames already asked for, at
+  most 0.25 s: the hub's 1001 "shutdown" (§1.4) is queued by the game instances' shutdown just
+  before `OnEnginePreExit` (`GameEngine.cpp:1377`, `:1391`, `:1396`). LLM tag `VaRest_WebSocket`
+  (W1; W5 parents it under the core's `VaRest`).
 * **Commands** (connect, send, close, pause/resume reading) go from the game thread into an MPSC
   queue followed by `lws_cancel_service`; the service thread drains them in
   `LWS_CALLBACK_EVENT_WAIT_CANCELLED` (T13). Nothing but `lws_cancel_service` is called from
-  another thread.
+  another thread. A send or a close queued before the open is written after it: LWS 3.0 drops a
+  WRITEABLE request made during the handshake, so `CLIENT_ESTABLISHED` asks again (§2.4).
 * **Events** go from the service thread into **one ordered queue per socket**: `Open`, `Message`,
   `Pong`, `Drained`, `Closed`, `Error`. A queue item carries type, frame kind, a final flag and
   bytes; in 2.0 the transport queues only complete messages (`bFinal = true`), so a later streaming
@@ -300,7 +324,7 @@ Per attempt, from a `Connect` command:
 * **Allowlist**: `UE::Core::FURLRequestFilter(TEXT("Online.HttpManager"), GEngineIni)`, as
   `LwsWebSocket.cpp:112-122`, but the refusal is an ordinary queued `Error` event, never a
   synchronous callback (E7).
-* **URL**: parsed with `lws_parse_uri`; schemes `ws`, `wss`, and outside Shipping `wss+insecure`
+* **URL**: parsed by VaRest on the game thread (`lws_parse_uri` writes into its input and takes any scheme, `libwebsockets.h:5806-5819`); schemes `ws`, `wss`, and outside Shipping `wss+insecure`
   (self-signed allowed and the host name not checked,
   `LCCSCF_ALLOW_SELFSIGNED | LCCSCF_SKIP_SERVER_CERT_HOSTNAME_CHECK`: with `ALLOW_SELFSIGNED` alone,
   as the engine sets it at `LwsWebSocket.cpp:747-750`, an IP URL fails the host-name check
@@ -323,8 +347,16 @@ Per attempt, from a `Connect` command:
   manager's user-data remap for that callback (`LwsWebSocketsManager.cpp:440-456`). Pinned keys
   configured on the engine certificate manager (`ISslCertificateManager.h:38-56`) apply for free.
   LWS 3.0's host-name check fails a `wss` URL whose host is an IP literal (X509 error 62) even when
-  the certificate carries that IP as a SAN and its CA is trusted [tls.hostname_ip_literal]; W1
-  decides what VaRest does with such a URL and how §3.4 classifies the failure (VaRest-sjj).
+  the certificate carries that IP as a SAN and its CA is trusted [tls.hostname_ip_literal]. W1
+  (VaRest-sjj, ruling Q3): in `PERFORM_SERVER_CERT_VERIFICATION` that error (62) is cleared only
+  for an IP-literal host, only at depth 0, and only when `X509_check_ip_asc` finds the IP among the
+  leaf's SAN entries; every other error stands (the chain, the dates, another IP, a DNS-only SAN). A
+  refused certificate is terminal `EVaRestSocketFailure::TlsVerification` (§3.4). A certificate
+  preverification refusal names the X509 error and depth; an engine manager/pin/delegate refusal
+  carries the manager-refusal detail. In insecure mode, LWS consumes its allowed self-signed and
+  hostname exceptions before this callback; any remaining failure (including expiry: VaRest does
+  not set `ALLOW_EXPIRED`) is still `TlsVerification` with the X509 error and depth. Successful
+  insecure verification bypasses the engine manager/pin check.
 * **Connect timeout** (`ConnectTimeout`, 10 s) is measured on the service thread and enforced with
   `lws_set_timeout(…, LWS_TO_KILL_ASYNC)` (T14), so a hitching game thread cannot cause it; a pending
   attempt ends 10049.6 ms after the kill with a 10 s wait, at most about 1 s with 100 ms
@@ -346,18 +378,21 @@ Per attempt, from a `Connect` command:
   W1b B9 (VaRest-gi0) resolves on `UE::Tasks`, passes the address with the name as the host, and
   tries the next address after a failure. A 3xx's `Location` host is resolved the same way, before
   any VaRest callback can refuse the redirect (W1 plan rulings I-4, Q5).
-* **Upgrade refusal**: the status comes from the error string (T7: "not 101, was N";
-  "unauthorized" = 401; "forbidden" = 403), and from `lws_http_client_http_response(wsi)` only when
-  the error comes from the status-line parser (the strings `HS: ws upgrade …`)
-  [hs.status_in_connection_error.refused]; never elsewhere: without a header table it dereferences
-  NULL (`client.c.o` `lws_http_client_http_response` 0x1294-0x12b2), and W0 could not reach the
-  DNS-failure case [hs.status_in_connection_error.dns_failure]. `Could not initialize connection`,
-  `HS: ACCEPT missing`, `HS: Accept hash wrong`, `HS: UPGRADE missing`, `HS: CONNECTION missing`,
+* **Upgrade refusal**: the status comes from the error string only (T7: "not 101, was N";
+  "unauthorized" = 401; "forbidden" = 403) [hs.status_in_connection_error.refused]. W1 never calls
+  `lws_http_client_http_response`: it returns a status only where the string already carries one,
+  and without a header table it dereferences NULL (`client.c.o` `lws_http_client_http_response`
+  0x1294-0x12b2); W0 could not reach the DNS-failure case [hs.status_in_connection_error.dns_failure].
+  A connect `lws_client_connect_via_info` refuses outright (it returns NULL) is VaRest's own
+  `ConnectFailed`. `HS: ACCEPT missing`, `HS: Accept hash wrong`, `HS: UPGRADE missing`, `HS: CONNECTION missing`,
   `HS: Rejected by filter cb` and the redirect strings are all in the parser tests. So are LWS 3.0's
   strings for the failures without a status line, each raised after `lws_client_connect_via_info`
   returned a connection: a refused TCP connect "connect failed" [hs.connect_refused], a failed
   certificate check "client connect failed" [tls.untrusted_rejected], LWS's own handshake timeout
   and a kill while pending "" [timeout.default_secs, hs.status_in_connection_error.killed_pending].
+  W1 tells an empty string apart by the time the attempt took: LWS cuts the TCP connect and the
+  proxy exchange at a fixed 20 s whatever `timeout_secs` says (`lws_client_connect_2`), and the
+  other stages at `timeout_secs` (review conc M-1, M-2).
 * **No upgrade response** (rev 2, §22 A2): the upgrade request was sent and the connection closed
   before any HTTP status line arrived (engine.io's answer to a non-matching path). The transport
   reports it as its own failure reason, `NoUpgradeResponse`; LWS 3.0 reports it as "read failed"
@@ -367,8 +402,9 @@ Per attempt, from a `Connect` command:
   following). LWS 3.0 follows one itself [hs.redirect_relative, hs.redirect_absolute,
   hs.redirect_to_tls] and runs `APPEND_HANDSHAKE_HEADER` again for the new request (2 times; the
   probe's callback appends on every call, so it appended Authorization again, and that went out on
-  the second request [hs.redirect_reappends_headers]; whether LWS replays appended headers by itself
-  was not tested, VaRest-2rt), where the callback sees the new target in
+  the second request [hs.redirect_reappends_headers]; W1a's `Probe.VaRest.Lws.Handshake.RedirectReplay`
+  appends Authorization only on the first request and verifies it arrived there: on a same-server
+  relative ws 302 the target received none [hs.redirect_replay_first_append_only]). The callback sees the new target in
   `_WSI_TOKEN_CLIENT_HOST` and `_URI` (host=127.0.0.1 uri=/ws/echo?key=<k> on the second call, after
   host=127.0.0.1:32863 and the 302's uri on the first) [hs.redirect_target_visible] and the request
   carries `Host: 127.0.0.1`, the port dropped (the first request had `Host: 127.0.0.1:32863`)
@@ -376,8 +412,11 @@ Per attempt, from a `Connect` command:
   headers) once the connection's target differs from the original scheme+host+port, which the second
   `APPEND_HANDSHAKE_HEADER` of an attempt marks (in the vetoed run a second `WSI_CREATE` for the
   connection came just before it), and the socket fails the connection with a redirect error at
-  the first callback that can, `APPEND_HANDSHAKE_HEADER`, else `FILTER_PRE_ESTABLISH`; the W1 plan
-  names the error kind. A non-zero return in `APPEND_HANDSHAKE_HEADER` gives a refused client with
+  the first callback that can, `APPEND_HANDSHAKE_HEADER`, else `FILTER_PRE_ESTABLISH`, as
+  `EVaRestSocketFailure::Redirect` with `HttpStatus` 0 (LWS follows the 3xx before any callback sees
+  its status). A redirect of a wss attempt makes its second TLS handshake before the second
+  `APPEND_HANDSHAKE_HEADER`, so a certificate check after the attempt's first
+  `APPEND_HANDSHAKE_HEADER` is refused as the redirect too. A non-zero return in `APPEND_HANDSHAKE_HEADER` gives a refused client with
   no `CONNECTION_ERROR` (WSI_CREATE > connect< > APPEND_HANDSHAKE_HEADER > WSI_CREATE >
   APPEND_HANDSHAKE_HEADER > CLOSED_CLIENT_HTTP > WSI_DESTROY) and no second request at the server, so
   the transport reports the failure itself; vetoing there is the primary guard, since the second
@@ -409,8 +448,8 @@ Per attempt, from a `Connect` command:
   one per WRITEABLE callback, so PINGs and the close frame can be interleaved between fragments
   (RFC 6455 §5.4 allows control frames inside a fragmented message) and a large upload does not
   starve the dead-link detector.
-* `lws_partial_buffered` is checked after each write; LWS's own buffering of a truncated write is
-  counted. A control frame's `lws_write` return counts its header (13 for a 7-byte PING), while the
+* `lws_partial_buffered` is checked after each write; a write LWS still holds stays counted, whole,
+  until LWS says it drained. A control frame's `lws_write` return counts its header (13 for a 7-byte PING), while the
   data writes returned their payload length (50000 for each 50 000-byte fragment
   [tx.partial_after_fragment]), a 1 MiB write too while LWS still held part of it
   [tx.large_write_result]; so a write has failed only when it returns < 0. `lws_partial_buffered` is
@@ -423,8 +462,9 @@ Per attempt, from a `Connect` command:
   open. So the transport requests WRITEABLE again at `LWS_CALLBACK_CLIENT_ESTABLISHED` when anything
   is queued (a send, a close). A rig finding, not a passport row: `Probe.VaRest.Lws.Rig.WriteBeforeOpen`
   fails without the re-request (b41b89a; `Source/VaRestTests/Private/LwsProbe/VaRestLwsProbe.cpp:606-613`).
-* **Buffered amount** (bytes accepted by `Send` and not yet handed to the socket) is exact and
-  published to the game thread; it is the basis of backpressure (§6.3). `Drained` fires when it
+* **Buffered amount** (bytes accepted by `Send` and not yet handed to the socket) is exact to within
+  one 64 KiB fragment (the last write LWS still holds, which `lws_partial_buffered` flags but does
+  not count) and published to the game thread; it is the basis of backpressure (§6.3). `Drained` fires when it
   returns to zero after crossing the high-water mark.
 * **Auto-replies** (rev 2, §22 SW-5): per-connection rules from the connect command answer an exact
   inbound **text** frame on the service thread. A reply is a data message, so it never enters a
@@ -454,7 +494,7 @@ Per attempt, from a `Connect` command:
   connection at once, 0.0 ms, without waiting for the echo [close.ours_noecho_wait_ms]: evidence, not
   the pattern to follow. `CloseTimeout` (5 s) bounds a server that never echoes: when it is shorter
   than LWS's 5 s, VaRest ends the connection itself with `lws_set_timeout(…, LWS_TO_KILL_ASYNC)`
-  (T14; the kill's own latency is in §2.1).
+  (T14; the kill's own latency is in §2.1). An end by LWS's own close-ack timer, after our close frame and with no close from the peer, is reported with `bWasClean = false`, whatever `CloseTimeout` says.
 * **Peer close** (T12): length 0 → **1005**, length 1 → 1002 (malformed), else the big-endian code
   and a **UTF-8** reason (invalid bytes become U+FFFD with a warning). Codes a peer must not send
   (<1000, 1004–1006, 1015, 1016–2999, ≥5000) are normalised to 1005. LWS 3.0 rewrites some codes
@@ -588,10 +628,11 @@ code sets → the table. Rows are matched on (who closed, code); the transport r
 | 4400, 4403, 4404 | stop | `Auth` for 4403, else `Server` |
 | upgrade 401 | refresh session, then retry (§3.3) | `Auth` |
 | upgrade 408, 429, 5xx | reconnect | |
-| upgrade 3xx (redirect not followed or failed), other 4xx | stop | `Http` (`HttpStatus` set; a 403 message names the Origin sent) |
+| upgrade 3xx (redirect not followed or failed: `Redirect`, `HttpStatus` 0 on LWS 3.0, §2.2), other 4xx | stop | `Http` (`HttpStatus` set for a 4xx; a 403 message names the Origin sent) |
 | `Bad URL`, bad scheme, allowlist refusal, handshake validation, subprotocol mismatch | stop | `Config` |
 | no upgrade response (rev 2, §22 A2: `NoUpgradeResponse`) | reconnect; the reason travels in `FVaRestSocketClose` and `OnRetryScheduled`, so a protocol stage may make it terminal (Socket.IO: after 3, `Config`) | |
-| connect timeout, DNS/TCP/TLS failure, unknown connect error | reconnect | |
+| TLS certificate refused (`TlsVerification`: the chain, the name or a pinned key; VaRest-sjj) | stop | `Connection` (not retryable, captive portals included: the game reconnects explicitly, ruling Q3; the message names the X509 error for preverification refusals, otherwise the manager refusal) |
+| connect timeout, DNS/TCP failure, another TLS handshake failure, unknown connect error | reconnect | |
 | **anything else** | reconnect | |
 
 The 4xxx rows follow the "4000 + HTTP status" convention (graphql-ws and others).
@@ -716,7 +757,7 @@ one unit. The backlog survives reconnects, not `Close()` (entries reported `Canc
 
 ### 6.3 Backpressure
 
-The transport reports an exact buffered amount (§2.4). `GetBufferedAmount()`; above
+The transport reports the buffered amount, exact to within one 64 KiB fragment (§2.4). `GetBufferedAmount()`; above
 `SendHighWater` (256 KiB) `Volatile` sends drop; above `MaxBufferedBytes` (16 MiB) any send is
 `Rejected` (`Offline`); `OnDrained` fires when the buffer empties after crossing the high-water
 mark. `MaxSendBytes` (16 MiB) bounds one message. Receive-side backpressure is flow control (§2.3).
@@ -1130,7 +1171,7 @@ Errors reuse `FVaRestError` (core §3.3); close details travel in `FVaRestSocket
 | `MaxQueued` / `MaxQueuedBytes` | 256 / 1 MiB | §6.2 |
 | `PingInterval` / `PingTimeout` | 20 s / 10 s | §5 |
 | `MaxPendingRequests`, request timeout | 1024, 10 s | |
-| `ConnectTimeout`, `ReadyTimeout`, `CloseTimeout` | 10 s, = connect, 5 s | |
+| `ConnectTimeout`, `ReadyTimeout`, `CloseTimeout` | 10 s, = connect, 5 s | `ConnectTimeout` at most 60 s, the context's `timeout_secs` (§2.2); a `CloseTimeout` above LWS's fixed 5 s close-ack acts as about 5 s, and an end by that timer is not clean (§2.5, T20) |
 | Handshake header buffer | 32 KiB (context), checked per header | §2.2 |
 | Fragment size for sends | 64 KiB | §2.4 |
 | Close reason | 123 bytes | RFC 6455 §5.5 |
@@ -1165,7 +1206,7 @@ selected protocol), fragmented and large text (Cyrillic split inside a code poin
 binary, interleaved text/binary order, invalid UTF-8 → 1007, size limit → 1009, empty close → 1005,
 close codes and UTF-8 reasons, unclean drop → 1006, ping RTT and silent-server death, connect timeout,
 close against a non-echoing server, flow control (slow consumer), backpressure and `Drained`,
-fragmented sends, allowlist, upgrade refusal statuses.
+fragmented sends, allowlist, upgrade refusal statuses; W1 adds a cancelled attempt that sends nothing, a start that failed or was refused under a handshake in flight, and the close frames Shutdown writes first.
 
 ### 16.3 Test server (`Tools/testserver/`, Python 3 stdlib)
 
@@ -1174,7 +1215,7 @@ sees `Upgrade: websocket`, answers 101, takes over `self.connection`/`self.rfile
 `close_connection`. One process and port; login/refresh/token state shared. `ws.py` runs alone too;
 since `python3 -I` drops the script directory from `sys.path`, it inserts its own directory before
 importing siblings. A **TLS listener** uses stdlib `ssl` with a committed self-signed test certificate
-(`Tools/testserver/certs/`, test-only), reached with `bAllowSelfSignedTls` or `wss+insecure`.
+(`Tools/testserver/certs/`, test-only). The runner's TLS URL is an IP literal; W1's tests reach it as `wss://localhost` (TCP to 127.0.0.1, the test CA trusted), as `wss://127.0.0.1` through VaRest's IP check (§2.2), and with `wss+insecure` or `bAllowSelfSignedTls`, which carry the same flags (§2.2).
 
 Hand-written RFC 6455 (≈300 lines): handshake (`Sec-WebSocket-Accept` = base64(SHA-1(key +
 `258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)), subprotocol selection, refusal statuses); frames with 7/16/64-bit
@@ -1258,9 +1299,8 @@ W1 need no core code beyond the test-server harness, so they can proceed while c
   shipped code line for line (§2.2), but Win64/Mac/Android/iOS are only verified in the release pass.
   Mitigation: W1 keeps the TLS code a copy of the engine's with citations; a release-pass checklist
   item per platform (ws, wss, pinned key, proxy).
-* **LWS 3.0 behaviour we inferred from 4.3** (§0.3 list). Mitigation: W0 probe before W1; the
-  fallbacks are written down (protocol registration at context creation, string status parsing,
-  1002 handling).
+* **LWS 3.0 behaviour is measured on Linux only** (§0.3 T17-T29, the W0 passport). Mitigation: the
+  release pass re-runs the probe on Win64 and Mac and W1's transport suite on devices (bead VaRest-b4d).
 * **Owning a transport** means owning its bugs: one more milestone of work and a thread to maintain.
   Mitigation: the transport is small (one context, one protocol, client only) and fully covered by
   §16.2 against a server we control.
@@ -1341,10 +1381,10 @@ For the core plans (one list; nothing else in core changes):
 | D18 | Mobile: disconnect on background, reconnect on foreground | iOS suspends; presence stays truthful | rejoin cost after short app switches; `Keep` available |
 | D19 | Logout closes; token refresh does not reconnect | servers authenticate at handshake | servers re-checking tokens mid-session need a close-code rule |
 | D20 | Python stdlib test server shared with HTTP, plus a TLS listener with a committed test cert | real tokens; wss covered | none |
-| D21 | Log levels Basic/Headers/Body as §12; LWS library logs Error/Warning when VaRest owns the setting, a one-time warning when the engine's Verbose setting meets query tokens | no flooding; no tokens in library logs by default | frame one-liners only via the Inspector |
+| D21 | Log levels Basic/Headers/Body as §12; LWS library logs Error/Warning when VaRest owns the setting, a one-time warning when the engine's Verbose setting meets query tokens in a build where both share one LWS copy (§1.2) | no flooding; no tokens in library logs by default | frame one-liners only via the Inspector |
 | D22 | Off-thread API limited to `Send`/`SendBinary`/`Emit` with config snapshots | a clear contract by shape | worker-thread requests must hop to the game thread |
 | D23 | Header validation (RFC 7230 names, visible-ASCII values, per-header space check) | E19 cannot recur; no mangling | servers wanting UTF-8 header values cannot get them |
-| D24 | Subprotocols via `local_protocol_name`, no ini step; fallback: register declared protocols at context creation | E17 removed | if W0 disproves both, code-only subprotocols need a declaration |
+| D24 | Subprotocols via `local_protocol_name`, no ini step; W0 found no fallback needed (an unregistered selection stays bound, [hs.unregistered_selected_bound]) | E17 removed | none known |
 | D25 | URL sugar `http(s)`→`ws(s)`; paths relative to the environment | one asset, one environment switch | none |
 | D26 | `Close()` takes effect at the call; no public `Closing` state | "Close → Connect" works | the server's final close reply is not reported |
 | D27 | Channels (`FVaRestSocketChannel`) in 2.0 | Socket.IO namespaces without a retrofit | a small API surface plain sockets ignore |
@@ -1412,7 +1452,7 @@ unchanged. **SW-12** (Socket.IO trace items) — folded into the generic trace w
 | # | Amendment | Where | Lands in |
 | --- | --- | --- | --- |
 | A1 | Session change kinds `Refreshed` / `Replaced` / `Cleared` (core §4.2 via §19 item 2); `Replaced` restarts open sockets with the closing hook; `ResetSession()` on the socket for opaque `WithBearer` lambdas | §3.3, §19 item 2 | core M4, W5 |
-| A2 | Transport failure reason `NoUpgradeResponse` (upgrade sent, closed before any status line); default row "reconnect"; W0 pins the LWS 3.0 error string | §2.2, §3.4, §16.4 | W0, W1 |
+| A2 | Transport failure reason `NoUpgradeResponse` (upgrade sent, closed before any status line); default row "reconnect"; W0 pinned the LWS 3.0 error string, "read failed" [hs.no_upgrade_response] | §2.2, §3.4, §16.4 | W0, W1 |
 | A3 | WS lookups (`Socket`, `Find`, BP *Get Socket*) refuse sockets and entries owned by another protocol module, with a `Config` error naming its accessor | §9 | W5 |
 | A4 | Trace: `SocketFrame` gets a codec-set protocol tag and an attachment count; new `SocketChannel` events (up / down / refused, reason, recovered) | §12, §19 item 4 | W5 |
 | A5 | VaRestJson for protocol codecs: `BytesWriter` encode hook and writer entries (§19 item 12) | §19 | core M2 |

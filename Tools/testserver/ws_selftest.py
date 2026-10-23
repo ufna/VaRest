@@ -496,6 +496,29 @@ class ScenarioTest(WsTestBase):
         self.assertEqual(sent["frames_at"], [len(first[2])])
         self.assertEqual(self.connect("/ws/fragment?text=abc&at=5").status, 400)
 
+    def test_fragment_empty_edges(self):
+        for binary in (0, 1):
+            for first, final in ((1, 0), (0, 1), (1, 1)):
+                with self.subTest(binary=binary, empty_first=first, empty_final=final):
+                    key = uuid.uuid4().hex
+                    client = self.connect("/ws/fragment?text=abc&binary=%d&empty_first=%d&empty_final=%d&key=%s"
+                                          % (binary, first, final, key))
+                    expected = []
+                    opcode = ws.OP_BINARY if binary else ws.OP_TEXT
+                    if first:
+                        expected.append((0, opcode, b""))
+                    expected.append((0 if final else 1, ws.OP_CONT if first else opcode, b"abc"))
+                    if final:
+                        expected.append((1, ws.OP_CONT, b""))
+                    for frame in expected:
+                        self.assertEqual(client.recv(), frame)
+                    client.close()
+                    self.assertEqual(len(self.of(self.ended(key), "message_sent")), 1)
+        # Boundary offsets stay invalid; the new flags alone allow the two empty edges.
+        for query in ("at=0", "at=3", "empty_first=2", "empty_first=-1", "empty_final=x", "empty_final=2"):
+            with self.subTest(query=query):
+                self.assertEqual(self.connect("/ws/fragment?text=abc&" + query).status, 400)
+
     def test_large(self):
         key = uuid.uuid4().hex
         client = self.connect("/ws/large?bytes=100000&ascii=0&frame=4096&key=" + key)

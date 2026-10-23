@@ -126,3 +126,13 @@ bd prime                # Refresh Beads context
 
 **Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/core-concepts/sync-concepts.md for details and anti-patterns.
 <!-- END BEADS CODEX SETUP -->
+
+## WebSocket module and frozen names
+
+| Module | Type | Responsibility |
+| --- | --- | --- |
+| `VaRestWebSocket` | Runtime | VaRest's own WebSocket client transport on the engine-bundled libwebsockets 3.0 (W1): `IVaRestSocketTransport` and its LWS implementation -- one context and service thread per process, one ordered event queue per connection, VaRest's handshake rules, in-place fragments, the close rules, TLS with the engine's roots and pins -- and `FVaRestFakeSocketTransport`; W2-W5 add the socket, stages, hub and Blueprint surface. Never depends on the engine's `WebSockets` module |
+
+- **The WebSocket enums freeze with W5**: `EVaRestSocketFrameKind`, `EVaRestSocketCloseBy` and `EVaRestSocketFailure`
+  (`/Script/VaRestWebSocket`, W1) and their enumerator names become pins and `FVaRestSocketClose` fields there. A rename
+  needs a CoreRedirect in the same commit.

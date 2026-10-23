@@ -40,7 +40,7 @@ Routes (GET with Upgrade: websocket):
   /ws/serverping?count=&interval_ms=&size=&unsolicited=0|1
                                    PINGs "ping-<i>" (padded to size with "."), then text "pings-done"; unsolicited=1
                                    first sends a PONG nobody asked for; echo mode
-  /ws/fragment?(text=|cyrillic=N|bytes=N)&at=o,..&split_inside=o,..&binary=0|1&ping_between=0|1
+  /ws/fragment?(text=|cyrillic=N|bytes=N)&at=o,..&split_inside=o,..&binary=0|1&ping_between=0|1&empty_first=0|1&empty_final=0|1
                                    one message cut into frames at those offsets (split_inside: the first later offset
                                    inside a UTF-8 sequence), PING "between" after the first frame if asked; echo mode
   /ws/large?bytes=N&ascii=0|1&binary=0|1&frame=F&seed=S
@@ -681,11 +681,14 @@ def ws_fragment(h, match, journal):
     else:
         data = random.Random(1).randbytes(server.query_int(h, "bytes", 4096, MAX_MESSAGE, low=1))
     offsets = parse_offsets(h, data)
+    empty_first = server.query_int(h, "empty_first", 0, 1)
+    empty_final = server.query_int(h, "empty_final", 0, 1)
     ping_between = server.query_int(h, "ping_between", 0, 1)
     conn = accept(h, journal)
     journal.add("message_sent", kind="binary" if binary else "text", len=len(data), sha256=hashlib.sha256(data).hexdigest(),
                 frames_at=offsets)
-    cuts = [0] + offsets + [len(data)]
+    # Boundary offsets remain invalid: only these explicit flags add empty edge frames.
+    cuts = [0] * (1 + empty_first) + offsets + [len(data)] * (1 + empty_final)
     for index in range(len(cuts) - 1):
         first, last = index == 0, index == len(cuts) - 2
         op = (OP_BINARY if binary else OP_TEXT) if first else OP_CONT

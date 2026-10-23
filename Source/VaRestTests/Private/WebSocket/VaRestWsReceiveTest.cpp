@@ -101,6 +101,30 @@ bool FVaRestWsReceiveSplitTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestWsReceiveEmptyEdgesTest, "VaRest.Integration.WebSocket.Transport.Receive.EmptyEdges", VAREST_WS_TEST_FLAGS)
+
+bool FVaRestWsReceiveEmptyEdgesTest::RunTest(const FString& Parameters)
+{
+	VAREST_WS_BEGIN();
+	for (const FScheme& Scheme : Schemes(Site))
+	{
+		for (const int32 Binary : { 0, 1 })
+		{
+			for (const int32 Edges : { 1, 2, 3 })
+			{
+				const FString Key = NewKey();
+				const FString Path = FString::Printf(TEXT("/ws/fragment?text=abc&binary=%d&empty_first=%d&empty_final=%d&key=%s"),
+					Binary, Edges & 1, (Edges >> 1) & 1, *Key);
+				const TUniquePtr<FEvents> Events = Receive(*this, *Transport, Scheme, Path, 1);
+				// Receive drains through the terminal event before the count: no extra empty message can arrive later.
+				SameAsSent(*this, *FString::Printf(TEXT("%s: %s, empty edges %d"), Scheme.Name, Binary ? TEXT("binary") : TEXT("text"), Edges),
+					*Events, FetchJournal(*this, Site, Key), Binary ? EVaRestSocketFrameKind::Binary : EVaRestSocketFrameKind::Text);
+			}
+		}
+	}
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestWsReceiveLargeTest, "VaRest.Integration.WebSocket.Transport.Receive.Large", VAREST_WS_TEST_FLAGS)
 
 bool FVaRestWsReceiveLargeTest::RunTest(const FString& Parameters)

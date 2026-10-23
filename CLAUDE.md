@@ -113,6 +113,7 @@ VaRest 2 is being built on branch `v2`. The design is
 | --- | --- | --- |
 | `VaRestJson` | Runtime | `FVaRestJson`: own arena DOM, RapidJSON (engine copy) as SAX reader + writer; `FVaRestJsonConvert` struct <-> JSON; `UVaRestJsonLibrary` BP JSON library (CustomThunk wildcards). Has a module class (`VaRestJsonModule.cpp`). Depends on Engine (public) |
 | `VaRestHttp` | Runtime | `FVaRestClient` and its `[[nodiscard]]` builder over a stage pipeline (retry, auth gate, attempt boundary, limiter, auth apply, log/redaction, transport; M4b adds the offline queue and the cache), HTTP-thread completion with zero-copy JSON decode off the game thread, the envelope, the session and its single-flight refresh, the public redactor, the Inspector trace surface with excerpts, `stat VaRest`, `UVaRestHttpSettings`; M5 adds the `UVaRestApi` asset, `UVaRestHub` and async BP actions |
+| `VaRestWebSocket` | Runtime | VaRest's own WebSocket client transport on the engine-bundled libwebsockets 3.0 (W1): `IVaRestSocketTransport` and its LWS implementation -- one context and service thread per process, one ordered event queue per connection, VaRest's handshake rules, in-place fragments, the close rules, TLS with the engine's roots and pins -- and `FVaRestFakeSocketTransport`; W2-W5 add the socket, stages, hub and Blueprint surface. Never depends on the engine's `WebSockets` module |
 | `VaRest` | Runtime | the **v1 API at unchanged paths**, reimplemented as deprecated shims (removed in v3) |
 | `VaRestEditor` | UncookedOnly | K2 nodes, v1 and v2 (`K2Node_VaRestMakeJson`); drops the convert cache on Blueprint struct changes |
 | `VaRestEditorTools` | Editor | asset definition, validation, menus |
@@ -144,4 +145,7 @@ fixture is authored from it.
   freeze with M5 too: M5's asset stores them. `EVaRestAuthRefreshOutcome` (`RefreshAuth`'s answer) is a plain C++ enum, not
   a Blueprint type: it freezes only if M5 makes it a `UENUM`. A rename needs a CoreRedirect (or a config redirect) in the
   same commit.
+- **The WebSocket enums freeze with W5**: `EVaRestSocketFrameKind`, `EVaRestSocketCloseBy` and `EVaRestSocketFailure`
+  (`/Script/VaRestWebSocket`, W1) and their enumerator names become pins and `FVaRestSocketClose` fields there. A rename
+  needs a CoreRedirect in the same commit.
 - **Push back with sources** when a premise is wrong.

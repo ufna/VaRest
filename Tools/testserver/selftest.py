@@ -446,6 +446,38 @@ class SilentTest(unittest.TestCase):
         finally:
             connection.close()
 
+    def test_periodic_input_cannot_extend_lifetime(self):
+        # A separate short-lived listener: exercise the real handler without a 30 s test.
+        listener = server.SilentServer(("127.0.0.1", 0), server.SilentHandler)
+        listener.hold_seconds = 0.25
+        worker = threading.Thread(target=listener.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+        worker.start()
+        try:
+            with socket.create_connection(listener.server_address, timeout=5) as client:
+                client.settimeout(0.03)
+                started = time.monotonic()
+                ended = False
+                sent = 0
+                while time.monotonic() - started < 1.0:
+                    try:
+                        client.sendall(b"still here")
+                        sent += 1
+                        data = client.recv(1)
+                        self.assertEqual(data, b"", "the silent listener never writes")
+                        ended = True
+                        break
+                    except socket.timeout:
+                        continue
+                    except ConnectionError:
+                        ended = True
+                        break
+                self.assertGreater(sent, 2, "periodic input reached the listener")
+                self.assertTrue(ended, "periodic input must not extend the absolute lifetime")
+        finally:
+            listener.shutdown()
+            listener.server_close()
+            worker.join(timeout=5)
+
     def test_accepts_and_never_answers(self):
         before = self.counts()
         self.assertEqual(before["port"], self.silent.server_address[1])
