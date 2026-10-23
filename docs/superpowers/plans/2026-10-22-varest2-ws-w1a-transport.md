@@ -9175,8 +9175,12 @@ with
 
 ```
   `LWS_CALLBACK_EVENT_WAIT_CANCELLED` (T13). Nothing but `lws_cancel_service` is called from
-  another thread. A send or a close queued before the open is written after it: LWS 3.0 drops a
-  WRITEABLE request made during the handshake, so `CLIENT_ESTABLISHED` asks again (§2.4).
+  another thread. Sends accepted before Open wait for `CLIENT_ESTABLISHED`, which re-requests
+  WRITEABLE because LWS 3.0 drops a request made during the handshake (§2.4). A Close processed by
+  the service thread while the attempt is still pending cancels it and discards its queued data;
+  no Open or close frame follows. If the connection is already open when the service thread
+  processes Close, its close follows the data already queued, bounded by `CloseTimeout` (§2.5).
+  The state at service-thread processing determines this outcome, not the time of the game-thread call.
 ```
 
 (e) §2.2 URL — replace `* **URL**: parsed with `lws_parse_uri`; schemes `ws`, `wss`, and outside Shipping `wss+insecure`` with `* **URL**: parsed by VaRest on the game thread (`lws_parse_uri` writes into its input and takes any scheme, `libwebsockets.h:5806-5819`); schemes `ws`, `wss`, and outside Shipping `wss+insecure``.

@@ -309,8 +309,12 @@ are rows of the W0 passport, `docs/passport/2026-10-22-lws30-probe.md` (§0.3).
 * **Commands** (connect, send, close, pause/resume reading) go from the game thread into an MPSC
   queue followed by `lws_cancel_service`; the service thread drains them in
   `LWS_CALLBACK_EVENT_WAIT_CANCELLED` (T13). Nothing but `lws_cancel_service` is called from
-  another thread. A send or a close queued before the open is written after it: LWS 3.0 drops a
-  WRITEABLE request made during the handshake, so `CLIENT_ESTABLISHED` asks again (§2.4).
+  another thread. Sends accepted before Open wait for `CLIENT_ESTABLISHED`, which re-requests
+  WRITEABLE because LWS 3.0 drops a request made during the handshake (§2.4). A Close processed by
+  the service thread while the attempt is still pending cancels it and discards its queued data;
+  no Open or close frame follows. If the connection is already open when the service thread
+  processes Close, its close follows the data already queued, bounded by `CloseTimeout` (§2.5).
+  The state at service-thread processing determines this outcome, not the time of the game-thread call.
 * **Events** go from the service thread into **one ordered queue per socket**: `Open`, `Message`,
   `Pong`, `Drained`, `Closed`, `Error`. A queue item carries type, frame kind, a final flag and
   bytes; in 2.0 the transport queues only complete messages (`bFinal = true`), so a later streaming
@@ -460,7 +464,8 @@ Per attempt, from a `Connect` command:
   [tx.two_writes_one_writeable], so the transport writes one frame and asks for WRITEABLE again.
 * **A WRITEABLE request made during the handshake is dropped** by LWS 3.0: no WRITEABLE follows the
   open. So the transport requests WRITEABLE again at `LWS_CALLBACK_CLIENT_ESTABLISHED` when anything
-  is queued (a send, a close). A rig finding, not a passport row: `Probe.VaRest.Lws.Rig.WriteBeforeOpen`
+  is queued (a send). A Close processed while pending instead cancels the attempt (§2.1).
+  A rig finding, not a passport row: `Probe.VaRest.Lws.Rig.WriteBeforeOpen`
   fails without the re-request (b41b89a; `Source/VaRestTests/Private/LwsProbe/VaRestLwsProbe.cpp:606-613`).
 * **Buffered amount** (bytes accepted by `Send` and not yet handed to the socket) is exact to within
   one 64 KiB fragment (the last write LWS still holds, which `lws_partial_buffered` flags but does
@@ -1295,10 +1300,11 @@ W1 need no core code beyond the test-server harness, so they can proceed while c
 
 ## 18. Risks
 
-* **TLS and certificate glue on four platforms we cannot test here.** The glue mirrors the engine's
-  shipped code line for line (§2.2), but Win64/Mac/Android/iOS are only verified in the release pass.
-  Mitigation: W1 keeps the TLS code a copy of the engine's with citations; a release-pass checklist
-  item per platform (ws, wss, pinned key, proxy).
+* **TLS and certificate glue on four platforms we cannot test here.** The glue follows the engine's
+  TLS integration with VaRest's documented IP-SAN correction and remaining-insecure-refusal rules
+  (§2.2). Win64/Mac/Android/iOS are only verified in the release pass. Mitigation: keep engine
+  integration citations and VaRest's verification additions explicit; a release-pass checklist
+  item per platform (ws, wss, pinned key, proxy), including the §2.2 verification rules.
 * **LWS 3.0 behaviour is measured on Linux only** (§0.3 T17-T29, the W0 passport). Mitigation: the
   release pass re-runs the probe on Win64 and Mac and W1's transport suite on devices (bead VaRest-b4d).
 * **Owning a transport** means owning its bugs: one more milestone of work and a thread to maintain.
@@ -1372,7 +1378,7 @@ For the core plans (one list; nothing else in core changes):
 | D9 | One ordered event queue per socket; bytes assembled; UTF-8 validated once; invalid → 1007 | exact delivery; RFC 6455 §8.1 | a lenient-server ecosystem sending bad UTF-8 loses those connections |
 | D10 | Decode always on the socket's pipe at arrival; no game-thread parse | the core threading rule holds; no added latency (§7.1) | one task per message burst |
 | D11 | Three send lanes (bypass, ready, backlog); `ReadyTimeout` | handshake vs join-first protocols; no stuck "connected, never ready" | protocols wanting another order use stages |
-| D12 | Real backpressure (buffered amount, high-water, `OnDrained`) and rx flow control | the transport knows exact bytes | none known |
+| D12 | Real backpressure (buffered amount, high-water, `OnDrained`) and rx flow control | the transport tracks buffered bytes within the one 64 KiB fragment bound in §2.4 | LWS exposes a partial-buffer flag, not its remaining byte count (§2.4) |
 | D13 | Limits per §15 | bounded memory everywhere | big-payload games raise settings |
 | D14 | Routing default `type`, whole message as data, byte-exact; numbers by canonical text | most common shape; JSON is case-sensitive | dawg-style `Type` needs one setting |
 | D15 | Per-socket string ids; fail on disconnect; inbound requests with at-most-once replies | no id collisions; replies cannot cross connections | servers needing numeric ids set `IdFormat` |
