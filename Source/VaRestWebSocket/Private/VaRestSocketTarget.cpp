@@ -115,6 +115,36 @@ namespace VaRest::WebSocket::VaRestSocketTargetPrivate
 		return true;
 	}
 
+	/**
+	 * What inet_aton (the resolver's numeric-host parser) would take: 1-4 labels, each decimal, 0x-hex or leading-0 octal.
+	 * Decimal-only hosts are refused at any label count (as before); hex labels only within inet_aton's 4
+	 */
+	bool IsInetAtonNumber(const FString& Host)
+	{
+		TArray<FString> Labels;
+		Host.ParseIntoArray(Labels, TEXT("."), false);
+		bool bAllDecimal = true;
+		for (const FString& Label : Labels)
+		{
+			if (Label.StartsWith(TEXT("0x"), ESearchCase::IgnoreCase))
+			{
+				bAllDecimal = false;
+				for (int32 Index = 2; Index < Label.Len(); ++Index)
+				{
+					if (!FChar::IsHexDigit(Label[Index]))
+					{
+						return false;
+					}
+				}
+			}
+			else if (!IsDigits(Label))
+			{
+				return false;
+			}
+		}
+		return !Labels.IsEmpty() && (bAllDecimal || Labels.Num() <= 4);
+	}
+
 	/** VCHAR, space and tab (spec 2.2, D23) */
 	bool IsHeaderValueChar(TCHAR C)
 	{
@@ -280,13 +310,9 @@ TValueOrError<VaRest::WebSocket::FSocketTarget, VaRest::WebSocket::FTargetError>
 			return Refuse(EVaRestSocketFailure::BadUrl, TEXT("the host has an empty or over-long label, or is over 253 characters"));
 		}
 		Out.bHostIsIp = IsIpv4Literal(Out.Host);
-		// Digits and dots that are not a clean IPv4 (01.1.1.1, 1.2.3) are read as numbers by some resolvers (inet_aton): refuse, never resolve them
-		bool bNumeric = true;
-		for (const TCHAR C : Out.Host)
-		{
-			bNumeric = bNumeric && ((C >= TEXT('0') && C <= TEXT('9')) || C == TEXT('.'));
-		}
-		if (bNumeric && !Out.bHostIsIp)
+		// A host inet_aton would read as a number (01.1.1.1, 1.2.3, 2130706433, 0x7f.0.0.1, 0X7F.1) reaches the resolver as a
+		// hostname and from there loopback under another name: refuse it unless it is a clean dotted-decimal IPv4
+		if (!Out.bHostIsIp && IsInetAtonNumber(Out.Host))
 		{
 			return Refuse(EVaRestSocketFailure::BadUrl, TEXT("a numeric host must be four decimal octets without leading zeros"));
 		}

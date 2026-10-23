@@ -65,6 +65,8 @@ bool FVaRestSocketTargetValidTest::RunTest(const FString& Parameters)
 		{ TEXT("ws://[1:2:3:4:5:6:7:8]/"), TEXT("1:2:3:4:5:6:7:8"), 80, TEXT("[1:2:3:4:5:6:7:8]"), TEXT("/"), false, true, TEXT("http://[1:2:3:4:5:6:7:8]"), TEXT("ws://[1:2:3:4:5:6:7:8]") },
 		{ TEXT("ws://[::ffff:1.2.3.4]/"), TEXT("::ffff:1.2.3.4"), 80, TEXT("[::ffff:1.2.3.4]"), TEXT("/"), false, true, TEXT("http://[::ffff:1.2.3.4]"), TEXT("ws://[::ffff:1.2.3.4]") },
 		{ TEXT("ws://[1::1.2.3.4]/"), TEXT("1::1.2.3.4"), 80, TEXT("[1::1.2.3.4]"), TEXT("/"), false, true, TEXT("http://[1::1.2.3.4]"), TEXT("ws://[1::1.2.3.4]") },
+		{ TEXT("ws://[fe80::1]/"), TEXT("fe80::1"), 80, TEXT("[fe80::1]"), TEXT("/"), false, true, TEXT("http://[fe80::1]"), TEXT("ws://[fe80::1]") },
+		{ TEXT("ws://[2001:db8::8a2e:370:7334]/"), TEXT("2001:db8::8a2e:370:7334"), 80, TEXT("[2001:db8::8a2e:370:7334]"), TEXT("/"), false, true, TEXT("http://[2001:db8::8a2e:370:7334]"), TEXT("ws://[2001:db8::8a2e:370:7334]") },
 	};
 	for (const FRow& Row : Rows)
 	{
@@ -134,6 +136,13 @@ bool FVaRestSocketTargetInvalidTest::RunTest(const FString& Parameters)
 		TEXT("ws://.example.com/"),
 		TEXT("ws://example.com./"),
 		TEXT("ws://01.1.1.1/"),             // ambiguous octal/decimal
+		TEXT("ws://1.2.3/"),                // inet_aton reads these as numbers (task 4 residual)
+		TEXT("ws://2130706433/"),
+		TEXT("ws://0x7f.0.0.1/"),
+		TEXT("ws://0x7f000001/"),
+		TEXT("ws://0X7F.1/"),
+		TEXT("ws://[::ffff:999.0.0.1]/"),   // a dotted tail past 255
+		TEXT("ws://[fe80::1%25eth0]/"),     // a zone id is never sent
 	};
 	for (const TCHAR* Url : Refused)
 	{
@@ -258,6 +267,10 @@ bool FVaRestSocketTargetAllowlistTest::RunTest(const FString& Parameters)
 	OnlyExample.Emplace(FString(TEXT("ws")), TArray<FString>{ FString(TEXT("example.com")) });
 	TestFalse(TEXT("a domain not listed is refused"), IsAllowedByFilter(TEXT("ws://127.0.0.1:9"), &OnlyExample));
 	TestTrue(TEXT("a listed one is allowed"), IsAllowedByFilter(TEXT("ws://example.com"), &OnlyExample));
+	// URLRequestFilter.cpp:148,159: domain matching is IgnoreCase, so Out.Host keeps the caller's case and FilterUrl needs no lowering
+	TArray<TPair<FString, TArray<FString>>> OnlyWss;
+	OnlyWss.Emplace(FString(TEXT("wss")), TArray<FString>{ FString(TEXT("example.com")) });
+	TestTrue(TEXT("an allowlist entry matches the host whatever its case"), IsAllowedByFilter(TEXT("wss://Example.COM"), &OnlyWss));
 	TestFalse(TEXT("a scheme without a section is refused (plan decision 15)"), IsAllowedByFilter(TEXT("wss://example.com"), &OnlyExample));
 	TestTrue(TEXT("IPv4 literals are recognised"), IsIpv4Literal(TEXT("127.0.0.1")) && IsIpv4Literal(TEXT("0.0.0.0")) && IsIpv4Literal(TEXT("255.255.255.255")));
 	TestFalse(TEXT("... and only they"), IsIpv4Literal(TEXT("01.1.1.1")) || IsIpv4Literal(TEXT("256.0.0.1")) || IsIpv4Literal(TEXT("1.2.3")) || IsIpv4Literal(TEXT("1.2.3.4.5"))
