@@ -5,8 +5,10 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
+#include "HAL/PlatformTime.h"
 #include "Misc/AutomationTest.h"
 #include "Misc/ScopeExit.h"
+#include "VaRestHttpTesting.h"
 #include "VaRestUrl.h"
 #include "VaRestWsTestUtil.h"
 
@@ -113,6 +115,48 @@ bool FVaRestWsRedirectUnreachableTest::RunTest(const FString& Parameters)
 	{
 		ExpectRefused(*this, *Transport, Site, Scheme, 302, FString::Printf(TEXT("%s://127.0.0.1:1/"), Scheme.bTls ? TEXT("wss") : TEXT("ws")), FString(), TEXT("to a closed port"));
 	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestWsRedirectUnresolvableTest, "VaRest.Integration.WebSocket.Transport.Redirect.Unresolvable", VAREST_WS_TEST_FLAGS)
+
+bool FVaRestWsRedirectUnresolvableTest::RunTest(const FString& Parameters)
+{
+	VAREST_WS_BEGIN();
+	// Task 11 carry: a redirect LWS follows to a host that does not resolve. LWS 3.0 raises no callback for it at all: after
+	// lws_client_reset (the old socket out of the poll set, the state back to unconnected), lws_client_connect_2's getaddrinfo
+	// failure frees the wsi without CONNECTION_ERROR or WSI_DESTROY (FConn::ReapIfDropped cites the archive). Spec 3.4: a
+	// failed redirect is a stop row, so Redirect, not a hang until ConnectTimeout -- whose kill would reach freed memory.
+	// "a..b": glibc's getaddrinfo refuses the empty label itself (EAI_NONAME, no query sent), so the host's TUN proxy, which
+	// answers every DNS query and completes every connect that leaves loopback, never sees it; a name a resolver answers
+	// NXDOMAIN for fails at the same getaddrinfo call. ConnectTimeout 4 s: an end by the deadline would miss the 2 s asked here
+	const int32 InFlightBefore = VaRest::WebSocket::Testing::GetTlsHandshakesInFlight();
+	for (const FScheme& Scheme : Schemes(Site))
+	{
+		const FString Key = NewKey();
+		const FString Location = FString::Printf(TEXT("%s://a..b:1/"), Scheme.bTls ? TEXT("wss") : TEXT("ws"));
+		FVaRestSocketConnectRequest Req = Request(Scheme, FString::Printf(TEXT("/ws/status/302?location=%s&key=%s"), *VaRest::Http::PercentEncode(Location), *Key));
+		Req.ConnectTimeout = 4.0;
+		const double Started = FPlatformTime::Seconds();
+		FEvents Events(Transport->Connect(MoveTemp(Req)));
+		TestTrue(FString::Printf(TEXT("%s: ended within 2 s"), Scheme.Name), Events.WaitEnd(2.0));
+		const FVaRestSocketEvent* End = Events.GetEnd();
+		if (!TestNotNull(FString::Printf(TEXT("%s: a terminal event"), Scheme.Name), End))
+		{
+			Events.Connection->Close(1000, TEXT("done"));
+			Events.WaitEnd(30.0);
+			continue;
+		}
+		TestTrue(FString::Printf(TEXT("%s: Error Redirect, status 0, after %.2f s (%s)"), Scheme.Name, End->Time - Started, *Events.Describe()),
+			End->Type == EVaRestSocketEventType::Error && End->End.Failure == EVaRestSocketFailure::Redirect && End->End.HttpStatus == 0);
+		TestFalse(FString::Printf(TEXT("%s: the Detail names no host"), Scheme.Name), End->End.Detail.Contains(TEXT("a..b"), ESearchCase::IgnoreCase));
+		TestEqual(FString::Printf(TEXT("%s: the 302 was asked once"), Scheme.Name), FetchJournal(*this, Site, Key)[TEXT("connections")].AsInt(), 1);
+		// Gone from the service, with no kill: LWS freed the wsi, so nothing may touch it again
+		TestTrue(FString::Printf(TEXT("%s: the connection left the service"), Scheme.Name),
+			VaRest::Http::Testing::PumpUntil([&Transport] { return Transport->GetCounters().LiveConnections == 0; }, 5.0, true));
+	}
+	TestEqual(TEXT("no kill was issued"), Transport->GetCounters().KillsIssued, 0);
+	TestEqual(TEXT("the wss attempt left the handshakes in flight (VaRest-rti)"), VaRest::WebSocket::Testing::GetTlsHandshakesInFlight(), InFlightBefore);
 	return true;
 }
 

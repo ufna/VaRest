@@ -198,6 +198,12 @@ int32 VaRest::WebSocket::Lws::FConn::OnCallback(FService& Service, lws* InWsi, i
 	case LWS_CALLBACK_WSI_CREATE:
 		OnWsiCreate();
 		return 0;
+	case LWS_CALLBACK_ADD_POLL_FD:
+		bLeftPollSet = false;
+		return 0;
+	case LWS_CALLBACK_DEL_POLL_FD:
+		bLeftPollSet = true;
+		return 0;
 	case LWS_CALLBACK_OPENSSL_PERFORM_SERVER_CERT_VERIFICATION:
 		// user is the X509_STORE_CTX, len preverify_ok (libwebsockets.h:1015-1044); the service found this connection by
 		// lws_wsi_user, as the engine does (LwsWebSocketsManager.cpp:447-456)
@@ -317,8 +323,8 @@ void VaRest::WebSocket::Lws::FConn::OnWsiCreate()
 	// probe's comment cites the archive). The attempt's own WSI_CREATE comes before its first APPEND_HANDSHAKE_HEADER, so
 	// one after it is a redirect's, seen before the redirect's TCP connect: a refused connect or a TLS failure at the new
 	// target ends as Redirect too, a stop row in spec 3.4, never ConnectFailed, which W2 would retry. Not before LWS
-	// resolves the new host, which the new socket's address family comes from: a Location whose name does not resolve is
-	// not seen here (no host of this suite can make a name fail: the TUN proxy resolves every name)
+	// resolves the new host, which the new socket's address family comes from: a Location whose name does not resolve never
+	// reaches here -- LWS frees the attempt with no callback, and ReapIfDropped reports it (Redirect.Unresolvable)
 	if (State != EConnState::Ended && AppendCalls > 0)
 	{
 		bRedirected = true;
@@ -430,9 +436,49 @@ void VaRest::WebSocket::Lws::FConn::OnDestroyed(FService& Service)
 	bDestroyed = true;
 }
 
+bool VaRest::WebSocket::Lws::FConn::ReapIfDropped()
+{
+	if (!bLeftPollSet || bDestroyed || !Wsi)
+	{
+		return false;
+	}
+	// Task 11 carry, measured by Redirect.Unresolvable (APPEND_HANDSHAKE_HEADER, DEL_POLL_FD, LWS's "lws_client_connect_2:
+	// getaddrinfo failed -2" and "Redirect failed", then no callback at all). LWS 3.0 frees a client wsi without a callback
+	// when a change of socket fails before the new one joins the poll set. Following a redirect, lws_client_reset takes the
+	// socket out of the set, sets the state to 0x200 (client-handshake.c.o 0xc50, 0xc82) and calls lws_client_connect_2. A
+	// getaddrinfo failure there (0x6b6), a socket() or socket-option failure (0x5ee, 0x8be) or a refused insert (0x8d6)
+	// jumps to 0x6bd, which raises CONNECTION_ERROR only for a state without the 0x200 bit -- lws_client_reset's 0x200 and
+	// connect_2's 0x201 (0x4f7) have it -- and frees a wsi outside the set with lws_free, no WSI_DESTROY (0x702-0x75b). The
+	// parser, handed NULL, returns 1 without touching it (client.c.o 0xd84-0xdb9); connect_2's next-address loop
+	// (0x46e-0x495) reaches the same path. A close takes a wsi out of the set only on its way to WSI_DESTROY in the same call
+	// (libwebsockets.c.o 0xd35, 0xf0e, then 0x1108-0x1115; the one early return, 0x10bb, is an event library's logical
+	// close). So a wsi that left the set and was not destroyed, seen here outside its own callbacks, is freed memory, and a
+	// later wsi may have its address (VaRest-81s): no LWS call names it again. After the first APPEND only a redirect changes
+	// sockets, and a failed redirect is a stop row (spec 3.4), not a ConnectFailed for W2 to retry. The Detail names no host
+	Wsi = nullptr;
+	if (AppendCalls > 0 && PendingFailure == EVaRestSocketFailure::None)
+	{
+		SetRedirectFailure();
+	}
+	const FString Dropped = TEXT("libwebsockets dropped the attempt with no error string while it changed sockets (a new host that does not resolve, or a socket that could not be made)");
+	if (PendingFailure != EVaRestSocketFailure::None)
+	{
+		EndPreOpen(PendingFailure, EVaRestSocketCloseBy::Transport, 0, PendingDetail + TEXT("; ") + Dropped);
+	}
+	else
+	{
+		EndPreOpen(EVaRestSocketFailure::ConnectFailed, EVaRestSocketCloseBy::Transport, 0, Dropped);
+	}
+	// OnDestroyed's bookkeeping, as no WSI_DESTROY will come; no kill landed, so the kill counters stay
+	UncountTls();
+	UncountClose();
+	bDestroyed = true;
+	return true;
+}
+
 void VaRest::WebSocket::Lws::FConn::Kill(FService& Service)
 {
-	if (!Wsi || bKillIssued)
+	if (!Wsi || bKillIssued || ReapIfDropped())
 	{
 		return;
 	}
@@ -448,6 +494,8 @@ void VaRest::WebSocket::Lws::FConn::Kill(FService& Service)
 void VaRest::WebSocket::Lws::FConn::CheckDeadlines(FService& Service, double Now)
 {
 	using namespace VaRest::WebSocket::Lws::VaRestLwsConnPrivate;
+	// First: everything below may touch the wsi
+	ReapIfDropped();
 	if (bKillIssued && !bDestroyed && Wsi && Now - KillArmedAt >= KillRearmSeconds)
 	{
 		// Review conc I-1: LWS's own stage timers replace a pending timeout (lws_client_socket_service and

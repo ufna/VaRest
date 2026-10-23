@@ -108,7 +108,17 @@ namespace VaRest::WebSocket::Lws
 		/** CLIENT_CLOSED, CLOSED_CLIENT_HTTP, and WSI_DESTROY for what did not end before it */
 		void OnEnded();
 		void OnDestroyed(FService& Service);
-		/** lws_set_timeout(LWS_TO_KILL_ASYNC) (T14): the end is reported by the caller, LWS tears TCP down later (plan decision 3) */
+		/**
+		 * The service's thread, outside this wsi's own callbacks: true when LWS freed the wsi without a WSI_DESTROY -- it left
+		 * LWS's poll set (bLeftPollSet) and nothing destroyed it or put it back. The attempt ends (Redirect after the first
+		 * APPEND_HANDSHAKE_HEADER), the wsi is never touched again, and the service erases the connection (Task 11 carry)
+		 */
+		bool ReapIfDropped();
+		/**
+		 * lws_set_timeout(LWS_TO_KILL_ASYNC) (T14): the end is reported by the caller, LWS tears TCP down later (plan decision 3).
+		 * A wsi LWS dropped is reaped instead (ReapIfDropped), here too: a Close command drained in the lws_service call that
+		 * dropped it runs before that call's CheckDeadlines, and the kill would write into freed memory
+		 */
 		void Kill(FService& Service);
 		void ReleaseHeld();
 		/** The outbox's bytes leave the buffered amount, with no Drained (an end) */
@@ -144,6 +154,15 @@ namespace VaRest::WebSocket::Lws
 		/** In TlsHandshakesInFlight(): a wss attempt from its connect until CLIENT_ESTABLISHED or WSI_DESTROY (review conc I-3) */
 		bool bTlsCounted = false;
 		double StartedAt = 0.0;
+		/**
+		 * DEL_POLL_FD took the wsi out of LWS's poll set and no ADD_POLL_FD has put it back (__remove_wsi_socket_from_fds and
+		 * __insert_wsi_socket_into_fds pass the wsi's userdata, pollfd.c.o 0x79f and 0x3ec of the Release archive, so both reach
+		 * this connection). A client wsi leaves the set to be destroyed -- WSI_DESTROY follows in the same call -- or to change
+		 * sockets: lws_client_reset following a redirect, lws_client_connect_2 trying the next address. There LWS 3.0 frees it
+		 * with no callback at all when the new socket never joins the set (ReapIfDropped). Not "out of the set": an attempt
+		 * queued for a header table has not joined it yet (__lws_header_table_detach starts its connect later, parsers.c.o 0x5b8)
+		 */
+		bool bLeftPollSet = false;
 		int32 AppendCalls = 0;
 		/**
 		 * LWS began following a 3xx: a WSI_CREATE came after the first APPEND_HANDSHAKE_HEADER (OnWsiCreate), and only then.
