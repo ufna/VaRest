@@ -6,6 +6,8 @@
 #include "VaRestIdentity.h"
 #include "VaRestPersistence.h"
 #include "VaRestAuth.h"
+#include "VaRestDiskCache.h"
+#include "VaRestExchangeState.h"
 #include "VaRestHttpSettings.h"
 #include "UObject/Package.h"
 #include "Misc/AutomationTest.h"
@@ -162,6 +164,7 @@ bool FVaRestOfflineRegistryTest::RunTest(const FString& Parameters)
     if (!TestTrue(TEXT("actual prepare barrier"),PumpUntil([&Hooks]{return Hooks.Hooks->AfterPrepare->Entered.load();}))) return false;
     Observe(Second.Client.Put<void>(TEXT("/second")).Body(TEXT("b")).QueueWhenOffline(),Rejected).Send();
     TestEqual(TEXT("reservation visible before commit"),First.Client.GetQueuedCount(),1);
+    TestTrue(TEXT("held Prepare metadata is actually reserved"),FirstState->Queue->MetadataBytesForTest()>0);
     if (!TestTrue(TEXT("second reservation refused"),Second.Wait(Rejected))) return false;
     TestTrue(TEXT("count bound is Config"),Rejected->Error.Kind==EVaRestErrorKind::Config);
     Hooks.Hooks->AfterPrepare->Released=true;
@@ -753,6 +756,274 @@ bool FVaRestOfflineCleanupStopTest::RunTest(const FString& Parameters)
             FQueueStore::Abort(Queue->GetDirectory(),99,TEXT("stopped"),[Abort](bool bOk){*Abort=bOk;});
             TestTrue(TEXT("refused cleanup returns explicit failure"),Abort->IsSet() && !Abort->GetValue());
         }
+    }
+    return true;
+}
+
+
+namespace VaRest::Http::Testing::PersistenceRegression
+{
+    class FCutoffCapture final : public IVaRestStage
+    {
+    public:
+        FName GetStageName() const override {return TEXT("Regression.TerminalWitness");}
+        void Process(const FVaRestExchangeRef& Exchange,const FVaRestStageNext& Next,FVaRestOutcomeCallback&& Done) override
+        {bEntered=true;Seen=Exchange;Next.Proceed(Exchange,MoveTemp(Done));}
+        bool IsDone() const {const auto Pinned=Seen.Pin();return bEntered && (!Pinned.IsValid() || Pinned->IsDone());}
+        bool bEntered=false;
+        TWeakPtr<FVaRestExchange,ESPMode::ThreadSafe> Seen;
+    };
+
+    enum class ECutoffAction { Cancel, Deadline, WorkerCancel };
+    bool Cutoff(FAutomationTestBase& Test,ECutoffAction Action)
+    {
+        for (bool bCommitted : {false,true})
+        {
+            FScopedPersistenceTest Disk; FTestRig Rig; const auto Capture=MakeShared<VaRest::Http::Testing::PersistenceRegression::FCutoffCapture,ESPMode::ThreadSafe>(); Rig.Client.Use(Capture,EVaRestStageSlot::Outer); FScopedPersistenceHooks Hooks(Disk.Root);
+            auto Gate=MakeShared<FPersistenceBarrier,ESPMode::ThreadSafe>();
+            if (bCommitted) Hooks.Hooks->BeforeRename=Gate; else Hooks.Hooks->AfterPrepare=Gate;
+            ON_SCOPE_EXIT {Gate->Released=true; Rig.Client.CancelAll(); Rig.Drain();};
+            Rig.Client.WithStorageDirectories(FPaths::Combine(Disk.Root,TEXT("cache")),Disk.Root).WithOfflineQueue(TEXT("cutoff"));
+            Rig.Connectivity->ReportOffline();
+            const auto Probe=MakeShared<FOutcomeProbe,ESPMode::ThreadSafe>(); Rig.Client.Use(Probe,EVaRestStageSlot::Outer);
+            if (!Test.TestTrue(TEXT("isolated queue loaded"),Rig.Drain())) return false;
+            const int32 BaselineTimers=Rig.Clock->NumPendingTimers();
+            const auto Reply=MakeOutcome<void>(); const auto Queued=MakeShared<int32,ESPMode::ThreadSafe>(0);
+            auto Request=Rig.Client.Put<void>(TEXT("/save")).Body(TEXT("payload")).QueueWhenOffline();
+            if (Action==ECutoffAction::Deadline) Request=MoveTemp(Request).Retry(FVaRestRetryPolicy::Disabled().WithDeadline(1));
+            const auto Handle=Observe(MoveTemp(Request),Reply).OnQueued([Queued](const FString&){++*Queued;}).Send();
+            if (!Test.TestTrue(TEXT("exact cutoff worker hold"),PumpUntil([Gate]{return Gate->Entered.load();}))) return false;
+            Test.TestFalse(TEXT("truthful completion awaits rename"),Capture->IsDone());
+            Test.TestEqual(TEXT("active until shared commit selection"),Handle.IsActive(),!bCommitted);
+            Test.TestEqual(TEXT("no acknowledgement before rename"),*Queued,0);
+            if (Action==ECutoffAction::Deadline) Rig.Clock->Advance(2);
+            else if (Action==ECutoffAction::WorkerCancel)
+            {
+                const auto Returned=MakeShared<std::atomic<bool>,ESPMode::ThreadSafe>(false);
+                auto Worker=UE::Tasks::Launch(TEXT("VaRest.Task9Cancel"),[Handle,Returned]{Handle.Cancel(); Returned->store(true);});
+                if (!Test.TestTrue(TEXT("worker Cancel returned before release"),PumpUntil([Returned]{return Returned->load();}))) {Gate->Released=true;Worker.Wait();return false;}
+                Worker.Wait();
+            }
+            else Handle.Cancel();
+            if (!bCommitted)
+            {
+                if (!Test.TestTrue(TEXT("pregate public completion before release"),Rig.Wait(Reply))) return false;
+                Test.TestEqual(TEXT("pregate terminal kind"),Reply->Error.Kind,Action==ECutoffAction::Deadline?EVaRestErrorKind::Timeout:EVaRestErrorKind::Canceled);
+                Test.TestEqual(TEXT("pregate chain outcome before worker release"),Probe->Total(Handle.GetId()),1);
+                if (Action!=ECutoffAction::Deadline)
+                    Test.TestEqual(TEXT("prompt canceled CHAIN before release"),Probe->Count(Handle.GetId(),EVaRestTransportFailure::Canceled),1);
+            }
+            Gate->Released=true;
+            if (!Test.TestTrue(TEXT("cutoff drains"),Rig.Drain())) return false;
+            Test.TestFalse(TEXT("barrier never timed out"),Gate->TimedOut.load());
+            Test.TestTrue(TEXT("actual outcome terminal"),Capture->IsDone());
+            Test.TestEqual(TEXT("one outer outcome"),Probe->Total(Handle.GetId()),1);
+            Test.TestEqual(TEXT("one truthful queued completion"),*Queued,bCommitted?1:0);
+            Test.TestEqual(TEXT("ordinary callback only before cutoff"),Reply->CompleteCalls.load(),bCommitted?0:1);
+            Test.TestEqual(TEXT("no physical wire"),Rig.Fake->NumCalls(),0);
+            const auto State=FClientAccess::State(Rig.Client);
+            Test.TestEqual(TEXT("exchange accounting settled"),State->NumInFlight(),0);
+            Test.TestEqual(TEXT("admission tickets released"),State->Queue->NumAdmissionsForTest(),0);
+            Test.TestEqual(TEXT("deadline disarmed"),Rig.Clock->NumPendingTimers(),BaselineTimers);
+            auto Loaded=MakeShared<FQueueLoad,ESPMode::ThreadSafe>();
+            FQueueStore::Load(QueueDirectory(Disk.Root,TEXT("cutoff")),TEXT("https://api.test"),{},[Loaded](FQueueLoad&& R){*Loaded=MoveTemp(R);});
+            if (!Test.TestTrue(TEXT("actual recovery drained"),Disk.Drain())) return false;
+            Test.TestTrue(TEXT("recovery successful"),Loaded->bOk);
+            Test.TestEqual(TEXT("only committed record recoverable"),Loaded->Items.Num(),bCommitted?1:0);
+        }
+        return true;
+    }
+}
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestOfflineCancelAroundCommitTest,"VaRest.Http.Offline.CancelAroundCommit",EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+bool FVaRestOfflineCancelAroundCommitTest::RunTest(const FString& Parameters)
+{ return VaRest::Http::Testing::PersistenceRegression::Cutoff(*this,VaRest::Http::Testing::PersistenceRegression::ECutoffAction::Cancel); }
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestOfflineDeadlineAroundCommitTest,"VaRest.Http.Offline.DeadlineAroundCommit",EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+bool FVaRestOfflineDeadlineAroundCommitTest::RunTest(const FString& Parameters)
+{ return VaRest::Http::Testing::PersistenceRegression::Cutoff(*this,VaRest::Http::Testing::PersistenceRegression::ECutoffAction::Deadline); }
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestOfflineAnyThreadCancelAroundCommitTest,"VaRest.Http.Offline.AnyThreadCancelAroundCommit",EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+bool FVaRestOfflineAnyThreadCancelAroundCommitTest::RunTest(const FString& Parameters)
+{ return VaRest::Http::Testing::PersistenceRegression::Cutoff(*this,VaRest::Http::Testing::PersistenceRegression::ECutoffAction::WorkerCancel); }
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestOfflineInterleavingsTest,"VaRest.Http.Offline.Interleavings",EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+bool FVaRestOfflineInterleavingsTest::RunTest(const FString& Parameters)
+{
+    using namespace VaRest::Http; using namespace VaRest::Http::Testing;
+    enum class EHold { Read, Prepare, Commit, Retire };
+    enum class EAction { Cancel, Deadline, Clear, Session, Edges, Drop, DropClient, Shutdown };
+    struct FRow { const TCHAR* Name; EHold Hold; EAction Action; EVaRestErrorKind Error; };
+    const FRow Rows[]={
+        {TEXT("cache cancel"),EHold::Read,EAction::Cancel,EVaRestErrorKind::Canceled},
+        {TEXT("cache deadline"),EHold::Read,EAction::Deadline,EVaRestErrorKind::Timeout},
+        {TEXT("cache clear"),EHold::Read,EAction::Clear,EVaRestErrorKind::None},
+        {TEXT("cache account"),EHold::Read,EAction::Session,EVaRestErrorKind::None},
+        {TEXT("prepare cancel"),EHold::Prepare,EAction::Cancel,EVaRestErrorKind::Canceled},
+        {TEXT("prepare deadline"),EHold::Prepare,EAction::Deadline,EVaRestErrorKind::Timeout},
+        {TEXT("prepare account"),EHold::Prepare,EAction::Session,EVaRestErrorKind::Auth},
+        {TEXT("commit cancel"),EHold::Commit,EAction::Cancel,EVaRestErrorKind::None},
+        {TEXT("retire online edges"),EHold::Retire,EAction::Edges,EVaRestErrorKind::None},
+        {TEXT("retire dropped handle"),EHold::Retire,EAction::Drop,EVaRestErrorKind::None},
+        {TEXT("retire released public client"),EHold::Retire,EAction::DropClient,EVaRestErrorKind::None},
+        {TEXT("prepare shutdown"),EHold::Prepare,EAction::Shutdown,EVaRestErrorKind::None},
+        {TEXT("commit shutdown"),EHold::Commit,EAction::Shutdown,EVaRestErrorKind::None}};
+    for (const FRow& Row : Rows)
+    {
+        AddInfo(Row.Name);
+        FScopedPersistenceTest Disk; auto Runtime=MakeUnique<FScopedPersistenceRuntime>(); FScopedCacheControls Controls;
+        FTestRig Rig; const auto Capture=MakeShared<VaRest::Http::Testing::PersistenceRegression::FCutoffCapture,ESPMode::ThreadSafe>(); Rig.Client.Use(Capture,EVaRestStageSlot::Outer); FScopedPersistenceHooks Hooks(Disk.Root);
+        const auto Gate=MakeShared<FPersistenceBarrier,ESPMode::ThreadSafe>();
+        ON_SCOPE_EXIT {Gate->Released=true; Rig.Client.CancelAll(); Rig.Drain();};
+        auto Policy=FVaRestCachePolicy::MemoryAndDisk();Policy.MemoryBytes=0;Policy.DiskBytes=1024*1024;Policy.DefaultTtlSeconds=600;
+        Rig.Client.WithBearer(TEXT("A-token")).WithStorageDirectories(FPaths::Combine(Disk.Root,TEXT("cache")),Disk.Root);
+        auto State=FClientAccess::State(Rig.Client);
+        const TWeakPtr<FClientState,ESPMode::ThreadSafe> WeakState=State;
+        if (Row.Hold==EHold::Read) Rig.Client.WithCache(Policy);
+        else {Rig.Client.WithOfflineQueue(TEXT("matrix"));Rig.Connectivity->ReportOffline();}
+        if (!TestTrue(TEXT("row setup drained"),Rig.Drain())) return false;
+        const auto Probe=MakeShared<FOutcomeProbe,ESPMode::ThreadSafe>(); Rig.Client.Use(Probe,EVaRestStageSlot::Outer);
+        if (Row.Hold==EHold::Retire)
+        {
+            const auto Ack=MakeShared<int32,ESPMode::ThreadSafe>(0),Events=MakeShared<int32,ESPMode::ThreadSafe>(0);
+            TUniquePtr<FTestRig> Survivor;
+            const auto SurvivorEvents=MakeShared<TArray<FString>,ESPMode::ThreadSafe>();
+            if (Row.Action==EAction::DropClient)
+            {
+                Survivor=MakeUnique<FTestRig>();
+                Survivor->Client.WithBearer(TEXT("A-token")).WithConnectivity(Rig.Connectivity).WithClock(Rig.Clock)
+                    .WithStorageDirectories(FPaths::Combine(Disk.Root,TEXT("cache")),Disk.Root).WithOfflineQueue(TEXT("matrix"));
+                Survivor->Client.OnQueuedResult().AddLambda([SurvivorEvents](const FVaRestQueuedResult& Result){SurvivorEvents->Add(Result.QueueId);});
+                Survivor->Fake->Enqueue(FVaRestFakeResponse::Text(204,TEXT("")));
+            }
+            ON_SCOPE_EXIT {if (Survivor) {Gate->Released=true;Survivor->Client.CancelAll();Survivor->Drain();}};
+            const auto Queue=State->Queue;
+            const auto Original=MakeOutcome<void>();
+            auto OriginalHandle=Observe(Rig.Client.Put<void>(TEXT("/one")).Body(TEXT("one")).NoAuth().QueueWhenOffline(),Original).OnQueued([Ack](const FString&){++*Ack;}).Send();
+            Rig.Client.Put<void>(TEXT("/two")).Body(TEXT("two")).NoAuth().QueueWhenOffline().OnQueued([Ack](const FString&){++*Ack;}).Send();
+            if (!TestTrue(TEXT("two records durably acknowledged"),PumpUntil([Ack]{return *Ack==2;})) || !TestTrue(TEXT("admission drained"),Rig.Drain())) return false;
+            Rig.Client.OnQueuedResult().AddLambda([Events](const FVaRestQueuedResult&){++*Events;});
+            Rig.Fake->bCompleteOnWorker=false;Rig.Fake->Enqueue(FVaRestFakeResponse::Manual());
+            Rig.Fake->Enqueue(FVaRestFakeResponse::Text(204,TEXT("")));Rig.Fake->Enqueue(FVaRestFakeResponse::Text(204,TEXT("")));
+            Rig.Connectivity->ReportOnline();
+            if (!TestTrue(TEXT("first replay physical"),PumpUntil([&Rig]{return Rig.Fake->NumCalls()==1;}))) return false;
+            PumpPersistence();TestEqual(TEXT("replay guard handed back"),PersistenceCounters().Launched.load(),PersistenceCounters().HandedBack.load());
+            if (!TestTrue(TEXT("serial hold accepted"),LaunchPersistence([Gate]{WaitPersistenceBarrier(Gate);return FIoResult();},[](FIoResult&&){}))) return false;
+            if (!TestTrue(TEXT("serial hold entered before retirement"),PumpUntil([Gate]{return Gate->Entered.load();}))) return false;
+            const uint64 BeforeRetire=PersistenceCounters().Launched.load();
+            Rig.Fake->Complete(0,FVaRestFakeResponse::Text(204,TEXT("")));
+            if (!TestTrue(TEXT("actual retire admitted behind serial barrier"),PumpUntil([State,BeforeRetire]{return State->NumInFlight()==0 && PersistenceCounters().Launched.load()==BeforeRetire+1;}))) return false;
+            TestEqual(TEXT("retirement not acknowledged early"),*Events,0); TestEqual(TEXT("head retained until retirement"),Rig.Client.GetQueuedCount(),2);
+            if (Row.Action==EAction::Drop) OriginalHandle=FVaRestRequestHandle();
+            else if (Row.Action==EAction::DropClient) {Rig.Client=FVaRestClient();State.Reset();}
+            else {Rig.Connectivity->ReportOffline();Rig.Connectivity->ReportOnline();Rig.Connectivity->ReportOffline();Rig.Connectivity->ReportOnline();}
+            Queue->ScheduleReplay();Queue->ScheduleReplay();PumpPersistence();PumpPersistence();
+            TestEqual(TEXT("active runner blocks a second guard before retirement"),PersistenceCounters().Launched.load(),BeforeRetire+1);
+            TestEqual(TEXT("next head has no premature physical wire"),Rig.Fake->NumCalls(),1);
+            Gate->Released=true;
+            if (!TestTrue(TEXT("all replay retirement settled"),Rig.Drain())) return false;
+            TestEqual(TEXT("next head starts once"),Rig.Fake->NumCalls()+(Survivor?Survivor->Fake->NumCalls():0),2);
+            TestEqual(TEXT("original subscriber only while registered"),*Events,Survivor?0:2);
+            if (Survivor)
+            {
+                TestFalse(TEXT("departed state released after owned retirement"),WeakState.IsValid());
+                TestEqual(TEXT("departed owner has only its original wire"),Rig.Fake->NumCalls(),1);
+                TestEqual(TEXT("surviving owner starts next head once"),Survivor->Fake->NumCalls(),1);
+                TestEqual(TEXT("surviving subscriber sees both heads"),SurvivorEvents->Num(),2);
+                if (SurvivorEvents->Num()==2) TestTrue(TEXT("each durable id delivered once"),(*SurvivorEvents)[0]!=(*SurvivorEvents)[1]);
+            }
+            TestEqual(TEXT("no original typed callback"),Original->CompleteCalls.load(),0);TestEqual(TEXT("queue empty"),Queue->Count(),0);
+        }
+        else
+        {
+            TUniquePtr<FScopedCacheStoreHooks> ReadHooks;
+            if (Row.Hold==EHold::Read)
+            {
+                Rig.Fake->Enqueue(FVaRestFakeResponse::Text(200,TEXT("old-cache")));
+                auto Seed=MakeOutcome<FString>();Observe(Rig.Client.Get<FString>(TEXT("/entry")),Seed).Send();
+                if (!TestTrue(TEXT("seed cached bytes"),Rig.Wait(Seed)) || !TestTrue(TEXT("seed disk drained"),Rig.Drain())) return false;
+                FString Origin;CanonicalOrigin(State->GetConfig()->BaseUrl,Origin);
+                ReadHooks=MakeUnique<FScopedCacheStoreHooks>(FPaths::Combine(State->GetConfig()->CacheRoot,HashFields(TEXT("VaRest/cache-origin/v1"),TArray<FString>{Origin})));
+                ReadHooks->Hooks->AfterRead=Gate; // immutable old bytes captured before ClearCache
+            }
+            else if (Row.Hold==EHold::Prepare) Hooks.Hooks->AfterPrepare=Gate;
+            else Hooks.Hooks->BeforeRename=Gate;
+            const auto Reply=MakeOutcome<FString>();const auto Ack=MakeShared<int32,ESPMode::ThreadSafe>(0);
+            auto Request=Row.Hold==EHold::Read ? Rig.Client.Get<FString>(TEXT("/entry")) : Rig.Client.Put<FString>(TEXT("/operation")).Body(TEXT("safe")).QueueWhenOffline();
+            if (Row.Action==EAction::Deadline) Request=MoveTemp(Request).Retry(FVaRestRetryPolicy::Disabled().WithDeadline(1));
+            const auto Handle=Observe(MoveTemp(Request),Reply).OnQueued([Ack](const FString&){++*Ack;}).Send();
+            if (!TestTrue(TEXT("row worker reached exact hold"),PumpUntil([Gate]{return Gate->Entered.load();}))) return false;
+            TestEqual(TEXT("no early queued event"),*Ack,0);
+            if (Row.Action==EAction::Cancel) Handle.Cancel();
+            if (Row.Action==EAction::Deadline) Rig.Clock->Advance(2);
+            if (Row.Action==EAction::Clear) Rig.Client.ClearCache();
+            if (Row.Action==EAction::Session) Rig.Client.SetBearerToken(TEXT("B-token"));
+            if (Row.Action==EAction::Cancel && Row.Hold!=EHold::Commit)
+            {
+                if (!TestTrue(TEXT("public canceled before worker release"),Rig.Wait(Reply))) return false;
+                TestEqual(TEXT("one canceled CHAIN before worker release"),Probe->Count(Handle.GetId(),EVaRestTransportFailure::Canceled),1);
+            }
+            if (Row.Action==EAction::Deadline && !TestTrue(TEXT("deadline completed before worker release"),Rig.Wait(Reply))) return false;
+            if (Row.Action==EAction::Shutdown)
+            {
+                State->CancelAll(NAME_None,EVaRestCancelReason::Shutdown);State->Queue->StopForShutdown();Gate->Released=true;Runtime->Stop();
+                TestEqual(TEXT("shutdown internal accounting settled"),State->NumInFlight(),0);TestTrue(TEXT("shutdown handle terminal"),Capture->IsDone());
+                TestEqual(TEXT("shutdown silent public outcome"),Reply->CompleteCalls.load(),0);TestEqual(TEXT("shutdown silent queued event"),*Ack,0);
+                TestEqual(TEXT("no shutdown global wrapper"),State->PendingApiCompletionWrappers,0);
+                Runtime.Reset(); // restore normal executor only after all owned-stop assertions
+            }
+            else
+            {
+                if (Row.Hold==EHold::Read && (Row.Action==EAction::Clear || Row.Action==EAction::Session)) Rig.Fake->Enqueue(FVaRestFakeResponse::Text(200,TEXT("new-wire")));
+                Gate->Released=true;if (!TestTrue(TEXT("row drained"),Rig.Drain())) return false;
+                TestEqual(TEXT("one final outer outcome"),Probe->Total(Handle.GetId()),1);
+                if (Row.Hold==EHold::Commit) {TestEqual(TEXT("commit acknowledged once"),*Ack,1);TestEqual(TEXT("no ordinary queued result"),Reply->CompleteCalls.load(),0);}
+                else
+                {
+                    TestEqual(TEXT("ordinary completion once"),Reply->CompleteCalls.load(),1);TestEqual(TEXT("expected terminal kind"),Reply->Error.Kind,Row.Error);
+                    if (Row.Error==EVaRestErrorKind::None)
+                    {
+                        if (!TestTrue(TEXT("wire body available"),Reply->Value.IsSet())) return false;
+                        TestEqual(TEXT("new identity/generation bytes"),Reply->Value.GetValue(),FString(TEXT("new-wire")));TestFalse(TEXT("old cache never reused"),Reply->Response.bFromCache);
+                    }
+                }
+            }
+            TestEqual(TEXT("no retained exchange"),State->NumInFlight(),0);
+            if (Row.Hold==EHold::Read)
+            {
+                const bool bNew=Row.Action==EAction::Clear || Row.Action==EAction::Session;
+                TestEqual(TEXT("wire count relative to seed"),Rig.Fake->NumCalls(),bNew?2:1);
+                ReadHooks.Reset();
+                if (bNew)
+                {
+                    // The held request retains its old snapshot: its later wire result may not populate
+                    // the replacement generation/account. Only a new resolved operation can do that.
+                    const auto Files=MakeShared<int32,ESPMode::ThreadSafe>(0);
+                    FString Origin;CanonicalOrigin(State->GetConfig()->BaseUrl,Origin);
+                    const FString Directory=FPaths::Combine(State->GetConfig()->CacheRoot,HashFields(TEXT("VaRest/cache-origin/v1"),TArray<FString>{Origin}));
+                    LaunchPersistence([Directory]{return ListFiles(Directory);},[Files](FIoResult&& R){for (const FString& Name:R.Names) if (Name.EndsWith(TEXT(".json"))) ++*Files;});
+                    if (!TestTrue(TEXT("old snapshot file inspection"),Disk.Drain())) return false;
+                    TestEqual(TEXT("clear removes old generation; account replacement preserves only old account record"),*Files,Row.Action==EAction::Clear?0:1);
+                    Rig.Fake->Enqueue(FVaRestFakeResponse::Text(200,TEXT("new-wire")));
+                    auto Fresh=MakeOutcome<FString>();Observe(Rig.Client.Get<FString>(TEXT("/entry")),Fresh).Send();
+                    if (!TestTrue(TEXT("new resolved operation fills current generation"),Rig.Wait(Fresh)) || !TestTrue(TEXT("current generation persisted"),Rig.Drain())) return false;
+                    TestFalse(TEXT("new identity had no stale record"),Fresh->Response.bFromCache);
+                }
+                auto Again=MakeOutcome<FString>();Observe(Rig.Client.Get<FString>(TEXT("/entry")),Again).Send();
+                if (!TestTrue(TEXT("cache file still readable"),Rig.Wait(Again)) || !TestTrue(TEXT("file control drained"),Rig.Drain())) return false;
+                TestTrue(TEXT("correct retained generation is cached"),Again->Response.bFromCache);
+                if (!TestTrue(TEXT("retained value present"),Again->Value.IsSet())) return false;
+                TestEqual(TEXT("retained file bytes"),Again->Value.GetValue(),FString(bNew?TEXT("new-wire"):TEXT("old-cache")));
+            }
+            else
+            {
+                TestEqual(TEXT("offline no transport"),Rig.Fake->NumCalls(),0);
+                auto Loaded=MakeShared<FQueueLoad,ESPMode::ThreadSafe>();
+                FQueueStore::Load(QueueDirectory(Disk.Root,TEXT("matrix")),TEXT("https://api.test"),{},[Loaded](FQueueLoad&& R){*Loaded=MoveTemp(R);});
+                if (!TestTrue(TEXT("restart cleanup and recovery"),Disk.Drain())) return false;
+                TestTrue(TEXT("actual files recoverable"),Loaded->bOk);TestEqual(TEXT("only successful rename survives"),Loaded->Items.Num(),Row.Hold==EHold::Commit?1:0);
+            }
+        }
+        TestFalse(TEXT("exact barrier never timed out"),Gate->TimedOut.load());
+        if (State) TestEqual(TEXT("all request state released"),State->NumInFlight(),0);
+        TestEqual(TEXT("no game-thread filesystem operations"),PersistenceCounters().OperationsOnGameThread.load(),uint64(0));
     }
     return true;
 }
