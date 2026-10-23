@@ -59,8 +59,10 @@ void VaRest::WebSocket::Lws::FConn::Close(FService& Service, int32 Code, TArray<
 
 int32 VaRest::WebSocket::Lws::FConn::OnWriteable(lws* InWsi)
 {
-	// After our close frame, 0 from every WRITEABLE: LWS then waits for the echo, up to its own 5 s (T20; plan decision 4)
-	if (bCloseSent || State != EConnState::Open)
+	// After our close frame, 0 from every WRITEABLE: LWS then waits for the echo, up to its own 5 s (T20; plan decision 4).
+	// After the peer's close nothing more goes out from VaRest (Task 9 review M2): LWS echoes that close itself
+	// [close.echo_on_return_0], and a data frame or a second close after it would break RFC 6455 5.5.1
+	if (bCloseSent || bPeerClosed || State != EConnState::Open)
 	{
 		return 0;
 	}

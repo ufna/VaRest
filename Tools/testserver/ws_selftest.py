@@ -384,6 +384,33 @@ class ScenarioTest(WsTestBase):
         client = self.connect("/ws/drop?rst=0")
         self.assertEqual(client.sock.recv(1), b"")
 
+    def test_drop_after_the_first_message(self):
+        key = uuid.uuid4().hex
+        client = self.connect("/ws/drop?on_message=1&key=" + key)
+        self.assertTrue(client.accepted)
+        # No drop before a message: a PING is still answered
+        client.send(ws.OP_PING, b"still there?")
+        self.assertEqual(client.message(), ("pong", b"still there?"))
+        client.send(ws.OP_TEXT, b"go")
+        with self.assertRaises(EOFError):
+            client.message()
+        journal = self.ended(key)
+        self.assertEqual([e["ev"] for e in journal["events"] if e["ev"] in ("message", "fin", "rst")], ["message", "fin"])
+        self.assertEqual([e["op"] for e in self.of(journal, "sent")], [ws.OP_PONG])
+        key = uuid.uuid4().hex
+        client = self.connect("/ws/drop?on_message=1&rst=1&key=" + key)
+        client.send(ws.OP_BINARY, b"\x01")
+        with self.assertRaises(ConnectionResetError):
+            client.sock.recv(1)
+        self.assertEqual([e["ev"] for e in self.ended(key)["events"] if e["ev"] in ("message", "fin", "rst")], ["message", "rst"])
+        # The client's close before any message: answered, and nothing is dropped
+        key = uuid.uuid4().hex
+        client = self.connect("/ws/drop?on_message=1&key=" + key)
+        client.close(1000)
+        self.assertEqual(client.message(), ("close", struct.pack("!H", 1000)))
+        self.assertEqual([e["ev"] for e in self.ended(key)["events"] if e["ev"] in ("fin", "rst")], [])
+        self.assertEqual(self.connect("/ws/drop?on_message=2").status, 400)
+
     def test_silent_answers_nothing(self):
         key = uuid.uuid4().hex
         client = self.connect("/ws/silent?key=" + key)
@@ -414,6 +441,23 @@ class ScenarioTest(WsTestBase):
         client.shutdown()
         journal = self.ended(key)
         self.assertLess(self.of(journal, "close")[0]["t"], self.of(journal, "eof")[0]["t"])
+
+    def test_noecho_answers_late_when_asked(self):
+        key = uuid.uuid4().hex
+        client = self.connect("/ws/noecho?echo_after_ms=300&key=" + key)
+        client.send(ws.OP_TEXT, b"x")
+        self.assertEqual(client.message(), ("text", b"x"))
+        sent = time.monotonic()
+        client.close(4000, b"bye")
+        self.assertEqual(client.message(), ("close", struct.pack("!H", 4000)))
+        self.assertGreaterEqual(time.monotonic() - sent, 0.3)
+        client.shutdown()
+        journal = self.ended(key)
+        closes = [e for e in self.of(journal, "sent") if e["op"] == ws.OP_CLOSE]
+        self.assertEqual(len(closes), 1)
+        self.assertGreaterEqual(closes[0]["t"] - self.of(journal, "close")[0]["t"], 0.3)
+        self.assertEqual(self.connect("/ws/noecho?echo_after_ms=%d" % (server.MAX_MS + 1)).status, 400)
+        self.assertEqual(self.connect("/ws/noecho?echo_after_ms=soon").status, 400)
 
     def test_serverping(self):
         key = uuid.uuid4().hex

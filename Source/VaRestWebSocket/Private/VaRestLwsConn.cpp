@@ -12,6 +12,19 @@ namespace VaRest::WebSocket::Lws::VaRestLwsConnPrivate
 	{
 		return Bytes.Num() > 0 ? FString::ConstructFromPtrSize(reinterpret_cast<const UTF8CHAR*>(Bytes.GetData()), Bytes.Num()) : FString();
 	}
+
+	/**
+	 * The Detail of an end that reports the peer's close code, from both OnEnded paths that do (Task 9 review M2). Task 2
+	 * review M-4: a normalised code is named as received -- a number, never the reason, which is payload
+	 */
+	FString PeerCloseDetail(const VaRest::WebSocket::FPeerClose& Received)
+	{
+		if (Received.bCodeNormalised)
+		{
+			return FString::Printf(TEXT("the server sent close code %d, which a peer must not send; reported as %d"), Received.ReceivedCode, Received.Code);
+		}
+		return Received.bMalformed ? FString(TEXT("the server's close payload was one byte; reported as 1002")) : FString();
+	}
 }
 
 VaRest::WebSocket::Lws::FConn::FConn(uint64 InId, TSharedRef<FSocketLink, ESPMode::ThreadSafe> InLink, FVaRestSocketConnectRequest&& InRequest)
@@ -309,28 +322,32 @@ void VaRest::WebSocket::Lws::FConn::OnEnded()
 	{
 		// Our close (spec 2.5): LWS 3.0 raises no callback for the peer's reply [close.ours_sequence], so an end before
 		// CloseTimeout counts as clean (plan decision 4). The peer's own close, crossing ours before it went out, ends it
-		// cleanly too; a close that went out neither way ended unclean. Review conc I-5: an end by LWS's own close-ack timer
-		// -- 5 s after our close frame (T20) -- with no close from the peer is the unanswered close CloseTimeout exists for:
-		// not clean. Above about 5 s LWS's timer ends it before VaRest's deadline; at 5 s both can fire in one lws_service
-		// return, LWS's first. 0.25 s under the 5 s: CloseSentAt is read before LWS writes the frame and arms its timer, which
-		// then ends the close at 5.5 s [close.ours_noecho_wait_ms], on its once-a-second walk (T26)
+		// cleanly too, reported as the peer's; a close that went out neither way ended unclean. Review conc I-5: an end by
+		// LWS's own close-ack timer (T20) with no close from the peer is the unanswered close CloseTimeout exists for: not
+		// clean. Task 9 review M1: that timer ends the connection only more than LwsCloseAckSeconds after it was armed -- it
+		// counts whole seconds from the second it was armed in (the re-arm note in CheckDeadlines), walks once a second
+		// (T26) and expires strictly after them: [close.ours_noecho_wait_ms] measured 5526 ms with 100 ms waits, which a
+		// ">=" expiry could not give -- and it is armed after CloseSentAt is read, when LWS writes the frame. So an end
+		// before LwsCloseAckSeconds is never the timer's and needs no margin: an answer 4.8 s after our close is clean
+		// (Timeout.CloseAnsweredLate). An end at or past it is reported unclean, even an answer that just beat the timer:
+		// VaRest cannot see the reply
 		const double SinceCloseSent = FPlatformTime::Seconds() - CloseSentAt;
-		const bool bAckTimedOut = bCloseSent && !bPeerClosed && SinceCloseSent >= LwsCloseAckSeconds - 0.25;
+		const bool bAckTimedOut = bCloseSent && !bPeerClosed && SinceCloseSent >= LwsCloseAckSeconds;
+		const bool bPeerFirst = !bCloseSent && bPeerClosed;
 		const int32 Code = bCloseSent ? CloseCode : (bPeerClosed ? Peer.Code : 1006);
 		FString Reason = bCloseSent ? Utf8ToString(CloseReason) : (bPeerClosed ? Peer.Reason : FString());
-		// Re-review N-8: worded by what VaRest knows -- an echo arriving just before LWS's timer cannot be seen
-		EndOpen(Code, MoveTemp(Reason), (bCloseSent || bPeerClosed) && !bAckTimedOut, CloseBy, CloseFailure,
-			bAckTimedOut ? FString::Printf(TEXT("the connection ended %.1f s after our close frame, at or past libwebsockets' 5 s close-ack timer"), SinceCloseSent) : FString());
+		// Re-review N-8, Task 9 review M1: worded by what VaRest knows -- it saw no close from the server, and cannot tell
+		// an end by LWS's timer from an answer just before it
+		FString Detail = bAckTimedOut
+			? FString::Printf(TEXT("the connection ended %.1f s after our close frame with no close seen from the server; libwebsockets' close-ack timer ends an unanswered close after 5 s"), SinceCloseSent)
+			: bPeerFirst ? PeerCloseDetail(Peer) : FString();
+		EndOpen(Code, MoveTemp(Reason), (bCloseSent || bPeerClosed) && !bAckTimedOut, CloseBy, CloseFailure, MoveTemp(Detail));
 		return;
 	}
 	if (bPeerClosed)
 	{
-		// The peer's close, echoed (OnPeerClose returned 0). Task 2 review M-4: a normalised code is named as received -- a
-		// number, never the reason, which is payload
-		const FString Detail = Peer.bCodeNormalised
-			? FString::Printf(TEXT("the server sent close code %d, which a peer must not send; reported as %d"), Peer.ReceivedCode, Peer.Code)
-			: Peer.bMalformed ? FString(TEXT("the server's close payload was one byte; reported as 1002")) : FString();
-		EndOpen(Peer.Code, Peer.Reason, true, EVaRestSocketCloseBy::Server, EVaRestSocketFailure::None, Detail);
+		// The peer's close, echoed (OnPeerClose returned 0)
+		EndOpen(Peer.Code, Peer.Reason, true, EVaRestSocketCloseBy::Server, EVaRestSocketFailure::None, PeerCloseDetail(Peer));
 		return;
 	}
 	// An end without a close frame (spec 2.5): FIN and RST both give CLIENT_CLOSED [close.drop_reports_client_closed]

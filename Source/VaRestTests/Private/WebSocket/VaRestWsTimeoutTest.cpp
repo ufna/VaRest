@@ -119,6 +119,49 @@ bool FVaRestWsTimeoutCloseAckTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestWsTimeoutCloseAnsweredLateTest, "VaRest.Integration.WebSocket.Transport.Timeout.CloseAnsweredLate", VAREST_WS_TEST_FLAGS)
+
+bool FVaRestWsTimeoutCloseAnsweredLateTest::RunTest(const FString& Parameters)
+{
+	VAREST_WS_BEGIN();
+	// Task 9 review M1: LWS's close-ack timer ends an unanswered close only more than 5 s after it was armed, and it is armed
+	// after VaRest reads CloseSentAt -- so a close the server answers 4.8 s after ours is an answered close, ended by the
+	// answer: clean, no Detail. A margin under 5 s would misread it (Task 9's 0.25 s did, from 4.75 s)
+	for (const FScheme& Scheme : Schemes(Site))
+	{
+		const FString Key = NewKey();
+		FVaRestSocketConnectRequest Req = Request(Scheme, TEXT("/ws/noecho?echo_after_ms=4800&key=") + Key);
+		Req.CloseTimeout = 8.0;
+		FEvents Events(Transport->Connect(MoveTemp(Req)));
+		if (!TestTrue(FString::Printf(TEXT("%s: opened"), Scheme.Name), Events.WaitType(EVaRestSocketEventType::Open)))
+		{
+			Events.WaitEnd();
+			continue;
+		}
+		const double ClosedAt = FPlatformTime::Seconds();
+		Events.Connection->Close(4000, TEXT("bye"));
+		TestTrue(FString::Printf(TEXT("%s: ended"), Scheme.Name), Events.WaitEnd(12.0));
+		const FVaRestSocketEvent* End = Events.GetEnd();
+		if (!TestNotNull(FString::Printf(TEXT("%s: a terminal event"), Scheme.Name), End))
+		{
+			continue;
+		}
+		const double Took = End->Time - ClosedAt;
+		// The harness: the answer came 4.8 s after the server read our close, inside the 4.75-5.0 s window this row is about.
+		// Past 5 s an end is no longer told apart from LWS's timer, and this row would say nothing
+		TestTrue(FString::Printf(TEXT("%s: ended by the server's answer after %.2f s (4.8 s asked)"), Scheme.Name, Took), Took >= 4.75 && Took < 5.0);
+		TestTrue(FString::Printf(TEXT("%s: Closed 4000 by the client, clean, no Detail (%s)"), Scheme.Name, *Events.Describe()),
+			End->Type == EVaRestSocketEventType::Closed && End->End.By == EVaRestSocketCloseBy::Client && End->End.Code == 4000 && End->End.bWasClean
+			&& End->End.Detail.IsEmpty());
+		const FVaRestJson Journal = FetchJournal(*this, Site, Key);
+		TestEqual(FString::Printf(TEXT("%s: the server got our close"), Scheme.Name), JournalCloseCode(Journal), 4000);
+		const TArray<FVaRestJson> Sent = JournalEvents(Journal, TEXT("sent"));
+		TestEqual(FString::Printf(TEXT("%s: the server answered it with one close"), Scheme.Name),
+			Sent.FilterByPredicate([](const FVaRestJson& Each) { return Each[TEXT("op")].AsInt() == 8; }).Num(), 1);
+	}
+	return true;
+}
+
 #undef VAREST_WS_BEGIN
 #undef VAREST_WS_TEST_FLAGS
 

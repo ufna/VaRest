@@ -144,12 +144,27 @@ bool FVaRestWsCloseDropTest::RunTest(const FString& Parameters)
 	{
 		for (const TCHAR* How : { TEXT("0"), TEXT("1") })
 		{
-			// FIN and RST both give CLIENT_CLOSED with no close frame [close.drop_fin_sequence, close.drop_rst_sequence]. 250 ms
-			// after the 101, so the drop meets an open connection: an RST right behind the 101 can discard it unread (seen on
-			// wss: "read failed" before the open, NoUpgradeResponse [hs.no_upgrade_response]); loopback opens in a few ms
-			const TUniquePtr<FEvents> Events = UntilServerEnds(*Transport, Request(Scheme, FString::Printf(TEXT("/ws/drop?after_ms=250&rst=%s&key=%s"), How, *NewKey())));
-			const FVaRestSocketEvent* End = Closed(*Events);
-			TestTrue(FString::Printf(TEXT("%s rst=%s: 1006, by the transport, not clean (%s)"), Scheme.Name, How, *Events->Describe()),
+			// FIN and RST both give CLIENT_CLOSED with no close frame [close.drop_fin_sequence, close.drop_rst_sequence]. The
+			// server drops only after our first message (on_message=1), which goes out after the Open: the drop always meets
+			// an open connection. An RST right behind the 101 can discard it unread (seen on wss: "read failed" before the
+			// open, NoUpgradeResponse [hs.no_upgrade_response]; bead VaRest-81s.1)
+			FEvents Events(Transport->Connect(Request(Scheme, FString::Printf(TEXT("/ws/drop?on_message=1&rst=%s&key=%s"), How, *NewKey()))));
+			const bool bOpened = Events.WaitType(EVaRestSocketEventType::Open);
+			if (!TestTrue(FString::Printf(TEXT("%s rst=%s: opened (%s)"), Scheme.Name, How, *Events.Describe()), bOpened))
+			{
+				Events.WaitEnd();
+				continue;
+			}
+			// Not Visit or a Close of ours: our close racing the drop would be reported as ours (UntilServerEnds' comment)
+			TestTrue(FString::Printf(TEXT("%s rst=%s: the message that ends it is taken"), Scheme.Name, How), Events.Connection->Send(FVaRestSocketFrame::Text(FStringView(TEXT("drop now")))));
+			if (!TestTrue(FString::Printf(TEXT("%s rst=%s: the server ended it"), Scheme.Name, How), Events.WaitEnd()))
+			{
+				Events.Connection->Close(1000, TEXT("the server did not end it"));
+				Events.WaitEnd();
+				continue;
+			}
+			const FVaRestSocketEvent* End = Closed(Events);
+			TestTrue(FString::Printf(TEXT("%s rst=%s: 1006, by the transport, not clean (%s)"), Scheme.Name, How, *Events.Describe()),
 				End && End->End.Code == 1006 && End->End.By == EVaRestSocketCloseBy::Transport && !End->End.bWasClean && End->End.Failure == EVaRestSocketFailure::None);
 		}
 	}

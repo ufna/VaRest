@@ -30,9 +30,13 @@ Routes (GET with Upgrade: websocket):
   /ws/close/<code>|none|onebyte?msg=<text>&reason=<text>
                                    optional text msg, then our close (any code, raw; none: empty payload; onebyte: 03),
                                    then up to CLOSE_WAIT for the client's answer (journaled as "close")
-  /ws/drop?after_ms=&msg=&rst=0|1  optional msg, then TCP ends without a close frame (FIN, or RST with rst=1)
+  /ws/drop?after_ms=&msg=&rst=0|1&on_message=0|1
+                                   optional msg, then TCP ends without a close frame (FIN, or RST with rst=1); with
+                                   on_message=1 only after the client's first data message (PINGs and a close
+                                   answered until then)
   /ws/silent                       answers nothing at all (no PONG, no close echo, no data) until the client ends TCP
-  /ws/noecho                       echo mode, but the client's close is never answered; waits for the client's TCP end
+  /ws/noecho[?echo_after_ms=<ms>]  echo mode, but the client's close is never answered (with echo_after_ms: answered
+                                   that long after it arrived, its code echoed); waits for the client's TCP end
   /ws/serverping?count=&interval_ms=&size=&unsolicited=0|1
                                    PINGs "ping-<i>" (padded to size with "."), then text "pings-done"; unsolicited=1
                                    first sends a PONG nobody asked for; echo mode
@@ -569,12 +573,28 @@ def ws_close(h, match, journal):
     conn.wait_close(CLOSE_WAIT)
 
 
+class StopServing(Exception):
+    """Raised from a serve() callback: leaves the receive loop at once (serve catches only the connection's own ends)"""
+
+
 def ws_drop(h, match, journal):
     after = server.query_int(h, "after_ms", 0, server.MAX_MS) / 1000.0
     rst = server.query_int(h, "rst", 0, 1)
+    on_message = server.query_int(h, "on_message", 0, 1)
     conn = accept(h, journal)
     if "msg" in h.query:
         conn.send_message("text", h.query["msg"][0].encode("utf-8"))
+    if on_message:
+        # The drop meets a connection the client has opened, whatever the timing: it sent a message after its open. Over
+        # TLS an RST right behind the 101 can end the attempt before the client reads the 101 (bead VaRest-81s.1)
+        def stop(connection, kind, data):
+            raise StopServing()
+        try:
+            conn.serve(on_message=stop)
+            # The client ended first (its close, its TCP end): nothing is left to drop
+            return
+        except StopServing:
+            pass
     time.sleep(after)
     if rst:
         # SO_LINGER on with a zero timeout: close() sends RST instead of FIN
@@ -596,9 +616,27 @@ def ws_silent(h, match, journal):
 
 
 def ws_noecho(h, match, journal):
+    # echo_after_ms: a close answered late -- after the client's own close-ack wait began -- instead of never
+    late = server.query_int(h, "echo_after_ms", 0, server.MAX_MS) / 1000.0 if "echo_after_ms" in h.query else None
     conn = accept(h, journal)
-    if echo(conn, echo_close=False) == "close":
-        conn.wait_eof(HOLD)
+    received = {}
+
+    def keep_close(connection, op, fin, payload):
+        if op == OP_CLOSE:
+            received["close"] = payload
+
+    if echo(conn, echo_close=False, on_frame=keep_close) != "close":
+        return
+    if late is not None:
+        time.sleep(late)
+        try:
+            # RFC 6455 5.5.1: the answer echoes the status code
+            conn.send_close(received["close"][:2])
+        except OSError as error:
+            # The client ended TCP before the answer (its own close-ack wait ran out first)
+            journal.add("error", text=repr(error))
+            return
+    conn.wait_eof(HOLD)
 
 
 def ws_serverping(h, match, journal):
