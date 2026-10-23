@@ -59,6 +59,12 @@ bool FVaRestSocketTargetValidTest::RunTest(const FString& Parameters)
 		{ TEXT("ws://example.com?x=1"), TEXT("example.com"), 80, TEXT("example.com"), TEXT("/?x=1"), false, false, TEXT("http://example.com"), TEXT("ws://example.com") },
 		{ TEXT("ws://example.com/\u043F?q=a b"), TEXT("example.com"), 80, TEXT("example.com"), TEXT("/%D0%BF?q=a%20b"), false, false, TEXT("http://example.com"), TEXT("ws://example.com") },
 		{ TEXT("wss+insecure://127.0.0.1:9/"), TEXT("127.0.0.1"), 9, TEXT("127.0.0.1:9"), TEXT("/"), true, true, TEXT("https://127.0.0.1:9"), TEXT("wss://127.0.0.1:9") },
+		{ TEXT("WSS://example.com"), TEXT("example.com"), 443, TEXT("example.com"), TEXT("/"), true, false, TEXT("https://example.com"), TEXT("wss://example.com") },
+		{ TEXT("ws://example.com/a\r\nX"), TEXT("example.com"), 80, TEXT("example.com"), TEXT("/a%0D%0AX"), false, false, TEXT("http://example.com"), TEXT("ws://example.com") },
+		{ TEXT("ws://[::]:1/"), TEXT("::"), 1, TEXT("[::]:1"), TEXT("/"), false, true, TEXT("http://[::]:1"), TEXT("ws://[::]:1") },
+		{ TEXT("ws://[1:2:3:4:5:6:7:8]/"), TEXT("1:2:3:4:5:6:7:8"), 80, TEXT("[1:2:3:4:5:6:7:8]"), TEXT("/"), false, true, TEXT("http://[1:2:3:4:5:6:7:8]"), TEXT("ws://[1:2:3:4:5:6:7:8]") },
+		{ TEXT("ws://[::ffff:1.2.3.4]/"), TEXT("::ffff:1.2.3.4"), 80, TEXT("[::ffff:1.2.3.4]"), TEXT("/"), false, true, TEXT("http://[::ffff:1.2.3.4]"), TEXT("ws://[::ffff:1.2.3.4]") },
+		{ TEXT("ws://[1::1.2.3.4]/"), TEXT("1::1.2.3.4"), 80, TEXT("[1::1.2.3.4]"), TEXT("/"), false, true, TEXT("http://[1::1.2.3.4]"), TEXT("ws://[1::1.2.3.4]") },
 	};
 	for (const FRow& Row : Rows)
 	{
@@ -114,12 +120,38 @@ bool FVaRestSocketTargetInvalidTest::RunTest(const FString& Parameters)
 		TEXT("ws://[::1/"),
 		TEXT("ws://[abc]/"),                // brackets hold IPv6 only
 		TEXT("ws://[::1]x/"),
+		TEXT("ws://::1/"),                  // an IPv6 address needs brackets
+		TEXT("ws://exa\r\nmple.com/"),      // CR/LF in the host
+		TEXT("ws://[:]/"),                  // RFC 4291 shape (review M-1)
+		TEXT("ws://[:::]/"),
+		TEXT("ws://[1.2.3.4:]/"),
+		TEXT("ws://[1::2::3]/"),
+		TEXT("ws://[1:2:3:4:5:6:7]/"),      // too few groups without ::
+		TEXT("ws://[1:2:3:4:5:6:7:8:9]/"),
+		TEXT("ws://[12345::]/"),            // a group of five digits
+		TEXT("ws://[::1.2.3]/"),
+		TEXT("ws://a..b/"),                 // host shape (review M-2)
+		TEXT("ws://.example.com/"),
+		TEXT("ws://example.com./"),
+		TEXT("ws://01.1.1.1/"),             // ambiguous octal/decimal
 	};
 	for (const TCHAR* Url : Refused)
 	{
 		const TValueOrError<FSocketTarget, FTargetError> Made = Prepare(Url);
 		TestTrue(FString::Printf(TEXT("%s is refused as BadUrl"), Url), Made.HasError() && Made.GetError().Failure == EVaRestSocketFailure::BadUrl);
 	}
+	const FString LongLabel = FString::Printf(TEXT("ws://%s.com/"), *FString::ChrN(64, TEXT('a')));
+	TestTrue(TEXT("a 64-character label is refused"), Prepare(*LongLabel).HasError());
+	const FString OkLabel = FString::Printf(TEXT("ws://%s.com/"), *FString::ChrN(63, TEXT('a')));
+	TestTrue(TEXT("a 63-character label is taken"), Prepare(*OkLabel).HasValue());
+	FString LongHost;
+	for (int32 Index = 0; Index < 5; ++Index)
+	{
+		LongHost += FString::ChrN(55, TEXT('a')) + TEXT(".");
+	}
+	LongHost += TEXT("com");
+	const FString TooLong = FString::Printf(TEXT("ws://%s/"), *LongHost);
+	TestTrue(TEXT("a host over 253 characters is refused"), LongHost.Len() > 253 && Prepare(*TooLong).HasError());
 	// Spec 2.2, 15: wss+insecure and bAllowSelfSignedTls do nothing in Shipping
 	TestTrue(TEXT("wss+insecure is refused under Shipping rules"), Prepare(TEXT("wss+insecure://127.0.0.1:9/"), true).HasError());
 	FVaRestSocketConnectRequest SelfSigned;
@@ -173,8 +205,14 @@ bool FVaRestSocketTargetHandshakeTest::RunTest(const FString& Parameters)
 	}
 	Request.Protocols = { TEXT("chat v2") };
 	TestTrue(TEXT("a protocol that is not a token is BadHandshake"), PrepareTarget(Request).HasError());
-	Request.Protocols = { TEXT("x"), TEXT("x") };
-	TestTrue(TEXT("a protocol offered twice is BadHandshake"), PrepareTarget(Request).HasError());
+	Request.Protocols = { TEXT("base64url.bearer.authorization.k8s.io.SECRETTOKEN"), TEXT("base64url.bearer.authorization.k8s.io.SECRETTOKEN") };
+	const TValueOrError<FSocketTarget, FTargetError> Twice = PrepareTarget(Request);
+	TestTrue(TEXT("a protocol offered twice is BadHandshake"), Twice.HasError());
+	if (Twice.HasError())
+	{
+		// The message reaches logs and a subprotocol can carry a bearer token (review I-2)
+		TestFalse(TEXT("... and its message holds no part of the subprotocol"), Twice.GetError().Message.Contains(TEXT("SECRETTOKEN"), ESearchCase::CaseSensitive) || Twice.GetError().Message.Contains(TEXT("bearer"), ESearchCase::CaseSensitive));
+	}
 	Request.Protocols.Reset();
 
 	// Headers (spec 2.2, D23)
@@ -190,6 +228,9 @@ bool FVaRestSocketTargetHandshakeTest::RunTest(const FString& Parameters)
 		{ TEXT("Host"), TEXT("x") },
 		{ TEXT("X-B"), TEXT("a\r\nX-C: b") },                // header injection
 		{ TEXT("X-D"), TEXT("caf\u00E9") },                  // StringCast<ANSICHAR> would mangle it (review item 21)
+		{ TEXT("sec-websocket-foo"), TEXT("x") },            // the whole Sec-WebSocket- prefix (RFC 6455 4.1)
+		{ TEXT("Sec-WebSocket-Origin"), TEXT("x") },
+		{ TEXT("SEC-WEBSOCKET-KEY"), TEXT("x") },
 		{ TEXT("X bad"), TEXT("v") },                        // not a token
 	};
 	for (const TPair<FString, FString>& Header : Bad)
@@ -219,7 +260,7 @@ bool FVaRestSocketTargetAllowlistTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("a listed one is allowed"), IsAllowedByFilter(TEXT("ws://example.com"), &OnlyExample));
 	TestFalse(TEXT("a scheme without a section is refused (plan decision 15)"), IsAllowedByFilter(TEXT("wss://example.com"), &OnlyExample));
 	TestTrue(TEXT("IPv4 literals are recognised"), IsIpv4Literal(TEXT("127.0.0.1")) && IsIpv4Literal(TEXT("0.0.0.0")) && IsIpv4Literal(TEXT("255.255.255.255")));
-	TestFalse(TEXT("... and only they"), IsIpv4Literal(TEXT("256.0.0.1")) || IsIpv4Literal(TEXT("1.2.3")) || IsIpv4Literal(TEXT("1.2.3.4.5"))
+	TestFalse(TEXT("... and only they"), IsIpv4Literal(TEXT("01.1.1.1")) || IsIpv4Literal(TEXT("256.0.0.1")) || IsIpv4Literal(TEXT("1.2.3")) || IsIpv4Literal(TEXT("1.2.3.4.5"))
 		|| IsIpv4Literal(TEXT("a.b.c.d")) || IsIpv4Literal(TEXT("1..2.3")) || IsIpv4Literal(TEXT("1234.1.1.1")));
 	return true;
 }

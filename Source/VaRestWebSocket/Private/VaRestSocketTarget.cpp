@@ -9,8 +9,7 @@
 namespace VaRest::WebSocket::VaRestSocketTargetPrivate
 {
 	/** The headers LWS writes itself (RFC 6455 4.1) or VaRest sets from Origin and Protocols: a duplicate breaks the upgrade */
-	const TCHAR* const ReservedHeaders[] = { TEXT("Host"), TEXT("Upgrade"), TEXT("Connection"), TEXT("Origin"), TEXT("Sec-WebSocket-Key"),
-		TEXT("Sec-WebSocket-Version"), TEXT("Sec-WebSocket-Protocol"), TEXT("Sec-WebSocket-Extensions"), TEXT("Sec-WebSocket-Accept") };
+	const TCHAR* const ReservedHeaders[] = { TEXT("Host"), TEXT("Upgrade"), TEXT("Connection"), TEXT("Origin") };
 
 	TValueOrError<VaRest::WebSocket::FSocketTarget, VaRest::WebSocket::FTargetError> Refuse(EVaRestSocketFailure Failure, FString Message)
 	{
@@ -22,6 +21,82 @@ namespace VaRest::WebSocket::VaRestSocketTargetPrivate
 	{
 		return (C >= TEXT('a') && C <= TEXT('z')) || (C >= TEXT('A') && C <= TEXT('Z')) || (C >= TEXT('0') && C <= TEXT('9'))
 			|| C == TEXT('-') || C == TEXT('.') || C == TEXT('_');
+	}
+
+	/** RFC 4291 2.2: groups of 1-4 hex digits, at most one "::", an optional trailing dotted IPv4 (two groups); 8 groups, or fewer with "::" */
+	bool IsIpv6Literal(const FString& Text)
+	{
+		FString Work = Text;
+		int32 Groups = 0;
+		int32 LastColon = INDEX_NONE;
+		if (Work.FindLastChar(TEXT(':'), LastColon) && Work.Mid(LastColon + 1).Contains(TEXT("."), ESearchCase::CaseSensitive))
+		{
+			if (!VaRest::WebSocket::IsIpv4Literal(Work.Mid(LastColon + 1)))
+			{
+				return false;
+			}
+			Groups = 2;
+			// Keep the colon: "1::1.2.3.4" becomes "1::" and "::1.2.3.4" "::"
+			Work = Work.Left(LastColon + 1);
+			if (!Work.EndsWith(TEXT("::"), ESearchCase::CaseSensitive))
+			{
+				Work.LeftChopInline(1);
+			}
+		}
+		const int32 Compressed = Work.Find(TEXT("::"), ESearchCase::CaseSensitive);
+		if (Compressed != INDEX_NONE && (Work.Find(TEXT("::"), ESearchCase::CaseSensitive, ESearchDir::FromStart, Compressed + 1) != INDEX_NONE))
+		{
+			return false;
+		}
+		const FString Sides[2] = { Compressed == INDEX_NONE ? Work : Work.Left(Compressed), Compressed == INDEX_NONE ? FString() : Work.Mid(Compressed + 2) };
+		for (int32 SideIndex = 0; SideIndex < (Compressed == INDEX_NONE ? 1 : 2); ++SideIndex)
+		{
+			if (Sides[SideIndex].IsEmpty())
+			{
+				if (Compressed == INDEX_NONE)
+				{
+					return false;
+				}
+				continue;
+			}
+			TArray<FString> Parts;
+			Sides[SideIndex].ParseIntoArray(Parts, TEXT(":"), false);
+			for (const FString& Part : Parts)
+			{
+				if (Part.IsEmpty() || Part.Len() > 4)
+				{
+					return false;
+				}
+				for (const TCHAR C : Part)
+				{
+					if (!FChar::IsHexDigit(C))
+					{
+						return false;
+					}
+				}
+				++Groups;
+			}
+		}
+		return Compressed == INDEX_NONE ? Groups == 8 : Groups <= 7;
+	}
+
+	/** Non-empty labels of at most 63 characters, 253 in all (RFC 1035 2.3.4); a trailing dot is refused, since the Host header and TLS name check would carry it */
+	bool IsHostShape(const FString& Host)
+	{
+		if (Host.Len() > 253)
+		{
+			return false;
+		}
+		TArray<FString> Labels;
+		Host.ParseIntoArray(Labels, TEXT("."), false);
+		for (const FString& Label : Labels)
+		{
+			if (Label.IsEmpty() || Label.Len() > 63)
+			{
+				return false;
+			}
+		}
+		return true;
 	}
 
 	bool IsDigits(FStringView Text)
@@ -90,6 +165,11 @@ bool VaRest::WebSocket::IsIpv4Literal(FStringView Host)
 		{
 			return false;
 		}
+		// 01.1.1.1 reads as octal in some stacks and decimal in others: refuse the ambiguity
+		if (Digits == 2 && Value == 0)
+		{
+			return false;
+		}
 		Value = Value * 10 + (C - TEXT('0'));
 		if (Value > 255)
 		{
@@ -155,18 +235,9 @@ TValueOrError<VaRest::WebSocket::FSocketTarget, VaRest::WebSocket::FTargetError>
 			return Refuse(EVaRestSocketFailure::BadUrl, TEXT("an IPv6 host needs [ and ]"));
 		}
 		Out.Host = Authority.Mid(1, CloseBracket - 1);
-		bool bColon = false;
-		for (const TCHAR C : Out.Host)
+		if (!IsIpv6Literal(Out.Host))
 		{
-			if (!(FChar::IsHexDigit(C) || C == TEXT(':') || C == TEXT('.')))
-			{
-				return Refuse(EVaRestSocketFailure::BadUrl, TEXT("an IPv6 host holds only hex digits, ':' and '.'"));
-			}
-			bColon = bColon || C == TEXT(':');
-		}
-		if (!bColon)
-		{
-			return Refuse(EVaRestSocketFailure::BadUrl, TEXT("brackets hold an IPv6 address"));
+			return Refuse(EVaRestSocketFailure::BadUrl, TEXT("brackets hold an IPv6 address (RFC 4291 2.2)"));
 		}
 		Out.bHostIsIp = true;
 		const FString After = Authority.Mid(CloseBracket + 1);
@@ -204,7 +275,21 @@ TValueOrError<VaRest::WebSocket::FSocketTarget, VaRest::WebSocket::FTargetError>
 				return Refuse(EVaRestSocketFailure::BadUrl, TEXT("the host holds a character VaRest does not send (a non-ASCII host needs punycode; spaces and controls are refused)"));
 			}
 		}
+		if (!IsHostShape(Out.Host))
+		{
+			return Refuse(EVaRestSocketFailure::BadUrl, TEXT("the host has an empty or over-long label, or is over 253 characters"));
+		}
 		Out.bHostIsIp = IsIpv4Literal(Out.Host);
+		// Digits and dots that are not a clean IPv4 (01.1.1.1, 1.2.3) are read as numbers by some resolvers (inet_aton): refuse, never resolve them
+		bool bNumeric = true;
+		for (const TCHAR C : Out.Host)
+		{
+			bNumeric = bNumeric && ((C >= TEXT('0') && C <= TEXT('9')) || C == TEXT('.'));
+		}
+		if (bNumeric && !Out.bHostIsIp)
+		{
+			return Refuse(EVaRestSocketFailure::BadUrl, TEXT("a numeric host must be four decimal octets without leading zeros"));
+		}
 	}
 	const int32 DefaultPort = Out.bTls ? 443 : 80;
 	Out.Port = DefaultPort;
@@ -259,7 +344,7 @@ TValueOrError<VaRest::WebSocket::FSocketTarget, VaRest::WebSocket::FTargetError>
 		}
 		if (Offered.ContainsByPredicate([&Protocol](const FString& Each) { return Each.Equals(Protocol, ESearchCase::CaseSensitive); }))
 		{
-			return Refuse(EVaRestSocketFailure::BadHandshake, FString::Printf(TEXT("subprotocol %s is offered twice"), *Protocol));
+			return Refuse(EVaRestSocketFailure::BadHandshake, FString(TEXT("a subprotocol is offered twice")));
 		}
 		Offered.Add(Protocol);
 	}
@@ -270,6 +355,11 @@ TValueOrError<VaRest::WebSocket::FSocketTarget, VaRest::WebSocket::FTargetError>
 		if (!VaRest::Http::IsValidHeaderName(Header.Key))
 		{
 			return Refuse(EVaRestSocketFailure::BadHandshake, TEXT("a header name is not an RFC 7230 token"));
+		}
+		// RFC 6455 4.1 reserves the whole Sec-WebSocket- prefix for the handshake
+		if (Header.Key.StartsWith(TEXT("Sec-WebSocket-"), ESearchCase::IgnoreCase))
+		{
+			return Refuse(EVaRestSocketFailure::BadHandshake, FString::Printf(TEXT("header %s is reserved: the Sec-WebSocket- prefix is the transport's own (set Protocols instead)"), *Header.Key));
 		}
 		for (const TCHAR* Reserved : ReservedHeaders)
 		{
