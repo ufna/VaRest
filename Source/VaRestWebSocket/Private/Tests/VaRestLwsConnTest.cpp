@@ -1,6 +1,7 @@
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 
-// FConn's send bookkeeping without a socket: a connection that never started (no wsi), driven as the handle drives it
+// FConn's send bookkeeping without a socket: a connection that never started (no wsi), driven as the handle drives it; the
+// classification of our close's end (ClassifyOurCloseEnd)
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -86,6 +87,43 @@ bool FVaRestLwsConnSendTest::RunTest(const FString& Parameters)
 			&& Events[0].End.Failure == EVaRestSocketFailure::Canceled && Events[0].End.By == EVaRestSocketCloseBy::Client);
 		TestEqual(TEXT("no Drained after an end, though 50 bytes had passed the mark"), CountType(Events, EVaRestSocketEventType::Drained), 0);
 		TestTrue(TEXT("the link has ended"), Link->bEnded.load());
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestLwsConnCloseAckTest, "VaRest.WebSocket.Lws.Conn.CloseAck",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestLwsConnCloseAckTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::WebSocket::Lws;
+	// Task 10 review M-3: the bound itself, with no server timing. LWS's close-ack timer ends an unanswered close only more
+	// than LwsCloseAckSeconds after our close frame (ClassifyOurCloseEnd's comment), so an end before it is an answer
+	struct FRow
+	{
+		const TCHAR* What;
+		bool bCloseWritten;
+		bool bPeerCloseRead;
+		double Seconds;
+		bool bClean;
+		bool bAckTimedOut;
+	};
+	const FRow Rows[] = {
+		{ TEXT("our close written, the end at 4.99 s: the answer came first"), true, false, 4.99, true, false },
+		{ TEXT("our close written, the end at 5.0 s: LWS's timer, as far as VaRest can tell"), true, false, 5.0, false, true },
+		{ TEXT("our close written, the end at 5.01 s"), true, false, 5.01, false, true },
+		{ TEXT("our close written, the end at 0.01 s"), true, false, 0.01, true, false },
+		{ TEXT("our close written and the peer's close read, at 6 s: answered, never the timer"), true, true, 6.0, true, false },
+		{ TEXT("our close not written, the peer's close read (the crossing)"), false, true, 0.5, true, false },
+		{ TEXT("our close not written, the peer's close read, at 6 s"), false, true, 6.0, true, false },
+		{ TEXT("neither close went out: unclean, not the timer"), false, false, 0.5, false, false },
+		{ TEXT("neither close went out, at 6 s"), false, false, 6.0, false, false },
+	};
+	for (const FRow& Row : Rows)
+	{
+		const FOurCloseEnd Got = ClassifyOurCloseEnd(Row.bCloseWritten, Row.bPeerCloseRead, Row.Seconds);
+		TestTrue(FString::Printf(TEXT("%s: clean is %s"), Row.What, Row.bClean ? TEXT("true") : TEXT("false")), Got.bClean == Row.bClean);
+		TestTrue(FString::Printf(TEXT("%s: the close-ack timer is %s"), Row.What, Row.bAckTimedOut ? TEXT("true") : TEXT("false")), Got.bAckTimedOut == Row.bAckTimedOut);
 	}
 	return true;
 }

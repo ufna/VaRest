@@ -27,6 +27,26 @@ namespace VaRest::WebSocket::Lws::VaRestLwsConnPrivate
 	}
 }
 
+VaRest::WebSocket::Lws::FOurCloseEnd VaRest::WebSocket::Lws::ClassifyOurCloseEnd(bool bCloseWritten, bool bPeerCloseRead, double SinceCloseWritten)
+{
+	// LWS 3.0 raises no callback for the peer's reply to our close [close.ours_sequence], so an end before CloseTimeout counts
+	// as clean (plan decision 4). The peer's own close, crossing ours before it went out, ends it cleanly too; a close that
+	// went out neither way ended unclean. Review conc I-5: an end by LWS's own close-ack timer (T20) with no close from the
+	// peer is the unanswered close CloseTimeout exists for: not clean. Task 9 review M1: that timer ends the connection only
+	// more than LwsCloseAckSeconds after it was armed -- it counts whole seconds of time() from the second it was armed in
+	// (the re-arm note in FConn::CheckDeadlines), walks once a second (T26) and expires strictly after them:
+	// [close.ours_noecho_wait_ms] measured 5526 ms with 100 ms waits, which a ">=" expiry could not give -- and it is armed
+	// after CloseSentAt is read, when LWS writes the frame. So, absent a wall-clock step (LWS counts in time(), CloseSentAt
+	// is monotonic: an NTP step forward could end an unanswered close sooner, reported clean), an end before
+	// LwsCloseAckSeconds is not the timer's and needs no margin: an answer 4.76 s after our close is clean
+	// (Timeout.CloseAnsweredLate, Lws.Conn.CloseAck). An end at or past it is reported unclean, even an answer that just beat
+	// the timer: VaRest cannot see the reply
+	FOurCloseEnd Out;
+	Out.bAckTimedOut = bCloseWritten && !bPeerCloseRead && SinceCloseWritten >= LwsCloseAckSeconds;
+	Out.bClean = (bCloseWritten || bPeerCloseRead) && !Out.bAckTimedOut;
+	return Out;
+}
+
 VaRest::WebSocket::Lws::FConn::FConn(uint64 InId, TSharedRef<FSocketLink, ESPMode::ThreadSafe> InLink, FVaRestSocketConnectRequest&& InRequest)
 	: Id(InId)
 	, Link(MoveTemp(InLink))
@@ -175,6 +195,9 @@ int32 VaRest::WebSocket::Lws::FConn::OnCallback(FService& Service, lws* InWsi, i
 		return OnWriteable(InWsi);
 	case LWS_CALLBACK_WS_PEER_INITIATED_CLOSE:
 		return OnPeerClose(In, Len);
+	case LWS_CALLBACK_WSI_CREATE:
+		OnWsiCreate();
+		return 0;
 	case LWS_CALLBACK_OPENSSL_PERFORM_SERVER_CERT_VERIFICATION:
 		// user is the X509_STORE_CTX, len preverify_ok (libwebsockets.h:1015-1044); the service found this connection by
 		// lws_wsi_user, as the engine does (LwsWebSocketsManager.cpp:447-456)
@@ -208,9 +231,9 @@ int32 VaRest::WebSocket::Lws::FConn::OnAppendHeaders(void* In, size_t Len)
 		// A second APPEND_HANDSHAKE_HEADER in one attempt: LWS followed a 3xx and builds the request to the new target
 		// [hs.redirect_relative, hs.redirect_absolute, hs.redirect_target_visible]. Ruling Q2: nothing is appended -- no auth and
 		// no header reaches another target -- and the attempt fails here, before the second request goes out; LWS then gives no
-		// CONNECTION_ERROR [hs.redirect_veto], so OnEnded reports it (plan decision 10)
-		PendingFailure = EVaRestSocketFailure::Redirect;
-		PendingDetail = TEXT("the server answered the upgrade with a redirect, which VaRest does not follow (ruling Q2)");
+		// CONNECTION_ERROR [hs.redirect_veto], so OnEnded reports it (plan decision 10). OnWsiCreate set the same failure
+		// already; set again here, so this guard stands on its own count and leaves bRedirected to OnWsiCreate
+		SetRedirectFailure();
 		return -1;
 	}
 	if (Target.HeaderBlock.Num() == 0)
@@ -239,11 +262,10 @@ int32 VaRest::WebSocket::Lws::FConn::OnFilterPreEstablish(lws* InWsi)
 		// Review conc I-1: an ended attempt never opens ("HS: Rejected by filter cb")
 		return -1;
 	}
-	if (AppendCalls > 1)
+	if (bRedirected)
 	{
-		// The response to a second request: a second guard behind the APPEND veto ("HS: Rejected by filter cb", hs.redirect_veto)
-		PendingFailure = EVaRestSocketFailure::Redirect;
-		PendingDetail = TEXT("the server answered the upgrade with a redirect, which VaRest does not follow (ruling Q2)");
+		// The response to a redirected request: a second guard behind the APPEND veto ("HS: Rejected by filter cb",
+		// hs.redirect_veto), on OnWsiCreate's signal rather than the APPEND count (Task 10 review M-2)
 		return -1;
 	}
 	// The last point the response headers exist (T6, libwebsockets.h:1301-1307): the subprotocol the server selected (T17)
@@ -286,6 +308,28 @@ int32 VaRest::WebSocket::Lws::FConn::OnEstablished(lws* InWsi)
 		lws_callback_on_writable(InWsi);
 	}
 	return 0;
+}
+
+void VaRest::WebSocket::Lws::FConn::OnWsiCreate()
+{
+	// Task 10 review M-2 [Probe.VaRest.Lws.Handshake.RedirectToClosedPort]: when LWS follows a 3xx, lws_client_reset closes
+	// the socket and calls lws_client_connect_2, which makes a new one and raises WSI_CREATE before its connect() (the
+	// probe's comment cites the archive). The attempt's own WSI_CREATE comes before its first APPEND_HANDSHAKE_HEADER, so
+	// one after it is a redirect's, seen before the redirect's TCP connect: a refused connect or a TLS failure at the new
+	// target ends as Redirect too, a stop row in spec 3.4, never ConnectFailed, which W2 would retry. Not before LWS
+	// resolves the new host, which the new socket's address family comes from: a Location whose name does not resolve is
+	// not seen here (no host of this suite can make a name fail: the TUN proxy resolves every name)
+	if (State != EConnState::Ended && AppendCalls > 0)
+	{
+		bRedirected = true;
+		SetRedirectFailure();
+	}
+}
+
+void VaRest::WebSocket::Lws::FConn::SetRedirectFailure()
+{
+	PendingFailure = EVaRestSocketFailure::Redirect;
+	PendingDetail = TEXT("the server answered the upgrade with a redirect, which VaRest does not follow (ruling Q2)");
 }
 
 void VaRest::WebSocket::Lws::FConn::OnConnectionError(const void* In, size_t Len)
@@ -341,28 +385,18 @@ void VaRest::WebSocket::Lws::FConn::OnEnded()
 	}
 	if (bCloseQueued)
 	{
-		// Our close (spec 2.5): LWS 3.0 raises no callback for the peer's reply [close.ours_sequence], so an end before
-		// CloseTimeout counts as clean (plan decision 4). The peer's own close, crossing ours before it went out, ends it
-		// cleanly too, reported as the peer's; a close that went out neither way ended unclean. Review conc I-5: an end by
-		// LWS's own close-ack timer (T20) with no close from the peer is the unanswered close CloseTimeout exists for: not
-		// clean. Task 9 review M1: that timer ends the connection only more than LwsCloseAckSeconds after it was armed -- it
-		// counts whole seconds from the second it was armed in (the re-arm note in CheckDeadlines), walks once a second
-		// (T26) and expires strictly after them: [close.ours_noecho_wait_ms] measured 5526 ms with 100 ms waits, which a
-		// ">=" expiry could not give -- and it is armed after CloseSentAt is read, when LWS writes the frame. So an end
-		// before LwsCloseAckSeconds is never the timer's and needs no margin: an answer 4.8 s after our close is clean
-		// (Timeout.CloseAnsweredLate). An end at or past it is reported unclean, even an answer that just beat the timer:
-		// VaRest cannot see the reply
+		// Our close (spec 2.5), classified by ClassifyOurCloseEnd, whose comment gives the rules and their bounds
 		const double SinceCloseSent = FPlatformTime::Seconds() - CloseSentAt;
-		const bool bAckTimedOut = bCloseSent && !bPeerClosed && SinceCloseSent >= LwsCloseAckSeconds;
+		const FOurCloseEnd Classified = ClassifyOurCloseEnd(bCloseSent, bPeerClosed, SinceCloseSent);
 		const bool bPeerFirst = !bCloseSent && bPeerClosed;
 		const int32 Code = bCloseSent ? CloseCode : (bPeerClosed ? Peer.Code : 1006);
 		FString Reason = bCloseSent ? Utf8ToString(CloseReason) : (bPeerClosed ? Peer.Reason : FString());
 		// Re-review N-8, Task 9 review M1: worded by what VaRest knows -- it saw no close from the server, and cannot tell
 		// an end by LWS's timer from an answer just before it
-		FString Detail = bAckTimedOut
+		FString Detail = Classified.bAckTimedOut
 			? FString::Printf(TEXT("the connection ended %.1f s after our close frame with no close seen from the server; libwebsockets' close-ack timer ends an unanswered close after 5 s"), SinceCloseSent)
 			: bPeerFirst ? PeerCloseDetail(Peer) : FString();
-		EndOpen(Code, MoveTemp(Reason), (bCloseSent || bPeerClosed) && !bAckTimedOut, CloseBy, CloseFailure, MoveTemp(Detail));
+		EndOpen(Code, MoveTemp(Reason), Classified.bClean, CloseBy, CloseFailure, MoveTemp(Detail));
 		return;
 	}
 	if (bPeerClosed)

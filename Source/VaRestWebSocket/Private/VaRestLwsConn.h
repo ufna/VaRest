@@ -21,6 +21,21 @@ namespace VaRest::WebSocket::Lws
 		Ended
 	};
 
+	/** How the end of a close VaRest started is reported (spec 2.5, plan decision 4, review conc I-5) */
+	struct FOurCloseEnd
+	{
+		bool bClean = false;
+		/** Ended, as far as VaRest can tell, by LWS's own close-ack timer: not clean, and the Detail says so */
+		bool bAckTimedOut = false;
+	};
+
+	/**
+	 * Any thread (pure): the classification FConn::OnEnded applies once our close was queued (Task 10 review M-3).
+	 * bCloseWritten: our close frame went out; bPeerCloseRead: the peer's close was read (PEER_INITIATED_CLOSE);
+	 * SinceCloseWritten: seconds from writing our close frame to the end
+	 */
+	FOurCloseEnd ClassifyOurCloseEnd(bool bCloseWritten, bool bPeerCloseRead, double SinceCloseWritten);
+
 	/**
 	 * One connection (WebSocket spec 2.1-2.5): libwebsockets' userdata for it, owned by the FService from Adopt on. Made and
 	 * prepared on the game thread by FTransport::Connect. From Adopt on every member is the service's: its functions run on
@@ -79,9 +94,17 @@ namespace VaRest::WebSocket::Lws
 		int32 OnWriteable(lws* InWsi);
 		/** PEER_INITIATED_CLOSE: the peer's close read by spec 2.5's rules (ParsePeerClose); 0, so LWS echoes it */
 		int32 OnPeerClose(const void* In, size_t Len);
-		/** PERFORM_SERVER_CERT_VERIFICATION: 0 accepts, 1 refuses (libwebsockets.h:1015-1044) */
+		/**
+		 * PERFORM_SERVER_CERT_VERIFICATION: 0 leaves OpenSSL's verdict standing, 1 refuses the certificate in any case; a
+		 * chain OpenSSL failed is accepted only by clearing its error (X509_STORE_CTX_set_error with X509_V_OK) and returning 0
+		 * (libwebsockets.h:1029-1037)
+		 */
 		int32 OnVerifyServerCertificate(FService& Service, X509_STORE_CTX* Store, int32 PreverifyOk);
 		void OnConnectionError(const void* In, size_t Len);
+		/** WSI_CREATE: one after the attempt's first APPEND_HANDSHAKE_HEADER is LWS following a 3xx (Task 10 review M-2) */
+		void OnWsiCreate();
+		/** The attempt was redirected: Redirect is the failure, whatever ends it (ruling Q2, plan decision 10) */
+		void SetRedirectFailure();
 		/** CLIENT_CLOSED, CLOSED_CLIENT_HTTP, and WSI_DESTROY for what did not end before it */
 		void OnEnded();
 		void OnDestroyed(FService& Service);
@@ -122,6 +145,11 @@ namespace VaRest::WebSocket::Lws
 		bool bTlsCounted = false;
 		double StartedAt = 0.0;
 		int32 AppendCalls = 0;
+		/**
+		 * LWS began following a 3xx: a WSI_CREATE came after the first APPEND_HANDSHAKE_HEADER (OnWsiCreate), and only then.
+		 * FILTER_PRE_ESTABLISH's guard keys on it, the APPEND guard on AppendCalls: two signals (Task 10 review M-2)
+		 */
+		bool bRedirected = false;
 		FString SelectedProtocol;
 		bool bKillIssued = false;
 		double KillAt = 0.0;

@@ -92,7 +92,9 @@ bool FVaRestWsClosePeerOddTest::RunTest(const FString& Parameters)
 			EmptyEnd && EmptyEnd->End.Code == 1005 && EmptyEnd->End.bWasClean && EmptyEnd->End.Reason.IsEmpty());
 		const TUniquePtr<FEvents> One = UntilServerEnds(*Transport, Request(Scheme, TEXT("/ws/close/onebyte?key=") + NewKey()));
 		const FVaRestSocketEvent* OneEnd = Closed(*One);
-		TestTrue(FString::Printf(TEXT("%s: a one-byte close is 1002 (%s)"), Scheme.Name, *One->Describe()), OneEnd && OneEnd->End.Code == 1002);
+		// Task 10 review M-7: the Detail names the malformed payload (PeerCloseDetail's one-byte branch)
+		TestTrue(FString::Printf(TEXT("%s: a one-byte close is 1002, the detail naming it (%s)"), Scheme.Name, *One->Describe()),
+			OneEnd && OneEnd->End.Code == 1002 && OneEnd->End.Detail.Contains(TEXT("one byte"), ESearchCase::CaseSensitive));
 		// Task 2 review M-4: a code normalised to 1005 is named in the Detail, as received -- a number, never the reason.
 		// LWS 3.0 passes codes from 5000 up unchanged (it rewrites only those below 3000, [close.rewritten_codes])
 		for (const int32 Sent : { 5000, 65535 })

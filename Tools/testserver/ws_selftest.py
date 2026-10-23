@@ -223,6 +223,13 @@ class CoreTest(WsTestBase):
         self.assertEqual(self.connect("/ws/status/401").headers["www-authenticate"], "Bearer")
         self.assertEqual(self.connect("/ws/status/101").status, 400)
 
+    def test_status_redirect_codes(self):
+        # Task 10 review M-2: the transport suite asks every redirect status LWS may follow
+        for code in (301, 302, 303, 307, 308):
+            moved = self.connect("/ws/status/%d?location=%s" % (code, urllib.parse.quote("/ws/echo?key=k", safe="")))
+            self.assertEqual((moved.status, moved.headers.get("location"), json.loads(moved.body)),
+                             (code, "/ws/echo?key=k", {"status": code}), code)
+
     def test_handshake_checked(self):
         self.assertEqual(self.connect("/ws/echo", version="12").status, 426)
         self.assertEqual(self.connect("/ws/echo", key="short").status, 400)
