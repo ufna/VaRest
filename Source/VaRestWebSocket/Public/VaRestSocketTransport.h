@@ -97,3 +97,12 @@ public:
 	 */
 	virtual TSharedRef<IVaRestSocketConnection, ESPMode::ThreadSafe> Connect(FVaRestSocketConnectRequest&& Request, TFunction<void()> OnEvents = nullptr) = 0;
 };
+
+namespace VaRest::WebSocket
+{
+	/**
+	 * The process's libwebsockets transport (spec 2.1: one context per process; plan decision 8), made at first use and
+	 * shut down at engine exit; a connect after that ends with Shutdown. Any thread; its Connect is game thread.
+	 */
+	VARESTWEBSOCKET_API TSharedRef<IVaRestSocketTransport, ESPMode::ThreadSafe> GetDefaultTransport();
+}

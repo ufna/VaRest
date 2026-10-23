@@ -116,8 +116,9 @@ set +e
 # --foreground: without it timeout runs the command in a background process group, so a terminal Ctrl-C no longer
 # reaches the editor and the next run refuses to start ("an editor is running"). The command is the editor itself
 # (exec), so --foreground's "children are not timed out" caveat does not apply.
+# No proxy variables until W1b B1 measures LWS 3.0 behind a proxy (review conc M-12): env execs the editor, so the PID file still names it.
 timeout --foreground --kill-after=30 "$TIMEOUT" bash -c 'echo $$ > "$0"; exec "$@"' "$PIDFILE" \
-	"$ENGINE/Engine/Binaries/Linux/UnrealEditor-Cmd" "$PROJECT" \
+	env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY "$ENGINE/Engine/Binaries/Linux/UnrealEditor-Cmd" "$PROJECT" \
 	-ExecCmds="Automation RunTests $FILTER; Quit" \
 	-unattended -nullrhi -nosplash -nopause -abslog="$LOG" ${SERVER_ARGS[@]+"${SERVER_ARGS[@]}"} ${VAREST_EXTRA_ARGS:-} >/dev/null 2>&1
 STATUS=$?
