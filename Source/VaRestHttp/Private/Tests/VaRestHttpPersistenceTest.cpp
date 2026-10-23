@@ -12,6 +12,10 @@
 #include "VaRestPersistenceWait.h"
 #include "VaRestClientState.h"
 #include "VaRestHttpSettings.h"
+#if PLATFORM_LINUX
+#include <unistd.h>
+#include <sys/stat.h>
+#endif
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestPersistenceOrderingTest, "VaRest.Http.Persistence.WorkerOrdering",
                                  EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
@@ -674,5 +678,56 @@ bool FVaRestPersistenceHooksTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("both actual handbacks delivered"), *Seen, 2);
 	TestFalse(TEXT("hook never timed out"), Gate->TimedOut.load());
 	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestPersistenceKnownSymlinkTest,"VaRest.Http.Persistence.KnownSymlinks",
+ EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+bool FVaRestPersistenceKnownSymlinkTest::RunTest(const FString& Parameters)
+{
+#if PLATFORM_LINUX
+    using namespace VaRest::Http;
+    using namespace VaRest::Http::Testing;
+    FScopedPersistenceTest Disk;
+    struct FObserved { bool bFixture=false,bRead=false,bList=false,bWrite=false,bRootRead=false,bUnchanged=false; };
+    const auto Seen=MakeShared<FObserved,ESPMode::ThreadSafe>();
+    const FString Root=FPaths::ConvertRelativePathToFull(Disk.Root);
+    LaunchPersistence([Root,Seen]
+    {
+        IPlatformFile& Platform=FPlatformFileManager::Get().GetPlatformFile();
+        const FString Outside=FPaths::Combine(Root,TEXT("Outside"));
+        const FString Target=FPaths::Combine(Outside,TEXT("target"));
+        const FString Leaf=FPaths::Combine(Root,TEXT("leaf-link"));
+        const FString DirectoryLink=FPaths::Combine(Root,TEXT("directory-link"));
+        ON_SCOPE_EXIT { unlink(TCHAR_TO_UTF8(*Leaf)); unlink(TCHAR_TO_UTF8(*DirectoryLink)); };
+        auto Result=WriteNewFile(Target,TArray<uint8>{1,2,3}); if (!Result.bOk) return Result;
+        struct stat LeafStat,RootStat;
+        Seen->bFixture=symlink(TCHAR_TO_UTF8(*Target),TCHAR_TO_UTF8(*Leaf))==0
+            && symlink(TCHAR_TO_UTF8(*Outside),TCHAR_TO_UTF8(*DirectoryLink))==0
+            && lstat(TCHAR_TO_UTF8(*Leaf),&LeafStat)==0 && S_ISLNK(LeafStat.st_mode)
+            && lstat(TCHAR_TO_UTF8(*DirectoryLink),&RootStat)==0 && S_ISLNK(RootStat.st_mode);
+        if (!Seen->bFixture) return FIoResult();
+        const auto Read=ReadBoundedFile(Leaf,3);
+        Seen->bRead=!Read.bOk && Read.Detail==TEXT("Symlink");
+        const auto RootRead=ReadBoundedFile(FPaths::Combine(DirectoryLink,TEXT("target")),3);
+        Seen->bRootRead=!RootRead.bOk && RootRead.Detail==TEXT("Symlink");
+        const auto Listed=ListFiles(DirectoryLink);
+        const auto Parent=ListFiles(Root);
+        Seen->bList=!Listed.bOk && Listed.Detail==TEXT("Symlink") && Parent.bOk && Parent.Names.IsEmpty();
+        const auto Written=WriteNewFile(FPaths::Combine(DirectoryLink,TEXT("new")),TArray<uint8>{9});
+        Seen->bWrite=!Written.bOk && Written.Detail==TEXT("Symlink") && !Platform.FileExists(*FPaths::Combine(Outside,TEXT("new")));
+        const auto Original=ReadBoundedFile(Target,3);
+        Seen->bUnchanged=Original.bOk && Original.Bytes==TArray<uint8>({1,2,3})
+            && lstat(TCHAR_TO_UTF8(*Leaf),&LeafStat)==0 && S_ISLNK(LeafStat.st_mode);
+        return Original;
+    },[](FIoResult&&){});
+    if (!TestTrue(TEXT("real symlink worker drained"),Disk.Drain())) return false;
+    TestTrue(TEXT("independent lstat fixture witness"),Seen->bFixture);
+    TestTrue(TEXT("leaf read refused"),Seen->bRead);
+    TestTrue(TEXT("linked parent read refused"),Seen->bRootRead);
+    TestTrue(TEXT("linked root refused and leaf skipped in parent listing"),Seen->bList);
+    TestTrue(TEXT("write through linked root refused"),Seen->bWrite);
+    TestTrue(TEXT("outside original and link unchanged"),Seen->bUnchanged);
+#endif
+    return true;
 }
 #endif

@@ -6,6 +6,7 @@
 #include "VaRestHttpLog.h"
 #include "VaRestRedactionPipe.h"
 #include "VaRestPersistence.h"
+#include "VaRestDiskCache.h"
 #include "VaRestTrace.h"
 #include "VaRestTracePoints.h"
 
@@ -30,6 +31,7 @@ public:
 		{
 			VaRest::Http::FClientState::CancelForShutdown();
 			VaRest::Http::StopPersistence();
+			VaRest::Http::FDiskCache::StopControls();
 		});
 		// IN-12: a sink that attaches late learns the live clients and in-flight requests. OnBuildSnapshot and the live-client
 		// registry it walks are leaked singletons (review I-4), so neither runs anything at static destruction.
@@ -41,6 +43,7 @@ public:
 		FVaRestTrace::OnBuildSnapshot().Remove(SnapshotHandle);
 		FCoreDelegates::OnEnginePreExit.Remove(PreExitHandle);
 		VaRest::Http::StopPersistence();
+		VaRest::Http::FDiskCache::StopControls();
 		VaRest::Http::StopRedactionPipe();
 	}
 

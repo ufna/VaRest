@@ -35,6 +35,8 @@ namespace VaRest::Http
 	void ReleasePersistenceCompletion(uint64 Ticket); // GT, idempotent, destroys pending completion on GT
 	void StopPersistence();                           // worker drain + silent internal commit accounting; suppresses user handbacks at pre-exit
 	FIoCounters& PersistenceCounters();
+	/** Worker-only known-link check; Linux needs lstat because UE 5.8 uses stat. */
+	bool IsKnownSymlink(const FString& Path);
 	FIoResult ReadBoundedFile(const FString& Path, int64 MaxBytes);
 	FIoResult WriteNewFile(const FString& Path, TConstArrayView<uint8> Bytes);
 	FIoResult DeleteFile(const FString& Path);

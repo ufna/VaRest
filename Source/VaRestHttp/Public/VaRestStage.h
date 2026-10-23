@@ -34,6 +34,7 @@ struct VARESTHTTP_API FVaRestAttemptOutcome
 	/** With one byte of slack for ParseOwned (spec 2.1); empty when the body went to a file */
 	TArray<uint8> Body;
 	bool bBodyInFile = false;
+	bool bFromCache = false;
 	EVaRestTransportFailure Failure = EVaRestTransportFailure::None;
 	FName FailureDetail;
 	/** A stage's own reason for a failure it made (an auth refresh rejected, no credentials): the error's Message when set */

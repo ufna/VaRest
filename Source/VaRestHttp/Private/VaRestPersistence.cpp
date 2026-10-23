@@ -12,6 +12,10 @@
 #include "Tasks/Pipe.h"
 #include "VaRestDecode.h"
 
+#if PLATFORM_LINUX
+#include <sys/stat.h>
+#endif
+
 namespace VaRest::Http
 {
 	struct FIoContinuation
@@ -420,11 +424,25 @@ namespace VaRest::Http::PersistencePrivate
 		return Result;
 	}
 } // namespace VaRest::Http::PersistencePrivate
+bool VaRest::Http::IsKnownSymlink(const FString& Path)
+{
+    PersistencePrivate::CheckWorker();
+#if PLATFORM_LINUX
+    // UE 5.8 UnixPlatformFile.cpp:1217-1236 uses stat, which follows the link.
+    // lstat identifies the actual leaf. This is not a race-proof openat/nofollow sandbox.
+    struct stat Info;
+    const FString Absolute=FPaths::ConvertRelativePathToFull(Path);
+    if (lstat(TCHAR_TO_UTF8(*Absolute),&Info)==0) return S_ISLNK(Info.st_mode);
+#endif
+    // Unimplemented is not a containment guarantee. Subsequent IO retains its own
+    // missing/access/error result; this helper only reports a positively known link.
+    return FPlatformFileManager::Get().GetPlatformFile().IsSymlink(*Path)==ESymlinkResult::Symlink;
+}
 VaRest::Http::FIoResult VaRest::Http::PersistencePrivate::ReadFile(const FString& Path, int64 MaxBytes, const FFileAdapter& Ops)
 {
 	PersistencePrivate::CheckWorker();
 	IPlatformFile& Platform = FPlatformFileManager::Get().GetPlatformFile();
-	if (Platform.IsSymlink(*Path) == ESymlinkResult::Symlink)
+	if (IsKnownSymlink(Path) || IsKnownSymlink(FPaths::GetPath(Path)))
 		return PersistencePrivate::Failure(TEXT("Symlink"));
 	TUniquePtr<IFileHandle> File(Platform.OpenRead(*Path));
 	if (!File.IsValid())
@@ -443,7 +461,7 @@ VaRest::Http::FIoResult VaRest::Http::PersistencePrivate::WriteFile(const FStrin
 {
 	PersistencePrivate::CheckWorker();
 	IPlatformFile& Platform = FPlatformFileManager::Get().GetPlatformFile();
-	if (Platform.IsSymlink(*FPaths::GetPath(Path)) == ESymlinkResult::Symlink || Platform.IsSymlink(*Path) == ESymlinkResult::Symlink)
+	if (IsKnownSymlink(FPaths::GetPath(Path)) || IsKnownSymlink(Path))
 		return PersistencePrivate::Failure(TEXT("Symlink"));
 	if (Platform.FileExists(*Path) || Platform.DirectoryExists(*Path))
 		return PersistencePrivate::Failure(TEXT("Exists"));
@@ -471,6 +489,8 @@ VaRest::Http::FIoResult VaRest::Http::PersistencePrivate::WriteFile(const FStrin
 VaRest::Http::FIoResult VaRest::Http::DeleteFile(const FString& Path)
 {
 	PersistencePrivate::CheckWorker();
+	if (IsKnownSymlink(Path) || IsKnownSymlink(FPaths::GetPath(Path)))
+		return PersistencePrivate::Failure(TEXT("Symlink"));
 	IPlatformFile& Platform = FPlatformFileManager::Get().GetPlatformFile();
 	FIoResult Result;
 	Result.bOk = !Platform.FileExists(*Path) || Platform.DeleteFile(*Path);
@@ -483,7 +503,7 @@ VaRest::Http::FIoResult VaRest::Http::ListFiles(const FString& Directory)
 	PersistencePrivate::CheckWorker();
 	IPlatformFile& Platform = FPlatformFileManager::Get().GetPlatformFile();
 	FIoResult Result;
-	if (Platform.IsSymlink(*Directory) == ESymlinkResult::Symlink)
+	if (IsKnownSymlink(Directory))
 		return PersistencePrivate::Failure(TEXT("Symlink"));
 	if (!Platform.DirectoryExists(*Directory))
 	{
@@ -500,7 +520,7 @@ VaRest::Http::FIoResult VaRest::Http::ListFiles(const FString& Directory)
 			                              Result.Detail = TEXT("DirectoryLimit");
 			                              return false;
 		                              }
-		                              if (!bDirectory && Platform.IsSymlink(Path) != ESymlinkResult::Symlink)
+		                              if (!bDirectory && !IsKnownSymlink(Path))
 		                              {
 			                              FString Name = FPaths::GetCleanFilename(Path);
 			                              if (Name.Len() > 256 || NameChars + Name.Len() > 524288 || NameBytes + Name.GetAllocatedSize() > 2 * 1024 * 1024)
