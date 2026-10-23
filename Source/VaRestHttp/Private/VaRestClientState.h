@@ -140,8 +140,9 @@ namespace VaRest::Http
 		/**
 		 * SetBearerToken, SetSession, ImportSession: Replaced, or Refreshed with bSameIdentity (plan decision 5); no event when
 		 * nothing changed. Ends a refresh in flight only with a new access token (M4a final review B3).
+		 * IdentityOverride is import-only, fully validated and applied even when tokens are unchanged.
 		 */
-		void SetTokensByGame(const FString& AccessToken, const FString* RefreshToken, double ExpiresInSeconds, double LifetimeSeconds, bool bSameIdentity);
+		void SetTokensByGame(const FString& AccessToken, const FString* RefreshToken, double ExpiresInSeconds, double LifetimeSeconds, bool bSameIdentity, const FGuid* IdentityOverride = nullptr);
 		void SetSessionHeader(FStringView Name, FStringView Value);
 		void RemoveSessionHeader(FStringView Name);
 		/**

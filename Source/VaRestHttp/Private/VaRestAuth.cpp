@@ -2,11 +2,13 @@
 
 #include "VaRestAuth.h"
 
+#include "Containers/UnrealString.h"
 #include "Misc/Base64.h"
 #include "VaRestAuthInternal.h"
 #include "VaRestClientState.h"
 #include "VaRestExchangeState.h"
 #include "VaRestHttpLog.h"
+#include "VaRestIdentity.h"
 #include "VaRestUrl.h"
 
 FVaRestAuthRefreshResult FVaRestAuthRefreshResult::Refreshed(FString InAccessToken, FString InRefreshToken, double InExpiresInSeconds)
@@ -59,6 +61,14 @@ namespace VaRest::Http::AuthPrivate
 	public:
 		virtual FName GetAuthName() const override { return TEXT("Bearer"); }
 
+		virtual bool GetIdentity(const FVaRestSessionData& Session, FString& OutIdentity) const override
+		{
+			OutIdentity.Reset();
+			if (!Session.HasAccessToken() && !Session.HasRefreshToken()) return false;
+			OutIdentity = VaRest::Http::SessionScope(Session);
+			return true;
+		}
+
 		virtual bool Apply(FVaRestAuthTarget& Target) const override
 		{
 			if (!Target.Session.HasAccessToken())
@@ -82,6 +92,16 @@ namespace VaRest::Http::AuthPrivate
 		}
 
 		virtual FName GetAuthName() const override { return TEXT("ApiKey"); }
+
+		virtual bool GetIdentity(const FVaRestSessionData& Session, FString& OutIdentity) const override
+		{
+			OutIdentity.Reset();
+			if (!ConfigError.IsEmpty()) return false;
+			OutIdentity = VaRest::Http::HashFields(TEXT("VaRest/apikey/v1"), TArray<FString>{
+				LexToString(static_cast<uint8>(Placement)),
+				Placement == EVaRestApiKeyPlacement::Header ? Name.ToLower() : Name, Key});
+			return true;
+		}
 
 		virtual FString GetConfigError() const override { return ConfigError; }
 
@@ -135,6 +155,14 @@ namespace VaRest::Http::AuthPrivate
 		}
 
 		virtual FName GetAuthName() const override { return TEXT("Basic"); }
+
+		virtual bool GetIdentity(const FVaRestSessionData& Session, FString& OutIdentity) const override
+		{
+			OutIdentity.Reset();
+			if (!ConfigError.IsEmpty()) return false;
+			OutIdentity = VaRest::Http::HashFields(TEXT("VaRest/basic/v1"), TArray<FString>{Credential});
+			return true;
+		}
 
 		virtual FString GetConfigError() const override { return ConfigError; }
 

@@ -5,6 +5,7 @@
 #include "VaRestBody.h"
 #include "VaRestClientState.h"
 #include "VaRestHttpLog.h"
+#include "VaRestIdentity.h"
 #include "VaRestUrl.h"
 
 namespace VaRest::Http::BearerRefreshPrivate
@@ -176,6 +177,14 @@ namespace VaRest::Http::BearerRefreshPrivate
 		}
 
 		virtual FName GetAuthName() const override { return TEXT("BearerRefresh"); }
+
+		virtual bool GetIdentity(const FVaRestSessionData& Session, FString& OutIdentity) const override
+		{
+			OutIdentity.Reset();
+			if (!Session.HasAccessToken() && !Session.HasRefreshToken()) return false;
+			OutIdentity = VaRest::Http::SessionScope(Session);
+			return true;
+		}
 
 		virtual FString GetConfigError() const override { return ConfigError; }
 

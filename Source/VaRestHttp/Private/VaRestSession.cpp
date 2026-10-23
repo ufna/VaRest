@@ -5,6 +5,7 @@
 #include "Tasks/Task.h"
 #include "VaRestAuth.h"
 #include "VaRestClientState.h"
+#include "VaRestIdentity.h"
 #include "VaRestTrace.h"
 #include "VaRestTracePoints.h"
 
@@ -222,12 +223,15 @@ void VaRest::Http::FClientState::AnnounceSession(EVaRestSessionChange Change, ui
 	Event.Text = Text;
 }
 
-void VaRest::Http::FClientState::SetTokensByGame(const FString& AccessToken, const FString* RefreshToken, double ExpiresInSeconds, double LifetimeSeconds, bool bSameIdentity)
+void VaRest::Http::FClientState::SetTokensByGame(const FString& AccessToken, const FString* RefreshToken, double ExpiresInSeconds, double LifetimeSeconds, bool bSameIdentity, const FGuid* IdentityOverride)
 {
 	const uint32 CredentialsBefore = Session.Data.CredentialGeneration;
 	const bool bNewRefreshToken = RefreshToken && !Session.Data.RefreshToken.Equals(*RefreshToken, ESearchCase::CaseSensitive);
+	// Import selected this only after validating every existing field, even when tokens are unchanged.
+	if (IdentityOverride) Session.Data.IdentityId = *IdentityOverride;
 	if (UpdateTokens(AccessToken, RefreshToken, ExpiresInSeconds, LifetimeSeconds))
 	{
+		if (!IdentityOverride && !bSameIdentity) Session.Data.IdentityId = FGuid::NewGuid();
 		if (!AccessToken.IsEmpty() && Session.Data.CredentialGeneration != CredentialsBefore)
 		{
 			// Plan decision 3: the game's credentials end a refresh in flight -- its waiters go on with them (Ready), and the
@@ -329,6 +333,7 @@ void VaRest::Http::FClientState::ExpireSessionNow(uint64 CauseRequestId, FString
 		// M4a final review B3: the access token's value changes only when there was one
 		++Data.CredentialGeneration;
 	}
+	Data.IdentityId = FGuid::NewGuid();
 	Data.AccessToken.Reset();
 	Data.RefreshToken.Reset();
 	Data.ExpiresAt = 0.0;
@@ -364,6 +369,8 @@ FString VaRest::Http::FClientState::ExportSession() const
 		Headers.Add(FVaRestJson::Object().Set(TEXT("name"), Pair.Key).Set(TEXT("value"), Pair.Value));
 	}
 	Root.Set(TEXT("headers"), Headers);
+	Root.Set(TEXT("cacheIdentity"), Data.IdentityId.ToString(EGuidFormats::DigitsLower));
+	Root.Set(TEXT("cacheBinding"), SessionBinding(Data));
 	return Root.ToString();
 }
 
@@ -439,6 +446,27 @@ bool VaRest::Http::FClientState::ImportSession(FStringView InJson, bool bSameIde
 		}
 		Headers.Set(Name, Value);
 	}
+	// An unkeyed binding detects mixed exports; it does not authenticate caller-owned credentials.
+	const bool bLiveIdentity = Session.Data.HasAccessToken() || Session.Data.HasRefreshToken()
+		|| !Session.Data.Headers.IsEmpty();
+	FVaRestSessionData Candidate;
+	Candidate.AccessToken = Access;
+	Candidate.RefreshToken = Refresh;
+	Candidate.Headers = Headers;
+	FGuid ImportedIdentity;
+	const FVaRestJson IdentityNode = Root[TEXT("cacheIdentity")];
+	const FVaRestJson BindingNode = Root[TEXT("cacheBinding")];
+	const FString IdentityText = IdentityNode.IsString() ? IdentityNode.AsString() : FString();
+	const FString BindingText = BindingNode.IsString() ? BindingNode.AsString() : FString();
+	bool bValidBinding = false;
+	if (IdentityText.Len() == 32 && FGuid::ParseExact(IdentityText, EGuidFormats::Digits, ImportedIdentity)
+		&& ImportedIdentity.IsValid() && BindingText.Len() == 64)
+	{
+		Candidate.IdentityId = ImportedIdentity;
+		bValidBinding = SessionBinding(Candidate).Equals(BindingText, ESearchCase::CaseSensitive);
+	}
+	const FGuid ChosenIdentity = bSameIdentity && bLiveIdentity ? Session.Data.IdentityId
+		: bValidBinding ? ImportedIdentity : FGuid::NewGuid();
 	if (Access.IsEmpty() && Refresh.IsEmpty())
 	{
 		// Controller ruling (Task 13), consistent with review M-4: a session with no token is a logout, not a login --
@@ -469,7 +497,7 @@ bool VaRest::Http::FClientState::ImportSession(FStringView InJson, bool bSameIde
 		SetSecrets(Retired);
 	}
 	// Re-review N-10: the time left is not the token's lifetime -- unknown, so BearerRefresh's configured lead applies
-	SetTokensByGame(Access, &Refresh, ExpiresIn, 0.0, bSameIdentity);
+	SetTokensByGame(Access, &Refresh, ExpiresIn, 0.0, bSameIdentity, &ChosenIdentity);
 	return true;
 }
 

@@ -172,6 +172,16 @@ public:
 	 */
 	virtual FString GetConfigError() const { return FString(); }
 
+	/**
+	 * Pure game-thread identity query; never calls Apply. Return an opaque account identity stable across refresh,
+	 * changing on account replacement. False (the custom-auth default) bypasses cache and refuses durable queueing.
+	 */
+	virtual bool GetIdentity(const FVaRestSessionData& Session, FString& OutIdentity) const
+	{
+		OutIdentity.Reset();
+		return false;
+	}
+
 	/** Refresh() can get new credentials for this session (a refresh token is there). Asked only while GetConfigError() is empty. */
 	virtual bool CanRefresh(const FVaRestSessionData& Session) const { return false; }
 

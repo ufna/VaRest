@@ -107,6 +107,8 @@ struct VARESTHTTP_API FVaRestBearerRefreshConfig
 /** Spec 4.2: a client's session, as FVaRestClient::GetSession copies it out. Game thread. */
 struct FVaRestSessionData
 {
+	/** Opaque account identity, independent of token generations; refresh preserves it. Not a credential. */
+	FGuid IdentityId = FGuid::NewGuid();
 	FString AccessToken;
 	FString RefreshToken;
 	/** Client-clock seconds (IVaRestClock) when the access token expires; 0 = unknown */
