@@ -17,11 +17,11 @@ namespace VaRest::WsTest::VaRestWsRedirectTestPrivate
 	using VaRest::WebSocket::Testing::ILwsTestTransport;
 
 	/**
-	 * /ws/status/<Status> to Location, with an Authorization header; checks the attempt failed Redirect and, when TargetKey is
+	 * Game thread: /ws/status/<Status> to Location, with an Authorization header; checks the attempt failed Redirect and, when TargetKey is
 	 * given, that the target saw nothing
 	 */
 	void ExpectRefused(FAutomationTestBase& Test, ILwsTestTransport& Transport, const FSite& Site, const FScheme& Scheme, int32 Status, const FString& Location,
-		const FString& TargetKey, const TCHAR* What)
+		const FString& TargetKey, const TCHAR* What, bool bExpectTlsVeto = false)
 	{
 		const FString Key = NewKey();
 		FVaRestSocketConnectRequest Req = Request(Scheme, FString::Printf(TEXT("/ws/status/%d?location=%s&key=%s"), Status, *VaRest::Http::PercentEncode(Location), *Key));
@@ -30,6 +30,11 @@ namespace VaRest::WsTest::VaRestWsRedirectTestPrivate
 		const FVaRestSocketEvent* End = Events->GetEnd();
 		Test.TestTrue(FString::Printf(TEXT("%s %s: Error Redirect, status 0 (plan decision 10) (%s)"), Scheme.Name, What, *Events->Describe()),
 			End && End->Type == EVaRestSocketEventType::Error && End->End.Failure == EVaRestSocketFailure::Redirect && End->End.HttpStatus == 0);
+		if (bExpectTlsVeto)
+		{
+			Test.TestTrue(FString::Printf(TEXT("%s %s: refused at the redirect TLS handshake (%s)"), Scheme.Name, What, *Events->Describe()),
+				End && End->End.Detail.Contains(TEXT("refused at the redirect TLS handshake"), ESearchCase::CaseSensitive));
+		}
 		Test.TestEqual(FString::Printf(TEXT("%s %s: the %d was asked once"), Scheme.Name, What, Status), FetchJournal(Test, Site, Key)[TEXT("connections")].AsInt(), 1);
 		if (!TargetKey.IsEmpty())
 		{
@@ -57,14 +62,14 @@ bool FVaRestWsRedirectSameServerTest::RunTest(const FString& Parameters)
 	VAREST_WS_BEGIN();
 	for (const FScheme& Scheme : Schemes(Site))
 	{
-		// hs.redirect_relative: LWS follows a relative Location on its own; the second APPEND_HANDSHAKE_HEADER is refused
+		// hs.redirect_relative: LWS follows a relative Location on its own; refused at TLS verification for wss, the second APPEND for ws
 		const FString Relative = NewKey();
-		ExpectRefused(*this, *Transport, Site, Scheme, 302, TEXT("/ws/echo?key=") + Relative, Relative, TEXT("relative"));
+		ExpectRefused(*this, *Transport, Site, Scheme, 302, TEXT("/ws/echo?key=") + Relative, Relative, TEXT("relative"), Scheme.bTls);
 		// hs.redirect_absolute: the same server by absolute URL. By IP: LWS resolves a Location's host itself, and localhost is ::1
 		// first here (plan decision 19), so a name would fail the TCP connect before the redirect could be seen
 		const FString Absolute = NewKey();
 		ExpectRefused(*this, *Transport, Site, Scheme, 302, FString::Printf(TEXT("%s://%s:%d/ws/echo?key=%s"), Scheme.bTls ? TEXT("wss") : TEXT("ws"), *Site.Host,
-			Scheme.bTls ? Site.TlsPort : Site.Port, *Absolute), Absolute, TEXT("absolute"));
+			Scheme.bTls ? Site.TlsPort : Site.Port, *Absolute), Absolute, TEXT("absolute"), Scheme.bTls);
 	}
 	return true;
 }
@@ -77,7 +82,7 @@ bool FVaRestWsRedirectSchemeTest::RunTest(const FString& Parameters)
 	const TArray<FScheme> Both = Schemes(Site);
 	// hs.redirect_to_tls: ws -> wss to another port (by IP, as W0 did); refused at the certificate check of a ws:// attempt
 	const FString ToTls = NewKey();
-	ExpectRefused(*this, *Transport, Site, Both[0], 302, FString::Printf(TEXT("wss://%s:%d/ws/echo?key=%s"), *Site.Host, Site.TlsPort, *ToTls), ToTls, TEXT("to wss"));
+	ExpectRefused(*this, *Transport, Site, Both[0], 302, FString::Printf(TEXT("wss://%s:%d/ws/echo?key=%s"), *Site.Host, Site.TlsPort, *ToTls), ToTls, TEXT("to wss"), true);
 	// hs.redirect_downgrade: wss -> ws, which LWS refuses itself ("HS: Redirect attempted SSL downgrade")
 	const FString Down = NewKey();
 	ExpectRefused(*this, *Transport, Site, Both[1], 302, FString::Printf(TEXT("ws://%s:%d/ws/echo?key=%s"), *Site.Host, Site.Port, *Down), Down, TEXT("downgrade"));

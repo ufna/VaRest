@@ -94,6 +94,9 @@ namespace VaRest::WebSocket::Testing
 		FScopedTlsHandshakeInFlight(const FScopedTlsHandshakeInFlight&) = delete;
 		FScopedTlsHandshakeInFlight& operator=(const FScopedTlsHandshakeInFlight&) = delete;
 	};
+
+	/** Any thread: the first certificate in Pem has Ip in its iPAddress SAN entries (the check VaRest-sjj's decision adds) */
+	VARESTWEBSOCKET_API bool CertificateMatchesIp(TConstArrayView<uint8> Pem, FStringView Ip);
 }
 
 #endif // WITH_DEV_AUTOMATION_TESTS

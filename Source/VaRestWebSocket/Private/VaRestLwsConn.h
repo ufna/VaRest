@@ -10,6 +10,18 @@
 
 namespace VaRest::WebSocket::Lws
 {
+	/** Any thread: Ip (no brackets) is one of Certificate's iPAddress SAN entries (VaRest-sjj, plan decision 9) */
+	bool CertificateMatchesIp(X509* Certificate, const FString& Ip);
+
+	/**
+	 * Any thread: VaRest's verdict on one certificate check of a wss attempt (plan decisions 9, 24; ruling Q3), in LWS's
+	 * convention for PERFORM_SERVER_CERT_VERIFICATION (libwebsockets.h:1028-1035): 0 accepts -- with the store's error reset
+	 * to X509_V_OK when VaRest overrules OpenSSL -- and 1 refuses, OutDetail then naming why. Certificates null (tests): no pin
+	 * check. FConn::OnVerifyServerCertificate calls it after its redirect guard; a unit test calls it from OpenSSL's own
+	 * verify callback (review spec I-5)
+	 */
+	int32 EvaluateServerCertificate(const FSocketTarget& Target, ISslCertificateManager* Certificates, X509_STORE_CTX* Store, int32 PreverifyOk, FString& OutDetail);
+
 	enum class EConnState : uint8
 	{
 		/** Made on the game thread; Start has not run */

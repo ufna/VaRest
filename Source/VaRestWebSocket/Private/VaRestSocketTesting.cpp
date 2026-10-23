@@ -5,7 +5,7 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "Misc/Paths.h"
-#include "VaRestLwsInclude.h"
+#include "VaRestLwsConn.h"
 #include "VaRestLwsTransport.h"
 
 #if PLATFORM_LINUX
@@ -108,6 +108,26 @@ VaRest::WebSocket::Testing::FScopedTlsHandshakeInFlight::FScopedTlsHandshakeInFl
 VaRest::WebSocket::Testing::FScopedTlsHandshakeInFlight::~FScopedTlsHandshakeInFlight()
 {
 	VaRest::WebSocket::Lws::TlsHandshakesInFlight().fetch_sub(1);
+}
+
+bool VaRest::WebSocket::Testing::CertificateMatchesIp(TConstArrayView<uint8> Pem, FStringView Ip)
+{
+	if (Pem.Num() == 0)
+	{
+		return false;
+	}
+	BIO* Bio = BIO_new_mem_buf(Pem.GetData(), Pem.Num());
+	if (!Bio)
+	{
+		return false;
+	}
+	X509* Certificate = PEM_read_bio_X509(Bio, nullptr, nullptr, nullptr);
+	BIO_free(Bio);
+	ERR_clear_error();
+	const bool bMatch = VaRest::WebSocket::Lws::CertificateMatchesIp(Certificate, FString(Ip));
+	// X509_free takes null
+	X509_free(Certificate);
+	return bMatch;
 }
 
 #endif // WITH_DEV_AUTOMATION_TESTS

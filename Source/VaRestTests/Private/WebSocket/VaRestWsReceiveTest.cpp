@@ -183,6 +183,44 @@ bool FVaRestWsReceiveInvalidTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestWsReceiveLimitsTest, "VaRest.Integration.WebSocket.Transport.Receive.Limits", VAREST_WS_TEST_FLAGS)
+
+bool FVaRestWsReceiveLimitsTest::RunTest(const FString& Parameters)
+{
+	VAREST_WS_BEGIN();
+	for (const FScheme& Scheme : Schemes(Site))
+	{
+		for (const int32 Size : { 65536, 65537 })
+		{
+			const FString Key = NewKey();
+			FVaRestSocketConnectRequest Limited;
+			Limited.MaxMessageBytes = 65536;
+			const TUniquePtr<FEvents> Events = Receive(*this, *Transport, Scheme,
+				FString::Printf(TEXT("/ws/large?bytes=%d&ascii=1&key=%s"), Size, *Key), 1, MoveTemp(Limited));
+			const FVaRestJson Journal = FetchJournal(*this, Site, Key);
+			if (Size == 65536)
+			{
+				SameAsSent(*this, *FString::Printf(TEXT("%s: exactly at the 65536-byte limit"), Scheme.Name), *Events, Journal, EVaRestSocketFrameKind::Text);
+				const TArray<const FVaRestSocketEvent*> Messages = Events->GetMessages();
+				if (TestEqual(TEXT("one message at the exact limit"), Messages.Num(), 1))
+				{
+					TestEqual(TEXT("exactly 65536 bytes delivered"), Messages[0]->Bytes.Num(), 65536);
+				}
+			}
+			else
+			{
+				const FVaRestSocketEvent* End = Events->GetEnd();
+				TestEqual(FString::Printf(TEXT("%s: 65537 bytes deliver no message"), Scheme.Name), Events->Count(EVaRestSocketEventType::Message), 0);
+				TestTrue(FString::Printf(TEXT("%s: one byte over the limit closes 1009 / MessageTooBig (%s)"), Scheme.Name, *Events->Describe()),
+					End && End->Type == EVaRestSocketEventType::Closed && End->End.Code == 1009
+					&& End->End.By == EVaRestSocketCloseBy::Transport && End->End.Failure == EVaRestSocketFailure::MessageTooBig);
+				TestEqual(FString::Printf(TEXT("%s: the server got our 1009"), Scheme.Name), JournalCloseCode(Journal), 1009);
+			}
+		}
+	}
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestWsReceiveEchoTest, "VaRest.Integration.WebSocket.Transport.Receive.Echo", VAREST_WS_TEST_FLAGS)
 
 bool FVaRestWsReceiveEchoTest::RunTest(const FString& Parameters)
@@ -202,13 +240,17 @@ bool FVaRestWsReceiveEchoTest::RunTest(const FString& Parameters)
 		Events.Connection->Send(FVaRestSocketFrame::Text(FStringView(TEXT("hello"))));
 		Events.Connection->Send(FVaRestSocketFrame::Binary(Raw));
 		Events.Connection->Send(FVaRestSocketFrame::Text(FStringView(Long)));
-		const bool bAll = Events.WaitMessages(3);
+		Events.Connection->Send(FVaRestSocketFrame::Text(FStringView()));
+		Events.Connection->Send(FVaRestSocketFrame::Binary(TConstArrayView<uint8>()));
+		const bool bAll = Events.WaitMessages(5);
 		const TArray<const FVaRestSocketEvent*> Messages = Events.GetMessages();
-		if (TestTrue(FString::Printf(TEXT("%s: three echoes (%s)"), Scheme.Name, *Events.Describe()), bAll && Messages.Num() == 3))
+		if (TestTrue(FString::Printf(TEXT("%s: five ordered echoes (%s)"), Scheme.Name, *Events.Describe()), bAll && Messages.Num() == 5))
 		{
 			TestTrue(FString::Printf(TEXT("%s: the text"), Scheme.Name), Messages[0]->Kind == EVaRestSocketFrameKind::Text && Utf8(Messages[0]->Bytes).Equals(TEXT("hello"), ESearchCase::CaseSensitive));
 			TestTrue(FString::Printf(TEXT("%s: the binary"), Scheme.Name), Messages[1]->Kind == EVaRestSocketFrameKind::Binary && Messages[1]->Bytes == TArray<uint8>(Raw, 3));
 			TestTrue(FString::Printf(TEXT("%s: the 300000 bytes, sent in fragments, back whole"), Scheme.Name), Messages[2]->Bytes.Num() == 300000 && Utf8(Messages[2]->Bytes).Equals(Long, ESearchCase::CaseSensitive));
+			TestTrue(FString::Printf(TEXT("%s: the fourth echo is empty text"), Scheme.Name), Messages[3]->Kind == EVaRestSocketFrameKind::Text && Messages[3]->Bytes.Num() == 0);
+			TestTrue(FString::Printf(TEXT("%s: the fifth echo is empty binary"), Scheme.Name), Messages[4]->Kind == EVaRestSocketFrameKind::Binary && Messages[4]->Bytes.Num() == 0);
 			// Spec 2.3: what is queued and not yet delivered counts; Consumed gives it back
 			TestEqual(FString::Printf(TEXT("%s: pending inbound bytes"), Scheme.Name), Events.Connection->GetPendingInboundBytes(), static_cast<int64>(5 + 3 + 300000));
 			Events.Connection->Consumed(5 + 3 + 300000);
