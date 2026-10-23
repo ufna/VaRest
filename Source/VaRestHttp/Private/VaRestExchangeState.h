@@ -17,6 +17,8 @@ class FVaRestRedactor;
 namespace VaRest::Http
 {
 	struct FPersistenceGuard;
+    class FOfflineQueue;
+    enum class EQueueAdmission : uint8 { Unused, Open, Aborted, Committing, Finished };
 	/**
 	 * M4a final review A1 (VaRest-tqt): one transport dispatch's identity, made by the transport stage at each start and
 	 * carried by its completion guard into FClientState::OnAttemptDone -- a parameter of its own, never a field of
@@ -58,6 +60,14 @@ namespace VaRest::Http
 		FName Tag;
 		EVaRestPriority Priority = EVaRestPriority::Normal;
 		bool bIdempotent = false;
+        bool bQueueWhenOffline = false, bQueueCommitted = false;
+        TUniqueFunction<void(const FString&)> OnQueued;
+        FVaRestTraceQueueReplay QueueReplayOf;
+        FString ReplayIdentityScope, QueueIdentityScope, QueueAnchorOrigin;
+        FVaRestHeaders QueueScopeHeaders;
+        FName QueueTerminalDetail;
+        TSharedPtr<FOfflineQueue, ESPMode::ThreadSafe> Queue;
+        std::atomic<EQueueAdmission> QueueAdmission{EQueueAdmission::Unused};
 		bool bKeepBody = false;
 		bool bOnHttpThread = false;
 		FString SaveTo;
@@ -260,6 +270,17 @@ namespace VaRest::Http
 		std::atomic<bool> bCancelRequested{ false };
 		std::atomic<bool> bDone{ false };
 	};
+
+    inline bool AcceptUserCancel(FExchangeState& Ex)
+    {
+        EQueueAdmission Seen=Ex.QueueAdmission.load(std::memory_order_acquire);
+        for (;;)
+        {
+            if (Seen==EQueueAdmission::Unused || Seen==EQueueAdmission::Aborted) return true;
+            if (Seen==EQueueAdmission::Committing || Seen==EQueueAdmission::Finished) return false;
+            if (Ex.QueueAdmission.compare_exchange_weak(Seen,EQueueAdmission::Aborted,std::memory_order_acq_rel)) return true;
+        }
+    }
 
 	/**
 	 * The one friend of FVaRestExchange. Declared in the public header, defined only here, so only code that includes this

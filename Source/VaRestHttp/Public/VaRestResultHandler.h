@@ -19,6 +19,8 @@ namespace VaRest::Http
 	struct FFinish
 	{
 		FVaRestResponse Response;
+        bool bQueued = false;
+        FString QueueId;
 		/** Kind None: a success so far */
 		FVaRestError Error;
 		/** The response body with its byte of slack; ParseOwned takes it (spec 2.1) */

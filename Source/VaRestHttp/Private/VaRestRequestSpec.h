@@ -11,12 +11,15 @@ namespace VaRest::Http
 	 * The one way VaRestHttp's own code reaches FRequestSpec's fields (bead VaRest-uq3). Declared a friend in the public
 	 * header and defined only here, in a Private header, so a module outside VaRestHttp cannot use it.
 	 */
+    struct FQueueItem;
 	struct FRequestSpecAccess
 	{
 		/** SendRequest's body: the spec into an exchange, the exchange into its client's pipeline (spec 1, 3.1) */
 		static FVaRestRequestHandle Send(TUniquePtr<FRequestSpec>&& Spec, const char* SourceFile, uint32 SourceLine);
 		/** Final review M7: Kind=Config to the callbacks of a builder made on an empty FVaRestClient */
 		static void DeliverWithoutClient(FRequestSpec& Spec);
+        static FVaRestRequestHandle SendQueued(const TSharedRef<FClientState,ESPMode::ThreadSafe>& State,
+            const FQueueItem& Item, bool bProbe, TUniqueFunction<void(const TVaRestResult<TArray<uint8>>&)>&& Done, FName TerminalDetail = NAME_None);
 		static FVaRestRequestHandle SendProbe(const TSharedRef<FClientState, ESPMode::ThreadSafe>& State,
 			FStringView Url, TUniqueFunction<void()>&& Done);
 	};

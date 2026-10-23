@@ -1,6 +1,8 @@
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 
 #include "VaRestIdentity.h"
+#include "VaRestClientState.h"
+#include "VaRestRedactor.h"
 
 #include "Containers/StringConv.h"
 #include "VaRestAuth.h"
@@ -155,4 +157,48 @@ bool VaRest::Http::SameOrigin(FStringView Left,FStringView Right)
 {
     FString A,B;
     return CanonicalOrigin(Left,A) && CanonicalOrigin(Right,B) && A==B;
+}
+
+namespace VaRest::Http::IdentityPrivate
+{
+    struct FProviderScope
+    {
+        TWeakPtr<IVaRestAuth,ESPMode::ThreadSafe> Provider;
+        FString Nonce;
+    };
+    FString ProviderNonce(const TSharedPtr<IVaRestAuth,ESPMode::ThreadSafe>& Provider)
+    {
+        check(IsInGameThread());
+        static auto* Providers=new TArray<FProviderScope>();
+        Providers->RemoveAll([](const FProviderScope& Entry){ return !Entry.Provider.IsValid(); });
+        for (const auto& Entry : *Providers)
+            if (Entry.Provider.Pin()==Provider) return Entry.Nonce;
+        FProviderScope Entry; Entry.Provider=Provider;
+        Entry.Nonce=FGuid::NewGuid().ToString(EGuidFormats::DigitsLower);
+        Providers->Add(Entry);
+        return Entry.Nonce;
+    }
+}
+bool VaRest::Http::RequestIdentityScope(const FClientConfig& Config,const FVaRestSessionData& Session,
+    EVaRestAuthMode Mode,const FVaRestHeaders& BuiltHeaders,FString& OutScope)
+{
+    FString Identity;
+    if (!AuthIdentity(Config.Auth.Get(),Mode,Session,Identity)) { OutScope.Reset(); return false; }
+    TArray<FString> Fields{Identity,LexToString(static_cast<uint8>(Mode))};
+    if (Mode!=EVaRestAuthMode::None && Config.Auth.IsValid())
+    {
+        Fields.Add(Config.Auth->GetAuthName().ToString().ToLower());
+        const FName Contract=Config.Auth->GetIdentityContractName();
+        Fields.Add(Contract.ToString().ToLower());
+        if (Contract.IsNone()) Fields.Add(IdentityPrivate::ProviderNonce(Config.Auth));
+    }
+    // Explicit request credentials cannot inherit the owner's anonymous/old-account scope.
+    FVaRestHeaders Credentials;
+    const FVaRestRedactRules Rules;
+    for (const auto& Pair : BuiltHeaders)
+        if (Rules.ShouldRedact(Pair.Key,EVaRestRedactKeyKind::Header)) Credentials.Add(Pair.Key,Pair.Value);
+    Fields.Append(CanonicalHeaders(Credentials));
+    if (Mode!=EVaRestAuthMode::None) Fields.Append(CanonicalHeaders(Session.Headers));
+    OutScope=HashFields(TEXT("VaRest/request-scope/v1"),Fields);
+    return true;
 }

@@ -181,6 +181,7 @@ VaRest::Http::Excerpts::FJob VaRest::Http::Excerpts::PrepareRequest(const FExcha
 {
 	using namespace ExcerptsPrivate;
 	FJob Job;
+    if (!Ex.QueueReplayOf.QueueId.IsEmpty()) return Job;
 	if (!Wanted() || Ex.Body.IsEmpty())
 	{
 		return Job;

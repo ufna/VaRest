@@ -1,6 +1,8 @@
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 
+#include "VaRestIdentity.h"
 #include "VaRestAuth.h"
+#include "VaRestOfflineInternal.h"
 
 #include "Containers/UnrealString.h"
 #include "Misc/Base64.h"
@@ -60,6 +62,7 @@ namespace VaRest::Http::AuthPrivate
 	{
 	public:
 		virtual FName GetAuthName() const override { return TEXT("Bearer"); }
+        virtual FName GetIdentityContractName() const override { return TEXT("VaRest.Bearer.v1"); }
 
 		virtual bool GetIdentity(const FVaRestSessionData& Session, FString& OutIdentity) const override
 		{
@@ -92,6 +95,7 @@ namespace VaRest::Http::AuthPrivate
 		}
 
 		virtual FName GetAuthName() const override { return TEXT("ApiKey"); }
+        virtual FName GetIdentityContractName() const override { return TEXT("VaRest.ApiKey.v1"); }
 
 		virtual bool GetIdentity(const FVaRestSessionData& Session, FString& OutIdentity) const override
 		{
@@ -155,6 +159,7 @@ namespace VaRest::Http::AuthPrivate
 		}
 
 		virtual FName GetAuthName() const override { return TEXT("Basic"); }
+        virtual FName GetIdentityContractName() const override { return TEXT("VaRest.Basic.v1"); }
 
 		virtual bool GetIdentity(const FVaRestSessionData& Session, FString& OutIdentity) const override
 		{
@@ -202,6 +207,19 @@ namespace VaRest::Http::AuthPrivate
 		virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) override
 		{
 			FExchangeState& Ex = Internals(*Exchange);
+            if (Ex.bQueueWhenOffline && !QueueIdentityStillCurrent(Ex))
+            { OnOutcome(LocalFailure(TEXT("QueueIdentity"))); return; }
+            if (!Ex.ReplayIdentityScope.IsEmpty())
+            {
+                const auto Current = Ex.State->GetConfig();
+                if (!SameOrigin(Current->BaseUrl, Ex.Url))
+                { OnOutcome(LocalFailure(TEXT("QueueOrigin"))); return; }
+                FString CurrentScope;
+                if ((Ex.AuthMode != EVaRestAuthMode::None && Current->Auth != Ex.Config->Auth)
+                    || !RequestIdentityScope(*Current, Ex.State->GetSessionData(), Ex.AuthMode, Ex.RequestHeaders, CurrentScope)
+                    || CurrentScope != Ex.ReplayIdentityScope)
+                { OnOutcome(LocalFailure(TEXT("QueueIdentity"))); return; }
+            }
 			CheckConditionalIdentity(Ex);
 			// First, before the configuration check and the session: the refresh request (plan decision 23) and NoAuth() -- a
 			// login -- go out bare, with neither credentials nor session headers. MarkAuthRefresh sends the refresh request with

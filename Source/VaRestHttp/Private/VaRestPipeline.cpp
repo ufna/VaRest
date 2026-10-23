@@ -1,5 +1,8 @@
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 
+#include "VaRestOfflineInternal.h"
+#include "VaRestIdentity.h"
+#include "VaRestPersistenceGuard.h"
 #include "Misc/Guid.h"
 #include "VaRestClientState.h"
 #include "VaRestConnectivity.h"
@@ -807,6 +810,25 @@ bool VaRest::Http::FClientState::Resolve(FExchangeState& Exchange, FString& OutE
 		Exchange.RequestHeaders.Set(TEXT("Idempotency-Key"), FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower));
 	}
 
+    if (Exchange.bQueueWhenOffline)
+    {
+        if (Exchange.bIsAuthRefresh || Exchange.bConnectivityProbe || !Exchange.QueueReplayOf.QueueId.IsEmpty()
+            || Cfg.QueueName.IsEmpty() || !Cfg.QueueConfigError.IsEmpty() || !Cfg.StorageConfigError.IsEmpty()
+            || !Exchange.Queue.IsValid() || (!Exchange.bIdempotent && !IsIdempotentVerb(Exchange.Verb))
+            || Exchange.Body.IsStreamed() || Exchange.Body.Kind == EVaRestBodyKind::Stream
+            || !Exchange.SaveTo.IsEmpty() || Exchange.bOnHttpThread || !SameOrigin(Cfg.BaseUrl, Exchange.Url))
+        { OutError = TEXT("invalid durable queue request configuration"); return false; }
+        const FVaRestRedactRules Rules;
+        for (const auto& Header : Exchange.RequestHeaders)
+            if (Rules.ShouldRedact(Header.Key, EVaRestRedactKeyKind::Header))
+            { OutError = TEXT("durable queue cannot persist explicit credential headers"); return false; }
+        if (Exchange.QueueIdentityScope.IsEmpty())
+        {
+            Exchange.QueueScopeHeaders = Exchange.RequestHeaders;
+            if (!CanonicalOrigin(Exchange.Url, Exchange.QueueAnchorOrigin) || !QueueScope(Exchange, Exchange.QueueIdentityScope))
+            { OutError = TEXT("queue requires an explicit stable auth identity"); return false; }
+        }
+    }
 	// Spec 4.1, plan decisions 1 and 8
 	Exchange.RetryPolicy = Exchange.RetryOverride.IsSet() ? Exchange.RetryOverride.GetValue() : Cfg.Retry;
 	Exchange.bRetryEligible = Exchange.RetryPolicy.IsEnabled() && (Exchange.bIdempotent || IsIdempotentVerb(Exchange.Verb));
@@ -815,7 +837,7 @@ bool VaRest::Http::FClientState::Resolve(FExchangeState& Exchange, FString& OutE
 	// own rule, CanRefreshNow: M4a final review B5)
 	const bool bAuthMayReplay = Cfg.Auth.IsValid() && Exchange.AuthMode != EVaRestAuthMode::None && !Exchange.bIsAuthRefresh
 		&& CanRefreshNow(*Cfg.Auth, GetSessionData());
-	Exchange.bMayReissue = Cfg.bMayReissue || Exchange.bRetryEligible || bAuthMayReplay;
+	Exchange.bMayReissue = Cfg.bMayReissue || Exchange.bRetryEligible || bAuthMayReplay || Exchange.bQueueWhenOffline;
 	// Plan decision 10: an absolute time on the request's clock; Enter stamped StartedAt before Resolve
 	const float Deadline = Exchange.RetryPolicy.Deadline;
 	Exchange.DeadlineAt = FMath::IsFinite(Deadline) && Deadline > 0.f ? Exchange.StartedAt + Deadline : 0.0;
@@ -1032,6 +1054,13 @@ void VaRest::Http::FClientState::OnChainDone(const FVaRestExchangeRef& Exchange,
 		return;
 	}
 	FFinish Finish = MakeFinish(Ex);
+    if (Outcome.bQueued)
+    {
+        Finish.bQueued = true;
+        Finish.QueueId = MoveTemp(Outcome.QueueId);
+        Complete(Exchange, MoveTemp(Finish));
+        return;
+    }
 	Finish.Response.Status = Outcome.Status;
 	Finish.Response.bFromCache = Outcome.bFromCache;
 	Finish.Response.Headers = MoveTemp(Outcome.Headers);
@@ -1207,7 +1236,8 @@ void VaRest::Http::FClientState::Complete(const FVaRestExchangeRef& Exchange, FF
 	{
 		Ex.CancelReason = EVaRestCancelReason::User; // the flag set off the game thread before the reason
 	}
-	if (bCanceled && Finish.Response.SavedFile.IsEmpty())
+	if (bCanceled && Finish.Response.SavedFile.IsEmpty() && !Ex.bQueueCommitted
+        && Ex.QueueAdmission.load(std::memory_order_acquire) != EQueueAdmission::Committing)
 	{
 		// After Cancel() nothing but Canceled is delivered, even an answer that raced it (decision 2). A SaveTo whose
 		// rename already replaced the destination delivers its success: the truthful outcome (review M-4).
@@ -1239,6 +1269,7 @@ void VaRest::Http::FClientState::Complete(const FVaRestExchangeRef& Exchange, FF
 	}
 
 	Ex.bDone = true;
+    if (Ex.bQueueWhenOffline) Ex.QueueAdmission.store(EQueueAdmission::Finished, std::memory_order_release);
 	// Task 16 review M-7: this exchange's own entry only. A second exchange that Enter let in under the same id (it ensures)
 	// replaced it; removing by id would take that one out, and CancelAll and the shutdown cancel would no longer reach it.
 	if (const FVaRestExchangeRef* Entry = InFlight.Find(Ex.RequestId); Entry && *Entry == Exchange)
@@ -1268,6 +1299,12 @@ void VaRest::Http::FClientState::Complete(const FVaRestExchangeRef& Exchange, FF
 	// Spec 4.8: the game's callbacks run under the tags the request was sent with, not VaRest's (FLlmSenderTags); the
 	// worker task below takes them from this scope at its launch (TaskPrivate.h:192)
 	VAREST_LLM_SCOPE_SENDER(Ex.SenderTags);
+    if (Finish.bQueued)
+    {
+        auto Queued = MoveTemp(Ex.OnQueued);
+        if (Queued) Queued(Finish.QueueId);
+        return;
+    }
 	if (Ex.bOnHttpThread)
 	{
 		// Decision 4: the game thread has seen the result (Completed, Task 15); the callbacks run on a worker.
@@ -1312,6 +1349,7 @@ void VaRest::Http::FClientState::Cancel(const FVaRestExchangeRef& Exchange, EVaR
 	{
 		return;
 	}
+    if (Reason == EVaRestCancelReason::User && !AcceptUserCancel(Ex)) return;
 	// Review C-2: the first reason wins, but silence (OwnerGone, Shutdown) overrides User
 	if (Ex.CancelReason == EVaRestCancelReason::None || Reason == EVaRestCancelReason::Shutdown || Reason == EVaRestCancelReason::OwnerGone)
 	{
@@ -1319,6 +1357,7 @@ void VaRest::Http::FClientState::Cancel(const FVaRestExchangeRef& Exchange, EVaR
 	}
 	Ex.bCancelRequested = true;
 	Ex.PersistenceAbort->store(true, std::memory_order_relaxed);
+    if (Ex.QueueAdmission.load(std::memory_order_acquire) == EQueueAdmission::Committing) return;
 	if (Ex.Phase != EVaRestExchangePhase::InChain)
 	{
 		// Created: Enter sees the flag. Decoding: Complete replaces the decoded result when it comes back.

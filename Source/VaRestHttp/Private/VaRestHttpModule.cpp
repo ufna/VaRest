@@ -1,5 +1,6 @@
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 
+#include "VaRestOfflineInternal.h"
 #include "Misc/CoreDelegates.h"
 #include "Modules/ModuleManager.h"
 #include "VaRestClientState.h"
@@ -30,6 +31,7 @@ public:
 		PreExitHandle = FCoreDelegates::OnEnginePreExit.AddLambda([]
 		{
 			VaRest::Http::FClientState::CancelForShutdown();
+            VaRest::Http::FOfflineQueue::StopAll();
 			VaRest::Http::StopPersistence();
 			VaRest::Http::FDiskCache::StopControls();
 		});

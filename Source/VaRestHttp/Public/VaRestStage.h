@@ -35,6 +35,8 @@ struct VARESTHTTP_API FVaRestAttemptOutcome
 	TArray<uint8> Body;
 	bool bBodyInFile = false;
 	bool bFromCache = false;
+    bool bQueued = false;
+    FString QueueId;
 	EVaRestTransportFailure Failure = EVaRestTransportFailure::None;
 	FName FailureDetail;
 	/** A stage's own reason for a failure it made (an auth refresh rejected, no credentials): the error's Message when set */

@@ -42,6 +42,7 @@ namespace VaRest::Http::TracePointsPrivate
 		const FVaRestRedactor& Redactor = *Held;
 		FVaRestTraceStarted Out;
 		Out.RequestId = Ex.RequestId;
+        Out.QueueReplayOf = Ex.QueueReplayOf;
 		Out.ScopeId = FVaRestTrace::ProcessScopeId;
 		Out.ClientId = Ex.ClientId;
 		Out.Verb = Redactor.ScrubText(Ex.Verb);
@@ -276,7 +277,11 @@ void VaRest::Http::TracePoints::Completed(FExchangeState& Ex, const FFinish& Fin
 	const FVaRestRedactor& Redactor = *Held;
 	FVaRestTraceCompleted Payload;
 	Payload.RequestId = Ex.RequestId;
-	if (Finish.Error.Kind == EVaRestErrorKind::Canceled)
+	if (Finish.bQueued)
+    {
+        Payload.Outcome = EVaRestTraceOutcome::Queued;
+    }
+    else if (Finish.Error.Kind == EVaRestErrorKind::Canceled)
 	{
 		Payload.Outcome = EVaRestTraceOutcome::Canceled;
 		Payload.CancelReason = Ex.CancelReason == EVaRestCancelReason::None ? EVaRestCancelReason::User : Ex.CancelReason;

@@ -31,6 +31,7 @@ namespace VaRest::Http
             && Policy.MemoryBytes >= 0 && Policy.DiskBytes >= 0;
     }
 	struct FPersistenceGuard;
+    class FOfflineQueue;
 
 	/** One immutable configuration snapshot; FClientState swaps a new one in on every edit (spec 3.1) */
 	struct FClientConfig
@@ -40,6 +41,9 @@ namespace VaRest::Http
 		FString HealthUrl;
 		FString CacheRoot;
 		FString QueueRoot;
+        FString QueueName, QueueConfigError;
+        FVaRestOfflinePolicy OfflinePolicy;
+        TSharedPtr<FOfflineQueue, ESPMode::ThreadSafe> RegisteredQueue;
 		FString StorageConfigError;
 		FVaRestCachePolicy Cache;
 		FString CacheConfigError;
@@ -86,6 +90,10 @@ namespace VaRest::Http
         TSharedRef<FDiskCache, ESPMode::ThreadSafe> GetDiskCacheFor(const FClientConfig& Cfg, int64 Capacity);
         void ClearCacheState();
 		void AttachConnectivity();
+        void RefreshQueueRegistration();
+        TSharedPtr<FOfflineQueue, ESPMode::ThreadSafe> Queue;
+        FVaRestQueuedResultEvent QueuedResult;
+        FLlmSenderTags EventSenderTags;
 		uint64 GetClientId() const { return ClientId; }
 		/** Any thread */
 		TSharedRef<const FClientConfig, ESPMode::ThreadSafe> GetConfig() const;

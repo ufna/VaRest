@@ -10,6 +10,9 @@ class IVaRestAuth;
 
 namespace VaRest::Http
 {
+    struct FClientConfig;
+    bool RequestIdentityScope(const FClientConfig& Config, const FVaRestSessionData& Session,
+        EVaRestAuthMode Mode, const FVaRestHeaders& BuiltHeaders, FString& OutScope);
 	/** Strict scheme/ASCII host/port origin; no userinfo. IPv6 alternatives compare conservatively. */
 	bool CanonicalOrigin(FStringView Url, FString& OutOrigin);
 	bool SameOrigin(FStringView Left, FStringView Right);

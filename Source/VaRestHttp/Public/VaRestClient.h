@@ -15,6 +15,7 @@
 #include "VaRestResultHandler.h"
 #include "VaRestRetry.h"
 #include "VaRestCache.h"
+#include "VaRestOffline.h"
 #include "VaRestUrl.h"
 #include "VaRestStage.h"
 
@@ -95,6 +96,11 @@ namespace VaRest::Http
 		/** A refresh request (FVaRestAuthRefreshContext::Request; plan decision 23) */
 		bool bAuthRefresh = false;
 		bool bConnectivityProbe = false;
+        bool bQueueWhenOffline = false;
+        TUniqueFunction<void(const FString&)> OnQueued;
+        FVaRestTraceQueueReplay QueueReplayOf;
+        FString ReplayIdentityScope;
+        FName QueueTerminalDetail;
 		/** Spec review I-2: the request id to use instead of a new one -- the refresh's own (FVaRestTrace::NewRequestId); 0 = a new one */
 		uint64 PresetRequestId = 0;
 		/** The current body is a struct, encoded with Naming: Naming() now fails. A later Body() or BodyFile() clears it. */
@@ -118,15 +124,16 @@ public:
 	uint64 GetId() const { return Id; }
 	/**
 	 * Any thread: sent and not finished. With OnHttpThread(), false once the result is handed to the worker; the callbacks
-	 * may still be running.
+	 * may still be running. For QueueWhenOffline(), false once durable commit is selected, before its asynchronous result.
 	 */
 	bool IsActive() const;
 	/**
 	 * Any thread. The callbacks then get Kind=Canceled (decision 2), never inside Cancel() (decision 3); after it returns
-	 * on the game thread no OnSuccess runs, with two exceptions. A SaveTo() whose rename already replaced the destination
+	 * on the game thread no OnSuccess runs, except after these acceptance points. A SaveTo() whose rename already replaced the destination
 	 * delivers its success with the saved file, the truthful outcome (review M-4). With OnHttpThread(), a result already
 	 * handed to the worker is past canceling (IsActive() is false): Cancel() is then a no-op while its callbacks are queued
-	 * or running there. No-op on a finished request.
+	 * or running there. Once QueueWhenOffline() selects commit (IsActive() is false), Cancel() is a no-op: the result
+	 * truthfully reports the rename outcome through OnQueued or the ordinary error callbacks. No-op on a finished request.
 	 */
 	void Cancel() const;
 
@@ -474,6 +481,9 @@ public:
 	TVaRestRequest Cache(const FVaRestCachePolicy& Policy) &&
 	{ Spec->Cache = Policy; return MoveTemp(*this); }
 	/** Bypass both cache reads and writes. */
+    TVaRestRequest QueueWhenOffline() && { Spec->bQueueWhenOffline = true; return MoveTemp(*this); }
+    TVaRestRequest OnQueued(TUniqueFunction<void(const FString&)>&& Callback) &&
+    { Spec->OnQueued = MoveTemp(Callback); return MoveTemp(*this); }
 	TVaRestRequest NoCache() &&
 	{ Spec->Cache = FVaRestCachePolicy(); return MoveTemp(*this); }
 
@@ -695,6 +705,12 @@ public:
 	FVaRestClient& WithHealthUrl(FStringView Url);
 	/** Path-only configuration; mobile roots select physical writable app storage before normalization. */
 	FVaRestClient& WithStorageDirectories(FStringView CacheRoot, FStringView QueueRoot);
+    FVaRestClient& WithOfflineQueue(FStringView Name, const FVaRestOfflinePolicy& Policy = FVaRestOfflinePolicy());
+    /** GT: committed and reserved admissions, including the active replay and loading waits. */
+    int32 GetQueuedCount() const;
+    /** Flush admitted persistence, not network replay. False means no callback; true delivers asynchronously. */
+    bool FlushQueue(TUniqueFunction<void(bool)>&& OnFlushed = {});
+    FVaRestQueuedResultEvent& OnQueuedResult();
 	/** Game thread: seeds the stream retry jitter draws from (plan decision 26), so a test knows each delay */
 	FVaRestClient& WithRandomSeed(int32 Seed);
 	/**

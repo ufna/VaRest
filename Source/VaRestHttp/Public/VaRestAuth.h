@@ -172,6 +172,16 @@ public:
 	 */
 	virtual FString GetConfigError() const { return FString(); }
 
+    /**
+     * Pure GT compatibility declaration for sharing a durable queue between provider instances.
+     * A nonempty stable name promises the same opaque identity semantics across those instances,
+     * independent of credentials or live session. GetIdentity still validates each real operation.
+     * NAME_None allows sharing only the same provider instance; replacing it or restarting refuses
+     * its old queued operations with Auth. Declare a contract for restart continuity.
+     * Never return credential material.
+     */
+    virtual FName GetIdentityContractName() const { return NAME_None; }
+
 	/**
 	 * Pure game-thread identity query; never calls Apply. Return an opaque account identity stable across refresh,
 	 * changing on account replacement. False (the custom-auth default) bypasses cache and refuses durable queueing.

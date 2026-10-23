@@ -1,6 +1,8 @@
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 
 #include "VaRestClient.h"
+#include "VaRestOfflineInternal.h"
+#include "VaRestQueueStore.h"
 
 #include "Tasks/Task.h"
 #include "HAL/PlatformFileManager.h"
@@ -192,6 +194,13 @@ FVaRestRequestHandle VaRest::Http::FRequestSpecAccess::Send(TUniquePtr<FRequestS
 	// state's read lock (decision 27). A struct body was encoded in Body() with the naming of that moment.
 	Ex.Config = Spec->State->GetConfig();
 	Ex.PersistenceGuard = Ex.Config->PersistenceGuard;
+    Ex.Queue = Ex.Config->RegisteredQueue;
+    Ex.bQueueWhenOffline = Spec->bQueueWhenOffline;
+    Ex.OnQueued = MoveTemp(Spec->OnQueued);
+    Ex.QueueReplayOf = MoveTemp(Spec->QueueReplayOf);
+    Ex.ReplayIdentityScope = MoveTemp(Spec->ReplayIdentityScope);
+    Ex.QueueTerminalDetail = Spec->QueueTerminalDetail;
+    if (Ex.bQueueWhenOffline) Ex.QueueAdmission.store(EQueueAdmission::Open, std::memory_order_release);
 	// Moved, not copied (review I-1): the builder dies in the caller after this returns, on the sending thread, and its
 	// reference must not be the client state's last one there
 	Ex.State = MoveTemp(Spec->State);
@@ -264,7 +273,9 @@ FVaRestRequestHandle::FVaRestRequestHandle(const FVaRestExchangeRef& InExchange)
 bool FVaRestRequestHandle::IsActive() const
 {
 	const TSharedPtr<FVaRestExchange, ESPMode::ThreadSafe> Pinned = Exchange.Pin();
-	return Pinned.IsValid() && !Pinned->IsDone();
+	if (!Pinned.IsValid() || Pinned->IsDone()) return false;
+    const auto Admission = VaRest::Http::Internals(*Pinned).QueueAdmission.load(std::memory_order_acquire);
+    return Admission != VaRest::Http::EQueueAdmission::Committing && Admission != VaRest::Http::EQueueAdmission::Finished;
 }
 
 void FVaRestRequestHandle::Cancel() const
@@ -274,6 +285,7 @@ void FVaRestRequestHandle::Cancel() const
 	{
 		return;
 	}
+    if (!VaRest::Http::AcceptUserCancel(VaRest::Http::Internals(*Pinned))) return;
 	if (IsInGameThread())
 	{
 		VaRest::Http::Internals(*Pinned).State->Cancel(Pinned.ToSharedRef(), EVaRestCancelReason::User);
@@ -871,6 +883,58 @@ FVaRestRequestHandle VaRest::Http::FRequestSpecAccess::SendProbe(
     Spec->bConnectivityProbe = true;
     auto Handler = MakeUnique<TResultHandler<void>>();
     Handler->OnComplete = [Callback = MoveTemp(Done)](const TVaRestResult<void>&) { Callback(); };
+    Spec->Handler = MoveTemp(Handler);
+    return Send(MoveTemp(Spec), __FILE__, __LINE__);
+}
+
+FVaRestClient& FVaRestClient::WithOfflineQueue(FStringView Name,const FVaRestOfflinePolicy& Policy)
+{
+    check(IsInGameThread());
+    if (State.IsValid())
+    {
+        State->EventSenderTags.Capture();
+        const FString OwnedName(Name);
+        State->EditConfig([&](VaRest::Http::FClientConfig& Config){ Config.QueueName=OwnedName; Config.OfflinePolicy=Policy; });
+    }
+    return *this;
+}
+int32 FVaRestClient::GetQueuedCount() const
+{ check(IsInGameThread()); if (!State.IsValid()) return 0; const auto Current=State->GetConfig(); return Current->RegisteredQueue.IsValid() ? Current->RegisteredQueue->Count() : 0; }
+bool FVaRestClient::FlushQueue(TUniqueFunction<void(bool)>&& Done)
+{
+    check(IsInGameThread());
+    if (!State.IsValid()) return false;
+    const auto Current=State->GetConfig();
+    if (!Current->QueueConfigError.IsEmpty() || !Current->RegisteredQueue.IsValid()) return false;
+    const TWeakPtr<VaRest::Http::FClientState,ESPMode::ThreadSafe> Weak(State);
+    return Current->RegisteredQueue->Flush([Weak,Callback=MoveTemp(Done)](bool bOk) mutable
+    {
+        if (Weak.IsValid() && !VaRest::Http::FClientState::IsShuttingDown() && Callback) Callback(bOk);
+    });
+}
+FVaRestQueuedResultEvent& FVaRestClient::OnQueuedResult()
+{ check(IsInGameThread()); check(State.IsValid()); return State->QueuedResult; }
+
+FVaRestRequestHandle VaRest::Http::FRequestSpecAccess::SendQueued(
+    const TSharedRef<FClientState,ESPMode::ThreadSafe>& State, const FQueueItem& Item, bool bProbe,
+    TUniqueFunction<void(const TVaRestResult<TArray<uint8>>&)>&& Done,FName TerminalDetail)
+{
+    TUniquePtr<FRequestSpec> Spec(new FRequestSpec(State, Item.Verb, Item.Url));
+    Spec->QueueTerminalDetail=TerminalDetail;
+    Spec->Headers = Item.Headers;
+    Spec->Body = Item.Body;
+    Spec->AuthMode = Item.AuthMode;
+    Spec->bIdempotent = Item.bIdempotent;
+    Spec->bKeepBody = true;
+    Spec->Tag = Item.Tag.IsEmpty() ? NAME_None : FName(*Item.Tag);
+    Spec->bQueueWhenOffline = false;
+    Spec->Cache = FVaRestCachePolicy();
+    Spec->bConnectivityProbe = bProbe;
+    Spec->QueueReplayOf.QueueId = Item.QueueId;
+    Spec->QueueReplayOf.OriginalRequestId = Item.OriginalRun == QueueRunId() ? Item.OriginalRequestId : 0;
+    Spec->ReplayIdentityScope = Item.Scope;
+    auto Handler = MakeUnique<TResultHandler<TArray<uint8>>>();
+    Handler->OnComplete = MoveTemp(Done);
     Spec->Handler = MoveTemp(Handler);
     return Send(MoveTemp(Spec), __FILE__, __LINE__);
 }

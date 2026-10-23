@@ -177,6 +177,7 @@ namespace VaRest::Http::BearerRefreshPrivate
 		}
 
 		virtual FName GetAuthName() const override { return TEXT("BearerRefresh"); }
+        virtual FName GetIdentityContractName() const override { return TEXT("VaRest.BearerRefresh.v1"); }
 
 		virtual bool GetIdentity(const FVaRestSessionData& Session, FString& OutIdentity) const override
 		{

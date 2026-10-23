@@ -32,6 +32,7 @@ namespace VaRest::Http::Testing
 		std::atomic<int32> ExchangesDestroyedOffGameThread{ 0 };
 		/** Bytes body logging copied on the game thread (task 14 review M7: at most the cap per body, Inspector 7) */
 		std::atomic<int64> LogBodyBytesCopied{ 0 };
+        std::atomic<int64> QueueAdmissionBytesCopied{0};
 		/** Bytes the trace copied on the game thread for excerpts, each after its admission (Task 21 review M-3: a refused one copies none) */
 		std::atomic<int64> TraceExcerptBytesCopied{ 0 };
 		/**
@@ -48,6 +49,42 @@ namespace VaRest::Http::Testing
 #endif
 
 #if WITH_DEV_AUTOMATION_TESTS
+namespace VaRest::Http::Testing
+{
+    enum class EQueueCodecAccount : uint8 { Encoded, Body, Additional };
+    struct FQueueCodecBuffers
+    {
+        int64 Current[3] = {0,0,0};
+        int64 Peak[3] = {0,0,0};
+    };
+    /** Direct-call, per-thread observer of annotated live backing buffers, not JSON arenas or RSS. */
+    class VARESTHTTP_API FScopedQueueCodecBuffers
+    {
+    public:
+        FScopedQueueCodecBuffers();
+        ~FScopedQueueCodecBuffers();
+        FScopedQueueCodecBuffers(const FScopedQueueCodecBuffers&) = delete;
+        FQueueCodecBuffers Buffers;
+    private:
+        FQueueCodecBuffers* Previous = nullptr;
+    };
+    /** Keep this token through the actual owner's lifetime, including a move into a parsed root. */
+    class VARESTHTTP_API FQueueCodecBufferOwner
+    {
+    public:
+        FQueueCodecBufferOwner(EQueueCodecAccount Account, const TArray<uint8>& Owner);
+        FQueueCodecBufferOwner(EQueueCodecAccount Account, const FString& Owner);
+        ~FQueueCodecBufferOwner();
+        FQueueCodecBufferOwner(const FQueueCodecBufferOwner&) = delete;
+    private:
+        void Acquire(EQueueCodecAccount Account, int64 AllocatedBytes);
+        FQueueCodecBuffers* Probe = nullptr;
+        int32 AccountIndex = 0;
+        int64 Bytes = 0;
+    };
+    /** GT only, test-owned callback at an explicitly unavailable registration publication. */
+    VARESTHTTP_API TFunction<void()>& QueueRegistrationGapForTest();
+}
 /**
  * Helpers for VaRest's automation tests, and for other modules' (Inspector, WebSocket). Not for game code: compiled with
  * WITH_DEV_AUTOMATION_TESTS only (review M15).

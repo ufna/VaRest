@@ -1,6 +1,7 @@
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 
 #include "VaRestClientState.h"
+#include "VaRestOfflineInternal.h"
 #include "VaRestPersistenceGuard.h"
 #include "VaRestIdentity.h"
 #include "VaRestRequestSpec.h"
@@ -123,11 +124,12 @@ VaRest::Http::FClientState::~FClientState()
 		// refresh waiters: game code and its captures, concurrency review M-9) die on the game thread. Moved, not copied
 		// (review N-3), so this thread keeps no reference; the task body dies on the game thread right after it runs
 		// (TaskPrivate.h:871-877).
-		UE::Tasks::Launch(TEXT("VaRest.ReleaseConfig"), [Id = ClientId, Doomed = MoveTemp(Config), DoomedSession = MoveTemp(Session)] { Doomed->Connectivity->UnregisterProbe(Id); }, UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
+		UE::Tasks::Launch(TEXT("VaRest.ReleaseConfig"), [Id = ClientId, Doomed = MoveTemp(Config), DoomedSession = MoveTemp(Session), DoomedQueue = MoveTemp(Queue), DoomedEvents = MoveTemp(QueuedResult)] { Doomed->Connectivity->UnregisterProbe(Id); if (DoomedQueue) DoomedQueue->Leave(Id); }, UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
 	}
 	else
 	{
 		Config->Connectivity->UnregisterProbe(ClientId);
+        if (Queue) Queue->Leave(ClientId);
 	}
 	ClientStatePrivate::FLiveRegistry& Registry = ClientStatePrivate::Live();
 	FScopeLock Lock(&Registry.Lock);
@@ -211,7 +213,28 @@ void VaRest::Http::FClientState::EditConfig(TFunctionRef<void(FClientConfig&)> E
 	const TSharedRef<const FClientConfig, ESPMode::ThreadSafe> Previous = GetConfig();
 	TSharedRef<FClientConfig, ESPMode::ThreadSafe> Next = MakeShared<FClientConfig, ESPMode::ThreadSafe>(*Previous);
 	Edit(*Next);
+    const bool bRegistrationChanged = !Previous->BaseUrl.Equals(Next->BaseUrl, ESearchCase::CaseSensitive)
+        || !Previous->QueueName.Equals(Next->QueueName, ESearchCase::CaseSensitive)
+        || !Previous->QueueRoot.Equals(Next->QueueRoot, ESearchCase::CaseSensitive)
+        || Previous->StorageConfigError != Next->StorageConfigError
+        || Previous->Connectivity != Next->Connectivity || Previous->Auth != Next->Auth
+        || Previous->OfflinePolicy.MaxQueued != Next->OfflinePolicy.MaxQueued
+        || Previous->OfflinePolicy.MaxAgeSeconds != Next->OfflinePolicy.MaxAgeSeconds
+        || Previous->OfflinePolicy.MaxItemBytes != Next->OfflinePolicy.MaxItemBytes
+        || Previous->OfflinePolicy.MaxBodyBytes != Next->OfflinePolicy.MaxBodyBytes;
+    if (bRegistrationChanged)
+    {
+        Next->RegisteredQueue.Reset();
+        Next->QueueConfigError = TEXT("QueueConfig");
+    }
 	Publish(Next);
+    if (bRegistrationChanged)
+    {
+#if WITH_DEV_AUTOMATION_TESTS
+        if (Testing::QueueRegistrationGapForTest()) Testing::QueueRegistrationGapForTest()();
+#endif
+        RefreshQueueRegistration();
+    }
 	// Trace-only work, so behind the mask (task 15 review M8): a sink attached later learns the name from its snapshot
 	if (FVaRestTrace::Detail() != EVaRestTraceDetail::None && ClientStatePrivate::TraceNameChanged(*Previous, *Next))
 	{
@@ -237,6 +260,7 @@ void VaRest::Http::FClientState::Publish(const TSharedRef<FClientConfig, ESPMode
 		}
 	}
 	// Cache answers before Retry; a request already inside Retry retains that complete retry cycle.
+    NewChain->Add(MakeOfflineStage());
 	NewChain->Add(MakeCacheStage());
 	NewChain->Add(MakeRetryStage());
 	// Spec 4.2: after retry (a replay is not a retry, plan decision 2), before the boundary (a replay is a new attempt) and
@@ -459,6 +483,7 @@ void VaRest::Http::FClientState::AttachConnectivity()
         const auto Pinned = Weak.Pin();
         if (!Pinned.IsValid() || FClientState::IsShuttingDown()) return false;
         const auto Current = Pinned->GetConfig();
+        if (Current->RegisteredQueue.IsValid() && Current->RegisteredQueue->TryReplay(true)) return true;
         if (Current->HealthUrl.IsEmpty() || !SameOrigin(Current->BaseUrl, Current->HealthUrl)) return false;
         FRequestSpecAccess::SendProbe(Pinned.ToSharedRef(), Current->HealthUrl,
             [Connectivity = Current->Connectivity] { Connectivity->ProbeFinished(); });
@@ -485,3 +510,20 @@ void VaRest::Http::FClientState::ClearCacheState()
     if (Current->StorageConfigError.IsEmpty() && CanonicalOrigin(Current->BaseUrl, Origin))
         GetDiskCacheFor(*Current, Current->Cache.DiskBytes)->Clear();
 }
+
+void VaRest::Http::FClientState::RefreshQueueRegistration()
+{
+    check(IsInGameThread());
+    if (Queue.IsValid()) Queue->Leave(ClientId);
+    FString Error;
+    Queue=FOfflineQueue::Join(AsShared(),Error);
+    EditConfig([this,&Error](FClientConfig& Edited){ Edited.QueueConfigError=Error; Edited.RegisteredQueue=Queue; });
+}
+
+#if WITH_DEV_AUTOMATION_TESTS
+TFunction<void()>& VaRest::Http::Testing::QueueRegistrationGapForTest()
+{
+    static TFunction<void()> Hook;
+    return Hook;
+}
+#endif
