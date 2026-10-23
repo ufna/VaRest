@@ -406,4 +406,78 @@ bool FVaRestHttpPersistenceCancelTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpPersistenceConfiguredKeyTest, "VaRest.Http.PersistenceGuard.ConfiguredKeyRepresentation",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpPersistenceConfiguredKeyTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http;
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::PersistenceTestPrivate;
+	for (const FString& Key : TArray<FString>{TEXT("_"), TEXT("-"), TEXT("."), TEXT("_-.-_")})
+	{
+		FPersistenceGuard Guard;
+		Guard.AddKey(Key);
+		TestTrue(TEXT("nonempty unusable configured key refuses persistence"), Guard.bRefusePersistence);
+		TestTrue(TEXT("pure key regression has no registered values to mask it"), Guard.Needles.IsEmpty());
+		const TArray<uint8> Json = Bytes(TEXT("{\"") + Key + TEXT("\":\"unknown-value\"}"));
+		const TArray<uint8> Form = Bytes(Key + TEXT("=unknown-value"));
+		FVaRestHeaders Header; Header.Add(Key, TEXT("unknown-value"));
+		TestFalse(TEXT("unusable configured JSON key cannot leak unknown value"), Guard.AllowsBody(EVaRestBodyKind::Json, TEXT("application/json"), Json));
+		TestFalse(TEXT("unusable configured form key cannot leak unknown value"), Guard.AllowsBody(EVaRestBodyKind::Form, TEXT("application/x-www-form-urlencoded"), Form));
+		TestTrue(TEXT("unusable configured header cannot leak unknown value"), Guard.SafeHeaders(Header).IsEmpty());
+		FPersistenceGuard IntoClean;
+		IntoClean.AddKey(TEXT("X-Game-Ticket"));
+		IntoClean.UnionWith(Guard);
+		TestTrue(TEXT("refused source propagates through union"), IntoClean.bRefusePersistence);
+		TestFalse(TEXT("refused source union cannot persist JSON"), IntoClean.AllowsBody(EVaRestBodyKind::Json, TEXT("application/json"), Json));
+		FPersistenceGuard Clean;
+		Clean.AddKey(TEXT("X-Game-Ticket"));
+		FPersistenceGuard IntoRefused = Guard;
+		IntoRefused.UnionWith(Clean);
+		TestTrue(TEXT("refused destination stays refused through union"), IntoRefused.bRefusePersistence);
+		TestFalse(TEXT("refused destination union cannot persist form"), IntoRefused.AllowsBody(EVaRestBodyKind::Form, TEXT("application/x-www-form-urlencoded"), Form));
+	}
+	FPersistenceGuard Representable;
+	Representable.AddKey(TEXT("X-Game-Ticket"));
+	TestFalse(TEXT("ordinary configured key remains usable"), Representable.bRefusePersistence);
+	TestTrue(TEXT("ordinary configured key protects structure"), Representable.Rules.ShouldRedact(FStringView(TEXT("X-Game-Ticket")), EVaRestRedactKeyKind::Json));
+	TestTrue(TEXT("ordinary rule permits harmless JSON"), Representable.AllowsBody(EVaRestBodyKind::Json, TEXT("application/json"), Bytes(TEXT("{\"score\":12}"))));
+	TestTrue(TEXT("ordinary rule permits harmless form"), Representable.AllowsBody(EVaRestBodyKind::Form, TEXT("application/x-www-form-urlencoded"), Bytes(TEXT("score=12"))));
+	FVaRestHeaders Harmless; Harmless.Add(TEXT("X-Score"), TEXT("12"));
+	TestEqual(TEXT("ordinary rule permits harmless header"), Representable.SafeHeaders(Harmless).Num(), 1);
+
+	for (int32 ConfigMode = 0; ConfigMode < 2; ++ConfigMode)
+	{
+		FTestRig Rig;
+		const FString Key = ConfigMode == 0 ? TEXT("_") : TEXT(".");
+		if (ConfigMode == 0) Rig.Client.SetSessionHeader(Key, TEXT("registered-session-value"));
+		else Rig.Client.WithRedactedKeys(TArray<FString>{Key});
+		const auto State = FClientAccess::State(Rig.Client);
+		if (!TestTrue(TEXT("published client state exists"), State.IsValid())) return false;
+		const auto Snapshot = State->GetConfig()->PersistenceGuard;
+		if (!TestTrue(TEXT("published persistence guard exists"), Snapshot.IsValid())) return false;
+		FPersistenceGuard Candidate = *Snapshot;
+		TestTrue(TEXT("published unusable alias refuses persistence"), Candidate.bRefusePersistence);
+		const FString Unknown = TEXT("unregistered-body-value");
+		// Deliberately distinct from the actual session header value: the raw needle must not hide a lost key rule.
+		TestFalse(TEXT("published alias protects unknown JSON value"), Candidate.AllowsBody(EVaRestBodyKind::Json, TEXT("application/json"), Bytes(TEXT("{\"") + Key + TEXT("\":\"") + Unknown + TEXT("\"}"))));
+		TestFalse(TEXT("published alias protects unknown form value"), Candidate.AllowsBody(EVaRestBodyKind::Form, TEXT("application/x-www-form-urlencoded"), Bytes(Key + TEXT("=") + Unknown)));
+		FVaRestHeaders UnknownHeader; UnknownHeader.Add(Key, Unknown);
+		TestTrue(TEXT("published alias protects unknown header value"), Candidate.SafeHeaders(UnknownHeader).IsEmpty());
+		const auto Outcome = MakeOutcome<void>();
+		Observe(Rig.Client.Get<void>(TEXT("/ordinary-live-request")), Outcome).Send();
+		TestTrue(TEXT("live HTTP still completes"), Rig.Wait(Outcome));
+		TestEqual(TEXT("persistence refusal does not fail live HTTP"), Outcome->SuccessCalls.load(), 1);
+		TestEqual(TEXT("live HTTP request still dispatched"), Rig.Fake->NumCalls(), 1);
+		if (ConfigMode == 0 && Rig.Fake->NumCalls() == 1)
+		{
+			const FString* Applied = Rig.Fake->GetCall(0).Request.Headers.Find(Key);
+			TestTrue(TEXT("live session alias still applied"), Applied && Applied->Equals(TEXT("registered-session-value"), ESearchCase::CaseSensitive));
+		}
+		TestTrue(TEXT("published alias rig drains"), Rig.Drain());
+	}
+	return true;
+}
+
 #endif

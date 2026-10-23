@@ -142,6 +142,9 @@ void VaRest::Http::FPersistenceGuard::AddKey(FStringView Key)
     { bRefusePersistence=true; return; }
     if (!FVaRestRedactRules::IsAcceptableKey(Key)) { bRefusePersistence=true; return; }
     ExtraKeys.Add(FString(Key)); Rules.AddKey(Key);
+    // Acceptable syntax can normalize to no rule (for example "_"). Fail persistence closed, not live HTTP.
+    if (!Key.IsEmpty() && !Rules.ShouldRedact(Key, EVaRestRedactKeyKind::Json))
+    { bRefusePersistence = true; }
 }
 void VaRest::Http::FPersistenceGuard::UnionWith(const FPersistenceGuard& Other)
 {
