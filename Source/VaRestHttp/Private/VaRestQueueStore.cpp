@@ -310,7 +310,7 @@ namespace VaRest::Http::QueueStorePrivate
     { return FPaths::ChangeExtension(FPaths::Combine(Directory,QueueFileName(Sequence,Id)),TEXT("pending")); }
 }
 void VaRest::Http::FQueueStore::Prepare(FString Directory,FString Origin,FVaRestOfflinePolicy Policy,
-    FQueueItem Item,FPersistenceGuard Guard,TUniqueFunction<void(bool)>&& Done)
+    FQueueItem Item,FPersistenceGuard Guard,TUniqueFunction<void(FQueuePrepareResult)>&& Done)
 {
     const int64 Reservation=FMath::Max<int64>(
         PersistenceGuardReservation(Item.Body.Kind,Item.Body.ContentType,Item.Body.Bytes.Num()),
@@ -318,7 +318,8 @@ void VaRest::Http::FQueueStore::Prepare(FString Directory,FString Origin,FVaRest
 #if WITH_DEV_AUTOMATION_TESTS
     const auto Hooks=Testing::PersistenceHooksFor(Directory);
 #endif
-    QueueStorePrivate::AsyncBool([Directory=MoveTemp(Directory),Origin=MoveTemp(Origin),Policy,
+    const auto Callback=MakeShared<TUniqueFunction<void(FQueuePrepareResult)>,ESPMode::ThreadSafe>(MoveTemp(Done));
+    if (!LaunchPersistence([Directory=MoveTemp(Directory),Origin=MoveTemp(Origin),Policy,
         Item=MoveTemp(Item),Guard=MoveTemp(Guard)
 #if WITH_DEV_AUTOMATION_TESTS
         ,Hooks
@@ -343,12 +344,20 @@ void VaRest::Http::FQueueStore::Prepare(FString Directory,FString Origin,FVaRest
         const auto Bytes=EncodeQueueRecord(Item);
         if (Bytes.IsEmpty() || Bytes.Num()>QueueStorePrivate::RecordLimit(Policy)
             || DecodeQueueRecord(Bytes,Origin,Policy).HasError()) return Refused;
-        auto Written=WriteNewFile(QueueStorePrivate::PendingPath(Directory,Item.Sequence,Item.QueueId),Bytes);
+        const FString Pending=QueueStorePrivate::PendingPath(Directory,Item.Sequence,Item.QueueId);
+#if WITH_DEV_AUTOMATION_TESTS
+        auto Written=Hooks.IsValid() && Hooks->bFailPrepare
+            ? Testing::WriteWithFault(Pending,Bytes,Testing::EFileFault::Flush,Hooks->BeforePrepareCleanup)
+            : WriteNewFile(Pending,Bytes);
+#else
+        auto Written=WriteNewFile(Pending,Bytes);
+#endif
 #if WITH_DEV_AUTOMATION_TESTS
         if (Written.bOk && Hooks.IsValid()) Testing::WaitPersistenceBarrier(Hooks->AfterPrepare);
 #endif
         return Written;
-    },MoveTemp(Done),Reservation);
+    },[Callback](FIoResult&& Result){ (*Callback)(FQueuePrepareResult{Result.bOk,Result.bCleanupOk}); },Reservation))
+        (*Callback)(FQueuePrepareResult());
 }
 void VaRest::Http::FQueueStore::Commit(FString Directory,uint64 Sequence,FString QueueId,
     TUniqueFunction<void(FQueueCommitResult)>&& Done)

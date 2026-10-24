@@ -142,17 +142,8 @@ void FCacheOperation::Start()
     Ex.LookupKey=Key; Ex.LookupIdentity=Identity;
     Epoch=Ex.State->GetCacheEpoch(); Ex.CacheEpoch=Epoch;
     if (!Ex.bCacheLookupCounted) { Ex.bCacheLookupCounted=true; FHttpStats::CacheLookup(Ex.State->GetCounters()); }
-    const auto CheckValidation=[this](const FVaRestHeaders& Headers)
-    {
-        for (const auto& Pair : Headers)
-        {
-            if (!Pair.Key.Equals(TEXT("Cache-Control"),ESearchCase::IgnoreCase)) continue;
-            const FString Lower=Pair.Value.ToLower();
-            bForceValidation|=Lower.Contains(TEXT("no-cache")) || Lower.Contains(TEXT("max-age=0"));
-        }
-    };
-    CheckValidation(Ex.RequestHeaders);
-    if (Ex.AuthMode!=EVaRestAuthMode::None) CheckValidation(Ex.State->GetSessionData().Headers);
+    bForceValidation=RequestRequiresCacheValidation(Ex.RequestHeaders)
+        || (Ex.AuthMode!=EVaRestAuthMode::None && RequestRequiresCacheValidation(Ex.State->GetSessionData().Headers));
     auto Memory=Ex.State->GetMemoryCache().Find(Key);
     if (Memory.IsValid()) { AfterLookup(MoveTemp(Memory),false); return; }
     if (Ex.CachePolicy.Mode!=EVaRestCacheMode::MemoryAndDisk) { AfterLookup(nullptr,false); return; }
@@ -350,7 +341,7 @@ bool VaRest::Http::BuildCacheKey(const FExchangeState& Ex,FString& OutKey,FStrin
         for (const auto& Header : Session.Headers) KnownHeaders.Set(Header.Key,Header.Value);
         if (!CacheHeadersEligible(KnownHeaders,FVaRestHeaders())) return false;
     }
-    if (!AuthIdentity(Ex.Config->Auth.Get(),Ex.AuthMode,Session,OutIdentity)) return false;
+    if (!RequestIdentityScope(*Ex.Config,Session,Ex.AuthMode,Built,OutIdentity)) return false;
     OutKey=CacheKey(Ex.Verb,Ex.Url,OutIdentity,Built,Ex.AuthMode==EVaRestAuthMode::None ? FVaRestHeaders() : Session.Headers);
     return true;
 }

@@ -387,4 +387,29 @@ bool FVaRestHttpCachePolicyMergeTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpRequestDirectiveSyntaxTest,"VaRest.Http.CachePolicy.RequestDirectiveSyntax",
+ EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+bool FVaRestHttpRequestDirectiveSyntaxTest::RunTest(const FString& Parameters)
+{
+    using namespace VaRest::Http;
+    struct FRow {const TCHAR* Text;bool bValidate;};
+    const FRow Rows[]={
+        {TEXT("no-cache"),true},{TEXT("max-age=0"),true},{TEXT(" MAX-AGE = \"000\" "),true},
+        {TEXT("max-age=\"\\0\""),true},{TEXT("extra=\"a,b\",max-age=\"0\""),true},
+        {TEXT("extra=\"no-cache, max-age=0\""),false},{TEXT("extra=\"\\\", no-cache\""),false},
+        {TEXT("max-age=\"0\"junk"),false},{TEXT("max-age=\"0"),false},{TEXT("max-age=\"0\\\""),false},
+        {TEXT("max-age=-0"),false},{TEXT("max-age=+0"),false},{TEXT("max-age=0.0"),false},
+        {TEXT("max-age=1"),false},{TEXT("max-age=\" 0 \""),false},{TEXT("x-no-cache"),false}};
+    for (const auto& Row : Rows)
+    {
+        FVaRestHeaders Headers;Headers.Set(TEXT("Cache-Control"),Row.Text);
+        TestEqual(Row.Text,RequestRequiresCacheValidation(Headers),Row.bValidate);
+    }
+    FVaRestHeaders Response;Response.Set(TEXT("Cache-Control"),TEXT("extension=\"no-store, no-cache, max-age=0\", max-age=60"));
+    const auto Metadata=ReadCacheMetadata(Response,0,1,FDateTime::UtcNow());
+    TestTrue(TEXT("response extension does not become a policy directive"),!Metadata.bNoStore && !Metadata.bNoCache && Metadata.Lifetime==60);
+    return true;
+}
+
 #endif

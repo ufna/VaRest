@@ -403,6 +403,9 @@ namespace VaRest::Http::PersistencePrivate
 {
 	struct FFileAdapter
 	{
+#if WITH_DEV_AUTOMATION_TESTS
+        TSharedPtr<Testing::FPersistenceBarrier, ESPMode::ThreadSafe> BeforeCleanup;
+#endif
 		TFunction<bool(IFileHandle&, uint8*, int64)> Read = [](IFileHandle& File, uint8* Into, int64 Size) { return File.Read(Into, Size); };
 		TFunction<bool(IFileHandle&, const uint8*, int64)> Write = [](IFileHandle& File, const uint8* From, int64 Size) { return File.Write(From, Size); };
 		TFunction<bool(IFileHandle&)> Flush = [](IFileHandle& File) { return File.Flush(true); };
@@ -545,23 +548,24 @@ VaRest::Http::FIoResult VaRest::Http::PersistencePrivate::WriteFile(const FStrin
 	if (!Platform.CreateDirectoryTree(*FPaths::GetPath(Path)) || InspectPersistencePath(FPaths::GetPath(Path)).Kind!=EPathKind::Directory)
 		return PersistencePrivate::Failure(TEXT("Directory"));
 	const FString Temporary = MakeTempFileName(Path, 0);
-	ON_SCOPE_EXIT
-	{
-		Platform.DeleteFile(*Temporary);
-	};
-	TUniquePtr<IFileHandle> File(Platform.OpenWrite(*Temporary, false, false));
-	if (!File.IsValid())
-		return PersistencePrivate::Failure(TEXT("Open"));
-	if (Bytes.Num() > 0 && !Ops.Write(*File, Bytes.GetData(), Bytes.Num()))
-		return PersistencePrivate::Failure(TEXT("Write"));
-	if (!Ops.Flush(*File))
-		return PersistencePrivate::Failure(TEXT("Flush"));
-	File.Reset();
-	if (!Ops.Move(Platform, Path, Temporary))
-		return PersistencePrivate::Failure(TEXT("Rename"));
-	FIoResult Result;
-	Result.bOk = true;
-	return Result;
+    FIoResult Result;
+    TUniquePtr<IFileHandle> File(Platform.OpenWrite(*Temporary, false, false));
+    if (!File.IsValid()) Result.Detail=TEXT("Open");
+    else if (Bytes.Num()>0 && !Ops.Write(*File,Bytes.GetData(),Bytes.Num())) Result.Detail=TEXT("Write");
+    else if (!Ops.Flush(*File)) Result.Detail=TEXT("Flush");
+    File.Reset(); // cleanup and its status are determined after closing the owned handle
+    if (Result.Detail.IsEmpty())
+    {
+        Result.bOk=Ops.Move(Platform,Path,Temporary);
+        if (!Result.bOk) Result.Detail=TEXT("Rename");
+    }
+#if WITH_DEV_AUTOMATION_TESTS
+    Testing::WaitPersistenceBarrier(Ops.BeforeCleanup);
+#endif
+    // A successful rename establishes the complete-file transition. All other exits
+    // need positive absence or actual typed deletion before Prepare can release occupancy.
+    Result.bCleanupOk=Result.bOk || VaRest::Http::DeleteFile(Temporary).bOk;
+    return Result;
 }
 VaRest::Http::FIoResult VaRest::Http::DeleteFile(const FString& InPath)
 {
@@ -637,9 +641,11 @@ VaRest::Http::FIoResult VaRest::Http::Testing::ReadWithFault(const FString& Path
 		Ops.Read = [](IFileHandle&, uint8*, int64) { return false; };
 	return PersistencePrivate::ReadFile(Path, MaxBytes, Ops);
 }
-VaRest::Http::FIoResult VaRest::Http::Testing::WriteWithFault(const FString& Path, TConstArrayView<uint8> Bytes, EFileFault Fault)
+VaRest::Http::FIoResult VaRest::Http::Testing::WriteWithFault(const FString& Path, TConstArrayView<uint8> Bytes, EFileFault Fault,
+    TSharedPtr<FPersistenceBarrier, ESPMode::ThreadSafe> BeforeCleanup)
 {
 	PersistencePrivate::FFileAdapter Ops;
+    Ops.BeforeCleanup=MoveTemp(BeforeCleanup);
 	if (Fault == EFileFault::Write)
 		Ops.Write = [](IFileHandle&, const uint8*, int64) { return false; };
 	if (Fault == EFileFault::Flush)

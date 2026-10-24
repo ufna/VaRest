@@ -483,7 +483,12 @@ void VaRest::Http::FClientState::AttachConnectivity()
         const auto Pinned = Weak.Pin();
         if (!Pinned.IsValid() || FClientState::IsShuttingDown()) return false;
         const auto Current = Pinned->GetConfig();
-        if (Current->RegisteredQueue.IsValid() && Current->RegisteredQueue->TryReplay(true)) return true;
+        return Current->RegisteredQueue.IsValid() && Current->RegisteredQueue->TryReplay(true);
+    }, [Weak]
+    {
+        const auto Pinned = Weak.Pin();
+        if (!Pinned.IsValid() || FClientState::IsShuttingDown()) return false;
+        const auto Current = Pinned->GetConfig();
         if (Current->HealthUrl.IsEmpty() || !SameOrigin(Current->BaseUrl, Current->HealthUrl)) return false;
         FRequestSpecAccess::SendProbe(Pinned.ToSharedRef(), Current->HealthUrl,
             [Connectivity = Current->Connectivity] { Connectivity->ProbeFinished(); });

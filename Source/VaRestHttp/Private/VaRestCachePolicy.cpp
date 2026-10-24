@@ -42,12 +42,21 @@ namespace VaRest::Http::CachePolicyPrivate
 			{
 				continue;
 			}
-			TArray<FString> Parts;
-			Pair.Value.ParseIntoArray(Parts, TEXT(","), false);
-			for (FString& Part : Parts)
-			{
-				Result.Add(Part.TrimStartAndEnd());
-			}
+            int32 Begin=0;
+            bool bQuoted=false,bEscaped=false;
+            for (int32 Index=0;Index<Pair.Value.Len();++Index)
+            {
+                const TCHAR Character=Pair.Value[Index];
+                if (bEscaped) { bEscaped=false; continue; }
+                if (bQuoted && Character==TEXT('\\')) { bEscaped=true; continue; }
+                if (Character==TEXT('"')) bQuoted=!bQuoted;
+                else if (Character==TEXT(',') && !bQuoted)
+                {
+                    Result.Add(Pair.Value.Mid(Begin,Index-Begin).TrimStartAndEnd());
+                    Begin=Index+1;
+                }
+            }
+            Result.Add(Pair.Value.Mid(Begin).TrimStartAndEnd());
 		}
 		return Result;
 	}
@@ -92,6 +101,39 @@ namespace VaRest::Http::CachePolicyPrivate
 		return false;
 	}
 } // namespace VaRest::Http::CachePolicyPrivate
+bool VaRest::Http::RequestRequiresCacheValidation(const FVaRestHeaders& Headers)
+{
+    for (const FString& Directive : CachePolicyPrivate::Tokens(Headers,TEXT("Cache-Control")))
+    {
+        FString Name,Value;
+        if (!Directive.Split(TEXT("="),&Name,&Value)) Name=Directive;
+        Name.TrimStartAndEndInline();Value.TrimStartAndEndInline();
+        if (Name.Equals(TEXT("no-cache"),ESearchCase::IgnoreCase)) return true;
+        if (!Name.Equals(TEXT("max-age"),ESearchCase::IgnoreCase)) continue;
+        if (Value.StartsWith(TEXT("\"")))
+        {
+            if (Value.Len()<2 || Value[Value.Len()-1]!=TEXT('"')) continue;
+            FString Decoded;
+            bool bValid=true;
+            for (int32 Index=1;Index<Value.Len()-1;++Index)
+            {
+                TCHAR Character=Value[Index];
+                if (Character==TEXT('\\'))
+                {
+                    if (++Index>=Value.Len()-1) { bValid=false; break; }
+                    Character=Value[Index];
+                }
+                else if (Character==TEXT('"')) { bValid=false; break; }
+                Decoded.AppendChar(Character);
+            }
+            if (!bValid) continue;
+            Value=MoveTemp(Decoded);
+        }
+        double Seconds=0;
+        if (ReadDeltaSeconds(Value,Seconds) && Seconds==0) return true;
+    }
+    return false;
+}
 VaRest::Http::FCacheMetadata VaRest::Http::ReadCacheMetadata(const FVaRestHeaders& Headers,
 	double DefaultTtl, double Now, FDateTime NowUtc)
 {

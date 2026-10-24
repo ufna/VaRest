@@ -122,13 +122,13 @@ bool FVaRestQueueStoreRecoveryTest::RunTest(const FString& Parameters)
     FScopedPersistenceTest Disk;
     auto Item=QueueStoreTestPrivate::Item(); const FString Directory=FPaths::Combine(Disk.Root,TEXT("records"));
     const auto Status=MakeShared<TOptional<bool>,ESPMode::ThreadSafe>();
-    FQueueStore::Prepare(Directory,TEXT("https://api.test"),FVaRestOfflinePolicy(),Item,FPersistenceGuard(),[Status](bool bOk){*Status=bOk;});
+    FQueueStore::Prepare(Directory,TEXT("https://api.test"),FVaRestOfflinePolicy(),Item,FPersistenceGuard(),[Status](FQueuePrepareResult Result){*Status=Result.bPrepared;});
     if (!TestTrue(TEXT("prepare drains"),Disk.Drain()) || !TestTrue(TEXT("prepare success"),Status->Get(false))) return false;
     const auto Loaded=MakeShared<FQueueLoad,ESPMode::ThreadSafe>();
     FQueueStore::Load(Directory,TEXT("https://api.test"),FVaRestOfflinePolicy(),[Loaded](FQueueLoad&& Value){*Loaded=MoveTemp(Value);});
     if (!TestTrue(TEXT("pending recovery drains"),Disk.Drain())) return false;
     TestTrue(TEXT("pending never replayed"),Loaded->bOk && Loaded->Items.IsEmpty());
-    FQueueStore::Prepare(Directory,TEXT("https://api.test"),FVaRestOfflinePolicy(),Item,FPersistenceGuard(),[Status](bool bOk){*Status=bOk;});
+    FQueueStore::Prepare(Directory,TEXT("https://api.test"),FVaRestOfflinePolicy(),Item,FPersistenceGuard(),[Status](FQueuePrepareResult Result){*Status=Result.bPrepared;});
     if (!TestTrue(TEXT("second prepare"),Disk.Drain()) || !TestTrue(TEXT("second prepared"),Status->Get(false))) return false;
     FQueueStore::Commit(Directory,Item.Sequence,Item.QueueId,[Status](FQueueCommitResult R){*Status=R.bCommitted;});
     if (!TestTrue(TEXT("commit drains"),Disk.Drain()) || !TestTrue(TEXT("commit success"),Status->Get(false))) return false;
@@ -163,7 +163,7 @@ bool FVaRestQueueStorePhysicalErrorsTest::RunTest(const FString& Parameters)
     const auto Status=MakeShared<TOptional<bool>,ESPMode::ThreadSafe>();
     const auto Witness=MakeShared<bool,ESPMode::ThreadSafe>(false);
     ON_SCOPE_EXIT { LaunchPersistence([Parent]{ chmod(TCHAR_TO_UTF8(*Parent),0700); FIoResult R; R.bOk=true; return R; },[](FIoResult&&){}); Disk.Drain(); };
-    FQueueStore::Prepare(Directory,TEXT("https://api.test"),FVaRestOfflinePolicy(),Item,FPersistenceGuard(),[Status](bool bOk){*Status=bOk;});
+    FQueueStore::Prepare(Directory,TEXT("https://api.test"),FVaRestOfflinePolicy(),Item,FPersistenceGuard(),[Status](FQueuePrepareResult Result){*Status=Result.bPrepared;});
     if (!TestTrue(TEXT("permission fixture prepared"),Disk.Drain()) || !TestTrue(TEXT("prepared"),Status->Get(false))) return false;
     LaunchPersistence([Parent,Pending]{ FIoResult R; R.bOk=chmod(TCHAR_TO_UTF8(*Parent),0)==0 && InspectPersistencePath(Pending).Kind==EPathKind::Error; return R; },[Witness](FIoResult&& R){*Witness=R.bOk;});
     if (!TestTrue(TEXT("permission witness drains"),Disk.Drain()) || !TestTrue(TEXT("actual inaccessible parent witnessed"),*Witness)) return false;
@@ -199,14 +199,14 @@ bool FVaRestQueueStoreCleanupLoadTest::RunTest(const FString& Parameters)
     FScopedPersistenceTest Disk;const FString Directory=FPaths::Combine(Disk.Root,TEXT("cleanup-load"));
     auto Item=QueueStoreTestPrivate::Item();const auto Status=MakeShared<bool,ESPMode::ThreadSafe>(false);
     ON_SCOPE_EXIT {LaunchPersistence([Directory]{chmod(TCHAR_TO_UTF8(*PersistencePathForIo(Directory)),0700);return FIoResult();},[](FIoResult&&){});Disk.Drain();};
-    FQueueStore::Prepare(Directory,TEXT("https://api.test"),{},Item,{},[Status](bool bOk){*Status=bOk;});
+    FQueueStore::Prepare(Directory,TEXT("https://api.test"),{},Item,{},[Status](FQueuePrepareResult Result){*Status=Result.bPrepared;});
     if (!TestTrue(TEXT("prepare drain"),Disk.Drain()) || !TestTrue(TEXT("acknowledged fixture prepared"),*Status)) return false;
     FQueueStore::Commit(Directory,Item.Sequence,Item.QueueId,[Status](FQueueCommitResult R){*Status=R.bCommitted;});
     if (!TestTrue(TEXT("commit drain"),Disk.Drain()) || !TestTrue(TEXT("acknowledged fixture committed"),*Status)) return false;
     const FString Json=FPaths::Combine(Directory,QueueFileName(Item.Sequence,Item.QueueId));
     ++Item.Sequence;Item.QueueId=FGuid::NewGuid().ToString(EGuidFormats::DigitsLower);
     const FString Pending=FPaths::ChangeExtension(FPaths::Combine(Directory,QueueFileName(Item.Sequence,Item.QueueId)),TEXT("pending"));
-    FQueueStore::Prepare(Directory,TEXT("https://api.test"),{},Item,{},[Status](bool bOk){*Status=bOk;});
+    FQueueStore::Prepare(Directory,TEXT("https://api.test"),{},Item,{},[Status](FQueuePrepareResult Result){*Status=Result.bPrepared;});
     if (!TestTrue(TEXT("pending prepare drain"),Disk.Drain()) || !TestTrue(TEXT("pending prepared"),*Status)) return false;
     LaunchPersistence([Directory,Pending]
     {
@@ -231,5 +231,28 @@ bool FVaRestQueueStoreCleanupLoadTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("missing witness drains"),Disk.Drain());TestTrue(TEXT("recovery actually removed pending"),*Status);return true;
 }
 #endif
+
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestQueuePrepareRefusalTest,"VaRest.Http.QueueStore.PrepareRefusalClean",
+ EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+bool FVaRestQueuePrepareRefusalTest::RunTest(const FString& Parameters)
+{
+    using namespace VaRest::Http;using namespace VaRest::Http::Testing;
+    FScopedPersistenceTest Disk;
+    auto Item=QueueStoreTestPrivate::Item();Item.Url=TEXT("https://api.test/path?password=private");
+    const auto Result=MakeShared<TOptional<FQueuePrepareResult>,ESPMode::ThreadSafe>();
+    FQueueStore::Prepare(Disk.Root,TEXT("https://api.test"),{},Item,{},[Result](FQueuePrepareResult Value){*Result=Value;});
+    if (!TestTrue(TEXT("validation result drains"),Disk.Drain()) || !TestTrue(TEXT("validation delivered"),Result->IsSet())) return false;
+    TestTrue(TEXT("pre-IO validation refusal is clean"),!Result->GetValue().bPrepared && Result->GetValue().bCleanupOk);
+    {
+        FScopedPersistenceRuntime Runtime;Runtime.Stop();Result->Reset();
+        const uint64 Before=PersistenceCounters().Launched.load();
+        FQueueStore::Prepare(Disk.Root,TEXT("https://api.test"),{},Item,{},[Result](FQueuePrepareResult Value){*Result=Value;});
+        if (!TestTrue(TEXT("launch refusal result delivered"),Result->IsSet())) return false;
+        TestTrue(TEXT("launch refusal is clean"),!Result->GetValue().bPrepared && Result->GetValue().bCleanupOk);
+        TestEqual(TEXT("refusal never launches worker"),PersistenceCounters().Launched.load(),Before);
+    }
+    return true;
+}
 
 #endif

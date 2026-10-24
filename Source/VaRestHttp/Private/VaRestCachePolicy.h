@@ -31,6 +31,8 @@ namespace VaRest::Http
 
 	/** Strict decimal seconds in [0, ten years]; failure leaves OutSeconds unchanged. */
 	bool ReadDeltaSeconds(FStringView Text, double& OutSeconds);
+	/** Actual request directives only; quoted delta-seconds and quoted extension commas are respected. */
+	bool RequestRequiresCacheValidation(const FVaRestHeaders& Headers);
 	FCacheMetadata ReadCacheMetadata(const FVaRestHeaders& Headers, double DefaultTtl,
 		double Now, FDateTime NowUtc);
 	/** Vary must refer only to known built/session request headers; no transport guesses. */

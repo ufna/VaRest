@@ -136,10 +136,10 @@ void FVaRestConnectivity::SetProbeInterval(double Seconds)
     IntervalSeconds = FMath::IsFinite(Seconds) ? FMath::Clamp(Seconds, 0.1, 3600.0) : 10.0;
     ArmProbe();
 }
-void FVaRestConnectivity::RegisterProbe(uint64 ClientId, TFunction<bool()>&& TryStart)
+void FVaRestConnectivity::RegisterProbe(uint64 ClientId, TFunction<bool()>&& TryStart, TFunction<bool()>&& TryFallback)
 {
     check(IsInGameThread());
-    Probes.Add(ClientId, MoveTemp(TryStart));
+    Probes.Add(ClientId, FProbeCandidates{MoveTemp(TryStart),MoveTemp(TryFallback)});
     ArmProbe();
 }
 void FVaRestConnectivity::UnregisterProbe(uint64 ClientId)
@@ -165,15 +165,20 @@ void FVaRestConnectivity::RunProbe()
     TArray<uint64> Owners;
     Probes.GetKeys(Owners);
     Owners.Sort();
-    for (uint64 OwnerId : Owners)
+    for (bool bFallback : {false,true})
     {
-        const TFunction<bool()>* Probe = Probes.Find(OwnerId);
-        if (!Probe || !*Probe) continue;
-        TFunction<bool()> TryStart = *Probe; // owns captures across unregister/reconfigure during Send/trace/events
-        bProbeRunning = true;
-        if (TryStart()) return;
-        bProbeRunning = false;
-        if (IsOnline() || VaRest::Http::ConnectivityPrivate::Forced()) break;
+        for (uint64 OwnerId : Owners)
+        {
+            const FProbeCandidates* Candidates = Probes.Find(OwnerId);
+            if (!Candidates) continue;
+            const TFunction<bool()>& Probe = bFallback ? Candidates->Fallback : Candidates->Preferred;
+            if (!Probe) continue;
+            TFunction<bool()> TryStart = Probe; // owns captures across unregister/reconfigure during Send/trace/events
+            bProbeRunning = true;
+            if (TryStart()) return;
+            bProbeRunning = false;
+            if (IsOnline() || VaRest::Http::ConnectivityPrivate::Forced()) { ArmProbe(); return; }
+        }
     }
     ArmProbe();
 }

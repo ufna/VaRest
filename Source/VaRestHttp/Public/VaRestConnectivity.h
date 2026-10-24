@@ -26,7 +26,8 @@ public:
     /** Synchronous GT observers, FIFO and nonrecursive. State changes before notification; request callbacks stay deferred. */
     FVaRestConnectivityChangedEvent& OnChanged() { return Changed; }
     void SetProbeInterval(double Seconds);
-    void RegisterProbe(uint64 ClientId, TFunction<bool()>&& TryStart);
+    /** Queue candidates across the scope precede fallback candidates; two-argument registrations remain preferred. */
+    void RegisterProbe(uint64 ClientId, TFunction<bool()>&& TryStart, TFunction<bool()>&& TryFallback = {});
     void UnregisterProbe(uint64 ClientId);
     void ProbeFinished();
 
@@ -42,7 +43,11 @@ private:
     TSharedRef<IVaRestClock, ESPMode::ThreadSafe> TimerClock;
     FVaRestTimerHandle ProbeTimer;
     FVaRestConnectivityChangedEvent Changed;
-    TMap<uint64, TFunction<bool()>> Probes;
+    struct FProbeCandidates
+    {
+        TFunction<bool()> Preferred,Fallback;
+    };
+    TMap<uint64, FProbeCandidates> Probes;
     bool bOnline = true;
     bool bPublishedOnline = true;
     bool bDelivering = false;

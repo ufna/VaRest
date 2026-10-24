@@ -445,6 +445,8 @@ the real current session; it must change with account and remain stable through 
 calls Apply speculatively. Identity/key are rechecked before disk handoff and storage. A changed
 identity removes cache-injected validators before dispatch; another identity's 304 cannot join old bytes.
 
+Request no-cache or numeric max-age zero, including valid quoted zero, requires validation online and forbids fresh/stale delivery offline. Parse actual directive tokens, respecting quoted extension commas/escapes; preserve both original and applied session restrictions.
+
 Freshness honors strict nonnegative max-age, no-store, no-cache, must-revalidate, Expires/Date,
 Age and apparent age; equality at expiry is stale and future timestamps do not extend freshness.
 Default TTL is the final fallback. `bServeStaleOnError` applies only to Connection/Offline and known
@@ -485,6 +487,7 @@ VaRest; trace copies use VaRest_Trace and user callbacks restore sender tags.
   explicitly unavailable Config state during re-registration. Sends that captured an old complete
   snapshot keep it; mixed snapshots cannot enqueue into the old domain. Current Count/Flush
   do not expose an unavailable registration's old coordinator.
+* Cache identity uses the same provider compatibility namespace as queue scope. Undeclared providers share cache entries only through the same live instance; replacement/restart safely misses old keys. Explicitly compatible provider/contract names still require the same real identity. Send captures the provider configuration; an older operation is never relabeled under a replacement provider.
 * The optional pure GT `GetIdentityContractName()` declares nonsecret stable provider semantics
   independently of current credentials. Matching non-None contract plus GetAuthName allows
   declared-compatible instances/restarts to interpret the same real opaque identity. Builtins
@@ -537,7 +540,7 @@ VaRest; trace copies use VaRest_Trace and user callbacks restore sender tags.
   are not stored on the application's behalf; ExportSession/ImportSession remain caller-owned.
 * `bool FlushQueue(callback={})` flushes admitted persistence work, not network replay. False
   means no callback (invalid registration, shutdown or bounded slot/waiter refusal); true delivers
-  asynchronously after the serial barrier, subject to shutdown/owner suppression. Failed cleanup
+  asynchronously after the serial barrier, subject to shutdown/owner suppression. Prepare propagates actual temporary-file cleanup after handle close: known-clean failures preserve admission, while uncertain cleanup fails storage closed even after filesystem access returns. Failed cleanup
   conservatively marks storage unavailable and Flush failed; prompt logical cancel may precede
   release of the still-owned admission accounting. Repair permissions, drain and fully release
   a failed coordinator before reopening for recovery. Disabling/re-enabling one client cannot
@@ -545,7 +548,7 @@ VaRest; trace copies use VaRest_Trace and user callbacks restore sender tags.
 * Connectivity is process-scoped by default and injectable per client/Hub. A current live physical
   Connection failure means offline; a positive physical status proves online, including HTTP
   errors or a body timeout before the logical deadline. Cache results, stale/closed replies and
-  status-zero timeout alone do not prove reachability. Timed offline probes prefer a queue head,
+  status-zero timeout alone do not prove reachability. Timed offline probes prefer an eligible queue head across all owners in the shared scope,
   otherwise optional HealthUrl, with no network request if neither exists; ForceOffline suppresses
   probes. Mobile network type supplies a hint. `OnChanged` is the narrow synchronous GT
   observer exception: state changes first, FIFO edges broadcast nonrecursively, nested changes

@@ -10,6 +10,7 @@ namespace VaRest::Http
 	struct FIoResult
 	{
 		bool bOk = false;
+        bool bCleanupOk = true; // WriteNewFile: no newly owned temporary remains; pre-IO refusal is clean
 		FString Detail;
 		TArray<uint8> Bytes;
 		TArray<FString> Names;
@@ -82,8 +83,8 @@ namespace VaRest::Http
 		};
 		struct FPersistenceHooks
 		{
-			TSharedPtr<FPersistenceBarrier, ESPMode::ThreadSafe> BeforeRead, BeforeQueueLoad, BeforeCacheWrite, AfterPrepare, BeforeRename;
-			bool bFailCommit = false, bFailCacheControl = false; // configured before admission, immutable on worker
+			TSharedPtr<FPersistenceBarrier, ESPMode::ThreadSafe> BeforeRead, BeforeQueueLoad, BeforeCacheWrite, AfterPrepare, BeforeRename, BeforePrepareCleanup;
+			bool bFailCommit = false, bFailCacheControl = false, bFailPrepare = false; // configured before admission, immutable on worker
 		};
 		int64 PersistencePendingBytesForTest();
 		TSharedPtr<const FPersistenceHooks, ESPMode::ThreadSafe> PersistenceHooksFor(const FString& Directory);
@@ -127,7 +128,8 @@ namespace VaRest::Http
 			Rename
 		};
 		FIoResult ReadWithFault(const FString& Path, int64 MaxBytes, EFileFault Fault);
-		FIoResult WriteWithFault(const FString& Path, TConstArrayView<uint8> Bytes, EFileFault Fault);
+		FIoResult WriteWithFault(const FString& Path, TConstArrayView<uint8> Bytes, EFileFault Fault,
+            TSharedPtr<FPersistenceBarrier, ESPMode::ThreadSafe> BeforeCleanup = nullptr);
 	} // namespace Testing
 #endif
 } // namespace VaRest::Http

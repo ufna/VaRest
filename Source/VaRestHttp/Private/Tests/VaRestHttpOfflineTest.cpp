@@ -1028,4 +1028,98 @@ bool FVaRestOfflineInterleavingsTest::RunTest(const FString& Parameters)
     return true;
 }
 
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestOfflineScopeQueuePriorityTest,"VaRest.Http.Offline.ScopeQueuePriority",EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+bool FVaRestOfflineScopeQueuePriorityTest::RunTest(const FString& Parameters)
+{
+    using namespace VaRest::Http;using namespace VaRest::Http::Testing;using namespace VaRest::Http::OfflineTestPrivate;
+    FScopedPersistenceTest Disk;FTestRig A,B;FCleanup CleanA(A),CleanB(B);
+    const auto Shared=A.Connectivity;
+    A.Client.WithHealthUrl(TEXT("https://api.test/health"));
+    B.Client.WithConnectivity(Shared).WithClock(A.Clock).WithStorageDirectories(Disk.Root,Disk.Root).WithOfflineQueue(TEXT("priority"));
+    Shared->ReportOffline();
+    const auto Ack=MakeShared<int32,ESPMode::ThreadSafe>(0);
+    B.Client.Put<void>(TEXT("/queued")).Body(TEXT("safe")).QueueWhenOffline().OnQueued([Ack](const FString&){++*Ack;}).Send();
+    if (!TestTrue(TEXT("durable queue seed"),PumpUntil([Ack]{return *Ack==1;})) || !TestTrue(TEXT("seed drain"),B.Drain())) return false;
+    B.Client.WithOfflineQueue(TEXT(""));B.Client.WithOfflineQueue(TEXT("priority"));
+    if (!TestTrue(TEXT("reopened queue load"),B.Drain()) || !TestEqual(TEXT("loaded durable head"),B.Client.GetQueuedCount(),1)) return false;
+    const auto Results=MakeShared<int32,ESPMode::ThreadSafe>(0);B.Client.OnQueuedResult().AddLambda([Results](const FVaRestQueuedResult&){++*Results;});
+    A.Fake->Enqueue(FVaRestFakeResponse::Manual());B.Fake->Enqueue(FVaRestFakeResponse::Manual());
+    A.Clock->Advance(10);
+    if (!TestTrue(TEXT("first physical probe starts"),PumpUntil([&A,&B]{return A.Fake->NumCalls()+B.Fake->NumCalls()>0;}))) return false;
+    const bool bQueueFirst=TestEqual(TEXT("scope queue precedes older health owner"),B.Fake->NumCalls(),1);
+    TestEqual(TEXT("health not dispatched while queue eligible"),A.Fake->NumCalls(),0);
+    if (!bQueueFirst) return false;
+    TestEqual(TEXT("actual queued application route"),B.Fake->GetCall(0).Request.Url,FString(TEXT("https://api.test/queued")));
+    A.Clock->Advance(10);PumpPersistence();
+    TestEqual(TEXT("held probe has no overlap"),A.Fake->NumCalls()+B.Fake->NumCalls(),1);
+    B.Fake->Complete(0,FVaRestFakeResponse::Text(200,TEXT("replayed")));
+    if (!TestTrue(TEXT("replay retired"),PumpUntil([Results]{return *Results==1;})) || !TestTrue(TEXT("terminal drain"),B.Drain())) return false;
+    TestEqual(TEXT("queue empty"),B.Client.GetQueuedCount(),0);
+    Shared->ReportOffline();A.Clock->Advance(10);
+    if (!TestTrue(TEXT("health fallback starts"),PumpUntil([&A]{return A.Fake->NumCalls()==1;}))) return false;
+    TestEqual(TEXT("health fallback route"),A.Fake->GetCall(0).Request.Url,FString(TEXT("https://api.test/health")));
+    A.Fake->Complete(0,FVaRestFakeResponse::Text(200,TEXT("healthy")));
+    return TestTrue(TEXT("scope drained after retirement and health"),A.Drain() && B.Drain());
+}
+#if PLATFORM_LINUX
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestOfflinePrepareCleanupTest,"VaRest.Http.Offline.PrepareCleanup",EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+bool FVaRestOfflinePrepareCleanupTest::RunTest(const FString& Parameters)
+{
+    using namespace VaRest::Http;using namespace VaRest::Http::Testing;using namespace VaRest::Http::OfflineTestPrivate;
+    for (int32 Mode=0;Mode<3;++Mode) // clean write failure, already-absent cleanup, actual denied unlink
+    {
+        AddInfo(FString::Printf(TEXT("prepare cleanup mode %d"),Mode));
+        FScopedPersistenceTest Disk;FTestRig Rig;FCleanup Cleanup(Rig);FScopedPersistenceHooks Hooks(Disk.Root);
+        FVaRestOfflinePolicy Policy;Policy.MaxQueued=1;Configure(Rig,Disk,TEXT("prepare-cleanup"),Policy);
+        if (!TestTrue(TEXT("loaded"),Disk.Drain())) return false;
+        const FString Directory=FClientAccess::State(Rig.Client)->Queue->GetDirectory();
+        const auto Gate=MakeShared<FPersistenceBarrier,ESPMode::ThreadSafe>();Hooks.Hooks->BeforePrepareCleanup=Gate;Hooks.Hooks->bFailPrepare=true;
+        ON_SCOPE_EXIT {FileTask([Directory]{chmod(TCHAR_TO_UTF8(*PersistencePathForIo(Directory)),0700);});Gate->Released=true;Rig.Client.CancelAll();TestTrue(TEXT("prepare cleanup unwind"),Rig.Drain());};
+        const auto Ack=MakeShared<int32,ESPMode::ThreadSafe>(0);auto Failed=MakeOutcome<void>();
+        Observe(Rig.Client.Put<void>(TEXT("/prepare")).Body(TEXT("safe")).QueueWhenOffline(),Failed).OnQueued([Ack](const FString&){++*Ack;}).Send();
+        if (!TestTrue(TEXT("write completed and handle closed before cleanup"),PumpUntil([Gate]{return Gate->Entered.load();}))) return false;
+        const auto Part=MakeShared<FString,ESPMode::ThreadSafe>();const auto Witness=MakeShared<bool,ESPMode::ThreadSafe>(false);
+        if (!TestTrue(TEXT("physical witness task"),FileTask([Directory,Part,Witness,Mode]
+        {
+            const auto Files=ListFiles(Directory);if (!Files.bOk || Files.Names.Num()!=1 || !Files.Names[0].EndsWith(TEXT(".part"))) return;
+            *Part=FPaths::Combine(Directory,Files.Names[0]);const auto Status=InspectPersistencePath(*Part);
+            if (Status.Kind!=EPathKind::Regular || Status.Size==0) return;
+            if (Mode==1) *Witness=DeleteFile(*Part).bOk && InspectPersistencePath(*Part).Kind==EPathKind::Missing;
+            else if (Mode==2) *Witness=chmod(TCHAR_TO_UTF8(*PersistencePathForIo(Directory)),0500)==0 && !DeleteFile(*Part).bOk && InspectPersistencePath(*Part).Kind==EPathKind::Regular;
+            else *Witness=true;
+        })) || !TestTrue(TEXT("actual nonempty part / absent / denied unlink"),*Witness)) return false;
+        const auto Flushed=MakeShared<TOptional<bool>,ESPMode::ThreadSafe>();TestTrue(TEXT("flush admitted"),Rig.Client.FlushQueue([Flushed](bool bOk){*Flushed=bOk;}));TestFalse(TEXT("flush noninline"),Flushed->IsSet());
+        Gate->Released=true;if (!TestTrue(TEXT("failed prepare drained"),Rig.Drain())) return false;
+        TestEqual(TEXT("failed prepare never acked"),*Ack,0);TestEqual(TEXT("one failed completion"),Failed->CompleteCalls.load(),1);
+        if (!TestTrue(TEXT("flush result"),Flushed->IsSet())) return false;TestFalse(TEXT("write failure reaches flush"),Flushed->GetValue());
+        FileTask([Directory,Part,Witness,Mode]
+        {
+            *Witness=InspectPersistencePath(*Part).Kind==(Mode==2?EPathKind::Regular:EPathKind::Missing);
+            *Witness=chmod(TCHAR_TO_UTF8(*PersistencePathForIo(Directory)),0700)==0 && *Witness;
+        });
+        if (!TestTrue(TEXT("residual truth and permissions restored before next admission"),*Witness)) return false;
+        Hooks.Hooks->bFailPrepare=false; // prior captured worker and callbacks are fully drained
+        const uint64 Before=PersistenceCounters().Launched.load();const auto NextAck=MakeShared<int32,ESPMode::ThreadSafe>(0);auto Next=MakeOutcome<void>();
+        Observe(Rig.Client.Put<void>(TEXT("/next")).Body(TEXT("safe")).QueueWhenOffline(),Next).OnQueued([NextAck](const FString&){++*NextAck;}).Send();
+        if (!TestTrue(TEXT("next resolves after IO restored"),Rig.Drain())) return false;
+        if (Mode==2)
+        {
+            TestEqual(TEXT("uncertain prepare cleanup refuses new IO"),PersistenceCounters().Launched.load(),Before);
+            TestEqual(TEXT("uncertain prepare cleanup cannot acknowledge"),*NextAck,0);
+            TestEqual(TEXT("storage unavailable"),Next->Error.Kind,EVaRestErrorKind::Config);
+            if (*NextAck!=0) continue;
+            Rig.Client.WithOfflineQueue(TEXT(""));Rig.Client.WithOfflineQueue(TEXT("prepare-cleanup"),Policy);
+            if (!TestTrue(TEXT("fully released coordinator recovers"),Rig.Drain())) return false;
+            FileTask([Part,Witness]{*Witness=InspectPersistencePath(*Part).Kind==EPathKind::Missing;});TestTrue(TEXT("Load removes orphan part"),*Witness);
+            const auto Recovered=MakeShared<int32,ESPMode::ThreadSafe>(0);
+            Rig.Client.Put<void>(TEXT("/recovered")).Body(TEXT("safe")).QueueWhenOffline().OnQueued([Recovered](const FString&){++*Recovered;}).Send();
+            if (!TestTrue(TEXT("recovered admission"),PumpUntil([Recovered]{return *Recovered==1;}))) return false;
+        }
+        else TestEqual(TEXT("known clean failure permits admission"),*NextAck,1);
+    }
+    return true;
+}
+#endif
+
 #endif

@@ -173,11 +173,11 @@ public:
 	virtual FString GetConfigError() const { return FString(); }
 
     /**
-     * Pure GT compatibility declaration for sharing a durable queue between provider instances.
+     * Pure GT compatibility declaration for cache and durable queue sharing between provider instances.
      * A nonempty stable name promises the same opaque identity semantics across those instances,
      * independent of credentials or live session. GetIdentity still validates each real operation.
      * NAME_None allows sharing only the same provider instance; replacing it or restarting refuses
-     * its old queued operations with Auth. Declare a contract for restart continuity.
+     * its old queued operations with Auth and misses old cached entries. Declare a contract for restart continuity.
      * Never return credential material.
      */
     virtual FName GetIdentityContractName() const { return NAME_None; }

@@ -249,7 +249,7 @@ public:
         FQueueStore::Abort(Queue->GetDirectory(),Item.Sequence,Item.QueueId,
             [Self=AsShared()](bool bClean){ Self->ResolveCleanup(bClean); });
     }
-    void Prepared(bool bOk);
+    void Prepared(FQueuePrepareResult PrepareResult);
     FVaRestExchangeRef Exchange;
     TSharedRef<FPersistenceWait,ESPMode::ThreadSafe> Wait;
     FQueueItem Item;
@@ -417,7 +417,7 @@ void VaRest::Http::FOfflineQueue::Enqueue(const FVaRestExchangeRef& Exchange,FVa
 #endif
         Job->Admission=Admission;
         FQueueStore::Prepare(Self->Directory,Self->Origin,Self->Policy,MoveTemp(WorkerItem),MoveTemp(Guard),
-            [Job](bool bOk){ Job->Prepared(bOk); });
+            [Job](FQueuePrepareResult Result){ Job->Prepared(Result); });
     };
     if (bLoaded) Start();
     else if (AfterLoad.Num()>=Policy.MaxQueued) Wait->Finish(LocalFailure(TEXT("QueueFull")));
@@ -437,14 +437,14 @@ void VaRest::Http::FOfflineQueue::AcceptCommitted(FQueueItem Item)
     Items.Sort([](const FQueueItem& Left,const FQueueItem& Right){ return Left.Sequence<Right.Sequence; });
 }
 
-void VaRest::Http::FQueueAdmissionJob::Prepared(bool bOk)
+void VaRest::Http::FQueueAdmissionJob::Prepared(FQueuePrepareResult PrepareResult)
 {
     LLM_SCOPE_BYTAG(VaRest);
     auto& Ex=Internals(*Exchange);
-    if (!bOk)
+    if (!PrepareResult.bPrepared)
     {
         Queue->bFlushFailed=true;
-        ResolveCleanup(true);
+        ResolveCleanup(PrepareResult.bCleanupOk);
         if (Wait->IsPending()) Wait->Finish(LocalFailure(TEXT("QueueWriteFailed")));
         return;
     }

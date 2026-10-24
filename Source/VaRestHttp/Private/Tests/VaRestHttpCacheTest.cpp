@@ -767,7 +767,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestCacheForceValidationTest,"VaRest.Http.Ca
 bool FVaRestCacheForceValidationTest::RunTest(const FString& Parameters)
 {
     using namespace VaRest::Http; using namespace VaRest::Http::Testing; using namespace VaRest::Http::CacheTestPrivate;
-    for (const TCHAR* Control : {TEXT("no-cache"),TEXT("max-age=0")}) for (bool bSessionOverlay : {false,true})
+    for (const TCHAR* Control : {TEXT("no-cache"),TEXT("max-age=0"),TEXT("max-age=\"0\""),TEXT(" MAX-AGE = \"0\" ")}) for (bool bSessionOverlay : {false,true})
     {
         FTestRig Rig; FCleanup Cleanup(Rig); auto Policy=FVaRestCachePolicy::Memory(); Policy.bServeStaleOnError=true;
         if (bSessionOverlay) Rig.Client.SetSessionHeader(TEXT("Cache-Control"),TEXT("max-age=60"));
@@ -778,6 +778,8 @@ bool FVaRestCacheForceValidationTest::RunTest(const FString& Parameters)
             if (!TestTrue(TEXT("forced validation completes"),Rig.Wait(A))) return false;
         }
         TestEqual(TEXT("fresh bytes require wire validation"),Rig.Fake->NumCalls(),2);
+        if (Rig.Fake->NumCalls()==2)
+            TestEqual(TEXT("request directive sends actual validator"),Rig.Fake->GetCall(1).Request.Headers.Get(TEXT("If-None-Match")),FString(TEXT("\"one\"")));
         Rig.Connectivity->ReportOffline(); auto B=MakeOutcome<FString>(); Observe(Rig.Client.Get<FString>(TEXT("/validation")).Header(TEXT("Cache-Control"),Control),B).Send();
         if (!TestTrue(TEXT("forced offline validation"),Rig.Wait(B))) return false;
         TestEqual(TEXT("fresh/stale forbidden by request directive offline"),B->Error.Kind,EVaRestErrorKind::Offline);
@@ -831,7 +833,7 @@ bool FVaRestCacheSessionHeadersTest::RunTest(const FString& Parameters)
             bNoAuth ? (Mode==5 ? FString(TEXT("no-store")) : FString()) : Headers[Mode].Value);
         TestTrue(TEXT("drain"),Rig.Drain());
     }
-    for (const TCHAR* Control : {TEXT("no-cache"),TEXT("max-age=0")}) for (bool bNoAuth : {false,true})
+    for (const TCHAR* Control : {TEXT("no-cache"),TEXT("max-age=0"),TEXT("max-age=\"0\""),TEXT(" MAX-AGE = \"0\" ")}) for (bool bNoAuth : {false,true})
     {
         FTestRig Rig; FCleanup Cleanup(Rig); Rig.Client.WithCache(FVaRestCachePolicy::Memory());
         // Keep exactly the same session header/key on seed and repeat: a key change cannot mask a fresh hit.
@@ -1014,6 +1016,115 @@ bool FVaRestCacheAgeAcross304Test::RunTest(const FString& Parameters)
         if (!TestTrue(TEXT("last value"),D->Value.IsSet())) return false;
         TestEqual(TEXT("invalid Age chain returns own bytes"),D->Value.GetValue(),FString(Mode==3 ? TEXT("aged-original") : TEXT("age-own-wire")));
         TestTrue(TEXT("drain"),Rig.Drain());
+    }
+    return true;
+}
+
+
+namespace VaRest::Http::CacheTestPrivate
+{
+    class FScopedAccountAuth final : public IVaRestAuth
+    {
+    public:
+        FName Name=TEXT("CacheAccount"),Contract;
+        FString Credential=TEXT("credential-A"),Account=TEXT("subject-1");
+        virtual FName GetAuthName() const override { return Name; }
+        virtual FName GetIdentityContractName() const override { return Contract; }
+        virtual bool GetIdentity(const FVaRestSessionData&,FString& Out) const override { Out=Account; return true; }
+        virtual bool Apply(FVaRestAuthTarget& Target) const override
+        { Target.Headers.Set(TEXT("Authorization"),Credential); return true; }
+    };
+}
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestCacheProviderNamespaceTest,"VaRest.Http.Cache.ProviderNamespace",
+ EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+bool FVaRestCacheProviderNamespaceTest::RunTest(const FString& Parameters)
+{
+    using namespace VaRest::Http; using namespace VaRest::Http::Testing; using namespace VaRest::Http::CacheTestPrivate;
+    // Replacement, same live instance/refresh, compatible contract, different contract/name, changed real account, NoAuth.
+    for (bool bDisk : {false,true}) for (int32 Mode=0;Mode<7;++Mode)
+    {
+        AddInfo(FString::Printf(TEXT("provider disk=%d mode=%d"),bDisk,Mode));
+        FScopedPersistenceTest Disk; FTestRig A,B; FCleanup CleanA(A),CleanB(B);
+        auto AuthA=MakeShared<FScopedAccountAuth,ESPMode::ThreadSafe>();
+        auto AuthB=MakeShared<FScopedAccountAuth,ESPMode::ThreadSafe>(); AuthB->Credential=TEXT("credential-B");
+        if (Mode>=2 && Mode<=5) {AuthA->Contract=TEXT("contract-one");AuthB->Contract=TEXT("CONTRACT-ONE");}
+        if (Mode==1) AuthB=AuthA;
+        if (Mode==3) AuthB->Contract=TEXT("contract-two");
+        if (Mode==4) AuthB->Name=TEXT("OtherProvider");
+        if (Mode==5) AuthB->Account=TEXT("subject-2");
+        const bool bHit=Mode==1 || Mode==2 || Mode==6;
+        const auto Policy=bDisk?FVaRestCachePolicy::MemoryAndDisk():FVaRestCachePolicy::Memory();
+        A.Client.WithStorageDirectories(Disk.Root,Disk.Root).WithCache(Policy).WithAuth(AuthA);
+        B.Client.WithStorageDirectories(Disk.Root,Disk.Root).WithCache(Policy).WithAuth(AuthB);
+        A.Fake->Enqueue(Response(200,TEXT("account-A")));
+        auto First=MakeOutcome<FString>();auto Seed=A.Client.Get<FString>(TEXT("/namespace"));
+        if (Mode==6) Seed=MoveTemp(Seed).NoAuth();
+        Observe(MoveTemp(Seed),First).Send();
+        if (!TestTrue(TEXT("seed complete"),A.Wait(First)) || !TestTrue(TEXT("seed durable"),Disk.Drain())) return false;
+        if (Mode==1) AuthA->Credential=TEXT("credential-refreshed");
+        auto& Next=bDisk?B:A; Next.Client.WithAuth(AuthB);
+        if (Mode==6) Next.Client.SetSessionHeader(TEXT("X-Tenant"),TEXT("ignored-for-noauth"));
+        if (!bHit) Next.Fake->Enqueue(Response(200,TEXT("account-B")));
+        auto Second=MakeOutcome<FString>();auto Request=Next.Client.Get<FString>(TEXT("/namespace"));
+        if (Mode==6) Request=MoveTemp(Request).NoAuth();
+        Observe(MoveTemp(Request),Second).Send();
+        if (!TestTrue(TEXT("replacement complete"),Next.Wait(Second))) return false;
+        TestEqual(TEXT("provider compatibility alone controls cache sharing"),Second->Response.bFromCache,bHit);
+        TestEqual(TEXT("incompatible provider must reach wire"),Next.Fake->NumCalls(),(bDisk?0:1)+(bHit?0:1));
+        if (!TestTrue(TEXT("representation present"),Second->Value.IsSet())) return false;
+        TestEqual(TEXT("no other account representation"),Second->Value.GetValue(),FString(bHit?TEXT("account-A"):TEXT("account-B")));
+        if (!bHit && Next.Fake->NumCalls()>(bDisk?0:1))
+            TestEqual(TEXT("new provider credentials applied"),Next.Fake->GetCall(bDisk?0:1).Request.Headers.Get(TEXT("Authorization")),AuthB->Credential);
+        if (!TestTrue(TEXT("provider row drains"),Disk.Drain() && A.Drain() && B.Drain())) return false;
+    }
+    return true;
+}
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestCacheProviderLookupSnapshotTest,"VaRest.Http.Cache.ProviderLookupSnapshot",
+ EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+bool FVaRestCacheProviderLookupSnapshotTest::RunTest(const FString& Parameters)
+{
+    using namespace VaRest::Http; using namespace VaRest::Http::Testing; using namespace VaRest::Http::CacheTestPrivate;
+    FScopedPersistenceTest Disk; FTestRig Rig; FCleanup Cleanup(Rig); FScopedPersistenceHooks Hooks(Disk.Root);
+    auto AuthA=MakeShared<FScopedAccountAuth,ESPMode::ThreadSafe>();auto AuthB=MakeShared<FScopedAccountAuth,ESPMode::ThreadSafe>();AuthB->Credential=TEXT("credential-B");
+    Rig.Client.WithStorageDirectories(Disk.Root,Disk.Root).WithCache(FVaRestCachePolicy::MemoryAndDisk()).WithAuth(AuthA);
+    Rig.Fake->Enqueue(Response(200,TEXT("account-A"),TEXT("max-age=0")));
+    auto Seed=MakeOutcome<FString>();Observe(Rig.Client.Get<FString>(TEXT("/snapshot")),Seed).Send();
+    if (!TestTrue(TEXT("seed"),Rig.Wait(Seed)) || !TestTrue(TEXT("seed persisted"),Disk.Drain())) return false;
+    FClientAccess::State(Rig.Client)->GetMemoryCache().Clear();
+    const auto Gate=MakeShared<FPersistenceBarrier,ESPMode::ThreadSafe>();Hooks.Hooks->BeforeRead=Gate;
+    ON_SCOPE_EXIT {Gate->Released=true;Rig.Client.CancelAll();TestTrue(TEXT("snapshot unwind drains"),Rig.Drain());};
+    auto Old=MakeOutcome<FString>();Rig.Fake->Enqueue(Response(304,TEXT("")));
+    Observe(Rig.Client.Get<FString>(TEXT("/snapshot")),Old).Send();
+    if (!TestTrue(TEXT("old A disk lookup held"),PumpUntil([Gate]{return Gate->Entered.load();}))) return false;
+    Rig.Client.WithAuth(AuthB);Gate->Released=true;
+    if (!TestTrue(TEXT("old snapshot completes"),Rig.Wait(Old)) || !TestTrue(TEXT("old write drains"),Disk.Drain())) return false;
+    if (!TestEqual(TEXT("old captured provider validates"),Rig.Fake->NumCalls(),2)) return false;
+    TestEqual(TEXT("old request keeps A credential"),Rig.Fake->GetCall(1).Request.Headers.Get(TEXT("Authorization")),AuthA->Credential);
+    TestEqual(TEXT("old request keeps A validator"),Rig.Fake->GetCall(1).Request.Headers.Get(TEXT("If-None-Match")),FString(TEXT("\"one\"")));
+    Rig.Fake->Enqueue(Response(200,TEXT("account-B")));auto New=MakeOutcome<FString>();Observe(Rig.Client.Get<FString>(TEXT("/snapshot")),New).Send();
+    if (!TestTrue(TEXT("new B request completes"),Rig.Wait(New))) return false;
+    TestFalse(TEXT("A handback never relabeled as B"),New->Response.bFromCache);
+    if (!TestEqual(TEXT("new B goes to wire"),Rig.Fake->NumCalls(),3)) return false;
+    TestFalse(TEXT("B never receives A validator"),Rig.Fake->GetCall(2).Request.Headers.Contains(TEXT("If-None-Match")));
+    TestEqual(TEXT("new B credential"),Rig.Fake->GetCall(2).Request.Headers.Get(TEXT("Authorization")),AuthB->Credential);
+    return TestTrue(TEXT("snapshot final drain"),Rig.Drain());
+}
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestCacheDirectiveTokensTest,"VaRest.Http.Cache.DirectiveTokens",
+ EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+bool FVaRestCacheDirectiveTokensTest::RunTest(const FString& Parameters)
+{
+    using namespace VaRest::Http::Testing; using namespace VaRest::Http::CacheTestPrivate;
+    for (const TCHAR* Control : {TEXT("extension=\"no-cache, max-age=0\""),TEXT("extension=\"escaped \\\" , no-cache, max-age=0\""),TEXT("max-age=60"),TEXT("max-age=0junk")})
+    {
+        FTestRig Rig;FCleanup Cleanup(Rig);Rig.Client.WithCache(FVaRestCachePolicy::Memory());Rig.Fake->Enqueue(Response());
+        for (int32 Index=0;Index<2;++Index)
+        {
+            auto Result=MakeOutcome<FString>();Observe(Rig.Client.Get<FString>(TEXT("/extension")).Header(TEXT("Cache-Control"),Control),Result).Send();
+            if (!TestTrue(TEXT("extension request completes"),Rig.Wait(Result))) return false;
+            TestEqual(TEXT("only actual zero/no-cache directives force validation"),Result->Response.bFromCache,Index==1);
+        }
+        TestEqual(TEXT("extension does not dispatch validation"),Rig.Fake->NumCalls(),1);
+        TestTrue(TEXT("extension drain"),Rig.Drain());
     }
     return true;
 }
