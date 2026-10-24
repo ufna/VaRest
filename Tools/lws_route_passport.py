@@ -9,6 +9,7 @@ import json
 import math
 import os
 import pathlib
+import re
 import tempfile
 import unittest
 
@@ -165,6 +166,116 @@ def identity(value, tls, supplied, route=None):
         problems.append('observed: supplied context not used')
     return problems
 
+def route_configuration(result, trace, relay_a, relay_b):
+    """Join immutable labels to the public proxy inputs and observed listeners."""
+    expected = immutable(result)
+    a, b = result['peer_a'], result['peer_b']
+    ipv6 = expected['form'] != 'v4'
+    host = '::1' if ipv6 else '127.0.0.1'
+    address_a = ('[%s]:%d' if ipv6 else '%s:%d') % (host, a['port'])
+    address_b = '127.0.0.1:%d' % b['port']
+    next_proxy = address_a if expected['mode'] in ('precreated', 'fallback') else address_b
+    separate = expected['form'] in ('bare-port', 'bracket-port')
+    if separate: next_proxy = '::1' if expected['form'] == 'bare-port' else '[::1]'
+    first = result.get('first_proxy')
+    if expected['mode'] in ('precreated', 'fallback'):
+        refused = re.fullmatch(r'127\.0\.0\.1:([1-9][0-9]*)', first or '') if isinstance(first, str) else None
+        first_ok = bool(refused and 1 <= int(refused[1]) <= 65535 and first not in (address_a, address_b))
+    else:
+        first_ok = first == address_a
+    valid = (a['host'] == host and b['host'] == '127.0.0.1' and first_ok
+             and result.get('proxy_a_address') == address_a and result.get('proxy_b_address') == address_b
+             and result.get('next_proxy') == next_proxy)
+    args = result.get('args')
+    if not isinstance(args, list) or any(not isinstance(arg, str) for arg in args):
+        return ['route acquisition configuration']
+    required = {'-VaRestRouteCase': expected['case'], '-VaRestRouteMode': expected['mode'],
+                '-VaRestRouteFirst': first, '-VaRestRouteNext': next_proxy}
+    required['-VaRestRouteProxyPort'] = str(a['port']) if separate else None
+    required['-VaRestRouteTls'] = expected['tls']
+    required['-VaRestRouteProvided'] = expected['provided']
+    for name, value in required.items():
+        actual = [arg for arg in args if arg.split('=', 1)[0] == name]
+        wanted = ([name] if value else []) if type(value) is bool else ([] if value is None else [name + '=' + value])
+        valid = valid and actual == wanted
+    selected = (trace['next_route'] if expected['mode'] == 'precreated'
+                or (expected['mode'] == 'fallback' and trace['retired_before_fallback']) else trace['first_route'])
+    valid = valid and trace['selected_route'] == selected
+    for relay, peer in ((relay_a, a), (relay_b, b)):
+        valid = valid and all(event.get('peer_host') == peer['host'] and event.get('peer_port') == peer['port']
+                              for event in relay['events'] if event.get('ev') == 'connect')
+    return [] if valid else ['route acquisition configuration']
+
+
+def primary_echo_proof(result, trace, rows, source, target):
+    """The producer accepts one exact RECEIVE, not a concatenation of fragments."""
+    failure = ['primary echo evidence']
+    conn = trace['final_connection']
+    opened = [event for event in rows if event['conn'] == conn and event['name'] == 'ESTABLISHED']
+    received = [event for event in rows if event['conn'] == conn and event['name'] == 'RECEIVE']
+    cleanup = [seq for seq, value in notes(rows, 'ownership')
+               if value.get('stage') == 0 and value.get('label') == 'cleanup-start']
+    intervals, lifetime_errors = lifecycle_index(rows)
+    payload = b'route-echo'
+    raw_valid = False
+    if len(opened) == len(received) == len(cleanup) == 1 and not lifetime_errors:
+        event = received[0]; life = intervals.get(event['wsi'])
+        raw_valid = (event['reason'] == 8 and event['hex'] == payload.hex() and event['len'] == len(payload)
+                     and event['wsi'] == opened[0]['wsi'] and life is not None and life['conn'] == conn
+                     and life['born'] < opened[0]['seq'] < event['seq'] < min(life['dead'], cleanup[0]))
+    if not raw_valid:
+        return failure
+    if not isinstance(result, dict): return failure
+    redirected = result['mode'] == 'redirect'
+    journal = target if redirected else source
+    key = result.get('target_key' if redirected else 'source_key')
+    if (not isinstance(journal, dict) or not isinstance(journal.get('events'), list)
+            or not isinstance(key, str) or not key or journal.get('key') != key): return failure
+    events = journal['events']
+    if any(not isinstance(event, dict) for event in events): return failure
+    encoded = base64.b64encode(payload).decode('ascii')
+    messages = [(n,event) for n,event in enumerate(events) if event.get('ev') == 'message'
+                and event.get('kind') == 'text' and event.get('b64') == encoded and event.get('len') == len(payload)]
+    sent = [(n,event) for n,event in enumerate(events) if event.get('ev') == 'sent' and event.get('op') == 1
+            and event.get('fin') == 1 and event.get('b64') == encoded and event.get('len') == len(payload)]
+    if len(messages) != 1 or len(sent) != 1: return failure
+    message_index, message = messages[0]; sent_index, echo = sent[0]
+    owner = message.get('conn')
+    requests = [n for n,event in enumerate(events) if event.get('ev') == 'request'
+                and type(event.get('conn')) is int and event['conn'] == owner]
+    upgrades = [n for n,event in enumerate(events) if event.get('ev') == 'response'
+                and event.get('status') == 101 and type(event.get('conn')) is int and event['conn'] == owner]
+    if (type(owner) is not int or owner <= 0 or type(echo.get('conn')) is not int or echo['conn'] != owner
+            or len(requests) != 1 or len(upgrades) != 1
+            or not requests[0] < upgrades[0] < message_index < sent_index): return failure
+    return []
+
+
+def held_original_continuity(rows, trace, records, intervals):
+    """Only the explicit held original promises one SSL through its later verification/open."""
+    if trace['mode'] not in ('held', 'held-reuse'): return []
+    failure = ['held original SSL continuity']
+    before, after = notes(rows, 'ssl-before-route'), notes(rows, 'ssl-after-route')
+    if len(before) != 1 or len(after) != 1: return failure
+    start, anchor = before[0]; end, final = after[0]
+    if (not start < end or anchor.get('conn') != trace['first_connection']
+            or identity(anchor, True, trace['provided'], trace['first_route'])
+            or live_witness(anchor, start, intervals) or live_witness(final, end, intervals)): return failure
+    keys = ('conn', 'wsi_token', 'ssl_token', 'route', 'actual_route', 'ctx_origin', 'ctx_supplied', 'ctx_exists', 'ssl_exists')
+    same = lambda value: all(value.get(key) == anchor.get(key) for key in keys)
+    if not same(final): return failure
+    for seq, value, phase in records:
+        if seq < start: continue
+        if value.get('conn') == anchor['conn'] and not same(value): return failure
+    if trace['mode'] == 'held':
+        for phase in ('create-before', 'create-after', 'tls-init-before', 'tls-init-after'):
+            for seq, value in notes(rows, phase):
+                if value.get('route') != trace['next_route']: continue
+                watch = value.get('watch')
+                if not isinstance(watch, dict) or not start < seq < end or not same(watch): return failure
+    return []
+
+
 def provenance(rows, trace):
     """One evidence consumer for validation AND every ownership summary, including non-open TLS."""
     intervals, problems = lifecycle_index(rows)
@@ -183,6 +294,7 @@ def provenance(rows, trace):
                     and watch.get('ssl_exists') is False):
                 continue
             records.append((seq, watch, 'watch'))
+    problems.extend(held_original_continuity(rows, trace, records, intervals))
     for seq, value, phase in sorted(records, key=lambda row: row[0]):
         errors = identity(value, trace['tls'], trace['provided'])
         errors.extend(live_witness(value, seq, intervals))
@@ -486,6 +598,7 @@ def validate_case(result, trace, relay_a, relay_b, source, target, neighbor):
         problems.append('trace schema/loss/shutdown')
     if trace.get('harness_ok') is not True or result['runner_rc'] != 0: problems.append('acquisition failed')
     if problems: return problems
+    problems.extend(route_configuration(result, trace, relay_a, relay_b))
     evidence = provenance(rows, trace); problems.extend(evidence['errors'])
     ops, op_errors = operations(rows); problems.extend(op_errors)
     if {op['route'] for op in ops} != {trace['first_route'], trace['next_route']}:
@@ -504,6 +617,7 @@ def validate_case(result, trace, relay_a, relay_b, source, target, neighbor):
         problems.extend(peer_proof(result, relay_a, source if trace['opened'] or expected['mode'] == 'redirect' else None, result['peer_a'], expected['tls']))
     if trace['opened']:
         if not trace['echoed']: problems.append('positive open lacked echo')
+        problems.extend(primary_echo_proof(result, trace, rows, source, target))
         problems.extend(connection_proof(rows, trace['final_connection'], trace['selected_route'], 'ssl-open', expected['tls'], expected['provided']))
     if expected['mode'] == 'untrusted' and (not route_refused or trace['opened']):
         bad = [e for e in rows if e['name'] == 'PERFORM_SERVER_CERT_VERIFICATION' and e['preverify'] == 0 and e['x509_error'] != 0]
@@ -590,13 +704,14 @@ def validate_case(result, trace, relay_a, relay_b, source, target, neighbor):
             problems.append('retirement marker disagrees with token stages')
     return problems
 
-def summarize(trace):
+def summarize(trace, result=None, source=None, target=None):
     if trace is None: return dict(outcome='partial/crashed; inspect flushed phases', operations=[], ownership='unestablished')
     rows = typed_events(trace)
     ops, errors = operations(rows)
     evidence = provenance(rows, trace)
     owner_errors, label = ownership(rows, trace, evidence)
-    return dict(outcome='open+echo' if trace['opened'] and trace['echoed'] else 'did not complete open+echo',
+    return dict(outcome='open+echo' if trace['opened'] and trace['echoed']
+                and not primary_echo_proof(result, trace, rows, source, target) else 'did not complete open+echo',
                 operations=ops, operation_errors=errors, ownership=label, ownership_errors=owner_errors,
                 provenance_errors=evidence['errors'],
                 retirements=retirement_stages(rows, trace['final_connection']))
@@ -617,7 +732,7 @@ def load_case(folder):
     trace = read_object(folder / 'trace.json') if (folder / 'trace.json').exists() else None
     artifacts = [read_object(folder / name) for name in ('proxy-a.json', 'proxy-b.json', 'source.json', 'target.json', 'neighbor.json')]
     errors = validate_case(result, trace, *artifacts)
-    try: summary = summarize(trace)
+    try: summary = summarize(trace, result, artifacts[2], artifacts[3])
     except (ValueError, KeyError, TypeError) as error: summary = dict(outcome='malformed trace', error=str(error), operations=[], ownership='unestablished')
     return result, trace, errors, summary
 
@@ -682,6 +797,7 @@ def synthetic(mode='held-reuse', provided=True):
     append('PERFORM_SERVER_CERT_VERIFICATION', 1, 7, depth=0, preverify=1, x509_error=0)
     note('verify-identity', **ident(1, 1), known_wsi=True, ssl_input=True, store_ssl=True, preverify=1)
     append('ESTABLISHED', 1, 7); note('ssl-open', **ident(1, 1))
+    append('RECEIVE', 1, 7, reason=8, len=10, hex=b'route-echo'.hex())
     append('WSI_DESTROY', 1, 7)
     labels=['cleanup-start','vhost-skipped-before','vhost-skipped-after','retirement-before','retirement-after',
             'shutdown-before','shutdown-after','caller-before','caller-after']
@@ -706,7 +822,13 @@ def synthetic(mode='held-reuse', provided=True):
         encoded = base64.b64encode(payload).decode('ascii')
         neighbor['events'] += [dict(ev='message', kind='text', len=len(payload), b64=encoded),
                                dict(ev='sent', op=1, fin=1, len=len(payload), b64=encoded)]
-    return [result, trace, relay(5001, True), relay(5002, False) if mode == 'held-reuse' else dict(events=[], dropped=0, active=0), journal, empty, neighbor]
+    journal['events'][0]['conn'] = 1
+    journal['events'] += [dict(ev='response', conn=1, status=101),
+                          dict(ev='message', conn=1, kind='text', len=10, b64='cm91dGUtZWNobw=='),
+                          dict(ev='sent', conn=1, op=1, fin=1, len=10, b64='cm91dGUtZWNobw==')]
+    values = [result, trace, relay(5001, True), relay(5002, False) if mode == 'held-reuse' else dict(events=[], dropped=0, active=0), journal, empty, neighbor]
+    configure_synthetic(values)
+    return values
 
 def change_note(values, phase, edit, first=True):
     for event in values[1]['events']:
@@ -727,7 +849,7 @@ def synthetic_untrusted():
     for phase in ('ssl-before-route', 'ssl-after-route', 'ssl-open'):
         remove_phase(values, phase)
     rows = values[1]['events']
-    rows[:] = [e for e in rows if e['name'] != 'ESTABLISHED' and e['note'] != 'hold-release-request']
+    rows[:] = [e for e in rows if e['name'] not in ('ESTABLISHED', 'RECEIVE') and e['note'] != 'hold-release-request']
     for event in rows:
         if event['name'] == 'PERFORM_SERVER_CERT_VERIFICATION':
             event.update(preverify=0, x509_error=18)
@@ -739,9 +861,195 @@ def synthetic_untrusted():
     for n, event in enumerate(rows, 1): event['seq'] = n
     values[2]['events'] = [e for e in values[2]['events'] if e['ev'] not in ('tls_hold', 'tls_release')]
     values[4] = dict(events=[], dropped=0, connections=0)
+    configure_synthetic(values)
     return values
 
+def configure_synthetic(values):
+    result = values[0]
+    form = result['form']; port = result['peer_a']['port']
+    host = '127.0.0.1' if form == 'v4' else '::1'
+    result['peer_a']['host'] = host
+    address = ('[%s]:%d' if form != 'v4' else '%s:%d') % (host, port)
+    result.update(proxy_a_address=address, proxy_b_address='127.0.0.1:5002',
+                  source_key='source-fixture', target_key='target-fixture')
+    result['first_proxy'] = '127.0.0.1:5999' if result['mode'] in ('precreated', 'fallback') else address
+    result['next_proxy'] = (address if result['mode'] in ('precreated', 'fallback') else result['proxy_b_address'])
+    if form in ('bare-port', 'bracket-port'):
+        result['next_proxy'] = '::1' if form == 'bare-port' else '[::1]'
+    result['args'] = ['-VaRestRouteCase=' + result['case'], '-VaRestRouteMode=' + result['mode'],
+                      '-VaRestRouteFirst=' + result['first_proxy'], '-VaRestRouteNext=' + result['next_proxy']]
+    if form in ('bare-port', 'bracket-port'): result['args'].append('-VaRestRouteProxyPort=%d' % port)
+    if result['tls']: result['args'].append('-VaRestRouteTls')
+    if result['provided']: result['args'].append('-VaRestRouteProvided')
+    for event in values[2]['events']:
+        if event.get('ev') == 'connect': event.update(peer_host=host, peer_port=port)
+    values[4]['key'] = result['source_key']; values[5]['key'] = result['target_key']
+
+
+def synthetic_route(mode='precreated', form='v4'):
+    values = synthetic('held', False)
+    ident = ('ipv6-' + form + '-wss' if form != 'v4' else
+             mode + ('-ws-generated' if mode == 'redirect' else '-wss-generated'))
+    values[0].update(definition(ident)); values[1].update(case=ident, mode=mode, tls=mode != 'redirect')
+    for phase in ('ssl-before-route', 'ssl-after-route'): remove_phase(values, phase)
+    for event in values[1]['events']:
+        if event['note'].startswith('{'):
+            value = json.loads(event['note'])
+            if 'watch' in value: value['watch'] = dict(conn=0, wsi_token=0, ssl_token=0, ssl_exists=False)
+            if mode == 'precreated' and value.get('conn') == 1:
+                value.update(route=2, actual_route=2)
+            if mode == 'redirect' and 'ssl_token' in value:
+                value.update(ssl_token=0, ssl_exists=False, ctx_exists=False, ctx_supplied=False,
+                             ctx_origin='none', index_matches_wsi=False)
+            event['note'] = json.dumps(value)
+    if mode == 'precreated': values[1]['selected_route'] = 2
+    if mode == 'redirect':
+        remove_phase(values, 'verify-identity')
+        values[1]['events'] = [e for e in values[1]['events'] if e['name'] != 'PERFORM_SERVER_CERT_VERIFICATION']
+        values[5] = copy.deepcopy(values[4])
+        values[4]['events'] = [values[4]['events'][0], dict(ev='response', conn=1, status=302)]
+    values[2]['events'] = [e for e in values[2]['events'] if e['ev'] not in ('tls_hold', 'tls_release')]
+    if mode == 'redirect': values[2]['events'] = [e for e in values[2]['events'] if e['ev'] != 'client_hello']
+    for n, event in enumerate(values[1]['events'], 1): event['seq'] = n
+    configure_synthetic(values)
+    return values
+
+
 class ValidatorTest(unittest.TestCase):
+    def test_primary_echo_requires_actual_main_payload_and_server(self):
+        for factory in (lambda: synthetic_route(), lambda: synthetic('held', False), synthetic,
+                        lambda: synthetic_route('redirect')):
+            original = factory()
+            self.assertEqual(validate_case(*original), [])
+            self.assertEqual(summarize(original[1], original[0], original[4], original[5])['outcome'], 'open+echo')
+            for mutation in ('missing', 'payload', 'length', 'other-conn', 'other-wsi', 'before-open',
+                             'after-cleanup', 'after-destroy', 'missing-message', 'missing-sent',
+                             'wrong-message', 'wrong-sent', 'wrong-journal', 'wrong-server-conn', 'wrong-request-conn',
+                             'wrong-reason', 'wrong-server-order', 'wrong-key'):
+                with self.subTest(mode=original[0]['mode'], mutation=mutation):
+                    values = copy.deepcopy(original); rows = values[1]['events']
+                    receive = next(e for e in rows if e['name'] == 'RECEIVE' and e['conn'] == values[1]['final_connection'])
+                    journal_index = 5 if values[0]['mode'] == 'redirect' else 4
+                    journal = values[journal_index]
+                    if mutation == 'missing': rows.remove(receive)
+                    elif mutation == 'payload': receive['hex'] = b'wrong-echo'.hex()
+                    elif mutation == 'length': receive['len'] = 9
+                    elif mutation == 'other-conn': receive['conn'] = 2
+                    elif mutation == 'other-wsi': receive['wsi'] = 999
+                    elif mutation == 'wrong-reason': receive['reason'] = -7
+                    elif mutation in ('before-open', 'after-cleanup', 'after-destroy'):
+                        rows.remove(receive)
+                        if mutation == 'before-open':
+                            index = next(i for i,e in enumerate(rows) if e['name'] == 'ESTABLISHED' and e['conn'] == 1)
+                        elif mutation == 'after-destroy':
+                            index = next(i+1 for i,e in enumerate(rows) if e['name'] == 'WSI_DESTROY' and e['conn'] == 1)
+                        else:
+                            index = next(i+1 for i,e in enumerate(rows) if e['note'].startswith('{')
+                                         and json.loads(e['note']).get('label') == 'cleanup-start')
+                        rows.insert(index, receive)
+                    elif mutation in ('missing-message', 'missing-sent'):
+                        journal['events'] = [e for e in journal['events'] if e['ev'] != mutation.split('-')[1]]
+                    elif mutation in ('wrong-message', 'wrong-sent'):
+                        next(e for e in journal['events'] if e['ev'] == mutation.split('-')[1])['b64'] = 'd3Jvbmc='
+                    elif mutation == 'wrong-journal':
+                        moved = [e for e in journal['events'] if e['ev'] in ('message', 'sent')]
+                        journal['events'] = [e for e in journal['events'] if e not in moved]
+                        values[4 if journal_index == 5 else 5]['events'].extend(moved)
+                    elif mutation == 'wrong-server-conn':
+                        next(e for e in journal['events'] if e['ev'] == 'sent')['conn'] = 99
+                    elif mutation == 'wrong-request-conn':
+                        next(e for e in journal['events'] if e['ev'] == 'request')['conn'] = True
+                    elif mutation == 'wrong-server-order':
+                        message = next(e for e in journal['events'] if e['ev'] == 'message')
+                        journal['events'].remove(message); journal['events'].append(message)
+                    else: journal['key'] = 'other-case'
+                    for n,event in enumerate(rows,1): event['seq'] = n
+                    self.assertIn('primary echo evidence', validate_case(*values))
+                    self.assertNotEqual(summarize(values[1], values[0], values[4], values[5])['outcome'], 'open+echo')
+            self.assertEqual(validate_case(*original), [])
+
+    def test_held_ssl_identity_reaches_original_verify_and_open(self):
+        for mode in ('held', 'held-reuse'):
+            for supplied in (False, True):
+                original = synthetic(mode, supplied)
+                self.assertEqual(validate_case(*original), [])
+                values = copy.deepcopy(original)
+                for event in values[1]['events']:
+                    if not event['note'].startswith('{'): continue
+                    value = json.loads(event['note'])
+                    if value.get('conn') == 1 and value.get('phase') in ('verify-identity', 'ssl-open'):
+                        value['ssl_token'] = 999; event['note'] = json.dumps(value)
+                with self.subTest(mode=mode, supplied=supplied):
+                    self.assertIn('held original SSL continuity', validate_case(*values))
+                    if supplied:
+                        self.assertEqual(summarize(values[1], values[0], values[4], values[5])['ownership'], 'supplied use unestablished')
+                self.assertEqual(validate_case(*original), [])
+
+    def test_missing_held_anchor_cannot_certify_supplied_ownership(self):
+        for mode in ('held', 'held-reuse'):
+            original = synthetic(mode)
+            for mutation in ('before', 'after', 'malformed-anchor', 'missing-verification'):
+                values = copy.deepcopy(original)
+                if mutation in ('before', 'after'): remove_phase(values, 'ssl-' + mutation + '-route')
+                elif mutation == 'malformed-anchor': change_note(values, 'ssl-before-route', lambda v: v.pop('ssl_token'))
+                else: remove_phase(values, 'verify-identity')
+                self.assertTrue(validate_case(*values), (mode, mutation))
+                self.assertEqual(summarize(values[1], values[0], values[4], values[5])['ownership'], 'supplied use unestablished')
+            self.assertEqual(validate_case(*original), [])
+
+    def test_redirect_can_replace_ssl_without_a_held_original(self):
+        values = synthetic_untrusted()
+        values[0].update(definition('redirect-wss-provided'))
+        values[1].update(case=values[0]['case'], mode='redirect')
+        rows = values[1]['events']
+        cert = next(e for e in rows if e['name'] == 'PERFORM_SERVER_CERT_VERIFICATION')
+        witness = next(e for e in rows if e['note'].startswith('{') and json.loads(e['note']).get('phase') == 'verify-identity')
+        first_cert = copy.deepcopy(cert); first_cert.update(preverify=1, x509_error=0)
+        first_witness = copy.deepcopy(witness)
+        note = json.loads(first_witness['note']); note['preverify'] = 1; first_witness['note'] = json.dumps(note)
+        note = json.loads(witness['note']); note['ssl_token'] = 2; witness['note'] = json.dumps(note)
+        index = rows.index(cert); rows[index:index] = [first_cert, first_witness]
+        for n,event in enumerate(rows,1): event['seq'] = n
+        values[4] = dict(connections=1, dropped=0, events=[dict(ev='request', conn=1,
+            headers=[['Host','localhost:443'],['Authorization','Bearer route-probe-marker']]), dict(ev='response', conn=1, status=302)])
+        values[2]['events'] += [dict(ev='connect', authority='127.0.0.1:443', headers=[], peer_host='127.0.0.1', peer_port=5001),
+                               dict(ev='client_hello', sni='127.0.0.1')]
+        configure_synthetic(values)
+        self.assertEqual(validate_case(*values), [])
+        self.assertEqual(provenance(rows, values[1])['errors'], [])
+        self.assertEqual(summarize(values[1], values[0], values[4], values[5])['ownership'], 'exercised supplied context finally destroyed by caller')
+
+    def test_immutable_form_requires_actual_family_configuration_and_args(self):
+        original = synthetic_route()
+        self.assertEqual(validate_case(*original), [])
+        for form in ('bracket-inline', 'bare-port', 'bracket-port'):
+            with self.subTest(relabel=form):
+                values = copy.deepcopy(original)
+                values[0].update(definition('ipv6-' + form + '-wss')); values[1]['case'] = values[0]['case']
+                self.assertIn('route acquisition configuration', validate_case(*values))
+            good = synthetic_route(form=form)
+            self.assertEqual(validate_case(*good), [])
+            for mutation in ('form-swap', 'wrong-port', 'missing-arg', 'duplicate-arg', 'wrong-case',
+                             'wrong-mode', 'wrong-tls', 'wrong-provided', 'wrong-observed-peer', 'wrong-address'):
+                with self.subTest(form=form, mutation=mutation):
+                    values = copy.deepcopy(good); result = values[0]
+                    if mutation == 'form-swap':
+                        new_form = 'bare-port' if form != 'bare-port' else 'bracket-port'
+                        result.update(definition('ipv6-' + new_form + '-wss')); values[1]['case'] = result['case']
+                        result['args'][0] = '-VaRestRouteCase=' + result['case']
+                    elif mutation == 'wrong-port': result['peer_a']['port'] = True
+                    elif mutation == 'missing-arg': result['args'] = [a for a in result['args'] if not a.startswith('-VaRestRouteNext=')]
+                    elif mutation == 'duplicate-arg': result['args'].append(result['args'][3])
+                    elif mutation == 'wrong-case': result['args'][0] = '-VaRestRouteCase=precreated-wss-generated'
+                    elif mutation == 'wrong-mode': result['args'][1] = '-VaRestRouteMode=held'
+                    elif mutation == 'wrong-tls': result['args'].remove('-VaRestRouteTls')
+                    elif mutation == 'wrong-provided': result['args'].append('-VaRestRouteProvided')
+                    elif mutation == 'wrong-observed-peer': values[2]['events'][0]['peer_host'] = '127.0.0.1'
+                    else: result['next_proxy'] = '127.0.0.1:5001'
+                    self.assertTrue(validate_case(*values))
+                    if mutation != 'wrong-port': self.assertIn('route acquisition configuration', validate_case(*values))
+            self.assertEqual(validate_case(*good), [])
+
     def test_peer_reset_requires_same_connection_prior_hello(self):
         original = synthetic_untrusted()
         hello = next(e for e in original[2]['events'] if e['ev'] == 'client_hello')
@@ -863,7 +1171,7 @@ class ValidatorTest(unittest.TestCase):
         for factory in (synthetic, synthetic_untrusted):
             original = factory()
             self.assertEqual(validate_case(*original), [])
-            self.assertEqual(summarize(original[1])['ownership'], 'exercised supplied context finally destroyed by caller')
+            self.assertEqual(summarize(original[1], original[0], original[4], original[5])['ownership'], 'exercised supplied context finally destroyed by caller')
             phase = 'verify-identity' if factory == synthetic_untrusted else 'ssl-open'
             for change in ('omit', 'malformed', 'wrong-context', 'missing-context', 'wrong-token', 'wrong-callback', 'omit-record'):
                 values = copy.deepcopy(original)
@@ -879,14 +1187,14 @@ class ValidatorTest(unittest.TestCase):
                     change_note(values, phase, lambda v: v.update(conn=999))
                 else: change_note(values, phase, edit)
                 self.assertTrue(validate_case(*values), (factory.__name__, change))
-                self.assertEqual(summarize(values[1])['ownership'], 'supplied use unestablished', (factory.__name__, change))
+                self.assertEqual(summarize(values[1], values[0], values[4], values[5])['ownership'], 'supplied use unestablished', (factory.__name__, change))
                 # Exact restoration is a positive control; no archive is rewritten during actual acquisition.
                 values = copy.deepcopy(original)
                 self.assertEqual(validate_case(*values), [])
-                self.assertEqual(summarize(values[1])['ownership'], 'exercised supplied context finally destroyed by caller')
+                self.assertEqual(summarize(values[1], values[0], values[4], values[5])['ownership'], 'exercised supplied context finally destroyed by caller')
         values = synthetic_untrusted(); remove_phase(values, 'verify-identity')
         self.assertIn('certificate callback requires one associated provenance record', validate_case(*values))
-        self.assertEqual(summarize(values[1])['ownership'], 'supplied use unestablished')
+        self.assertEqual(summarize(values[1], values[0], values[4], values[5])['ownership'], 'supplied use unestablished')
     def test_actual_token_lifetime_not_coherent_note_numbers(self):
         values = synthetic('held')
         for event in values[1]['events']:
@@ -897,7 +1205,7 @@ class ValidatorTest(unittest.TestCase):
                 value['watch']['wsi_token'] = 999
             event['note'] = json.dumps(value)
         self.assertIn('identity token not associated with connection', validate_case(*values))
-        self.assertEqual(summarize(values[1])['ownership'], 'supplied use unestablished')
+        self.assertEqual(summarize(values[1], values[0], values[4], values[5])['ownership'], 'supplied use unestablished')
         for where in ('before', 'during-create', 'during-init'):
             values = synthetic('held'); rows = values[1]['events']
             end = next(e for e in rows if e['name'] == 'WSI_DESTROY' and e['wsi'] == 7)
@@ -909,13 +1217,13 @@ class ValidatorTest(unittest.TestCase):
             rows.insert(index, end)
             for n,e in enumerate(rows,1): e['seq'] = n
             self.assertTrue(validate_case(*values), where)
-            self.assertEqual(summarize(values[1])['ownership'], 'supplied use unestablished')
+            self.assertEqual(summarize(values[1], values[0], values[4], values[5])['ownership'], 'supplied use unestablished')
         for phase in ('ssl-open', 'verify-identity'):
             values = synthetic('held'); rows = values[1]['events']
             name = 'ESTABLISHED' if phase == 'ssl-open' else 'PERFORM_SERVER_CERT_VERIFICATION'
             next(e for e in rows if e['name'] == name)['wsi'] = 999
             self.assertTrue(validate_case(*values), phase)
-            self.assertEqual(summarize(values[1])['ownership'], 'supplied use unestablished')
+            self.assertEqual(summarize(values[1], values[0], values[4], values[5])['ownership'], 'supplied use unestablished')
     def test_conn_zero_create_and_repeated_create_remain_valid(self):
         for repeat in (False, True):
             values = synthetic('held'); rows = values[1]['events']
@@ -929,7 +1237,7 @@ class ValidatorTest(unittest.TestCase):
             # Its token is stable from conn0 CREATE through DESTROY; notes cannot invent that association.
             for n,e in enumerate(rows,1): e['seq'] = n
             self.assertEqual(validate_case(*values), [])
-            self.assertEqual(summarize(values[1])['ownership'], 'exercised supplied context finally destroyed by caller')
+            self.assertEqual(summarize(values[1], values[0], values[4], values[5])['ownership'], 'exercised supplied context finally destroyed by caller')
     def test_all_emitted_fixture_cutoffs_invalidate_every_relay(self):
         for factory in (lambda: synthetic('held'), synthetic, synthetic_untrusted):
             original = factory()
@@ -952,10 +1260,10 @@ class ValidatorTest(unittest.TestCase):
                     v=json.loads(e['note'])
                     if v.get('phase')=='ownership': v['frees']=count if v['stage']>stage else 0; e['note']=json.dumps(v)
             self.assertEqual(validate_case(*values),[])
-            self.assertNotEqual(summarize(values[1])['ownership'],'exercised supplied context finally destroyed by caller')
+            self.assertNotEqual(summarize(values[1], values[0], values[4], values[5])['ownership'],'exercised supplied context finally destroyed by caller')
         values=synthetic(); values[1]['final_ctx_destructions']=[]; values[1]['frees_after_caller']=0
         change_note(values,'ownership',lambda v:v.update(frees=0),first=False)
-        self.assertEqual(summarize(values[1])['ownership'],'missing final destruction')
+        self.assertEqual(summarize(values[1], values[0], values[4], values[5])['ownership'],'missing final destruction')
     def test_unsupported_requires_immutable_capability(self):
         evidence=dict(operation='bind-ipv6-loopback',family='AF_INET6',host='::1',errno=errno.EAFNOSUPPORT)
         value=definition('ipv6-bare-port-wss'); value.update(unsupported_ipv6=True,errno=evidence['errno'],group_drained=True)
@@ -984,6 +1292,7 @@ class ValidatorTest(unittest.TestCase):
     def test_active_retirement_is_not_context_cleanup(self):
         values=synthetic('held'); values[0].update(definition('destroy-active-wss-provided'))
         values[1].update(case=values[0]['case'],mode='destroy-active')
+        configure_synthetic(values)
         rows=values[1]['events']; end=next(e for e in rows if e['conn']==1 and e['name']=='WSI_DESTROY')
         rows.remove(end)
         for event in rows:
@@ -1026,7 +1335,7 @@ def main():
         return int(not unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(ValidatorTest)).wasSuccessful())
     if args.case:
         result,trace,errors,summary=load_case(args.case)
-        if args.require_positive and (trace is None or not trace.get('opened') or not trace.get('echoed')):
+        if args.require_positive and summary.get('outcome') != 'open+echo':
             errors.append('required positive route did not open+echo')
         print(json.dumps(dict(case=result['case'],errors=errors,summary=summary),indent=2))
         return int(bool(errors))
