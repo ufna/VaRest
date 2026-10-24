@@ -251,6 +251,47 @@ def primary_echo_proof(result, trace, rows, source, target):
     return []
 
 
+def neighbor_echo_proof(rows, trace, journal, before, after):
+    """The independent held neighbor needs its own live RECEIVE and upgraded server transaction."""
+    failure = ['independent neighbor echo absent/outside hold']
+    conn = trace['neighbor_connection']; payload = b'neighbor-route-echo'
+    related = [event for event in rows if event['conn'] == conn]
+    opened = [event for event in related if event['name'] == 'ESTABLISHED']
+    received = [event for event in related if event['name'] == 'RECEIVE']
+    echoed = [event for event in related if event['note'] == 'neighbor-echo-held']
+    intervals, lifetime_errors = lifecycle_index(rows)
+    raw_valid = False
+    if len(opened) == len(received) == len(echoed) == 1 and not lifetime_errors:
+        event = received[0]; marker = echoed[0]; life = intervals.get(event['wsi'])
+        raw_valid = (event['reason'] == 8 and event['hex'] == payload.hex() and event['len'] == len(payload)
+                     and event['wsi'] == opened[0]['wsi'] and life is not None and life['conn'] == conn
+                     and marker['name'] == 'marker' and marker['reason'] == -7 and marker['wsi'] == 0 and marker['len'] == 1
+                     and before < life['born'] < opened[0]['seq'] < event['seq'] < marker['seq'] < life['dead'] < after)
+    if not raw_valid:
+        return failure
+    server_valid = False
+    if (isinstance(journal, dict) and journal.get('key') == trace['case'] + '-neighbor'
+            and isinstance(journal.get('events'), list) and all(isinstance(event, dict) for event in journal['events'])):
+        events = journal['events']
+        groups = [[(n, event) for n, event in enumerate(events) if event.get('ev') == kind
+                   and (kind != 'sent' or event.get('op') == 1)]
+                  for kind in ('request', 'response', 'message', 'sent')]
+        if all(len(group) == 1 for group in groups):
+            (request_index, request), (response_index, response), (message_index, message), (sent_index, sent) = [group[0] for group in groups]
+            owner = request.get('conn'); encoded = base64.b64encode(payload).decode('ascii')
+            server_valid = (type(owner) is int and owner > 0
+                            and all(type(event.get('conn')) is int and event['conn'] == owner for event in (response, message, sent))
+                            and request_index < response_index < message_index < sent_index
+                            and response.get('status') == 101 and message.get('kind') == 'text'
+                            and message.get('b64') == encoded and message.get('len') == len(payload)
+                            and type(sent.get('op')) is int and sent['op'] == 1
+                            and type(sent.get('fin')) is int and sent['fin'] == 1
+                            and sent.get('b64') == encoded and sent.get('len') == len(payload))
+    if not server_valid:
+        return failure
+    return []
+
+
 def held_original_continuity(rows, trace, records, intervals):
     """Only the explicit held original promises one SSL through its later verification/open."""
     if trace['mode'] not in ('held', 'held-reuse'): return []
@@ -685,18 +726,7 @@ def validate_case(result, trace, relay_a, relay_b, source, target, neighbor):
                 problems.extend(connection_proof(rows, conn, trace['next_route'], 'neighbor-ssl-open', True, expected['provided']))
                 problems.extend(peer_proof(result, relay_b, neighbor, result['peer_b'], True))
                 related = [e for e in rows if e['conn'] == conn]
-                received = [e for e in related if e['name'] == 'RECEIVE']
-                echoed = [e for e in related if e['note'] == 'neighbor-echo-held']
-                payload = b'neighbor-route-echo'
-                encoded = base64.b64encode(payload).decode('ascii')
-                server_message = any(e.get('ev') == 'message' and e.get('kind') == 'text'
-                                     and e.get('b64') == encoded and e.get('len') == len(payload) for e in neighbor['events'])
-                server_echo = any(e.get('ev') == 'sent' and e.get('op') == 1 and e.get('fin') == 1
-                                  and e.get('b64') == encoded and e.get('len') == len(payload) for e in neighbor['events'])
-                if (len(received) != 1 or received[0]['hex'] != payload.hex() or received[0]['len'] != len(payload)
-                        or len(echoed) != 1 or echoed[0]['len'] != 1 or not server_message or not server_echo
-                        or not before[0][0] < received[0]['seq'] < echoed[0]['seq'] < after[0][0]):
-                    problems.append('independent neighbor echo absent/outside hold')
+                problems.extend(neighbor_echo_proof(rows, trace, neighbor, before[0][0], after[0][0]))
                 ends = [e for e in related if e['name'] == 'WSI_DESTROY']
                 opens = [e for e in related if e['name'] == 'ESTABLISHED']
                 marker = [e for e in related if e['note'] == 'neighbor-retired-held']
@@ -806,8 +836,8 @@ def synthetic(mode='held-reuse', provided=True):
         note('verify-identity', **ident(2, 2), known_wsi=True, ssl_input=True, store_ssl=True, preverify=1)
         append('ESTABLISHED', 2, 8); note('neighbor-ssl-open', **ident(2, 2))
         append(conn=2, note='neighbor-open-held', len=1)
-        append('RECEIVE', 2, 8, hex=b'neighbor-route-echo'.hex(), len=19)
-        append(conn=2, note='neighbor-echo-held', len=1)
+        append('RECEIVE', 2, 8, reason=8, hex=b'neighbor-route-echo'.hex(), len=19)
+        append(conn=2, reason=-7, note='neighbor-echo-held', len=1)
         append('WSI_DESTROY', 2, 8); append(conn=2, note='neighbor-retired-held', len=1)
     note('ssl-after-route', **ident(1, 1)); append(conn=1, reason=-7, note='hold-release-request')
     append('PERFORM_SERVER_CERT_VERIFICATION', 1, 7, depth=0, preverify=1, x509_error=0)
@@ -836,8 +866,12 @@ def synthetic(mode='held-reuse', provided=True):
     if mode == 'held-reuse':
         payload = b'neighbor-route-echo'
         encoded = base64.b64encode(payload).decode('ascii')
-        neighbor['events'] += [dict(ev='message', kind='text', len=len(payload), b64=encoded),
-                               dict(ev='sent', op=1, fin=1, len=len(payload), b64=encoded)]
+        neighbor['key'] = result['case'] + '-neighbor'
+        neighbor['events'][0]['conn'] = 2
+        neighbor['events'] += [dict(ev='response', conn=2, status=101),
+                               dict(ev='message', conn=2, kind='text', len=len(payload), b64=encoded),
+                               dict(ev='sent', conn=2, op=1, fin=1, len=len(payload), b64=encoded),
+                               dict(ev='sent', conn=2, op=8, fin=1, len=2, b64='A+g=')]
     journal['events'][0]['conn'] = 1
     journal['events'] += [dict(ev='response', conn=1, status=101),
                           dict(ev='message', conn=1, kind='text', len=10, b64='cm91dGUtZWNobw=='),
@@ -1152,22 +1186,91 @@ class ValidatorTest(unittest.TestCase):
             with self.assertRaises(ValueError): unsupported(value, evidence)
 
     def test_neighbor_echo_is_actual_and_inside_window(self):
-        original = synthetic()
-        self.assertEqual(validate_case(*original), [])
-        for change in ('missing', 'payload', 'after-window', 'marker', 'server-message', 'server-echo'):
-            values = copy.deepcopy(original)
-            rows = values[1]['events']
-            received = next(e for e in rows if e['conn'] == 2 and e['name'] == 'RECEIVE')
-            if change == 'missing': rows.remove(received)
-            elif change == 'payload': received['hex'] = b'wrong'.hex()
-            elif change == 'after-window': rows.remove(received); rows.append(received)
-            elif change == 'marker': next(e for e in rows if e['note'] == 'neighbor-echo-held')['len'] = 0
-            else:
-                kind = 'message' if change == 'server-message' else 'sent'
-                values[6]['events'] = [e for e in values[6]['events'] if e['ev'] != kind]
-            for n,e in enumerate(rows,1): e['seq'] = n
-            self.assertIn('independent neighbor echo absent/outside hold', validate_case(*values), change)
-        self.assertEqual(validate_case(*original), [])
+        failure = 'independent neighbor echo absent/outside hold'
+        for supplied in (False, True):
+            original = synthetic('held-reuse', supplied)
+            self.assertEqual(validate_case(*original), [])
+            raw_faults = ('missing', 'payload', 'length', 'zero-wsi', 'foreign-wsi', 'stale-wsi',
+                          'wrong-conn', 'wrong-name', 'wrong-reason', 'duplicate-receive',
+                          'missing-open', 'duplicate-open', 'before-open', 'after-destroy',
+                          'before-window', 'after-window', 'marker', 'missing-marker',
+                          'duplicate-marker', 'marker-before-receive', 'marker-after-window',
+                          'marker-name', 'marker-reason', 'marker-wsi')
+            for change in raw_faults:
+                with self.subTest(supplied=supplied, raw=change):
+                    values = copy.deepcopy(original); rows = values[1]['events']
+                    received = next(e for e in rows if e['conn'] == 2 and e['name'] == 'RECEIVE')
+                    opened = next(e for e in rows if e['conn'] == 2 and e['name'] == 'ESTABLISHED')
+                    ended = next(e for e in rows if e['conn'] == 2 and e['name'] == 'WSI_DESTROY')
+                    marker = next(e for e in rows if e['note'] == 'neighbor-echo-held')
+                    def anchor(phase):
+                        return next(e for e in rows if e['note'].startswith('{') and json.loads(e['note']).get('phase') == phase)
+                    if change == 'missing': rows.remove(received)
+                    elif change == 'payload': received['hex'] = b'wrong'.hex()
+                    elif change == 'length': received['len'] = 18
+                    elif change in ('zero-wsi', 'foreign-wsi', 'stale-wsi'):
+                        received['wsi'] = {'zero-wsi': 0, 'foreign-wsi': 7, 'stale-wsi': 999}[change]
+                    elif change == 'wrong-conn': received['conn'] = 1
+                    elif change == 'wrong-name': received['name'] = 'marker'
+                    elif change == 'wrong-reason': received['reason'] = -7
+                    elif change == 'duplicate-receive': rows.insert(rows.index(received), copy.deepcopy(received))
+                    elif change == 'missing-open': rows.remove(opened)
+                    elif change == 'duplicate-open': rows.insert(rows.index(opened), copy.deepcopy(opened))
+                    elif change in ('before-open', 'after-destroy', 'before-window', 'after-window'):
+                        rows.remove(received)
+                        boundary = {'before-open': opened, 'after-destroy': ended,
+                                    'before-window': anchor('ssl-before-route'), 'after-window': anchor('ssl-after-route')}[change]
+                        rows.insert(rows.index(boundary) + int(change.startswith('after-')), received)
+                    elif change == 'marker': marker['len'] = 0
+                    elif change == 'missing-marker': rows.remove(marker)
+                    elif change == 'duplicate-marker': rows.insert(rows.index(marker), copy.deepcopy(marker))
+                    elif change == 'marker-name': marker['name'] = 'RECEIVE'
+                    elif change == 'marker-reason': marker['reason'] = 123456
+                    elif change == 'marker-wsi': marker['wsi'] = 8
+                    else:
+                        rows.remove(marker)
+                        rows.insert(rows.index(received) if change == 'marker-before-receive' else rows.index(anchor('ssl-after-route')) + 1, marker)
+                    for n,event in enumerate(rows,1): event.update(seq=n, time=float(n))
+                    self.assertIn(failure, validate_case(*values))
+            server_faults = ('missing-key', 'wrong-key', 'missing-request', 'missing-response', 'missing-message',
+                             'missing-sent', 'duplicate-request', 'duplicate-response', 'duplicate-message', 'duplicate-sent',
+                             'foreign-echo', 'request-owner-type', 'response-owner', 'message-owner', 'sent-owner',
+                             'zero-owner', 'negative-owner', 'bool-owner', 'message-payload', 'sent-payload',
+                             'message-length', 'sent-length', 'message-kind', 'sent-op', 'sent-fin', 'wrong-status',
+                             'request-after-response', 'response-after-message', 'message-after-sent')
+            for change in server_faults:
+                with self.subTest(supplied=supplied, server=change):
+                    values = copy.deepcopy(original); journal = values[6]; events = journal['events']
+                    request, response, message, sent = (next(e for e in events if e['ev'] == kind)
+                                                       for kind in ('request', 'response', 'message', 'sent'))
+                    if change == 'missing-key': journal.pop('key')
+                    elif change == 'wrong-key': journal['key'] = 'unrelated-neighbor'
+                    elif change.startswith(('missing-', 'duplicate-')):
+                        event = next(e for e in events if e['ev'] == change.split('-')[1])
+                        if change.startswith('missing-'): events.remove(event)
+                        else: events.append(copy.deepcopy(event))
+                    elif change == 'foreign-echo': message['conn'] = sent['conn'] = 999
+                    elif change == 'request-owner-type': request['conn'] = True
+                    elif change == 'response-owner': response['conn'] = 999
+                    elif change == 'message-owner': message['conn'] = 999
+                    elif change == 'sent-owner': sent['conn'] = 999
+                    elif change in ('zero-owner', 'negative-owner', 'bool-owner'):
+                        for event in events: event['conn'] = {'zero-owner': 0, 'negative-owner': -1, 'bool-owner': True}[change]
+                    elif change in ('message-payload', 'sent-payload'):
+                        (message if change.startswith('message') else sent)['b64'] = 'd3Jvbmc='
+                    elif change in ('message-length', 'sent-length'):
+                        (message if change.startswith('message') else sent)['len'] = 18
+                    elif change == 'message-kind': message['kind'] = 'binary'
+                    elif change == 'sent-op': sent['op'] = 2
+                    elif change == 'sent-fin': sent['fin'] = 0
+                    elif change == 'wrong-status': response['status'] = 302
+                    else:
+                        moved, boundary = {'request-after-response': (request, response),
+                                           'response-after-message': (response, message), 'message-after-sent': (message, sent)}[change]
+                        events.remove(moved); events.insert(events.index(boundary)+1, moved)
+                    self.assertIn(failure, validate_case(*values))
+            self.assertEqual(validate_case(*original), [])
+            self.assertEqual(summarize(original[1], original[0], original[4], original[5])['outcome'], 'open+echo')
 
     def test_authoritative_journals_precede_cleanup(self):
         for changed in ({}, dict(child_group_drained=False, relays_naturally_idle=[True, True], before_fixture_stop=True),
