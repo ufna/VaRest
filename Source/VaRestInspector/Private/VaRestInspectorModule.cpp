@@ -84,40 +84,6 @@ FSupportedAllocator GetSupportedAllocator()
 }
 } // namespace VaRest::Inspector::Private
 
-// Null Data is intentional: Task2 has no packet/store/snapshot backing.
-struct FVaRestInspectorSnapshot::FData
-{
-};
-FVaRestInspectorSnapshot::FVaRestInspectorSnapshot()
-{
-	check(IsInGameThread());
-}
-FVaRestInspectorSnapshot::~FVaRestInspectorSnapshot() = default;
-uint64 FVaRestInspectorSnapshot::GetRevision() const
-{
-	check(IsInGameThread());
-	return 0;
-}
-void FVaRestInspectorSnapshot::ForEachRecord(TFunctionRef<void(const FVaRestInspectorRecordView&)>) const
-{
-	check(IsInGameThread());
-}
-void FVaRestInspectorSnapshot::ForEachStats(TFunctionRef<void(const FVaRestInspectorHttpStats&)>) const
-{
-	check(IsInGameThread());
-}
-TConstArrayView<FVaRestInspectorLink> FVaRestInspectorSnapshot::GetLinks() const
-{
-	check(IsInGameThread());
-	return {};
-}
-const FVaRestInspectorDiagnostics& FVaRestInspectorSnapshot::GetDiagnostics() const
-{
-	check(IsInGameThread());
-	static const FVaRestInspectorDiagnostics Empty;
-	return Empty;
-}
-
 class FVaRestInspectorModule final : public IVaRestInspector
 {
 public:
@@ -159,8 +125,13 @@ public:
 		check(IsInGameThread());
 		if (VaRest::Inspector::Private::bShuttingDown)
 			return false;
+#if VAREST_WITH_INSPECTOR
+		(void)Out;
+		return false;
+#else
 		Out = MakeShared<FVaRestInspectorSnapshot, ESPMode::ThreadSafe>();
 		return true;
+#endif
 	}
 	virtual bool ForEachRecord(TFunctionRef<void(const FVaRestInspectorRecordView&)>) const override
 	{

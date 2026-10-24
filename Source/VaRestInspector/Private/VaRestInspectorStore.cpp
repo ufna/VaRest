@@ -2,12 +2,15 @@
 
 #include "VaRestInspectorStore.h"
 #include "VaRestInspectorPhases.h"
+#include "VaRestInspectorSnapshot.h"
 
 #include "CoreGlobals.h"
 #include "HAL/UnrealMemory.h"
 #include "Math/UnrealMathUtility.h"
 #include "Misc/ScopeExit.h"
 #include "VaRestClock.h"
+
+#include <limits>
 
 #if VAREST_WITH_INSPECTOR
 namespace VaRest::Inspector::Private
@@ -264,13 +267,38 @@ struct FStore::FRow
 	uint64 NextNoteSerial = 0;
 	FDispatchSlotPtr Dispatches[16];
 	int32 NumDispatches = 0, PreviousDispatchSlot = INDEX_NONE;
+	int32 IndexSlot = INDEX_NONE, DeadlineIndex = INDEX_NONE;
 };
 struct FStore::FStorage
 {
+	enum class EIndexState : uint8
+	{
+		Empty,
+		Occupied,
+		Deleted
+	};
 	struct FIndexEntry
 	{
+		EIndexState State = EIndexState::Empty;
 		uint64 RequestId = 0;
 		TSharedPtr<FRow, ESPMode::ThreadSafe> Row;
+		bool bRemovePending = false;
+	};
+	struct FDeadlineEntry
+	{
+		double Due = std::numeric_limits<double>::infinity();
+		int32 IndexSlot = INDEX_NONE;
+	};
+	struct FRetainedIdEntry
+	{
+		uint64 RequestId = 0;
+		int32 LookupSlot = INDEX_NONE;
+	};
+	struct FRetainedLookupEntry
+	{
+		EIndexState State = EIndexState::Empty;
+		uint64 RequestId = 0;
+		int32 RingSlot = INDEX_NONE;
 	};
 	explicit FStorage(FStoreCredit&& InCredit)
 		: SelfCredit(MoveTemp(InCredit))
@@ -282,7 +310,12 @@ struct FStore::FStorage
 	// permit bounded insertion/deletion without reallocating either domain.
 	TStoreBlock<int32> Arrival;
 	TStoreBlock<FClientEntry> Clients;
+	TStoreBlock<FDeadlineEntry> DeadlineHeap;
+	TStoreBlock<FRetainedIdEntry> RetainedIds;
+	TStoreBlock<FRetainedLookupEntry> RetainedLookup;
 	int32 IndexCapacity = 0, MaxRows = 0, ClientCapacity = 0;
+	int32 RetainedCapacity = 0, RetainedLookupCapacity = 0;
+	int32 RetainedHead = 0, NumRetained = 0, NumDeadline = 0;
 	int32 NumRows = 0, NumClients = 0;
 };
 void FStore::FStorageDeleter::operator()(FStorage* Object) const
@@ -315,13 +348,19 @@ bool FStore::CalibrateRows(FAllocationLifetime& Lifetime, std::atomic<int64>& St
 	using C = SharedPointerInternals::TReferenceControllerWithDeleter<FRow, D, ESPMode::ThreadSafe>;
 	using HeaderD = TInspectorDeleter<FDispatchHeaderOwner>;
 	using HeaderC = SharedPointerInternals::TReferenceControllerWithDeleter<FDispatchHeaderOwner, HeaderD, ESPMode::ThreadSafe>;
+	using SnapshotD = TInspectorDeleter<FVaRestInspectorSnapshot>;
+	using SnapshotC = SharedPointerInternals::TReferenceControllerWithDeleter<FVaRestInspectorSnapshot, SnapshotD, ESPMode::ThreadSafe>;
 	constexpr uint32 RowNewAlignment = sizeof(C) <= 8 ? 8 : __STDCPP_DEFAULT_NEW_ALIGNMENT__;
 	constexpr uint32 HeaderNewAlignment = sizeof(HeaderC) <= 8 ? 8 : __STDCPP_DEFAULT_NEW_ALIGNMENT__;
-	static_assert(sizeof(C) == sizeof(HeaderC) && sizeof(C) > 0 && sizeof(C) <= 1024, "Shared retained calibration requires equal concrete controller requests");
+	constexpr uint32 SnapshotNewAlignment = sizeof(SnapshotC) <= 8 ? 8 : __STDCPP_DEFAULT_NEW_ALIGNMENT__;
+	static_assert(sizeof(C) == sizeof(HeaderC) && sizeof(C) == sizeof(SnapshotC) && sizeof(C) > 0 && sizeof(C) <= 1024,
+		"Shared retained calibration requires equal concrete controller requests");
 	static_assert(alignof(C) > 0 && alignof(C) <= 16 && alignof(HeaderC) > 0 && alignof(HeaderC) <= 16 &&
-		RowNewAlignment == HeaderNewAlignment, "Both concrete controllers must use the calibrated ordinary new alignment");
+		alignof(SnapshotC) > 0 && alignof(SnapshotC) <= 16 && RowNewAlignment == HeaderNewAlignment && RowNewAlignment == SnapshotNewAlignment,
+		"All concrete controllers must use the calibrated ordinary new alignment");
 	return Lifetime.Allocator.Calibrate(StartupUsed, StartupLimit, sizeof(C), alignof(C)) &&
-		HasInspectorControllerCalibration<FRow>(Lifetime) && HasInspectorControllerCalibration<FDispatchHeaderOwner>(Lifetime);
+		HasInspectorControllerCalibration<FRow>(Lifetime) && HasInspectorControllerCalibration<FDispatchHeaderOwner>(Lifetime) &&
+		HasInspectorControllerCalibration<FVaRestInspectorSnapshot>(Lifetime);
 }
 bool FStore::Initialize(TRefCountPtr<FBudgetAccount> InAccount)
 {
@@ -332,7 +371,8 @@ bool FStore::Initialize(TRefCountPtr<FBudgetAccount> InAccount)
 		InAccount->BootstrapBytes < 4096 || InAccount->BootstrapBytes > InAccount->Limit ||
 		Limits.MaxRecords < 1 || Limits.MaxRecords > 65536 || Limits.StoreBytes <= 0 ||
 		!HasInspectorControllerCalibration<FRow>(*InAccount->Lifetime) ||
-		!HasInspectorControllerCalibration<FDispatchHeaderOwner>(*InAccount->Lifetime))
+		!HasInspectorControllerCalibration<FDispatchHeaderOwner>(*InAccount->Lifetime) ||
+		!HasInspectorControllerCalibration<FVaRestInspectorSnapshot>(*InAccount->Lifetime))
 	{
 		Increment(State.UnsupportedAllocator);
 		return false;
@@ -347,22 +387,33 @@ bool FStore::Initialize(TRefCountPtr<FBudgetAccount> InAccount)
 		Increment(State.UnsupportedAllocator);
 		return false;
 	}
-	int32 MaxRows = Limits.MaxRecords, ClientCapacity = FNormalizedLimits::Clients, IndexCapacity = 0;
+	int32 MaxRows = Limits.MaxRecords, ClientCapacity = FNormalizedLimits::Clients;
+	int32 IndexCapacity = 0, RetainedCapacity = 0, RetainedLookupCapacity = 0;
 	bool bFits = false;
 	while (true)
 	{
 		IndexCapacity = 2;
 		while (IndexCapacity < MaxRows * 2)
 			IndexCapacity *= 2;
+		RetainedCapacity = FMath::Min(FNormalizedLimits::Tombstones, MaxRows);
+		RetainedLookupCapacity = 2;
+		while (RetainedLookupCapacity < RetainedCapacity * 2)
+			RetainedLookupCapacity *= 2;
 		const auto IndexBound = Allocator.Bound(SIZE_T(IndexCapacity) * sizeof(FStorage::FIndexEntry), alignof(FStorage::FIndexEntry));
 		const auto ArrivalBound = Allocator.Bound(SIZE_T(IndexCapacity) * sizeof(int32), alignof(int32));
 		const auto ClientsBound = Allocator.Bound(SIZE_T(ClientCapacity) * sizeof(FClientEntry), alignof(FClientEntry));
+		const auto DeadlineBound = Allocator.Bound(SIZE_T(MaxRows) * sizeof(FStorage::FDeadlineEntry), alignof(FStorage::FDeadlineEntry));
+		const auto RetainedBound = Allocator.Bound(SIZE_T(RetainedCapacity) * sizeof(FStorage::FRetainedIdEntry), alignof(FStorage::FRetainedIdEntry));
+		const auto RetainedLookupBound = Allocator.Bound(SIZE_T(RetainedLookupCapacity) * sizeof(FStorage::FRetainedLookupEntry), alignof(FStorage::FRetainedLookupEntry));
 		int64 Startup = InAccount->BootstrapBytes;
-		bFits = IndexBound.IsSet() && ArrivalBound.IsSet() && ClientsBound.IsSet() &&
+		bFits = IndexBound.IsSet() && ArrivalBound.IsSet() && ClientsBound.IsSet() && DeadlineBound.IsSet() && RetainedBound.IsSet() && RetainedLookupBound.IsSet() &&
 				AddChecked(Startup, int64(SelfBound.GetValue()), Limits.StoreBytes / 4) &&
 				AddChecked(Startup, int64(IndexBound.GetValue()), Limits.StoreBytes / 4) &&
 				AddChecked(Startup, int64(ArrivalBound.GetValue()), Limits.StoreBytes / 4) &&
 				AddChecked(Startup, int64(ClientsBound.GetValue()), Limits.StoreBytes / 4) &&
+				AddChecked(Startup, int64(DeadlineBound.GetValue()), Limits.StoreBytes / 4) &&
+				AddChecked(Startup, int64(RetainedBound.GetValue()), Limits.StoreBytes / 4) &&
+				AddChecked(Startup, int64(RetainedLookupBound.GetValue()), Limits.StoreBytes / 4) &&
 				AddChecked(Startup, int64(RowBound.GetValue()), Limits.StoreBytes) && AddChecked(Startup, 4096, Limits.StoreBytes);
 		if (bFits)
 			break;
@@ -392,7 +443,8 @@ bool FStore::Initialize(TRefCountPtr<FBudgetAccount> InAccount)
 	}
 	TUniquePtr<FStorage, FStorageDeleter> Candidate(new (Memory) FStorage(MoveTemp(Credit.GetValue())));
 	if (!Candidate->Index.Allocate(InAccount, IndexCapacity) || !Candidate->Arrival.Allocate(InAccount, IndexCapacity) ||
-		!Candidate->Clients.Allocate(InAccount, ClientCapacity))
+		!Candidate->Clients.Allocate(InAccount, ClientCapacity) || !Candidate->DeadlineHeap.Allocate(InAccount, MaxRows) ||
+		!Candidate->RetainedIds.Allocate(InAccount, RetainedCapacity) || !Candidate->RetainedLookup.Allocate(InAccount, RetainedLookupCapacity))
 	{
 		Increment(State.RefusedRows);
 		return false;
@@ -400,6 +452,8 @@ bool FStore::Initialize(TRefCountPtr<FBudgetAccount> InAccount)
 	Candidate->IndexCapacity = IndexCapacity;
 	Candidate->MaxRows = MaxRows;
 	Candidate->ClientCapacity = ClientCapacity;
+	Candidate->RetainedCapacity = RetainedCapacity;
+	Candidate->RetainedLookupCapacity = RetainedLookupCapacity;
 	Budget = MoveTemp(InAccount);
 	Storage = MoveTemp(Candidate);
 	return true;
@@ -413,9 +467,9 @@ FStore::FRow* FStore::Find(uint64 RequestId) const
 	for (uint32 Offset = 0; Offset <= Mask; ++Offset)
 	{
 		const auto& Entry = Storage->Index[int32((Start + Offset) & Mask)];
-		if (!Entry.RequestId)
+		if (Entry.State == FStorage::EIndexState::Empty)
 			return nullptr;
-		if (Entry.RequestId == RequestId)
+		if (Entry.State == FStorage::EIndexState::Occupied && Entry.RequestId == RequestId)
 			return Entry.Row.Get();
 	}
 	return nullptr;
@@ -433,11 +487,22 @@ FStore::FRow* FStore::AdmitRow(uint64 RequestId, bool bPartial)
 	for (uint32 Offset = 0; Offset <= Mask; ++Offset)
 	{
 		const int32 Candidate = int32((Start + Offset) & Mask);
-		if (Storage->Index[Candidate].RequestId == 0)
+		auto& Entry = Storage->Index[Candidate];
+		if (Entry.State == FStorage::EIndexState::Occupied)
 		{
-			Slot = Candidate;
-			break;
+			if (Entry.RequestId == RequestId)
+				return Entry.Row.Get();
+			continue;
 		}
+		if (Entry.State == FStorage::EIndexState::Deleted)
+		{
+			if (Slot == INDEX_NONE)
+				Slot = Candidate;
+			continue;
+		}
+		if (Slot == INDEX_NONE)
+			Slot = Candidate;
+		break;
 	}
 	if (Slot == INDEX_NONE || Storage->NumRows >= Storage->IndexCapacity)
 	{
@@ -462,8 +527,11 @@ FStore::FRow* FStore::AdmitRow(uint64 RequestId, bool bPartial)
 	Row->Value.bPartial = bPartial;
 	Row->Value.ArrivalOrdinal = ++NextArrival;
 	Row->Value.BirthMetadataOrdinal = LastConsumedMetadataOrdinal;
+	Row->IndexSlot = Slot;
+	Storage->Index[Slot].State = FStorage::EIndexState::Occupied;
 	Storage->Index[Slot].RequestId = RequestId;
 	Storage->Index[Slot].Row = MoveTemp(Row);
+	Storage->Index[Slot].bRemovePending = false;
 	Storage->Arrival[Storage->NumRows++] = Slot;
 	FRow* Result = Storage->Index[Slot].Row.Get();
 	Touch(*Result);
@@ -492,6 +560,8 @@ void FStore::SetStartedScalars(FRow& Row, const FPacketScalars& Scalars)
 		Row.Value.bStartUtcKnown = true;
 	}
 	Row.Value.bPartial |= EnumHasAnyFlags(Scalars.Flags, EVaRestTraceRequestFlags::Partial);
+	if (Scalars.bExcerptPending && Row.Value.RequestExcerptState == EVaRestInspectorDetailState::Absent)
+		Row.Value.RequestExcerptState = EVaRestInspectorDetailState::Pending;
 }
 FStore::EAttachedBase FStore::PrepareAttachedBase(uint64 RequestId, bool& bNeedsStarted)
 {
@@ -563,6 +633,8 @@ bool FStore::ApplyAttachedStarted(const FVaRestTraceStarted& Borrowed, const FCa
 		Row->Value.StartUtc = Borrowed.StartUtc;
 		Row->Value.bStartUtcKnown = true;
 	}
+	if (Policy.bBodies && Borrowed.bExcerptPending && Row->Value.RequestExcerptState == EVaRestInspectorDetailState::Absent)
+		Row->Value.RequestExcerptState = EVaRestInspectorDetailState::Pending;
 	Touch(*Row);
 	if (!bNeedsStarted)
 		return true;
@@ -673,21 +745,25 @@ void FStore::ApplyClient(uint64 ClientId, uint64 ScopeId, bool bCreated, FString
 	Entry->Label = static_cast<TCHAR*>(Memory);
 	Entry->Chars = Label.Len();
 }
-void FStore::ApplyAttached(const FVaRestTraceSnapshot& Snapshot, const FCapturePolicy& Policy,
+bool FStore::ApplyAttached(const FVaRestTraceSnapshot& Snapshot, const FCapturePolicy& Policy,
 	TSharedRef<FPendingAccount, ESPMode::ThreadSafe> Pending, FAllocationAdapter& Allocator)
 {
 	check(IsInGameThread());
 	if (!Storage || bEnumerating)
-		return;
+		return false;
 	if (Pending->Lifetime != Budget->Lifetime || &Allocator != &Budget->Lifetime->Allocator)
 	{
 		Increment(State.UnsupportedAllocator);
-		return;
+		return false;
 	}
 	if (CurrentReconciliationStamp == MAX_uint64)
 	{
 		for (int32 Index = 0; Index < Storage->NumRows; ++Index)
-			Storage->Index[Storage->Arrival[Index]].Row->PresenceStamp = 0;
+		{
+			FRow& Row = *Storage->Index[Storage->Arrival[Index]].Row;
+			if (!Row.Value.bSealed)
+				Row.PresenceStamp = 0;
+		}
 		CurrentReconciliationStamp = 0;
 	}
 	++CurrentReconciliationStamp;
@@ -706,8 +782,14 @@ void FStore::ApplyAttached(const FVaRestTraceSnapshot& Snapshot, const FCaptureP
 		Row.Value.bPartial = true;
 		Row.Value.EndState = EVaRestInspectorEndState::CaptureInterrupted;
 		Row.Evidence = ELivenessEvidence::None;
-		Touch(Row);
+		if (Row.Value.RequestExcerptState == EVaRestInspectorDetailState::Pending)
+			Row.Value.RequestExcerptState = EVaRestInspectorDetailState::CaptureStopped;
+		for (int32 Dispatch = 0; Dispatch < Row.NumDispatches; ++Dispatch)
+			if (Row.Dispatches[Dispatch]->ResponseExcerptState == EVaRestInspectorDetailState::Pending)
+				Row.Dispatches[Dispatch]->ResponseExcerptState = EVaRestInspectorDetailState::CaptureStopped;
+		CompleteMutation(Row);
 	}
+	return true;
 }
 FDispatchSlot* FStore::FindDispatch(FRow& Row, const FPacketScalars& Scalars) const
 {
@@ -804,6 +886,8 @@ void FStore::ApplyPhysical(FRow& Row, FPacket& Packet)
 		Slot->bHasEnded = true;
 		if (!Slot->bHasDispatched)
 			Slot->Attempt = Fixed.Scalars.Attempt;
+		if (Fixed.Scalars.bExcerptPending && Slot->ResponseExcerptState == EVaRestInspectorDetailState::Absent)
+			Slot->ResponseExcerptState = EVaRestInspectorDetailState::Pending;
 		if (!FStorePacketOwner::TryTake(Packet, Budget, Budget->Lifetime->Allocator, Slot->Ended))
 		{
 			Slot->EndedFixed.Header.bMetadataOmitted = true;
@@ -812,31 +896,56 @@ void FStore::ApplyPhysical(FRow& Row, FPacket& Packet)
 		}
 	}
 }
-void FStore::ApplyExcerpt(FRow& Row, FPacket& Packet)
+FStore::EExcerptApplication FStore::ApplyExcerpt(FRow& Row, FPacket& Packet, EVaRestInspectorDetailState& OutDetail)
 {
+	OutDetail = EVaRestInspectorDetailState::Absent;
+	if (Row.Value.bSealed)
+		return EExcerptApplication::Ignored;
+	const FPacketScalars Scalars = Packet.Fixed().Scalars;
 	FStorePacketPtr* Destination = &Row.RequestExcerpt;
-	if (Packet.Fixed().Scalars.Owner == EVaRestTraceExcerptOwner::Response)
+	EVaRestInspectorDetailState* Detail = &Row.Value.RequestExcerptState;
+	if (Scalars.Owner == EVaRestTraceExcerptOwner::Response)
 	{
-		FDispatchSlot* Slot = FindDispatch(Row, Packet.Fixed().Scalars);
+		FDispatchSlot* Slot = FindDispatch(Row, Scalars);
 		if (!Slot)
-			Slot = AdmitDispatch(Row, Packet.Fixed().Scalars);
+		{
+			if (Row.Value.bTerminalKnown)
+				return EExcerptApplication::Ignored;
+			Slot = AdmitDispatch(Row, Scalars);
+		}
 		if (!Slot)
 		{
 			AddObservation(Row.Value.OmittedExcerpts, 1, Row.Value.bCountersSaturated);
 			Row.Value.bMetadataOmitted = true;
 			Increment(State.MetadataOmitted);
-			return;
+			OutDetail = EVaRestInspectorDetailState::MetadataOmitted;
+			return EExcerptApplication::Refused;
 		}
 		Destination = &Slot->ResponseExcerpt;
+		Detail = &Slot->ResponseExcerptState;
 	}
-	if (*Destination)
-		return;
-	if (!FStorePacketOwner::TryTake(Packet, Budget, Budget->Lifetime->Allocator, *Destination))
+	if (*Destination || (*Detail != EVaRestInspectorDetailState::Absent && *Detail != EVaRestInspectorDetailState::Pending) ||
+		(Row.Value.bTerminalKnown && *Detail != EVaRestInspectorDetailState::Pending))
+		return EExcerptApplication::Ignored;
+	FStorePacketPtr Candidate;
+	if (!FStorePacketOwner::TryTake(Packet, Budget, Budget->Lifetime->Allocator, Candidate))
 	{
 		AddObservation(Row.Value.OmittedExcerpts, 1, Row.Value.bCountersSaturated);
 		Row.Value.bMetadataOmitted = true;
 		Increment(State.MetadataOmitted);
+		OutDetail = EVaRestInspectorDetailState::MetadataOmitted;
+		return EExcerptApplication::Refused;
 	}
+	*Destination = MoveTemp(Candidate);
+	switch (Scalars.Skip)
+	{
+	case EVaRestExcerptSkip::None: *Detail = EVaRestInspectorDetailState::Present; break;
+	case EVaRestExcerptSkip::Backlog: *Detail = EVaRestInspectorDetailState::Backlog; break;
+	case EVaRestExcerptSkip::Disabled: *Detail = EVaRestInspectorDetailState::CaptureStopped; break;
+	case EVaRestExcerptSkip::Discarded: *Detail = EVaRestInspectorDetailState::Discarded; break;
+	}
+	OutDetail = *Detail;
+	return EExcerptApplication::Resolved;
 }
 void FStore::ApplyCompletion(FRow& Row, FPacket& Packet)
 {
@@ -876,6 +985,199 @@ void FStore::ApplyCompletion(FRow& Row, FPacket& Packet)
 	// The fallback never contains slices, even when the admitted full owner
 	// has text. Its metadata is always unavailable without that separate owner.
 	Row.CompletionFixed.Header.bMetadataOmitted = true;
+}
+bool FStore::HasPendingExcerpt(const FRow& Row)
+{
+	if (Row.Value.RequestExcerptState == EVaRestInspectorDetailState::Pending)
+		return true;
+	for (int32 Index = 0; Index < Row.NumDispatches; ++Index)
+		if (Row.Dispatches[Index]->ResponseExcerptState == EVaRestInspectorDetailState::Pending)
+			return true;
+	return false;
+}
+bool FStore::CanSeal(const FRow& Row)
+{
+	return Row.Value.bTerminalKnown && !HasPendingExcerpt(Row);
+}
+bool FStore::ShouldShareRow(const FRow& Row)
+{
+	return Row.Value.bSealed;
+}
+void FStore::CompleteMutation(FRow& Row)
+{
+	if (Row.Value.bSealed)
+		return;
+	const bool bSeal = CanSeal(Row);
+	if (bSeal)
+		RemoveDeadline(Row);
+	Touch(Row);
+	if (bSeal)
+		Row.Value.bSealed = true;
+}
+void FStore::AddDeadline(FRow& Row)
+{
+	if (Row.DeadlineIndex != INDEX_NONE)
+		return;
+	check(Storage && Row.IndexSlot >= 0 && Row.IndexSlot < Storage->IndexCapacity && Storage->NumDeadline < Storage->MaxRows);
+	check(Storage->Index[Row.IndexSlot].Row.Get() == &Row);
+	double Due = std::numeric_limits<double>::infinity();
+	if (FMath::IsFinite(Row.Value.CompletedObservedAt))
+	{
+		const double Candidate = Row.Value.CompletedObservedAt + 5.0;
+		if (FMath::IsFinite(Candidate))
+			Due = Candidate;
+	}
+	int32 Position = Storage->NumDeadline++;
+	Storage->DeadlineHeap[Position] = {Due, Row.IndexSlot};
+	Row.DeadlineIndex = Position;
+	auto SetPosition = [&](int32 Index) {
+		FRow* Other = Storage->Index[Storage->DeadlineHeap[Index].IndexSlot].Row.Get();
+		check(Other);
+		Other->DeadlineIndex = Index;
+	};
+	while (Position > 0)
+	{
+		const int32 Parent = (Position - 1) / 2;
+		if (!(Storage->DeadlineHeap[Position].Due < Storage->DeadlineHeap[Parent].Due))
+			break;
+		const auto Temporary = Storage->DeadlineHeap[Parent];
+		Storage->DeadlineHeap[Parent] = Storage->DeadlineHeap[Position];
+		Storage->DeadlineHeap[Position] = Temporary;
+		SetPosition(Parent);
+		SetPosition(Position);
+		Position = Parent;
+	}
+}
+void FStore::RemoveDeadline(FRow& Row)
+{
+	const int32 Removed = Row.DeadlineIndex;
+	if (Removed == INDEX_NONE)
+		return;
+	check(Storage && Removed >= 0 && Removed < Storage->NumDeadline && Row.IndexSlot >= 0 && !Row.Value.bSealed);
+	const int32 Last = Storage->NumDeadline - 1;
+	Row.DeadlineIndex = INDEX_NONE;
+	if (Removed != Last)
+	{
+		Storage->DeadlineHeap[Removed] = Storage->DeadlineHeap[Last];
+		FRow* Moved = Storage->Index[Storage->DeadlineHeap[Removed].IndexSlot].Row.Get();
+		check(Moved);
+		Moved->DeadlineIndex = Removed;
+	}
+	Storage->NumDeadline = Last;
+	if (Removed == Last)
+		return;
+	auto SetPosition = [&](int32 Index) {
+		FRow* Other = Storage->Index[Storage->DeadlineHeap[Index].IndexSlot].Row.Get();
+		check(Other);
+		Other->DeadlineIndex = Index;
+	};
+	auto SwapEntries = [&](int32 Left, int32 Right) {
+		const auto Temporary = Storage->DeadlineHeap[Left];
+		Storage->DeadlineHeap[Left] = Storage->DeadlineHeap[Right];
+		Storage->DeadlineHeap[Right] = Temporary;
+		SetPosition(Left);
+		SetPosition(Right);
+	};
+	int32 Position = Removed;
+	while (Position > 0)
+	{
+		const int32 Parent = (Position - 1) / 2;
+		if (!(Storage->DeadlineHeap[Position].Due < Storage->DeadlineHeap[Parent].Due))
+			break;
+		SwapEntries(Position, Parent);
+		Position = Parent;
+	}
+	while (true)
+	{
+		const int32 Left = Position * 2 + 1;
+		if (Left >= Storage->NumDeadline)
+			break;
+		const int32 Right = Left + 1;
+		int32 Smallest = Left;
+		if (Right < Storage->NumDeadline && Storage->DeadlineHeap[Right].Due < Storage->DeadlineHeap[Left].Due)
+			Smallest = Right;
+		if (!(Storage->DeadlineHeap[Smallest].Due < Storage->DeadlineHeap[Position].Due))
+			break;
+		SwapEntries(Position, Smallest);
+		Position = Smallest;
+	}
+}
+int32 FStore::ExpirePendingExcerpts()
+{
+	check(IsInGameThread());
+	if (!Storage)
+		return 0;
+	if (bEnumerating)
+	{
+		bExpiryPending = true;
+		return 0;
+	}
+	const double Now = Clock->Now();
+	if (!FMath::IsFinite(Now))
+		return 0;
+	int32 Expired = 0;
+	while (Storage->NumDeadline > 0 && Expired < 256)
+	{
+		const auto Next = Storage->DeadlineHeap[0];
+		if (!FMath::IsFinite(Next.Due) || Now < Next.Due)
+			break;
+		FRow* Row = Storage->Index[Next.IndexSlot].Row.Get();
+		check(Row && Row->DeadlineIndex == 0);
+		RemoveDeadline(*Row);
+		bool bChanged = false;
+		if (Row->Value.RequestExcerptState == EVaRestInspectorDetailState::Pending)
+		{
+			Row->Value.RequestExcerptState = EVaRestInspectorDetailState::TimedOut;
+			bChanged = true;
+		}
+		for (int32 Index = 0; Index < Row->NumDispatches; ++Index)
+			if (Row->Dispatches[Index]->ResponseExcerptState == EVaRestInspectorDetailState::Pending)
+			{
+				Row->Dispatches[Index]->ResponseExcerptState = EVaRestInspectorDetailState::TimedOut;
+				bChanged = true;
+			}
+		check(bChanged);
+		CompleteMutation(*Row);
+		++Expired;
+	}
+	return Expired;
+}
+void FStore::StopPendingExcerpts()
+{
+	check(IsInGameThread());
+	if (bEnumerating)
+	{
+		bStopPending = true;
+		return;
+	}
+	if (!Storage)
+		return;
+	for (int32 Arrival = 0; Arrival < Storage->NumRows; ++Arrival)
+	{
+		FRow& Row = *Storage->Index[Storage->Arrival[Arrival]].Row;
+		bool bChanged = false;
+		if (Row.Value.RequestExcerptState == EVaRestInspectorDetailState::Pending)
+		{
+			Row.Value.RequestExcerptState = EVaRestInspectorDetailState::CaptureStopped;
+			bChanged = true;
+		}
+		for (int32 Index = 0; Index < Row.NumDispatches; ++Index)
+			if (Row.Dispatches[Index]->ResponseExcerptState == EVaRestInspectorDetailState::Pending)
+			{
+				Row.Dispatches[Index]->ResponseExcerptState = EVaRestInspectorDetailState::CaptureStopped;
+				bChanged = true;
+			}
+		if (bChanged)
+			CompleteMutation(Row);
+	}
+}
+int32 FStore::IndexCapacity() const
+{
+	return Storage ? Storage->IndexCapacity : 0;
+}
+int32 FStore::RetainedIdCapacity() const
+{
+	return Storage ? Storage->RetainedCapacity : 0;
 }
 bool FStore::EnsureNoteStorage(FRow& Row)
 {
@@ -987,21 +1289,23 @@ bool FStore::Apply(FPacket&& Incoming)
 		return true;
 	const bool bStarted = Fixed.Header.Kind == EVaRestTraceKind::Started;
 	const bool bCompleted = Fixed.Header.Kind == EVaRestTraceKind::Completed;
+	const bool bExcerpt = Fixed.Header.Kind == EVaRestTraceKind::Excerpt;
 	const bool bOrphanKind = Fixed.Header.Kind == EVaRestTraceKind::AttemptDispatched || Fixed.Header.Kind == EVaRestTraceKind::AttemptEnded ||
-							 Fixed.Header.Kind == EVaRestTraceKind::Note || Fixed.Header.Kind == EVaRestTraceKind::Excerpt;
+							 Fixed.Header.Kind == EVaRestTraceKind::Note || bExcerpt;
 	if ((!bStarted && !bCompleted && !bOrphanKind) || Fixed.Scalars.RequestId == 0)
 		return false;
 	if (((Fixed.Header.Kind == EVaRestTraceKind::AttemptDispatched || Fixed.Header.Kind == EVaRestTraceKind::AttemptEnded) && Fixed.Scalars.DispatchId == 0) ||
-		(Fixed.Header.Kind == EVaRestTraceKind::Excerpt &&
-			((Fixed.Scalars.Owner == EVaRestTraceExcerptOwner::Response && Fixed.Scalars.DispatchId == 0) ||
+		(bExcerpt && ((Fixed.Scalars.Owner == EVaRestTraceExcerptOwner::Response && Fixed.Scalars.DispatchId == 0) ||
 			 (Fixed.Scalars.Owner == EVaRestTraceExcerptOwner::Request && Fixed.Scalars.DispatchId != 0) ||
 			 (Fixed.Scalars.Owner != EVaRestTraceExcerptOwner::Request && Fixed.Scalars.Owner != EVaRestTraceExcerptOwner::Response))))
 	{
 		Increment(State.ContractViolations);
 		return false;
 	}
+	if (bExcerpt && IsIdRetained(Fixed.Scalars.RequestId))
+		return false;
 	FRow* Row = Find(Fixed.Scalars.RequestId);
-	if (Row && (Row->Value.bTerminalKnown || Row->Value.bSealed))
+	if (Row && !bExcerpt && (Row->Value.bTerminalKnown || Row->Value.bSealed))
 	{
 		Increment(State.ContractViolations);
 		return false;
@@ -1011,6 +1315,30 @@ bool FStore::Apply(FPacket&& Incoming)
 		Row = AdmitRow(Fixed.Scalars.RequestId, !bStarted || Fixed.Header.bSnapshot);
 	if (!Row)
 		return false;
+	if (bExcerpt)
+	{
+		EVaRestInspectorDetailState Detail = EVaRestInspectorDetailState::Absent;
+		const EExcerptApplication Result = ApplyExcerpt(*Row, Packet, Detail);
+		if (Result == EExcerptApplication::Ignored)
+			return false;
+		Row->Value.bMetadataOmitted |= Fixed.Header.bMetadataOmitted;
+		if (!Row->Value.bTerminalKnown && (bNew || !Row->Value.bPinned))
+		{
+			Row->Value.bPartial = true;
+			Row->Value.EndState = EVaRestInspectorEndState::CaptureInterrupted;
+			Increment(OrphanEpoch);
+		}
+		FVaRestInspectorTimelineEntry Timeline;
+		Timeline.Kind = Fixed.Header.Kind;
+		Timeline.Seq = Fixed.Header.Seq;
+		Timeline.Time = Fixed.Header.Time;
+		Timeline.Attempt = Fixed.Scalars.Attempt;
+		Timeline.DispatchId = Fixed.Scalars.DispatchId;
+		Timeline.DetailState = Fixed.Header.bMetadataOmitted ? EVaRestInspectorDetailState::MetadataOmitted : Detail;
+		AppendTimeline(*Row, Timeline);
+		CompleteMutation(*Row);
+		return Result == EExcerptApplication::Resolved;
+	}
 	// Queue-origin omission is already counted upstream. Preserve its row
 	// truth without adding a second Store omission diagnostic.
 	Row->Value.bMetadataOmitted |= Fixed.Header.bMetadataOmitted;
@@ -1049,6 +1377,8 @@ bool FStore::Apply(FPacket&& Incoming)
 	{
 		ApplyCompletion(*Row, Packet);
 		Timeline.DetailState = Row->Value.CompletedMetadataState;
+		if (HasPendingExcerpt(*Row))
+			AddDeadline(*Row);
 	}
 	else if (bNew || !Row->Value.bPinned)
 	{
@@ -1067,32 +1397,210 @@ bool FStore::Apply(FPacket&& Incoming)
 				!Slot->EndedFixed.Header.bMetadataOmitted);
 			Timeline.DetailState = bAvailable ? EVaRestInspectorDetailState::Present : EVaRestInspectorDetailState::MetadataOmitted;
 		}
-		else if (Timeline.Kind == EVaRestTraceKind::Excerpt)
-		{
-			ApplyExcerpt(*Row, Packet);
-			const FStorePacketOwner* Owner = Row->RequestExcerpt.Get();
-			if (SourceScalars.Owner == EVaRestTraceExcerptOwner::Response)
-			{
-				const FDispatchSlot* Slot = FindDispatch(*Row, SourceScalars);
-				Owner = Slot ? Slot->ResponseExcerpt.Get() : nullptr;
-			}
-			Timeline.DetailState = Owner && !Owner->Get().Fixed().Header.bMetadataOmitted ?
-				EVaRestInspectorDetailState::Present : EVaRestInspectorDetailState::MetadataOmitted;
-		}
 		else if (Timeline.Kind == EVaRestTraceKind::Note)
 			Timeline.DetailState = ApplyNote(*Row, Packet, NoteSerial);
 	}
 	if (bSourceMetadataOmitted)
 		Timeline.DetailState = EVaRestInspectorDetailState::MetadataOmitted;
 	AppendTimeline(*Row, Timeline, NoteSerial);
-	Touch(*Row);
+	CompleteMutation(*Row);
 	return true;
+}
+bool FStore::IsIdRetained(uint64 RequestId) const
+{
+	if (!Storage || !RequestId || Storage->RetainedLookupCapacity <= 0)
+		return false;
+	const uint32 Mask = uint32(Storage->RetainedLookupCapacity - 1);
+	const uint32 Start = uint32(RequestId ^ (RequestId >> 32)) * 0x9e3779b9u;
+	for (uint32 Offset = 0; Offset <= Mask; ++Offset)
+	{
+		const auto& Entry = Storage->RetainedLookup[int32((Start + Offset) & Mask)];
+		if (Entry.State == FStorage::EIndexState::Empty)
+			return false;
+		if (Entry.State == FStorage::EIndexState::Occupied && Entry.RequestId == RequestId)
+			return Entry.RingSlot >= 0 && Entry.RingSlot < Storage->RetainedCapacity &&
+				Storage->RetainedIds[Entry.RingSlot].RequestId == RequestId;
+	}
+	return false;
+}
+void FStore::RetainRemovedId(uint64 RequestId)
+{
+	check(Storage && RequestId && Storage->RetainedCapacity > 0 && Storage->RetainedLookupCapacity > 0);
+	if (IsIdRetained(RequestId))
+		return;
+	int32 RingSlot = INDEX_NONE;
+	if (Storage->NumRetained == Storage->RetainedCapacity)
+	{
+		RingSlot = Storage->RetainedHead;
+		auto& Retained = Storage->RetainedIds[RingSlot];
+		const int32 OldLookup = Retained.LookupSlot;
+		check(OldLookup >= 0 && OldLookup < Storage->RetainedLookupCapacity);
+		auto& OldEntry = Storage->RetainedLookup[OldLookup];
+		check(OldEntry.State == FStorage::EIndexState::Occupied && OldEntry.RequestId == Retained.RequestId && OldEntry.RingSlot == RingSlot);
+		OldEntry.State = FStorage::EIndexState::Deleted;
+		OldEntry.RequestId = 0;
+		OldEntry.RingSlot = INDEX_NONE;
+		Storage->RetainedHead = (Storage->RetainedHead + 1) % Storage->RetainedCapacity;
+	}
+	else
+	{
+		RingSlot = (Storage->RetainedHead + Storage->NumRetained) % Storage->RetainedCapacity;
+		++Storage->NumRetained;
+	}
+	const uint32 Mask = uint32(Storage->RetainedLookupCapacity - 1);
+	const uint32 Start = uint32(RequestId ^ (RequestId >> 32)) * 0x9e3779b9u;
+	int32 LookupSlot = INDEX_NONE;
+	for (uint32 Offset = 0; Offset <= Mask; ++Offset)
+	{
+		const int32 Candidate = int32((Start + Offset) & Mask);
+		auto& Entry = Storage->RetainedLookup[Candidate];
+		if (Entry.State == FStorage::EIndexState::Occupied)
+		{
+			if (Entry.RequestId == RequestId)
+			{
+				LookupSlot = Candidate;
+				break;
+			}
+			continue;
+		}
+		if (Entry.State == FStorage::EIndexState::Deleted)
+		{
+			if (LookupSlot == INDEX_NONE)
+				LookupSlot = Candidate;
+			continue;
+		}
+		if (LookupSlot == INDEX_NONE)
+			LookupSlot = Candidate;
+		break;
+	}
+	check(LookupSlot != INDEX_NONE);
+	auto& Lookup = Storage->RetainedLookup[LookupSlot];
+	Lookup.State = FStorage::EIndexState::Occupied;
+	Lookup.RequestId = RequestId;
+	Lookup.RingSlot = RingSlot;
+	Storage->RetainedIds[RingSlot].RequestId = RequestId;
+	Storage->RetainedIds[RingSlot].LookupSlot = LookupSlot;
+}
+void FStore::ResetRetainedIds()
+{
+	if (!Storage)
+		return;
+	for (int32 Index = 0; Index < Storage->RetainedCapacity; ++Index)
+		Storage->RetainedIds[Index] = {};
+	for (int32 Index = 0; Index < Storage->RetainedLookupCapacity; ++Index)
+		Storage->RetainedLookup[Index] = {};
+	Storage->RetainedHead = 0;
+	Storage->NumRetained = 0;
+}
+bool FStore::RemoveEligibleRow(uint64 RequestId)
+{
+	check(IsInGameThread());
+	if (!Storage || !RequestId)
+		return false;
+	const uint32 Mask = uint32(Storage->IndexCapacity - 1);
+	const uint32 Start = uint32(RequestId ^ (RequestId >> 32)) * 0x9e3779b9u;
+	for (uint32 Offset = 0; Offset <= Mask; ++Offset)
+	{
+		const int32 Slot = int32((Start + Offset) & Mask);
+		auto& Entry = Storage->Index[Slot];
+		if (Entry.State == FStorage::EIndexState::Empty)
+			return false;
+		if (Entry.State != FStorage::EIndexState::Occupied || Entry.RequestId != RequestId)
+			continue;
+		if (!Entry.Row || Entry.Row->Value.bPinned)
+			return false;
+		if (bEnumerating)
+		{
+			Entry.bRemovePending = true;
+			return true;
+		}
+		return RemoveEligibleRowNow(Slot);
+	}
+	return false;
+}
+bool FStore::RemoveEligibleRowNow(int32 IndexSlot)
+{
+	check(Storage && IndexSlot >= 0 && IndexSlot < Storage->IndexCapacity && !bEnumerating);
+	auto& Entry = Storage->Index[IndexSlot];
+	if (Entry.State != FStorage::EIndexState::Occupied || !Entry.Row || Entry.Row->Value.bPinned)
+		return false;
+	FRow& Row = *Entry.Row;
+	RemoveDeadline(Row);
+	bool bArrivalRemoved = false;
+	for (int32 Index = 0; Index < Storage->NumRows; ++Index)
+		if (Storage->Arrival[Index] == IndexSlot)
+		{
+			for (int32 Move = Index; Move + 1 < Storage->NumRows; ++Move)
+				Storage->Arrival[Move] = Storage->Arrival[Move + 1];
+			--Storage->NumRows;
+			Storage->Arrival[Storage->NumRows] = INDEX_NONE;
+			bArrivalRemoved = true;
+			break;
+		}
+	check(bArrivalRemoved);
+	RetainRemovedId(Entry.RequestId);
+	Entry.bRemovePending = false;
+	Entry.Row.Reset();
+	Entry.RequestId = 0;
+	Entry.State = FStorage::EIndexState::Deleted;
+	Increment(RevisionValue);
+	return true;
+}
+void FStore::FlushDeferredRemovals()
+{
+	if (!Storage)
+		return;
+	for (int32 Index = 0; Index < Storage->IndexCapacity; ++Index)
+	{
+		auto& Entry = Storage->Index[Index];
+		if (!Entry.bRemovePending)
+			continue;
+		Entry.bRemovePending = false;
+		if (Entry.State == FStorage::EIndexState::Occupied && Entry.Row && !Entry.Row->Value.bPinned)
+			RemoveEligibleRowNow(Index);
+	}
+}
+void FStore::FlushDeferred()
+{
+	if (bEnumerating)
+		return;
+	if (bGenerationPending)
+	{
+		const uint64 NewGeneration = DeferredGeneration;
+		const uint64 ConsumedOrdinal = DeferredConsumedOrdinal;
+		bGenerationPending = false;
+		BeginGeneration(NewGeneration, ConsumedOrdinal);
+	}
+	if (bClearPending)
+	{
+		bClearPending = false;
+		bStopPending = false;
+		bExpiryPending = false;
+		Clear();
+		return;
+	}
+	if (bStopPending)
+	{
+		bStopPending = false;
+		StopPendingExcerpts();
+	}
+	if (bExpiryPending)
+	{
+		bExpiryPending = false;
+		ExpirePendingExcerpts();
+	}
+	FlushDeferredRemovals();
 }
 void FStore::BeginGeneration(uint64 InGeneration, uint64 ConsumedOrdinal)
 {
 	check(IsInGameThread());
 	if (bEnumerating)
+	{
+		DeferredGeneration = InGeneration;
+		DeferredConsumedOrdinal = ConsumedOrdinal;
+		bGenerationPending = true;
 		return;
+	}
 	Generation = InGeneration;
 	LastConsumedMetadataOrdinal = ConsumedOrdinal;
 	OrphanEpoch = 0;
@@ -1116,19 +1624,32 @@ void FStore::Clear()
 		bClearPending = true;
 		return;
 	}
+	bStopPending = false;
+	bExpiryPending = false;
 	if (!Storage)
 		return;
+	while (Storage->NumDeadline > 0)
+	{
+		FRow* Row = Storage->Index[Storage->DeadlineHeap[0].IndexSlot].Row.Get();
+		check(Row);
+		RemoveDeadline(*Row);
+	}
 	for (int32 Index = 0; Index < Storage->IndexCapacity; ++Index)
 	{
+		Storage->Index[Index].bRemovePending = false;
 		Storage->Index[Index].Row.Reset();
 		Storage->Index[Index].RequestId = 0;
+		Storage->Index[Index].State = FStorage::EIndexState::Empty;
 	}
+	for (int32 Index = 0; Index < Storage->NumRows; ++Index)
+		Storage->Arrival[Index] = INDEX_NONE;
 	for (int32 Index = 0; Index < Storage->NumClients; ++Index)
 		Storage->Clients[Index].Reset();
 	Storage->NumRows = 0;
 	Storage->NumClients = 0;
 	CurrentReconciliationStamp = 0;
 	OrphanEpoch = 0;
+	ResetRetainedIds();
 	Increment(RevisionValue);
 }
 uint64 FStore::Revision() const
@@ -1136,12 +1657,294 @@ uint64 FStore::Revision() const
 	check(IsInGameThread());
 	return RevisionValue;
 }
+FStringView FStore::ClientLabel(uint64 ClientId) const
+{
+	if (!Storage)
+		return {};
+	for (int32 Index = 0; Index < Storage->NumClients; ++Index)
+	{
+		const FClientEntry& Client = Storage->Clients[Index];
+		if (Client.ClientId == ClientId && Client.Label)
+			return {Client.Label, Client.Chars};
+	}
+	return {};
+}
+bool FStore::MeasureMutableSnapshot(FSnapshotBuilder& Builder, const FRow& Row) const
+{
+	if (!Builder.MeasureDispatches(Row.NumDispatches) ||
+		!Builder.MeasureNotes(Row.Notes.IsAllocated() ? FNormalizedLimits::NoteSlots : 0) ||
+		!Builder.MeasureTimeline(Row.Timeline.IsAllocated() ? FNormalizedLimits::TimelineSlots : 0))
+		return false;
+	if (Row.Started && !Builder.MeasurePacket(Row.Started->View(), &Row.Started->Get().Excerpt()))
+		return false;
+	if (Row.Completed && Row.Value.CompletedMetadataState != EVaRestInspectorDetailState::MetadataOmitted &&
+		!Builder.MeasurePacket(Row.Completed->View(), &Row.Completed->Get().Excerpt()))
+		return false;
+	if (Row.RequestExcerpt && !Builder.MeasurePacket(Row.RequestExcerpt->View(), &Row.RequestExcerpt->Get().Excerpt()))
+		return false;
+	if (Row.Notes.IsAllocated())
+		for (int32 Index = 0; Index < FNormalizedLimits::NoteSlots; ++Index)
+			if (Row.Notes[Index].Owner && !Builder.MeasurePacket(Row.Notes[Index].Owner->View(), &Row.Notes[Index].Owner->Get().Excerpt()))
+				return false;
+	const FDispatchHeaderOwner* HeaderOwners[16] = {};
+	int32 NumHeaders = 0;
+	for (int32 Index = 0; Index < Row.NumDispatches; ++Index)
+	{
+		const FDispatchSlot& Slot = *Row.Dispatches[Index];
+		if (Slot.Ended && !Builder.MeasurePacket(Slot.Ended->View(), &Slot.Ended->Get().Excerpt()))
+			return false;
+		if (Slot.ResponseExcerpt && !Builder.MeasurePacket(Slot.ResponseExcerpt->View(), &Slot.ResponseExcerpt->Get().Excerpt()))
+			return false;
+		if (!Slot.Headers)
+			continue;
+		int32 Header = 0;
+		while (Header < NumHeaders && HeaderOwners[Header] != Slot.Headers.Get())
+			++Header;
+		if (Header == NumHeaders)
+			HeaderOwners[NumHeaders++] = Slot.Headers.Get();
+	}
+	if (!Builder.MeasureHeaders(NumHeaders))
+		return false;
+	for (int32 Index = 0; Index < NumHeaders; ++Index)
+		if (!Builder.MeasurePacket(HeaderOwners[Index]->View(), nullptr))
+			return false;
+	return true;
+}
+bool FStore::ConstructMutableSnapshot(FSnapshotBuilder& Builder, const FRow& Row, FSnapshotRowCopy& Copy) const
+{
+	Copy.Value = Row.Value;
+	Copy.Value.Started = {};
+	Copy.Value.Completed = {};
+	Copy.Value.Marker = {};
+	Copy.Value.Dispatches = {};
+	Copy.Value.DispatchEvents = {};
+	Copy.Value.Notes = {};
+	Copy.Value.Excerpts = {};
+	Copy.Value.Timeline = {};
+	Copy.Value.ScopeLabel = {};
+	Copy.Value.ClientLabel = {};
+	Copy.Evidence = Row.Evidence;
+	Copy.PresenceStamp = Row.PresenceStamp;
+	Copy.IndexSlot = Row.IndexSlot;
+	Copy.DeadlineIndex = Row.DeadlineIndex;
+	Copy.CompletionFixed = Row.CompletionFixed;
+	Copy.NoteHead = Row.NoteHead;
+	Copy.NumNotes = Row.NumNotes;
+	Copy.TimelineHead = Row.TimelineHead;
+	Copy.NumTimeline = Row.NumTimeline;
+	Copy.NextNoteSerial = Row.NextNoteSerial;
+	Copy.PreviousDispatchSlot = Row.PreviousDispatchSlot;
+	if (Row.Started)
+	{
+		Copy.bHasStarted = true;
+		if (!Builder.ConstructPacket(Row.Started->View(), &Row.Started->Get().Excerpt(), Copy.Started))
+			return false;
+	}
+	if (Row.Completed && Row.Value.CompletedMetadataState != EVaRestInspectorDetailState::MetadataOmitted)
+	{
+		Copy.bHasCompletedOwner = true;
+		if (!Builder.ConstructPacket(Row.Completed->View(), &Row.Completed->Get().Excerpt(), Copy.Completed))
+			return false;
+	}
+	if (Row.RequestExcerpt)
+	{
+		Copy.bHasRequestExcerpt = true;
+		if (!Builder.ConstructPacket(Row.RequestExcerpt->View(), &Row.RequestExcerpt->Get().Excerpt(), Copy.RequestExcerpt))
+			return false;
+	}
+	if (!Builder.ConstructTimeline(Copy, Row.Timeline.IsAllocated() ? FNormalizedLimits::TimelineSlots : 0))
+		return false;
+	for (int32 Index = 0; Index < Copy.TimelineSlots; ++Index)
+	{
+		Copy.Timeline[Index].Value = Row.Timeline[Index].Value;
+		Copy.Timeline[Index].NoteSerial = Row.Timeline[Index].NoteSerial;
+	}
+	if (!Builder.ConstructNotes(Copy, Row.Notes.IsAllocated() ? FNormalizedLimits::NoteSlots : 0))
+		return false;
+	for (int32 Index = 0; Index < Copy.NoteSlots; ++Index)
+	{
+		Copy.Notes[Index].Serial = Row.Notes[Index].Serial;
+		if (Row.Notes[Index].Owner && !Builder.ConstructPacket(Row.Notes[Index].Owner->View(), &Row.Notes[Index].Owner->Get().Excerpt(), Copy.Notes[Index].Packet))
+			return false;
+	}
+	const FDispatchHeaderOwner* HeaderOwners[16] = {};
+	int32 NumHeaders = 0;
+	for (int32 Index = 0; Index < Row.NumDispatches; ++Index)
+	{
+		const auto& Headers = Row.Dispatches[Index]->Headers;
+		if (!Headers)
+			continue;
+		int32 Header = 0;
+		while (Header < NumHeaders && HeaderOwners[Header] != Headers.Get())
+			++Header;
+		if (Header == NumHeaders)
+			HeaderOwners[NumHeaders++] = Headers.Get();
+	}
+	if (!Builder.ConstructHeaders(Copy, NumHeaders))
+		return false;
+	for (int32 Index = 0; Index < NumHeaders; ++Index)
+		if (!Builder.ConstructPacket(HeaderOwners[Index]->View(), nullptr, Copy.Headers[Index]))
+			return false;
+	if (!Builder.ConstructDispatches(Copy, Row.NumDispatches))
+		return false;
+	for (int32 Index = 0; Index < Row.NumDispatches; ++Index)
+	{
+		const FDispatchSlot& Source = *Row.Dispatches[Index];
+		FSnapshotDispatch& Target = Copy.Dispatches[Index];
+		Target.DispatchId = Source.DispatchId;
+		Target.Attempt = Source.Attempt;
+		Target.bHasDispatched = Source.bHasDispatched;
+		Target.bHasEnded = Source.bHasEnded;
+		Target.DispatchedFixed = Source.DispatchedFixed;
+		Target.EndedFixed = Source.EndedFixed;
+		Target.HeadersState = Source.HeadersState;
+		Target.ResponseExcerptState = Source.ResponseExcerptState;
+		if (Source.bHasEnded)
+		{
+			if (Source.Ended)
+			{
+				if (!Builder.ConstructPacket(Source.Ended->View(), &Source.Ended->Get().Excerpt(), Target.Ended))
+					return false;
+			}
+			else
+				Builder.ConstructScalarPacket(Source.EndedFixed, Target.Ended);
+		}
+		if (Source.ResponseExcerpt && !Builder.ConstructPacket(Source.ResponseExcerpt->View(), &Source.ResponseExcerpt->Get().Excerpt(), Target.ResponseExcerpt))
+			return false;
+		if (Source.Headers)
+			for (int32 Header = 0; Header < NumHeaders; ++Header)
+				if (HeaderOwners[Header] == Source.Headers.Get())
+				{
+					Target.HeaderIndex = Header;
+					break;
+				}
+	}
+	return true;
+}
 bool FStore::TrySnapshot(TSharedPtr<const FVaRestInspectorSnapshot, ESPMode::ThreadSafe>& Out) const
 {
 	check(IsInGameThread());
-	// Task7 owns real immutable snapshot backing; never publish the empty
-	// Module shell as a successful snapshot of these nonempty mutable rows.
-	return false;
+	if (!Storage || !Budget || !Budget->Lifetime || !HasInspectorControllerCalibration<FRow>(*Budget->Lifetime) ||
+		!HasInspectorControllerCalibration<FDispatchHeaderOwner>(*Budget->Lifetime) ||
+		!HasInspectorControllerCalibration<FVaRestInspectorSnapshot>(*Budget->Lifetime))
+		return false;
+	FSnapshotBuilder Builder;
+	if (!Builder.Begin(*this, Storage->NumRows))
+		return false;
+	for (int32 Index = 0; Index < Storage->NumRows; ++Index)
+	{
+		const FRow& Row = *Storage->Index[Storage->Arrival[Index]].Row;
+		const FStringView Label = ClientLabel(Row.Value.ClientId);
+		if (ShouldShareRow(Row))
+		{
+			if (!Builder.MeasureSealedRow(Label))
+				return false;
+		}
+		else if (!Builder.MeasureMutableRow(Label) || !MeasureMutableSnapshot(Builder, Row))
+			return false;
+	}
+	if (!Builder.FinishMeasurement() || !Builder.Reserve())
+		return false;
+	for (int32 Index = 0; Index < Storage->NumRows; ++Index)
+	{
+		const auto& Entry = Storage->Index[Storage->Arrival[Index]];
+		const FRow& Row = *Entry.Row;
+		const FStringView Label = ClientLabel(Row.Value.ClientId);
+		if (ShouldShareRow(Row))
+		{
+			TSharedPtr<const FRow, ESPMode::ThreadSafe> Owner = Entry.Row;
+			if (!Builder.ConstructSealedEntry(Owner, Label))
+				return false;
+		}
+		else
+		{
+			FSnapshotRowCopy* Copy = Builder.ConstructMutableRow();
+			if (!Copy || !ConstructMutableSnapshot(Builder, Row, *Copy) || !Builder.ConstructMutableEntry(Copy, Label))
+				return false;
+		}
+	}
+	return Builder.Publish(Out);
+}
+void FStore::VisitImmutableRow(const FRow& Row, FStringView Label, TFunctionRef<void(const FVaRestInspectorRecordView&)> Visitor)
+{
+	FVaRestInspectorRecordView View = Row.Value;
+	View.Started = {};
+	View.Completed = {};
+	View.Marker = {};
+	if (Row.Started)
+		View.Started = Row.Started->View();
+	if (Row.Completed)
+		View.Completed = Row.Completed->View();
+	else if (Row.Value.bActualCompletionObserved)
+		View.Completed.Fixed = &Row.CompletionFixed;
+	// All composition is visitor-local. Persistent row state never borrows
+	// these arrays, and shared header backing keeps its initialized extent.
+	FPacketFixed DispatchFixed[16];
+	FVaRestInspectorDispatchView DispatchViews[16];
+	FVaRestInspectorPacketView DispatchEvents[32], Excerpts[17];
+	FVaRestInspectorPacketView Notes[FNormalizedLimits::NoteSlots];
+	FVaRestInspectorTimelineEntry Timeline[FNormalizedLimits::TimelineSlots];
+	int32 NumEvents = 0, NumExcerpts = 0;
+	for (int32 NoteIndex = 0; NoteIndex < Row.NumNotes; ++NoteIndex)
+		Notes[NoteIndex] = Row.Notes[(Row.NoteHead + NoteIndex) % FNormalizedLimits::NoteSlots].Owner->View();
+	for (int32 TimelineIndex = 0; TimelineIndex < Row.NumTimeline; ++TimelineIndex)
+		Timeline[TimelineIndex] = Row.Timeline[(Row.TimelineHead + TimelineIndex) % FNormalizedLimits::TimelineSlots].Value;
+	View.Notes = {Notes, Row.NumNotes};
+	View.Timeline = {Timeline, Row.NumTimeline};
+	if (Row.RequestExcerpt)
+		Excerpts[NumExcerpts++] = Row.RequestExcerpt->View();
+	for (int32 DispatchIndex = 0; DispatchIndex < Row.NumDispatches; ++DispatchIndex)
+	{
+		const FDispatchSlot& Slot = *Row.Dispatches[DispatchIndex];
+		auto& Dispatch = DispatchViews[DispatchIndex];
+		Dispatch.DispatchId = Slot.DispatchId;
+		Dispatch.Attempt = Slot.Attempt;
+		Dispatch.bHasDispatched = Slot.bHasDispatched;
+		Dispatch.bHasEnded = Slot.bHasEnded;
+		Dispatch.HeadersState = Slot.HeadersState;
+		Dispatch.ResponseExcerptState = Slot.ResponseExcerptState;
+		if (Slot.bHasDispatched)
+		{
+			auto& Fixed = DispatchFixed[DispatchIndex];
+			Fixed = Slot.DispatchedFixed;
+			Dispatch.Dispatched.Fixed = &Fixed;
+			if (Slot.Headers)
+			{
+				const auto Headers = Slot.Headers->View();
+				Fixed.Headers = Headers.Fixed->Headers;
+				Dispatch.Dispatched.Backing = Headers.Backing;
+			}
+			Dispatch.AttemptStart = Fixed.Scalars.AttemptStart;
+			Dispatch.DispatchAt = Fixed.Header.Time;
+			Dispatch.GapKind = Fixed.Scalars.GapKind;
+			Dispatch.GapSeconds = Fixed.Scalars.GapSeconds;
+			DispatchEvents[NumEvents++] = Dispatch.Dispatched;
+		}
+		if (Slot.bHasEnded)
+		{
+			if (Slot.Ended)
+				Dispatch.Ended = Slot.Ended->View();
+			else
+				Dispatch.Ended.Fixed = &Slot.EndedFixed;
+			Dispatch.UploadDoneAt = Slot.EndedFixed.Scalars.UploadDoneAt;
+			Dispatch.StatusAt = Slot.EndedFixed.Scalars.StatusAt;
+			Dispatch.TransportDoneAt = Slot.EndedFixed.Scalars.TransportDoneAt;
+			DispatchEvents[NumEvents++] = Dispatch.Ended;
+		}
+		if (Slot.ResponseExcerpt)
+		{
+			Dispatch.ResponseExcerpt = Slot.ResponseExcerpt->View();
+			Excerpts[NumExcerpts++] = Dispatch.ResponseExcerpt;
+		}
+		DeriveDispatchPhases(Dispatch);
+	}
+	View.Dispatches = {DispatchViews, Row.NumDispatches};
+	View.DispatchEvents = {DispatchEvents, NumEvents};
+	View.Excerpts = {Excerpts, NumExcerpts};
+	if (View.ScopeId == 0)
+		View.ScopeLabel = TEXT("Process");
+	View.ClientLabel = Label;
+	Visitor(View);
 }
 bool FStore::ForEachRecord(TFunctionRef<void(const FVaRestInspectorRecordView&)> Visitor) const
 {
@@ -1152,97 +1955,12 @@ bool FStore::ForEachRecord(TFunctionRef<void(const FVaRestInspectorRecordView&)>
 	ON_SCOPE_EXIT
 	{
 		bEnumerating = false;
-		if (bClearPending)
-		{
-			bClearPending = false;
-			const_cast<FStore*>(this)->Clear();
-		}
+		const_cast<FStore*>(this)->FlushDeferred();
 	};
 	for (int32 Index = 0; Index < Storage->NumRows; ++Index)
 	{
 		const FRow& Row = *Storage->Index[Storage->Arrival[Index]].Row;
-		FVaRestInspectorRecordView View = Row.Value;
-		if (Row.Started)
-			View.Started = Row.Started->View();
-		if (Row.Completed)
-			View.Completed = Row.Completed->View();
-		else if (Row.Value.bActualCompletionObserved)
-			View.Completed.Fixed = &Row.CompletionFixed;
-		// All composition is visitor-local. Persistent row state never borrows
-		// these arrays, and shared header backing keeps its initialized extent.
-		FPacketFixed DispatchFixed[16];
-		FVaRestInspectorDispatchView DispatchViews[16];
-		FVaRestInspectorPacketView DispatchEvents[32], Excerpts[17];
-		FVaRestInspectorPacketView Notes[FNormalizedLimits::NoteSlots];
-		FVaRestInspectorTimelineEntry Timeline[FNormalizedLimits::TimelineSlots];
-		int32 NumEvents = 0, NumExcerpts = 0;
-		for (int32 NoteIndex = 0; NoteIndex < Row.NumNotes; ++NoteIndex)
-			Notes[NoteIndex] = Row.Notes[(Row.NoteHead + NoteIndex) % FNormalizedLimits::NoteSlots].Owner->View();
-		for (int32 TimelineIndex = 0; TimelineIndex < Row.NumTimeline; ++TimelineIndex)
-			Timeline[TimelineIndex] = Row.Timeline[(Row.TimelineHead + TimelineIndex) % FNormalizedLimits::TimelineSlots].Value;
-		View.Notes = {Notes, Row.NumNotes};
-		View.Timeline = {Timeline, Row.NumTimeline};
-		if (Row.RequestExcerpt)
-			Excerpts[NumExcerpts++] = Row.RequestExcerpt->View();
-		for (int32 DispatchIndex = 0; DispatchIndex < Row.NumDispatches; ++DispatchIndex)
-		{
-			const FDispatchSlot& Slot = *Row.Dispatches[DispatchIndex];
-			auto& Dispatch = DispatchViews[DispatchIndex];
-			Dispatch.DispatchId = Slot.DispatchId;
-			Dispatch.Attempt = Slot.Attempt;
-			Dispatch.bHasDispatched = Slot.bHasDispatched;
-			Dispatch.bHasEnded = Slot.bHasEnded;
-			Dispatch.HeadersState = Slot.HeadersState;
-			if (Slot.bHasDispatched)
-			{
-				auto& Fixed = DispatchFixed[DispatchIndex];
-				Fixed = Slot.DispatchedFixed;
-				Dispatch.Dispatched.Fixed = &Fixed;
-				if (Slot.Headers)
-				{
-					const auto Headers = Slot.Headers->View();
-					Fixed.Headers = Headers.Fixed->Headers;
-					Dispatch.Dispatched.Backing = Headers.Backing;
-				}
-				Dispatch.AttemptStart = Fixed.Scalars.AttemptStart;
-				Dispatch.DispatchAt = Fixed.Header.Time;
-				Dispatch.GapKind = Fixed.Scalars.GapKind;
-				Dispatch.GapSeconds = Fixed.Scalars.GapSeconds;
-				DispatchEvents[NumEvents++] = Dispatch.Dispatched;
-			}
-			if (Slot.bHasEnded)
-			{
-				if (Slot.Ended)
-					Dispatch.Ended = Slot.Ended->View();
-				else
-					Dispatch.Ended.Fixed = &Slot.EndedFixed;
-				Dispatch.UploadDoneAt = Slot.EndedFixed.Scalars.UploadDoneAt;
-				Dispatch.StatusAt = Slot.EndedFixed.Scalars.StatusAt;
-				Dispatch.TransportDoneAt = Slot.EndedFixed.Scalars.TransportDoneAt;
-				DispatchEvents[NumEvents++] = Dispatch.Ended;
-			}
-			if (Slot.ResponseExcerpt)
-			{
-				Dispatch.ResponseExcerpt = Slot.ResponseExcerpt->View();
-				Excerpts[NumExcerpts++] = Dispatch.ResponseExcerpt;
-			}
-			DeriveDispatchPhases(Dispatch);
-		}
-		View.Dispatches = {DispatchViews, Row.NumDispatches};
-		View.DispatchEvents = {DispatchEvents, NumEvents};
-		View.Excerpts = {Excerpts, NumExcerpts};
-		if (View.ScopeId == 0)
-			View.ScopeLabel = TEXT("Process");
-		for (int32 ClientIndex = 0; ClientIndex < Storage->NumClients; ++ClientIndex)
-		{
-			const FClientEntry& Client = Storage->Clients[ClientIndex];
-			if (Client.ClientId == View.ClientId && Client.Label)
-			{
-				View.ClientLabel = FStringView(Client.Label, Client.Chars);
-				break;
-			}
-		}
-		Visitor(View);
+		VisitImmutableRow(Row, ClientLabel(Row.Value.ClientId), Visitor);
 	}
 	return true;
 }

@@ -97,6 +97,15 @@ bool FVaRestInspectorModuleTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("empty facade enumeration succeeds"), Inspector->ForEachRecord([&Records](const FVaRestInspectorRecordView&) { ++Records; }));
 	TestEqual(TEXT("no facade records"), Records, 0);
 	TSharedPtr<const FVaRestInspectorSnapshot, ESPMode::ThreadSafe> Snapshot;
+#if VAREST_WITH_INSPECTOR
+	Snapshot = MakeShared<FVaRestInspectorSnapshot, ESPMode::ThreadSafe>();
+	const auto* Sentinel = Snapshot.Get();
+	TestFalse(TEXT("compiled-in inert facade refuses snapshot"), Inspector->TrySnapshot(Snapshot));
+	TestTrue(TEXT("inert refusal preserves nonnull output"), Snapshot.Get() == Sentinel);
+	Snapshot.Reset();
+	TestFalse(TEXT("inert refusal also preserves null output"), Inspector->TrySnapshot(Snapshot));
+	TestNull(TEXT("null output remains null"), Snapshot.Get());
+#else
 	if (!TestTrue(TEXT("empty snapshot succeeds"), Inspector->TrySnapshot(Snapshot)) ||
 		!TestTrue(TEXT("snapshot exists"), Snapshot.IsValid()))
 		return false;
@@ -124,6 +133,7 @@ bool FVaRestInspectorModuleTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("no snapshot backing controllers"), Diagnostics.SnapshotControllers, 0);
 	TestFalse(TEXT("diagnostics inactive"), Diagnostics.bCapturing);
 	TestFalse(TEXT("no pending limits"), Diagnostics.bPendingLimits);
+#endif
 	const auto After = FVaRestTrace::GetSinks();
 	TestEqual(TEXT("controls and snapshot do not register a sink"), After ? After->Num() : 0, SinkCount);
 	TestNull(TEXT("capture console object is absent"), IConsoleManager::Get().FindConsoleObject(TEXT("VaRest.Inspector.Capture")));

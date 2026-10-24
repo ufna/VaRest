@@ -778,7 +778,7 @@ static bool CheckLimitsAndScalars(FAutomationTestBase& Test)
 		{
 			auto OneByteShort = FStoreCredit::Acquire(Roots.Account(), Roots.Account()->Limit - Roots.Account()->UsedBytes.load() - ExcerptCharge.GetValue() + 1);
 			if (!Test.TestTrue(TEXT("excerpt capacity one-byte-short pressure"), OneByteShort.IsSet())) return false;
-			Test.TestTrue(TEXT("excerpt refusal preserves accepted scalar row"), Store.Apply(MoveTemp(HeldExcerpt.GetValue())));
+			Test.TestFalse(TEXT("optional excerpt refusal returns false and preserves scalar row"), Store.Apply(MoveTemp(HeldExcerpt.GetValue())));
 			Test.TestEqual(TEXT("refused allocated-capacity excerpt releases real source ref"), LargeBody.GetSharedReferenceCount(), 1);
 			Store.ForEachRecord([&](const FVaRestInspectorRecordView& Row) {
 				Test.TestEqual(TEXT("refused excerpt retains existing physical slot"), Row.Dispatches.Num(), 1);

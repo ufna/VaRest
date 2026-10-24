@@ -15,6 +15,7 @@
 
 namespace VaRest::Inspector::Private
 {
+class FSnapshotBuilder;
 class FStore;
 }
 
@@ -113,6 +114,7 @@ struct FVaRestInspectorDispatchView
 	EVaRestTraceGap GapKind = EVaRestTraceGap::None;
 	double GapSeconds = 0;
 	EVaRestInspectorHeadersState HeadersState = EVaRestInspectorHeadersState::Unknown;
+	EVaRestInspectorDetailState ResponseExcerptState = EVaRestInspectorDetailState::Absent;
 	FVaRestInspectorPacketView Dispatched, Ended, ResponseExcerpt;
 	FVaRestInspectorPhase Auth, Queued, Prepare, Send, Wait, Receive, Wall, Gap;
 };
@@ -156,6 +158,7 @@ struct FVaRestInspectorRecordView
 	double CompletedObservedAt = 0;
 	EVaRestInspectorDetailState CompletedMetadataState = EVaRestInspectorDetailState::Absent;
 	EVaRestInspectorDetailState FinalPreviewState = EVaRestInspectorDetailState::Absent;
+	EVaRestInspectorDetailState RequestExcerptState = EVaRestInspectorDetailState::Absent;
 	FVaRestInspectorPhase Total, Decode, Deliver;
 	// Completed may expose only pre-admitted scalars with empty Backing/Excerpt.
 	// Consult CompletedMetadataState; nonnull Fixed does not imply retained text.
@@ -179,7 +182,12 @@ public:
 	const FVaRestInspectorDiagnostics& GetDiagnostics() const;
 
 private:
+	friend class VaRest::Inspector::Private::FSnapshotBuilder;
 	friend class VaRest::Inspector::Private::FStore;
 	struct FData;
-	TUniquePtr<FData> Data;
+	struct FDataDeleter
+	{
+		void operator()(FData* Object) const;
+	};
+	TUniquePtr<FData, FDataDeleter> Data;
 };

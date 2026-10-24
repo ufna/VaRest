@@ -66,9 +66,19 @@ struct FDispatchSlot
 	bool bHasDispatched = false, bHasEnded = false;
 	FPacketFixed DispatchedFixed, EndedFixed;
 	EVaRestInspectorHeadersState HeadersState = EVaRestInspectorHeadersState::Unknown;
+	EVaRestInspectorDetailState ResponseExcerptState = EVaRestInspectorDetailState::Absent;
 	TSharedPtr<const FDispatchHeaderOwner, ESPMode::ThreadSafe> Headers;
 	FStorePacketPtr Ended, ResponseExcerpt;
 };
+
+class FSnapshotBuilder;
+struct FSnapshotRowCopy;
+#if WITH_DEV_AUTOMATION_TESTS
+namespace SnapshotTesting
+{
+struct FStoreAccess;
+}
+#endif
 
 class FStore
 {
@@ -81,7 +91,7 @@ public:
 	static bool CalibrateRows(FAllocationLifetime& Lifetime, std::atomic<int64>& StartupUsed, int64 StartupLimit);
 	bool Initialize(TRefCountPtr<FBudgetAccount> InAccount);
 	bool Apply(FPacket&& Packet);
-	void ApplyAttached(const FVaRestTraceSnapshot& Snapshot, const FCapturePolicy& Policy,
+	bool ApplyAttached(const FVaRestTraceSnapshot& Snapshot, const FCapturePolicy& Policy,
 		TSharedRef<FPendingAccount, ESPMode::ThreadSafe> Pending, FAllocationAdapter& Allocator);
 	void BeginGeneration(uint64 InGeneration, uint64 ConsumedOrdinal);
 	void Clear();
@@ -91,6 +101,11 @@ public:
 	FVaRestInspectorDiagnostics Diagnostics() const;
 
 private:
+	friend class FSnapshotBuilder;
+	friend class ::FVaRestInspectorSnapshot;
+#if WITH_DEV_AUTOMATION_TESTS
+	friend struct SnapshotTesting::FStoreAccess;
+#endif
 	enum class EAttachedBase : uint8
 	{
 		Refused,
@@ -103,6 +118,12 @@ private:
 		Started,
 		Snapshot
 	};
+	enum class EExcerptApplication : uint8
+	{
+		Resolved,
+		Refused,
+		Ignored
+	};
 	struct FRow;
 	struct FStorage;
 	struct FStorageDeleter
@@ -114,7 +135,7 @@ private:
 	FDispatchSlot* FindDispatch(FRow& Row, const FPacketScalars& Scalars) const;
 	FDispatchSlot* AdmitDispatch(FRow& Row, const FPacketScalars& Scalars);
 	void ApplyPhysical(FRow& Row, FPacket& Packet);
-	void ApplyExcerpt(FRow& Row, FPacket& Packet);
+	EExcerptApplication ApplyExcerpt(FRow& Row, FPacket& Packet, EVaRestInspectorDetailState& OutDetail);
 	void ApplyCompletion(FRow& Row, FPacket& Packet);
 	EVaRestInspectorDetailState ApplyNote(FRow& Row, FPacket& Packet, uint64& OutNoteSerial);
 	bool EnsureNoteStorage(FRow& Row);
@@ -128,7 +149,28 @@ private:
 		TSharedRef<FPendingAccount, ESPMode::ThreadSafe> Pending, FAllocationAdapter& Allocator);
 	void SetStartedScalars(FRow& Row, const FPacketScalars& Scalars);
 	void Touch(FRow& Row);
+	void CompleteMutation(FRow& Row);
+	static bool HasPendingExcerpt(const FRow& Row);
+	static bool CanSeal(const FRow& Row);
+	static bool ShouldShareRow(const FRow& Row);
+	void AddDeadline(FRow& Row);
+	void RemoveDeadline(FRow& Row);
+	int32 ExpirePendingExcerpts();
+	void StopPendingExcerpts();
+	bool RemoveEligibleRow(uint64 RequestId);
+	bool RemoveEligibleRowNow(int32 IndexSlot);
+	void FlushDeferred();
+	void FlushDeferredRemovals();
+	bool IsIdRetained(uint64 RequestId) const;
+	void RetainRemovedId(uint64 RequestId);
+	void ResetRetainedIds();
+	int32 IndexCapacity() const;
+	int32 RetainedIdCapacity() const;
 	void ApplyClient(uint64 ClientId, uint64 ScopeId, bool bCreated, FStringView Label);
+	FStringView ClientLabel(uint64 ClientId) const;
+	bool MeasureMutableSnapshot(FSnapshotBuilder& Builder, const FRow& Row) const;
+	bool ConstructMutableSnapshot(FSnapshotBuilder& Builder, const FRow& Row, FSnapshotRowCopy& Copy) const;
+	static void VisitImmutableRow(const FRow& Row, FStringView Label, TFunctionRef<void(const FVaRestInspectorRecordView&)> Visitor);
 	const FNormalizedLimits Limits;
 	TSharedRef<IVaRestClock, ESPMode::ThreadSafe> Clock;
 	TRefCountPtr<FBudgetAccount> Budget;
@@ -136,8 +178,10 @@ private:
 	FVaRestInspectorDiagnostics State;
 	uint64 Generation = 0, LastConsumedMetadataOrdinal = 0, CurrentReconciliationStamp = 0;
 	uint64 OrphanEpoch = 0, RevisionValue = 0, NextArrival = 0;
+	uint64 DeferredGeneration = 0, DeferredConsumedOrdinal = 0;
 	mutable bool bEnumerating = false;
 	mutable bool bClearPending = false;
+	bool bGenerationPending = false, bStopPending = false, bExpiryPending = false;
 };
 } // namespace VaRest::Inspector::Private
 #endif
