@@ -57,6 +57,8 @@ struct FVaRestInspectorTimelineEntry
 	double Time = 0.0;
 	int32 Attempt = 0;
 	uint64 DispatchId = 0;
+	// Scalar history survives optional-owner loss. No packet pointer escapes.
+	EVaRestInspectorDetailState DetailState = EVaRestInspectorDetailState::Absent;
 };
 struct FVaRestInspectorLink
 {
@@ -142,13 +144,21 @@ struct FVaRestInspectorRecordView
 	// the bounded slots have no perfect duplicate-suppression guarantee.
 	uint64 ObservedDispatches = 0, ObservedEnds = 0;
 	uint64 OmittedDispatches = 0, OmittedEnds = 0, OmittedExcerpts = 0;
+	uint64 OmittedNotes = 0, OmittedTimeline = 0;
 	uint64 WireBytesUp = 0, WireBytesDown = 0;
 	bool bWireBytesUnknown = false, bCountersSaturated = false;
 	int32 FinalStatus = 0;
 	int64 FinalBodyBytes = -1;
 	EVaRestTraceResponseStorage FinalStorage = EVaRestTraceResponseStorage::Unknown;
 	double CompletedAt = -1, DecodeStartAt = -1, DecodeEndAt = -1;
+	// Receipt time belongs to the Inspector clock, independently of source phases.
+	bool bActualCompletionObserved = false;
+	double CompletedObservedAt = 0;
+	EVaRestInspectorDetailState CompletedMetadataState = EVaRestInspectorDetailState::Absent;
+	EVaRestInspectorDetailState FinalPreviewState = EVaRestInspectorDetailState::Absent;
 	FVaRestInspectorPhase Total, Decode, Deliver;
+	// Completed may expose only pre-admitted scalars with empty Backing/Excerpt.
+	// Consult CompletedMetadataState; nonnull Fixed does not imply retained text.
 	FVaRestInspectorPacketView Started, Completed, Marker;
 	TConstArrayView<FVaRestInspectorDispatchView> Dispatches;
 	TConstArrayView<FVaRestInspectorPacketView> DispatchEvents, Notes, Excerpts;

@@ -50,6 +50,7 @@ class TStoreBlock
 {
 public:
 	~TStoreBlock() { Reset(); }
+	bool IsAllocated() const { return Data != nullptr; }
 	bool Allocate(TRefCountPtr<FBudgetAccount> Account, int32 InCount)
 	{
 		if (Data || !Account || !Account->Lifetime || InCount <= 0)
@@ -121,6 +122,16 @@ struct FClientEntry
 	TCHAR* Label = nullptr;
 	int32 Chars = 0;
 	bool bCreated = false;
+};
+struct FNoteEntry
+{
+	FStorePacketPtr Owner;
+	uint64 Serial = 0;
+};
+struct FTimelineSlot
+{
+	FVaRestInspectorTimelineEntry Value;
+	uint64 NoteSerial = 0;
 };
 } // namespace
 
@@ -244,6 +255,13 @@ struct FStore::FRow
 	ELivenessEvidence Evidence = ELivenessEvidence::None;
 	uint64 PresenceStamp = 0;
 	FStorePacketPtr Started, Completed, RequestExcerpt;
+	// This permanently admitted fixed slot preserves all actual terminal
+	// scalars even when optional Completed packet ownership is refused.
+	FPacketFixed CompletionFixed;
+	TStoreBlock<FNoteEntry> Notes;
+	TStoreBlock<FTimelineSlot> Timeline;
+	int32 NoteHead = 0, NumNotes = 0, TimelineHead = 0, NumTimeline = 0;
+	uint64 NextNoteSerial = 0;
 	FDispatchSlotPtr Dispatches[16];
 	int32 NumDispatches = 0, PreviousDispatchSlot = INDEX_NONE;
 };
@@ -578,6 +596,16 @@ bool FStore::ApplyAttachedStarted(const FVaRestTraceStarted& Borrowed, const FCa
 		return false;
 	}
 	AdoptAttachedPacket(Borrowed.RequestId, MoveTemp(Stored));
+	const FPacketFixed& Attached = Row->Started->Get().Fixed();
+	FVaRestInspectorTimelineEntry Timeline;
+	Timeline.Kind = Attached.Header.Kind;
+	Timeline.Seq = Attached.Header.Seq;
+	Timeline.Time = Attached.Header.Time;
+	Timeline.Attempt = Attached.Scalars.Attempt;
+	Timeline.DispatchId = Attached.Scalars.DispatchId;
+	Timeline.DetailState = Attached.Header.bMetadataOmitted ?
+		EVaRestInspectorDetailState::MetadataOmitted : EVaRestInspectorDetailState::Present;
+	AppendTimeline(*Row, Timeline);
 	if (Measured == EMeasure::ScalarOnly)
 		NoteAttachLoss(Borrowed.RequestId);
 	return true;
@@ -810,6 +838,132 @@ void FStore::ApplyExcerpt(FRow& Row, FPacket& Packet)
 		Increment(State.MetadataOmitted);
 	}
 }
+void FStore::ApplyCompletion(FRow& Row, FPacket& Packet)
+{
+	check(!Row.Value.bActualCompletionObserved && !Row.Value.bTerminalKnown && !Row.Completed);
+	Row.CompletionFixed = ScalarCopy(Packet.Fixed());
+	const FPacketScalars& Scalars = Row.CompletionFixed.Scalars;
+	Row.Value.bActualCompletionObserved = true;
+	Row.Value.bTerminalKnown = true;
+	Row.Value.bPinned = false;
+	// Keep even a nonfinite receipt unknown. Only the first real completion
+	// reaches this path; source absence/attachment never creates this evidence.
+	Row.Value.CompletedObservedAt = Clock->Now();
+	Row.Value.CompletedAt = Row.CompletionFixed.Header.Time;
+	Row.Value.FinalStatus = Scalars.Status;
+	Row.Value.FinalBodyBytes = Scalars.DeliveredBodyBytes;
+	Row.Value.FinalStorage = Scalars.Storage;
+	Row.Value.DecodeStartAt = Scalars.DecodeStartAt;
+	Row.Value.DecodeEndAt = Scalars.DecodeEndAt;
+	Row.Value.FinalPreviewState = Scalars.bFromCache ? EVaRestInspectorDetailState::NoProducer : EVaRestInspectorDetailState::Absent;
+	// Completed has no final DispatchId. Physical Ended metadata and excerpts
+	// remain in their own slots; neither status nor arrival proves selection.
+	switch (Scalars.Outcome)
+	{
+	case EVaRestTraceOutcome::Success: Row.Value.EndState = EVaRestInspectorEndState::Success; break;
+	case EVaRestTraceOutcome::Error: Row.Value.EndState = EVaRestInspectorEndState::Error; break;
+	case EVaRestTraceOutcome::Queued: Row.Value.EndState = EVaRestInspectorEndState::Queued; break;
+	case EVaRestTraceOutcome::Canceled: Row.Value.EndState = EVaRestInspectorEndState::Canceled; break;
+	}
+	Row.Value.CompletedMetadataState = Row.CompletionFixed.Header.bMetadataOmitted ?
+		EVaRestInspectorDetailState::MetadataOmitted : EVaRestInspectorDetailState::Present;
+	if (!FStorePacketOwner::TryTake(Packet, Budget, Budget->Lifetime->Allocator, Row.Completed))
+	{
+		Row.Value.CompletedMetadataState = EVaRestInspectorDetailState::MetadataOmitted;
+		Row.Value.bMetadataOmitted = true;
+		Increment(State.MetadataOmitted);
+	}
+	// The fallback never contains slices, even when the admitted full owner
+	// has text. Its metadata is always unavailable without that separate owner.
+	Row.CompletionFixed.Header.bMetadataOmitted = true;
+}
+bool FStore::EnsureNoteStorage(FRow& Row)
+{
+	return Row.Notes.IsAllocated() || Row.Notes.Allocate(Budget, FNormalizedLimits::NoteSlots);
+}
+bool FStore::EnsureTimelineStorage(FRow& Row)
+{
+	return Row.Timeline.IsAllocated() || Row.Timeline.Allocate(Budget, FNormalizedLimits::TimelineSlots);
+}
+void FStore::InvalidateNoteTimeline(FRow& Row, uint64 NoteSerial)
+{
+	check(NoteSerial != 0);
+	for (int32 Index = 0; Index < Row.NumTimeline; ++Index)
+	{
+		auto& Slot = Row.Timeline[(Row.TimelineHead + Index) % FNormalizedLimits::TimelineSlots];
+		if (Slot.NoteSerial == NoteSerial)
+		{
+			Slot.Value.DetailState = EVaRestInspectorDetailState::Evicted;
+			Slot.NoteSerial = 0;
+		}
+	}
+}
+EVaRestInspectorDetailState FStore::ApplyNote(FRow& Row, FPacket& Packet, uint64& OutNoteSerial)
+{
+	OutNoteSerial = 0;
+	const auto Omit = [&] {
+		AddObservation(Row.Value.OmittedNotes, 1, Row.Value.bCountersSaturated);
+		Row.Value.bMetadataOmitted = true;
+		Increment(State.MetadataOmitted);
+		return EVaRestInspectorDetailState::MetadataOmitted;
+	};
+	// Private association serials must never wrap into a still-retained slot.
+	if (Row.NextNoteSerial == MAX_uint64)
+	{
+		Row.Value.bCountersSaturated = true;
+		return Omit();
+	}
+	if (!EnsureNoteStorage(Row))
+		return Omit();
+	const bool bMetadataOmitted = Packet.Fixed().Header.bMetadataOmitted;
+	FStorePacketPtr Candidate;
+	// Pending, the candidate and every old note remain fully charged during
+	// admission. A failed candidate cannot displace any existing history.
+	if (!FStorePacketOwner::TryTake(Packet, Budget, Budget->Lifetime->Allocator, Candidate))
+		return Omit();
+	int32 Destination = (Row.NoteHead + Row.NumNotes) % FNormalizedLimits::NoteSlots;
+	if (Row.NumNotes == FNormalizedLimits::NoteSlots)
+	{
+		Destination = Row.NoteHead;
+		auto& Old = Row.Notes[Destination];
+		InvalidateNoteTimeline(Row, Old.Serial);
+		Old.Owner.Reset(); // Packet/backing/wrapper free before their credit.
+		Old.Serial = 0;
+		Row.NoteHead = (Row.NoteHead + 1) % FNormalizedLimits::NoteSlots;
+		AddObservation(Row.Value.OmittedNotes, 1, Row.Value.bCountersSaturated);
+		Row.Value.bMetadataOmitted = true;
+	}
+	else
+		++Row.NumNotes;
+	auto& Entry = Row.Notes[Destination];
+	check(!Entry.Owner);
+	Entry.Owner = MoveTemp(Candidate);
+	Entry.Serial = ++Row.NextNoteSerial;
+	OutNoteSerial = Entry.Serial;
+	return bMetadataOmitted ? EVaRestInspectorDetailState::MetadataOmitted : EVaRestInspectorDetailState::Present;
+}
+void FStore::AppendTimeline(FRow& Row, const FVaRestInspectorTimelineEntry& Entry, uint64 NoteSerial)
+{
+	if (!EnsureTimelineStorage(Row))
+	{
+		AddObservation(Row.Value.OmittedTimeline, 1, Row.Value.bCountersSaturated);
+		Row.Value.bMetadataOmitted = true;
+		Increment(State.MetadataOmitted);
+		return;
+	}
+	int32 Destination = (Row.TimelineHead + Row.NumTimeline) % FNormalizedLimits::TimelineSlots;
+	if (Row.NumTimeline == FNormalizedLimits::TimelineSlots)
+	{
+		Destination = Row.TimelineHead;
+		Row.TimelineHead = (Row.TimelineHead + 1) % FNormalizedLimits::TimelineSlots;
+		AddObservation(Row.Value.OmittedTimeline, 1, Row.Value.bCountersSaturated);
+		Row.Value.bMetadataOmitted = true;
+	}
+	else
+		++Row.NumTimeline;
+	Row.Timeline[Destination].Value = Entry;
+	Row.Timeline[Destination].NoteSerial = NoteSerial;
+}
 bool FStore::Apply(FPacket&& Incoming)
 {
 	check(IsInGameThread());
@@ -860,6 +1014,17 @@ bool FStore::Apply(FPacket&& Incoming)
 	// Queue-origin omission is already counted upstream. Preserve its row
 	// truth without adding a second Store omission diagnostic.
 	Row->Value.bMetadataOmitted |= Fixed.Header.bMetadataOmitted;
+	// Snapshot identity and source timestamps before any packet can move into
+	// an immutable owner. Receipt/application order is the ring order only.
+	FVaRestInspectorTimelineEntry Timeline;
+	Timeline.Kind = Fixed.Header.Kind;
+	Timeline.Seq = Fixed.Header.Seq;
+	Timeline.Time = Fixed.Header.Time;
+	Timeline.Attempt = Fixed.Scalars.Attempt;
+	Timeline.DispatchId = Fixed.Scalars.DispatchId;
+	const FPacketScalars SourceScalars = Fixed.Scalars;
+	const bool bSourceMetadataOmitted = Fixed.Header.bMetadataOmitted;
+	uint64 NoteSerial = 0;
 	if (bStarted)
 	{
 		SetStartedScalars(*Row, Fixed.Scalars);
@@ -877,29 +1042,13 @@ bool FStore::Apply(FPacket&& Incoming)
 				Increment(State.MetadataOmitted);
 			}
 		}
+		Timeline.DetailState = Row->Started && !Row->Started->Get().Fixed().Header.bMetadataOmitted ?
+			EVaRestInspectorDetailState::Present : EVaRestInspectorDetailState::MetadataOmitted;
 	}
 	else if (bCompleted)
 	{
-		Row->Value.bTerminalKnown = true;
-		Row->Value.bPinned = false;
-		Row->Value.FinalStatus = Fixed.Scalars.Status;
-		Row->Value.FinalBodyBytes = Fixed.Scalars.DeliveredBodyBytes;
-		Row->Value.FinalStorage = Fixed.Scalars.Storage;
-		Row->Value.CompletedAt = Fixed.Header.Time;
-		Row->Value.DecodeStartAt = Fixed.Scalars.DecodeStartAt;
-		Row->Value.DecodeEndAt = Fixed.Scalars.DecodeEndAt;
-		switch (Fixed.Scalars.Outcome)
-		{
-		case EVaRestTraceOutcome::Success: Row->Value.EndState = EVaRestInspectorEndState::Success; break;
-		case EVaRestTraceOutcome::Error: Row->Value.EndState = EVaRestInspectorEndState::Error; break;
-		case EVaRestTraceOutcome::Queued: Row->Value.EndState = EVaRestInspectorEndState::Queued; break;
-		case EVaRestTraceOutcome::Canceled: Row->Value.EndState = EVaRestInspectorEndState::Canceled; break;
-		}
-		if (!FStorePacketOwner::TryTake(Packet, Budget, Budget->Lifetime->Allocator, Row->Completed))
-		{
-			Row->Value.bMetadataOmitted = true;
-			Increment(State.MetadataOmitted);
-		}
+		ApplyCompletion(*Row, Packet);
+		Timeline.DetailState = Row->Value.CompletedMetadataState;
 	}
 	else if (bNew || !Row->Value.bPinned)
 	{
@@ -909,11 +1058,33 @@ bool FStore::Apply(FPacket&& Incoming)
 	}
 	if (!bStarted && !bCompleted)
 	{
-		if (Fixed.Header.Kind == EVaRestTraceKind::AttemptDispatched || Fixed.Header.Kind == EVaRestTraceKind::AttemptEnded)
+		if (Timeline.Kind == EVaRestTraceKind::AttemptDispatched || Timeline.Kind == EVaRestTraceKind::AttemptEnded)
+		{
 			ApplyPhysical(*Row, Packet);
-		else if (Fixed.Header.Kind == EVaRestTraceKind::Excerpt)
+			const FDispatchSlot* Slot = FindDispatch(*Row, SourceScalars);
+			const bool bAvailable = Slot && (Timeline.Kind == EVaRestTraceKind::AttemptDispatched ?
+				!Slot->DispatchedFixed.Header.bMetadataOmitted && Slot->HeadersState != EVaRestInspectorHeadersState::MetadataOmitted :
+				!Slot->EndedFixed.Header.bMetadataOmitted);
+			Timeline.DetailState = bAvailable ? EVaRestInspectorDetailState::Present : EVaRestInspectorDetailState::MetadataOmitted;
+		}
+		else if (Timeline.Kind == EVaRestTraceKind::Excerpt)
+		{
 			ApplyExcerpt(*Row, Packet);
+			const FStorePacketOwner* Owner = Row->RequestExcerpt.Get();
+			if (SourceScalars.Owner == EVaRestTraceExcerptOwner::Response)
+			{
+				const FDispatchSlot* Slot = FindDispatch(*Row, SourceScalars);
+				Owner = Slot ? Slot->ResponseExcerpt.Get() : nullptr;
+			}
+			Timeline.DetailState = Owner && !Owner->Get().Fixed().Header.bMetadataOmitted ?
+				EVaRestInspectorDetailState::Present : EVaRestInspectorDetailState::MetadataOmitted;
+		}
+		else if (Timeline.Kind == EVaRestTraceKind::Note)
+			Timeline.DetailState = ApplyNote(*Row, Packet, NoteSerial);
 	}
+	if (bSourceMetadataOmitted)
+		Timeline.DetailState = EVaRestInspectorDetailState::MetadataOmitted;
+	AppendTimeline(*Row, Timeline, NoteSerial);
 	Touch(*Row);
 	return true;
 }
@@ -995,12 +1166,22 @@ bool FStore::ForEachRecord(TFunctionRef<void(const FVaRestInspectorRecordView&)>
 			View.Started = Row.Started->View();
 		if (Row.Completed)
 			View.Completed = Row.Completed->View();
+		else if (Row.Value.bActualCompletionObserved)
+			View.Completed.Fixed = &Row.CompletionFixed;
 		// All composition is visitor-local. Persistent row state never borrows
 		// these arrays, and shared header backing keeps its initialized extent.
 		FPacketFixed DispatchFixed[16];
 		FVaRestInspectorDispatchView DispatchViews[16];
 		FVaRestInspectorPacketView DispatchEvents[32], Excerpts[17];
+		FVaRestInspectorPacketView Notes[FNormalizedLimits::NoteSlots];
+		FVaRestInspectorTimelineEntry Timeline[FNormalizedLimits::TimelineSlots];
 		int32 NumEvents = 0, NumExcerpts = 0;
+		for (int32 NoteIndex = 0; NoteIndex < Row.NumNotes; ++NoteIndex)
+			Notes[NoteIndex] = Row.Notes[(Row.NoteHead + NoteIndex) % FNormalizedLimits::NoteSlots].Owner->View();
+		for (int32 TimelineIndex = 0; TimelineIndex < Row.NumTimeline; ++TimelineIndex)
+			Timeline[TimelineIndex] = Row.Timeline[(Row.TimelineHead + TimelineIndex) % FNormalizedLimits::TimelineSlots].Value;
+		View.Notes = {Notes, Row.NumNotes};
+		View.Timeline = {Timeline, Row.NumTimeline};
 		if (Row.RequestExcerpt)
 			Excerpts[NumExcerpts++] = Row.RequestExcerpt->View();
 		for (int32 DispatchIndex = 0; DispatchIndex < Row.NumDispatches; ++DispatchIndex)

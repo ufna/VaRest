@@ -115,6 +115,12 @@ private:
 	FDispatchSlot* AdmitDispatch(FRow& Row, const FPacketScalars& Scalars);
 	void ApplyPhysical(FRow& Row, FPacket& Packet);
 	void ApplyExcerpt(FRow& Row, FPacket& Packet);
+	void ApplyCompletion(FRow& Row, FPacket& Packet);
+	EVaRestInspectorDetailState ApplyNote(FRow& Row, FPacket& Packet, uint64& OutNoteSerial);
+	bool EnsureNoteStorage(FRow& Row);
+	bool EnsureTimelineStorage(FRow& Row);
+	void AppendTimeline(FRow& Row, const FVaRestInspectorTimelineEntry& Entry, uint64 NoteSerial = 0);
+	void InvalidateNoteTimeline(FRow& Row, uint64 NoteSerial);
 	EAttachedBase PrepareAttachedBase(uint64 RequestId, bool& bNeedsStarted);
 	void AdoptAttachedPacket(uint64 RequestId, FStorePacketPtr&& Packet);
 	void NoteAttachLoss(uint64 RequestId);
