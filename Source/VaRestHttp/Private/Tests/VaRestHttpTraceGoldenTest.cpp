@@ -174,6 +174,10 @@ bool FVaRestHttpGoldenCancelTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("... the backing-off one's only attempt ended 503"), EndedB.Num() == 1 && EndedB[0].Value.Status == 503);
 	for (const uint64 Id : { A.GetId(), B.GetId() })
 	{
+		const auto Starts = All<FVaRestTraceAttemptDispatched>(Recorder, Id, EVaRestTraceKind::AttemptDispatched);
+		const auto Ends = All<FVaRestTraceAttemptEnded>(Recorder, Id, EVaRestTraceKind::AttemptEnded);
+		TestTrue(TEXT("cancellation preserves physical identity"), Starts.Num() == 1 && Ends.Num() == 1
+			&& Starts[0].Value.DispatchId != 0 && Ends[0].Value.DispatchId == Starts[0].Value.DispatchId);
 		const auto Completed = All<FVaRestTraceCompleted>(Recorder, Id, EVaRestTraceKind::Completed);
 		TestTrue(FString::Printf(TEXT("#%llu: Completed Canceled, reason User"), Id), Completed.Num() == 1 && Completed[0].Value.Outcome == EVaRestTraceOutcome::Canceled
 			&& Completed[0].Value.CancelReason == EVaRestCancelReason::User && Completed[0].Key == 0.0);

@@ -24,7 +24,7 @@ namespace VaRest::Http
 		/** IN-1, on entry after Resolve. Reads the initiator (IN-15) and StartUtc into the exchange for the snapshot. */
 		void Started(FExchangeState& Ex);
 		/** IN-2, immediately before the transport starts */
-		void AttemptDispatched(const FExchangeState& Ex);
+		void AttemptDispatched(const FExchangeState& Ex, const FDispatchTag& Tag);
 		/**
 		 * IN-3, when the transport's result is back on the game thread, for the dispatch Tag names: its attempt and its own
 		 * probe's times. Non-const: the current dispatch's end (bCurrent, M4a final review A1) records which attempt's

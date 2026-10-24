@@ -139,6 +139,10 @@ Offline probes default to 10 seconds and prefer eligible queue heads across ever
 
 Started stays immediate, with actual cache policy and `bCacheLookupPending` during unresolved reads; snapshots show current state and Completed carries final CacheLookup and bFromCache independently. Cache hits have no transport attempt. Queued/stale/expiry notes before an attempt use the real RequestId and Attempt0, never an invented attempt. CacheStored means actual synchronous memory retention before Completed; best-effort disk writes neither delay successful delivery nor emit late request Notes. A disk-only stored response may have no CacheStored Note.
 
+`Completed.Response` adds final delivered status, separately gated/redacted headers, redacted effective URL/content type and a scalar body descriptor. BodyBytes is captured under the trace mask before decode consumes the body; it is independent of wire BytesDown. A wire304 may deliver200 with cached entity bytes and zero wire bytes. Memory describes a captured in-memory entity; Stream keeps unknown size (-1). A late sink that missed the scalar capture, a queued acknowledgement or a local completion with no response keeps unknown storage/size; absent response status is0. Empty cached EffectiveUrl remains empty. Cache/stale/304 delivered previews have no producer and remain unavailable; physical304 excerpts are not a substitute. No extra body copy is introduced.
+
+HTTP starts/ends/response excerpts carry public uint64 DispatchId from the existing captured uint32 dispatch serial (1..MAX_uint32). Pair physical events by RequestId+DispatchId, independently of Attempt and delivery order. Backlog/Discarded retain their promised response id; request/frame excerpts use0. The private generator and thirteen trace kinds remain unchanged.
+
 Durable replay request-body previews are disabled in O(1) before copy/preparation/announcement, including short secrets. Ordinary request and response excerpt/redactor behavior is unchanged. Cache/queue correctness does not require Inspector capture or body excerpts.
 
 The M5 consumer freeze preserves these exact names and fields:

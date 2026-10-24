@@ -178,7 +178,7 @@ void VaRest::Http::TracePoints::Started(FExchangeState& Ex)
 	Job.Launch();
 }
 
-void VaRest::Http::TracePoints::AttemptDispatched(const FExchangeState& Ex)
+void VaRest::Http::TracePoints::AttemptDispatched(const FExchangeState& Ex, const FDispatchTag& Tag)
 {
 	if (FVaRestTrace::Detail() == EVaRestTraceDetail::None)
 	{
@@ -188,6 +188,7 @@ void VaRest::Http::TracePoints::AttemptDispatched(const FExchangeState& Ex)
 	FVaRestTrace::FScopedCycles Cycles;
 	FVaRestTraceAttemptDispatched Payload;
 	Payload.RequestId = Ex.RequestId;
+	Payload.DispatchId = static_cast<uint64>(Tag.Serial);
 	Payload.Attempt = Ex.Attempt;
 	Payload.bConditional = Ex.bCacheConditional;
 	Payload.AttemptStart = Ex.AttemptStartedAt;
@@ -224,6 +225,7 @@ void VaRest::Http::TracePoints::AttemptEnded(FExchangeState& Ex, const FVaRestTr
 	const FVaRestRedactor& Redactor = *Held;
 	FVaRestTraceAttemptEnded Payload;
 	Payload.RequestId = Ex.RequestId;
+	Payload.DispatchId = static_cast<uint64>(Tag.Serial);
 	// M4a final review A1 (ruling: relabel, not drop): the dispatch's own attempt, which a stale end no longer shares with
 	// the exchange (Retry dispatched the next one), so its AttemptDispatched stays paired with it
 	Payload.Attempt = Tag.Attempt;
@@ -255,12 +257,13 @@ void VaRest::Http::TracePoints::AttemptEnded(FExchangeState& Ex, const FVaRestTr
 	if (bCurrent && Excerpts::WillExcerptOnDecode(Ex, Result))
 	{
 		Ex.ExcerptOnDecodeAttempt = Tag.Attempt;
+		Ex.ExcerptOnDecodeDispatchId = static_cast<uint64>(Tag.Serial);
 		Ex.ExcerptOnDecodeBytes = Result.Body.Num();
 		Payload.bExcerptPending = true;
 	}
 	else if (bCurrent)
 	{
-		Job = Excerpts::PrepareResponse(Ex, Result, Tag.Attempt);
+		Job = Excerpts::PrepareResponse(Ex, Result, Tag.Attempt, static_cast<uint64>(Tag.Serial));
 		Payload.bExcerptPending = Job.IsSet();
 	}
 	FVaRestTrace::Emit(EVaRestTraceKind::AttemptEnded, Ex.Config->Clock->Now(), FVaRestTracePayload(TInPlaceType<FVaRestTraceAttemptEnded>(), MoveTemp(Payload)));
@@ -283,6 +286,15 @@ void VaRest::Http::TracePoints::Completed(FExchangeState& Ex, const FFinish& Fin
 	const FVaRestRedactor& Redactor = *Held;
 	FVaRestTraceCompleted Payload;
 	Payload.RequestId = Ex.RequestId;
+	Payload.Response.Status = Finish.Response.Status;
+	Payload.Response.BodyBytes = Finish.TraceResponseBodyBytes;
+	Payload.Response.Storage = Finish.TraceResponseStorage;
+	Payload.Response.EffectiveUrl = Redactor.RedactUrl(Finish.Response.EffectiveUrl);
+	Payload.Response.ContentType = Redactor.ScrubText(Finish.Response.ContentType);
+	if (FVaRestTrace::Wants(EVaRestTraceDetail::Headers))
+	{
+		Payload.Response.Headers = Redactor.RedactHeaders(Finish.Response.Headers);
+	}
 	Payload.CacheLookup = Ex.CacheLookup;
 	Payload.bFromCache = Finish.Response.bFromCache;
 	if (Finish.bQueued)

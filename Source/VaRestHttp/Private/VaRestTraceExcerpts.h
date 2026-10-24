@@ -71,12 +71,32 @@ namespace VaRest::Http
 		/** Counts Bytes in when they fit under AdmissionCap(); unset (nothing counted) when they do not */
 		TOptional<FAdmission> TryAdmit(int64 Bytes);
 
+#if WITH_DEV_AUTOMATION_TESTS
+		/** GT-only scoped route for one real response job; Gate outlives the scope and its launched tasks. */
+		class FScopedResponseGate final
+		{
+		public:
+			FScopedResponseGate(uint64 Request, uint64 Dispatch, FRedactionGate& InGate);
+			~FScopedResponseGate();
+			FScopedResponseGate(const FScopedResponseGate&) = delete;
+			FScopedResponseGate& operator=(const FScopedResponseGate&) = delete;
+		private:
+			friend struct FJob;
+			static FScopedResponseGate* Current;
+			FScopedResponseGate* Previous = nullptr;
+			uint64 RequestId = 0;
+			uint64 DispatchId = 0;
+			FRedactionGate* Gate = nullptr;
+		};
+#endif
+
 		/** An excerpt prepared on the game thread and launched right after the event that announces it (bExcerptPending) */
 		struct FJob
 		{
 			EVaRestTraceExcerptOwner Owner = EVaRestTraceExcerptOwner::Request;
 			uint64 RequestId = 0;
 			int32 Attempt = 0;
+			uint64 DispatchId = 0;
 			int64 TotalBytes = 0;
 			/** The admission counter's share of this job's copy (concurrency review M-12: released whatever path drops the job) */
 			FAdmission Admitted;
@@ -110,7 +130,7 @@ namespace VaRest::Http
 		/** At AttemptEnded: the decode task will excerpt this response from the body itself (a 2xx a decoder parses) */
 		bool WillExcerptOnDecode(const FExchangeState& Ex, const FVaRestTransportResult& Result);
 		/** At AttemptEnded, every other response of the current dispatch (of Attempt): its prefix copied here, redacted on the pipe */
-		FJob PrepareResponse(const FExchangeState& Ex, const FVaRestTransportResult& Result, int32 Attempt);
+		FJob PrepareResponse(const FExchangeState& Ex, const FVaRestTransportResult& Result, int32 Attempt, uint64 DispatchId);
 		/**
 		 * On the decode task, before the parse rewrites the body in place: no copy (IN-14). Nothing when no sink wants
 		 * Bodies any more, as the pipe's path (Task 21 review M-2).

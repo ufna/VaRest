@@ -39,6 +39,11 @@ bool FVaRestTraceCacheHitGolden::RunTest(const FString& Parameters)
     const auto& Ended=Events[1].Payload.Get<FVaRestTraceCompleted>();
     TestTrue(TEXT("initial pending, unresolved"),Started.bCacheLookupPending && Started.CacheLookup==EVaRestTraceCacheLookup::None);
     TestTrue(TEXT("final memory provenance"),Ended.bFromCache && Ended.CacheLookup==EVaRestTraceCacheLookup::HitMemory);
+    TestEqual(TEXT("delivered cache status"),Ended.Response.Status,200);
+    TestEqual(TEXT("delivered cached entity bytes, independent of zero wire bytes"),Ended.Response.BodyBytes,int64(14));
+    TestTrue(TEXT("cached storage is memory"),Ended.Response.Storage==EVaRestTraceResponseStorage::Memory);
+    TestEqual(TEXT("cached effective URL matches delivered result"),Ended.Response.EffectiveUrl,Hit->Response.EffectiveUrl);
+    TestEqual(TEXT("default cache retains request URL"),Ended.Response.EffectiveUrl,FString(TEXT("https://api.test/cached")));
     TestEqual(TEXT("Started actual attempt zero"),Started.CurrentAttempt,0);
     TestTrue(TEXT("nonnegative logical duration"),Events[1].Time>=Events[0].Time && Hit->Response.Elapsed>=0);
     const auto& Counters=FClientAccess::State(Rig.Client)->GetCounters();
@@ -75,6 +80,20 @@ namespace VaRest::Http::TraceCacheOfflinePrivate
         Reply.Headers.Set(TEXT("Cache-Control"),Control); Reply.Headers.Set(TEXT("ETag"),TEXT("\"golden\""));
         return Reply;
     }
+    // Exercise an actually empty final cached URL without changing cache policy behavior.
+    class FClearCachedOutcomeUrl final : public IVaRestStage
+    {
+    public:
+        virtual FName GetStageName() const override { return TEXT("TraceClearCachedOutcomeUrl"); }
+        virtual void Process(const FVaRestExchangeRef& Exchange,const FVaRestStageNext& Next,FVaRestOutcomeCallback&& Done) override
+        {
+            Next.Proceed(Exchange,[Up=MoveTemp(Done)](FVaRestAttemptOutcome&& Outcome) mutable
+            {
+                if (Outcome.bFromCache) Outcome.EffectiveUrl.Reset();
+                Up(MoveTemp(Outcome));
+            });
+        }
+    };
     // Actual exchange capture also permits an Outer answer while the inner operation remains held.
     class FOuter final : public IVaRestStage, public TSharedFromThis<FOuter,ESPMode::ThreadSafe>
     {
@@ -217,6 +236,8 @@ bool FVaRestTraceCache304Golden::RunTest(const FString& Parameters)
     Note(*this,Events[3],Handle.GetId(),EVaRestTraceNoteKind::CacheRevalidated,1);
     TestTrue(TEXT("final revalidation"),End.CacheLookup==EVaRestTraceCacheLookup::Revalidate && End.bFromCache);
     TestEqual(TEXT("served status 200"),Result->Response.Status,200); TestEqual(TEXT("one attempt"),Result->Response.Attempts,1);
+    TestEqual(TEXT("trace describes delivered 200, not physical 304"),End.Response.Status,200);
+    TestEqual(TEXT("original-body entity size survives decode"),End.Response.BodyBytes,int64(13));
     TestTrue(TEXT("nonnegative response duration"),Result->Response.Elapsed>=0); TestEqual(TEXT("complete once"),Result->CompleteCalls.load(),1);
     if (!TestTrue(TEXT("body present"),Result->Value.IsSet())) return false;
     TestEqual(TEXT("original body"),Result->Value.GetValue(),FString(TEXT("original-body")));
@@ -565,4 +586,116 @@ bool FVaRestTraceCacheQueueNoSinks::RunTest(const FString& Parameters)
     if (!TestTrue(TEXT("replay operation"),PumpUntil([Results]{return Results->load()==1;}) && Rig.Drain())) return false;
     TestEqual(TEXT("stores build no events without sinks"),FVaRestTrace::Counters().EventsBuilt.load(),Before); return true;
 }
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestTraceDeliveredCacheResponse, "VaRest.Http.Trace.DeliveredResponse.Cache",
+    EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+bool FVaRestTraceDeliveredCacheResponse::RunTest(const FString& Parameters)
+{
+    using namespace VaRest::Http;
+    using namespace VaRest::Http::Testing;
+    using namespace VaRest::Http::TraceCacheOfflinePrivate;
+    // Raw results consume Finish.Body, including the cache's owned entity, before Completed.
+    enum class ECase { Memory, Disk, Revalidated, OfflineStale, AttemptedStale, EmptyUrl };
+    for (ECase Case : {ECase::Memory, ECase::Disk, ECase::Revalidated, ECase::OfflineStale, ECase::AttemptedStale, ECase::EmptyUrl})
+    {
+        FScopedPersistenceTest Disk;
+        FTestRig Rig;
+        Storage(Rig, Disk);
+        FScopedTraceRecorder Trace(EVaRestTraceDetail::Metadata | EVaRestTraceDetail::Headers);
+        ON_SCOPE_EXIT { Rig.Client.CancelAll(); Rig.Drain(); };
+        auto Policy = Case == ECase::Disk ? FVaRestCachePolicy::MemoryAndDisk() : FVaRestCachePolicy::Memory();
+        if (Case == ECase::Disk) Policy.MemoryBytes = 0;
+        Policy.bServeStaleOnError = true;
+        Rig.Client.WithCache(Policy);
+        if (Case == ECase::EmptyUrl) Rig.Client.Use(MakeShared<FClearCachedOutcomeUrl, ESPMode::ThreadSafe>(), EVaRestStageSlot::Outer);
+        const bool bStale = Case == ECase::Revalidated || Case == ECase::OfflineStale || Case == ECase::AttemptedStale;
+        auto Reply = FVaRestFakeResponse::Text(200, TEXT("plain-response"));
+        Reply.Headers.Set(TEXT("Cache-Control"), bStale ? TEXT("max-age=0") : TEXT("max-age=60"));
+        Reply.Headers.Set(TEXT("ETag"), TEXT("\"delivered\""));
+        Rig.Fake->Enqueue(MoveTemp(Reply));
+        const auto Seed = MakeOutcome<TArray<uint8>>();
+        const uint64 SeedId = Observe(Rig.Client.Get<TArray<uint8>>(TEXT("/delivered")), Seed).Send().GetId();
+        if (!TestTrue(TEXT("seed and persistence complete"), Rig.Wait(Seed) && Rig.Drain())) return false;
+        const auto SeedEvents = Trace.Recorder->For(SeedId);
+        if (!TestTrue(TEXT("seed has Completed"), !SeedEvents.IsEmpty() && SeedEvents.Last().Kind == EVaRestTraceKind::Completed)) return false;
+        const auto& Network = SeedEvents.Last().Payload.Get<FVaRestTraceCompleted>();
+        TestEqual(TEXT("network entity size survives raw move"), Network.Response.BodyBytes, int64(14));
+        TestEqual(TEXT("network delivered status"), Network.Response.Status, 200);
+        TestTrue(TEXT("seed raw value retained"), Seed->Value.IsSet() && Seed->Value->Num() == 14);
+        if (Case == ECase::Revalidated)
+        {
+            auto NotModified = FVaRestFakeResponse::Text(304, TEXT(""));
+            NotModified.Headers.Set(TEXT("Cache-Control"), TEXT("max-age=60"));
+            Rig.Fake->Enqueue(MoveTemp(NotModified));
+        }
+        else if (Case == ECase::OfflineStale) Rig.Connectivity->ReportOffline();
+        else if (Case == ECase::AttemptedStale)
+        {
+            auto Failed = FVaRestFakeResponse::Text(0, TEXT(""));
+            Failed.Failure = EVaRestTransportFailure::Connection;
+            Rig.Fake->Enqueue(MoveTemp(Failed));
+        }
+        const auto Result = MakeOutcome<TArray<uint8>>();
+        const uint64 Id = Observe(Rig.Client.Get<TArray<uint8>>(TEXT("/delivered")).NoRetry(), Result).Send().GetId();
+        if (!TestTrue(TEXT("delivered cache result"), Rig.Wait(Result))) return false;
+        const auto Events = Trace.Recorder->For(Id);
+        if (!TestTrue(TEXT("final event is completion"), !Events.IsEmpty() && Events.Last().Kind == EVaRestTraceKind::Completed)) return false;
+        const auto& Delivered = Events.Last().Payload.Get<FVaRestTraceCompleted>();
+        TestTrue(TEXT("cached success"), Delivered.Outcome == EVaRestTraceOutcome::Success && Delivered.bFromCache);
+        TestEqual(TEXT("delivered status independent of physical end"), Delivered.Response.Status, 200);
+        TestEqual(TEXT("delivered entity is fourteen bytes"), Delivered.Response.BodyBytes, int64(14));
+        TestTrue(TEXT("cached entity storage"), Delivered.Response.Storage == EVaRestTraceResponseStorage::Memory);
+        TestEqual(TEXT("cached content type"), Delivered.Response.ContentType, FString(TEXT("text/plain; charset=utf-8")));
+        TestEqual(TEXT("cached wire bytes remain zero"), Result->Response.BytesDown, int64(0));
+        TestEqual(TEXT("cached effective URL matches delivered result"), Delivered.Response.EffectiveUrl, Result->Response.EffectiveUrl);
+        if (Case == ECase::EmptyUrl)
+            TestTrue(TEXT("actually empty cached URL stays empty"), Delivered.Response.EffectiveUrl.IsEmpty());
+        else
+            TestEqual(TEXT("default cached URL stays present"), Delivered.Response.EffectiveUrl, FString(TEXT("https://api.test/delivered")));
+        TestTrue(TEXT("result still owns its entity"), Result->Value.IsSet() && Result->Value->Num() == 14);
+        int32 PhysicalEnds = 0;
+        for (const auto& Event : Events)
+        {
+            if (Event.Kind != EVaRestTraceKind::AttemptEnded) continue;
+            ++PhysicalEnds;
+            const auto& Wire = Event.Payload.Get<FVaRestTraceAttemptEnded>();
+            if (Case == ECase::Revalidated) TestEqual(TEXT("physical end is 304"), Wire.Status, 304);
+            if (Case == ECase::AttemptedStale) TestTrue(TEXT("physical connection failure"), Wire.Failure == EVaRestTransportFailure::Connection);
+        }
+        TestEqual(TEXT("only attempted paths have an end"), PhysicalEnds,
+            Case == ECase::Revalidated || Case == ECase::AttemptedStale ? 1 : 0);
+    }
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestTraceDeliveredQueuedResponse, "VaRest.Http.Trace.DeliveredResponse.Queued",
+    EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+bool FVaRestTraceDeliveredQueuedResponse::RunTest(const FString& Parameters)
+{
+    using namespace VaRest::Http;
+    using namespace VaRest::Http::Testing;
+    using namespace VaRest::Http::TraceCacheOfflinePrivate;
+    FScopedPersistenceTest Disk;
+    FTestRig Rig;
+    Storage(Rig, Disk);
+    FScopedTraceRecorder Trace;
+    ON_SCOPE_EXIT { Rig.Client.CancelAll(); Rig.Drain(); };
+    Rig.Client.WithOfflineQueue(TEXT("delivered-queued"));
+    Rig.Connectivity->ReportOffline();
+    const auto Queued = MakeShared<std::atomic<int32>, ESPMode::ThreadSafe>(0);
+    const uint64 Id = Rig.Client.Post<void>(TEXT("/queued")).Body(TEXT("safe-body")).Idempotent().QueueWhenOffline()
+        .OnQueued([Queued](const FString&) { ++*Queued; }).Send().GetId();
+    if (!TestTrue(TEXT("durable queue acknowledgement"), PumpUntil([Queued] { return Queued->load() == 1; }))) return false;
+    const auto Events = Trace.Recorder->For(Id);
+    if (!TestTrue(TEXT("queued completion"), !Events.IsEmpty() && Events.Last().Kind == EVaRestTraceKind::Completed)) return false;
+    const auto& End = Events.Last().Payload.Get<FVaRestTraceCompleted>();
+    TestTrue(TEXT("queued outcome"), End.Outcome == EVaRestTraceOutcome::Queued);
+    TestEqual(TEXT("queued has no delivered status"), End.Response.Status, 0);
+    TestEqual(TEXT("queued size unobserved"), End.Response.BodyBytes, int64(-1));
+    TestTrue(TEXT("queued storage unknown"), End.Response.Storage == EVaRestTraceResponseStorage::Unknown);
+    TestTrue(TEXT("queued has no delivered metadata"), End.Response.Headers.IsEmpty() && End.Response.ContentType.IsEmpty() && End.Response.EffectiveUrl.IsEmpty());
+    TestEqual(TEXT("queued has no wire attempt"), Rig.Fake->NumCalls(), 0);
+    return true;
+}
+
 #endif

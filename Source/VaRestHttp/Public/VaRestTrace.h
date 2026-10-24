@@ -216,6 +216,8 @@ enum class EVaRestTraceGap : uint8
 struct FVaRestTraceAttemptDispatched
 {
 	uint64 RequestId = 0;
+	/** Captured physical dispatch serial (1..MAX_uint32), independent of Attempt. */
+	uint64 DispatchId = 0;
 	int32 Attempt = 0;
 	double AttemptStart = 0.0;
 	/** M4 */
@@ -236,6 +238,8 @@ struct FVaRestTraceAttemptDispatched
 struct FVaRestTraceAttemptEnded
 {
 	uint64 RequestId = 0;
+	/** Captured physical dispatch serial (1..MAX_uint32), independent of Attempt. */
+	uint64 DispatchId = 0;
 	int32 Attempt = 0;
 	/** 0 = no response */
 	int32 Status = 0;
@@ -299,12 +303,28 @@ struct FVaRestTraceEnvelope
 	FString Message;
 };
 
+/** Delivered body storage, independently of request-body construction kind and wire byte counters. */
+enum class EVaRestTraceResponseStorage : uint8 { Unknown, Memory, Stream };
+
+/** Final delivered metadata; strings are redacted and headers follow the Headers detail mask. */
+struct FVaRestTraceResponse
+{
+	int32 Status = 0;
+	FVaRestHeaders Headers;
+	FString EffectiveUrl;
+	FString ContentType;
+	/** Captured before decode consumes the entity; -1 when unobserved or streamed. */
+	int64 BodyBytes = -1;
+	EVaRestTraceResponseStorage Storage = EVaRestTraceResponseStorage::Unknown;
+};
+
 /** IN-5: on the game thread, before any callback (OnHttpThread ones included) */
 struct FVaRestTraceCompleted
 {
 	static constexpr int32 MaxDecodeWarnings = 32;
 
 	uint64 RequestId = 0;
+	FVaRestTraceResponse Response;
 	EVaRestTraceOutcome Outcome = EVaRestTraceOutcome::Success;
 	/** Final lookup history and actual delivered response provenance are independent. */
 	EVaRestTraceCacheLookup CacheLookup = EVaRestTraceCacheLookup::None;
@@ -397,6 +417,8 @@ struct FVaRestTraceExcerptEvent
 {
 	EVaRestTraceExcerptOwner Owner = EVaRestTraceExcerptOwner::Request;
 	uint64 RequestId = 0;
+	/** Captured physical dispatch serial (1..MAX_uint32); 0 for request/frame excerpts. */
+	uint64 DispatchId = 0;
 	/** The attempt whose response it is; 0 for a request body, taken before the first attempt */
 	int32 Attempt = 0;
 	/** W5 */

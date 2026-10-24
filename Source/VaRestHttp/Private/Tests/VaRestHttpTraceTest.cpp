@@ -3,9 +3,12 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "HAL/IConsoleManager.h"
+#include "HAL/FileManager.h"
 #include "HAL/PlatformProcess.h"
 #include "HAL/PlatformTime.h"
 #include "Misc/AutomationTest.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
 #include "Misc/ScopeExit.h"
 #include "Misc/ScopeLock.h"
 #include "Tasks/Task.h"
@@ -230,6 +233,15 @@ bool FVaRestHttpTraceSuccessTest::RunTest(const FString& Parameters)
 
 	const FVaRestTraceCompleted& Completed = Events[3].Payload.Get<FVaRestTraceCompleted>();
 	TestTrue(TEXT("IN-5: success"), Completed.Outcome == EVaRestTraceOutcome::Success && Completed.Error.Kind == EVaRestErrorKind::None);
+	TestTrue(TEXT("start and end share a nonzero physical id"), Dispatched.DispatchId != 0 && Ended.DispatchId == Dispatched.DispatchId);
+	TestEqual(TEXT("delivered status"), Completed.Response.Status, 200);
+	TestEqual(TEXT("body size survives consuming JSON decode"), Completed.Response.BodyBytes, int64(2));
+	TestTrue(TEXT("delivered body was in memory"), Completed.Response.Storage == EVaRestTraceResponseStorage::Memory);
+	TestEqual(TEXT("delivered URL redacted"), Completed.Response.EffectiveUrl, Ended.EffectiveUrl);
+	TestEqual(TEXT("delivered content type"), Completed.Response.ContentType, FString(TEXT("application/json")));
+	TestEqual(TEXT("delivered cookie redacted"), Completed.Response.Headers.Get(TEXT("Set-Cookie")), FString(TEXT("***")));
+	TestEqual(TEXT("delivered credential redacted"), Completed.Response.Headers.Get(TEXT("Authorization")), FString(TEXT("***")));
+	TestEqual(TEXT("delivered Location redacted"), Completed.Response.Headers.Get(TEXT("Location")), FString(TEXT("https://api.test/next?code=***&page=2")));
 	TestEqual(TEXT("... the result type"), Completed.ResultType, FName(TEXT("Json")));
 	TestTrue(TEXT("... decode times, read because a sink is attached"), Completed.DecodeStartAt >= 0.0 && Completed.DecodeEndAt >= Completed.DecodeStartAt);
 	return true;
@@ -357,7 +369,8 @@ bool FVaRestHttpTraceZeroCostTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("with a sink: four events for the request"), Events.Num(), 4);
 	TestEqual(TEXT("... the two timing delegates bound for the one attempt (IN-11)"), TraceCounters.DelegateBinds.load(), static_cast<uint64>(2));
 	TestTrue(TEXT("Metadata alone builds no headers"), Events.Num() == 4 && Events[0].Payload.Get<FVaRestTraceStarted>().Headers.IsEmpty()
-		&& Events[1].Payload.Get<FVaRestTraceAttemptDispatched>().Headers.IsEmpty() && Events[2].Payload.Get<FVaRestTraceAttemptEnded>().Headers.IsEmpty());
+		&& Events[1].Payload.Get<FVaRestTraceAttemptDispatched>().Headers.IsEmpty() && Events[2].Payload.Get<FVaRestTraceAttemptEnded>().Headers.IsEmpty()
+		&& Events[3].Payload.Get<FVaRestTraceCompleted>().Response.Headers.IsEmpty());
 	return true;
 }
 
@@ -765,6 +778,125 @@ bool FVaRestHttpTracePathTemplateTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("no password in any log line"), Capture.Contains(TEXT("canary-pw")));
 	TestEqual(TEXT("never sent"), Rig.Fake->NumCalls(), 0);
 	return true;
+}
+
+
+namespace VaRest::Http::TraceTestPrivate
+{
+    /** Attach after OnChainDone has captured no descriptor, before the queued GT decode delivery can complete. */
+    class FAttachAfterOutcome final : public IVaRestStage
+    {
+    public:
+        explicit FAttachAfterOutcome(const TSharedRef<Testing::FTraceRecorder, ESPMode::ThreadSafe>& InRecorder)
+            : Recorder(InRecorder) {}
+        virtual FName GetStageName() const override { return TEXT("AttachAfterOutcome"); }
+        virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) override
+        {
+            Next.Proceed(Exchange, [Sink = Recorder, Flag = Attached, Up = MoveTemp(OnOutcome)](FVaRestAttemptOutcome&& Outcome) mutable
+            {
+                Up(MoveTemp(Outcome));
+                FVaRestTrace::AddSink(Sink);
+                Flag->store(true);
+            });
+        }
+        TSharedRef<Testing::FTraceRecorder, ESPMode::ThreadSafe> Recorder;
+        TSharedRef<std::atomic<bool>, ESPMode::ThreadSafe> Attached = MakeShared<std::atomic<bool>, ESPMode::ThreadSafe>(false);
+    };
+
+    TOptional<FVaRestTraceCompleted> CompletionOf(const Testing::FTraceRecorder& Recorder, uint64 Id)
+    {
+        for (const auto& Event : Recorder.For(Id))
+        {
+            if (Event.Kind == EVaRestTraceKind::Completed) return Event.Payload.Get<FVaRestTraceCompleted>();
+        }
+        return {};
+    }
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestTraceDeliveredLocalStream, "VaRest.Http.Trace.DeliveredResponse.NetworkLocalStream",
+    EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+bool FVaRestTraceDeliveredLocalStream::RunTest(const FString& Parameters)
+{
+    using namespace VaRest::Http::Testing;
+    using namespace VaRest::Http::TraceTestPrivate;
+    FScopedPersistenceTest Files;
+    FTestRig Rig;
+    FScopedTraceRecorder Trace(EVaRestTraceDetail::Metadata);
+    ON_SCOPE_EXIT { Rig.Client.CancelAll(); Rig.Drain(); };
+    FlushRedactionPipe();
+    const int64 CopiedBefore = Counters().TraceExcerptBytesCopied.load();
+    Rig.Fake->Enqueue(FVaRestFakeResponse::Text(200, TEXT("plain-response")));
+    const auto Raw = MakeOutcome<TArray<uint8>>();
+    const uint64 RawId = Observe(Rig.Client.Get<TArray<uint8>>(TEXT("/raw")), Raw).Send().GetId();
+    if (!TestTrue(TEXT("network raw result"), Rig.Wait(Raw))) return false;
+    const auto Network = CompletionOf(*Trace.Recorder, RawId);
+    if (!TestTrue(TEXT("network completion captured"), Network.IsSet())) return false;
+    TestEqual(TEXT("network final status"), Network->Response.Status, 200);
+    TestEqual(TEXT("raw move keeps original size"), Network->Response.BodyBytes, int64(14));
+    TestTrue(TEXT("network memory storage"), Network->Response.Storage == EVaRestTraceResponseStorage::Memory);
+    TestTrue(TEXT("metadata alone builds no delivered headers"), Network->Response.Headers.IsEmpty());
+    TestTrue(TEXT("raw value still owns actual bytes"), Raw->Value.IsSet() && Raw->Value->Num() == 14);
+
+    const auto Refused = MakeOutcome<void>();
+    const uint64 RefusedId = Observe(Rig.Client.Get<void>(TEXT("/invalid/{id")), Refused).Send().GetId();
+    if (!TestTrue(TEXT("local refusal complete"), Rig.Wait(Refused))) return false;
+    const auto Local = CompletionOf(*Trace.Recorder, RefusedId);
+    if (!TestTrue(TEXT("local completion captured"), Local.IsSet())) return false;
+    TestTrue(TEXT("local Config error"), Local->Outcome == EVaRestTraceOutcome::Error && Local->Error.Kind == EVaRestErrorKind::Config);
+    TestEqual(TEXT("local no status"), Local->Response.Status, 0);
+    TestEqual(TEXT("local unobserved size"), Local->Response.BodyBytes, int64(-1));
+    TestTrue(TEXT("local unknown storage"), Local->Response.Storage == EVaRestTraceResponseStorage::Unknown);
+    TestTrue(TEXT("local no delivered strings"), Local->Response.ContentType.IsEmpty() && Local->Response.EffectiveUrl.IsEmpty());
+    TestEqual(TEXT("local no extra dispatch"), Rig.Fake->NumCalls(), 1);
+
+    IFileManager::Get().MakeDirectory(*Files.Root, true);
+    const FString File = FPaths::Combine(Files.Root, TEXT("download.bin"));
+    Rig.Fake->Enqueue(FVaRestFakeResponse::Text(200, TEXT("plain-response")));
+    const auto Saved = MakeOutcome<FVaRestResponse>();
+    const uint64 SavedId = Observe(Rig.Client.Get<FVaRestResponse>(TEXT("/save")).SaveTo(File), Saved).Send().GetId();
+    if (!TestTrue(TEXT("stream completion"), Rig.Wait(Saved))) return false;
+    const auto Stream = CompletionOf(*Trace.Recorder, SavedId);
+    if (!TestTrue(TEXT("stream trace captured"), Stream.IsSet())) return false;
+    TestEqual(TEXT("stream delivered status"), Stream->Response.Status, 200);
+    TestTrue(TEXT("stream descriptor"), Stream->Response.Storage == EVaRestTraceResponseStorage::Stream);
+    TestEqual(TEXT("stream size remains unknown despite known wire count"), Stream->Response.BodyBytes, int64(-1));
+    TestEqual(TEXT("stream wire bytes"), Saved->Response.BytesDown, int64(14));
+    TArray<uint8> DiskBytes;
+    TestTrue(TEXT("actual saved entity"), FFileHelper::LoadFileToArray(DiskBytes, *File) && DiskBytes.Num() == 14);
+    TestEqual(TEXT("metadata adds no excerpt body copies"), Counters().TraceExcerptBytesCopied.load(), CopiedBefore);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestTraceDeliveredUnknown, "VaRest.Http.Trace.DeliveredResponse.UnknownAfterLateAttach",
+    EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+bool FVaRestTraceDeliveredUnknown::RunTest(const FString& Parameters)
+{
+    using namespace VaRest::Http::Testing;
+    using namespace VaRest::Http::TraceTestPrivate;
+    FVaRestTrace::FScopedSinkIsolation Isolation;
+    FTestRig Rig;
+    const auto Recorder = MakeShared<FTraceRecorder, ESPMode::ThreadSafe>(EVaRestTraceDetail::Metadata);
+    const auto Stage = MakeShared<FAttachAfterOutcome, ESPMode::ThreadSafe>(Recorder);
+    Rig.Client.Use(Stage, EVaRestStageSlot::Outer);
+    ON_SCOPE_EXIT
+    {
+        Rig.Client.CancelAll();
+        Rig.Drain();
+        if (Stage->Attached->load()) FVaRestTrace::RemoveSink(Recorder);
+    };
+    TestTrue(TEXT("no capture at outcome handoff"), FVaRestTrace::Detail() == EVaRestTraceDetail::None);
+    Rig.Fake->Enqueue(FVaRestFakeResponse::Json(200, FUtf8StringView(UTF8TEXT("{\"n\":1}"))));
+    const auto Result = MakeOutcome<FVaRestJson>();
+    const uint64 Id = Observe(Rig.Client.Get(TEXT("/late-attach")), Result).Send().GetId();
+    if (!TestTrue(TEXT("decode delivered after attachment"), Rig.Wait(Result))) return false;
+    TestTrue(TEXT("attachment happened after outcome handoff"), Stage->Attached->load());
+    const auto Done = CompletionOf(*Recorder, Id);
+    if (!TestTrue(TEXT("late completion captured"), Done.IsSet())) return false;
+    TestEqual(TEXT("final response status remains observable"), Done->Response.Status, 200);
+    TestEqual(TEXT("unobserved predecode size stays unknown"), Done->Response.BodyBytes, int64(-1));
+    TestTrue(TEXT("unobserved storage stays unknown"), Done->Response.Storage == EVaRestTraceResponseStorage::Unknown);
+    TestTrue(TEXT("actual body still decoded"), Result->Value.IsSet() && Result->Value->Get(TEXT("n")).AsInt64() == 1);
+    return true;
 }
 
 #endif

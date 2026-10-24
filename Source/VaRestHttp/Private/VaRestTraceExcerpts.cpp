@@ -25,12 +25,13 @@ namespace VaRest::Http::ExcerptsPrivate
 #endif
 	}
 
-	void Emit(EVaRestTraceExcerptOwner Owner, uint64 RequestId, int32 Attempt, FVaRestTraceExcerpt&& Excerpt, double Time)
+	void Emit(EVaRestTraceExcerptOwner Owner, uint64 RequestId, int32 Attempt, uint64 DispatchId, FVaRestTraceExcerpt&& Excerpt, double Time)
 	{
 		FVaRestTraceExcerptEvent Payload;
 		Payload.Owner = Owner;
 		Payload.RequestId = RequestId;
 		Payload.Attempt = Attempt;
+		Payload.DispatchId = DispatchId;
 		Payload.Excerpt = MoveTemp(Excerpt);
 		FVaRestTrace::Emit(EVaRestTraceKind::Excerpt, Time, FVaRestTracePayload(TInPlaceType<FVaRestTraceExcerptEvent>(), MoveTemp(Payload)));
 	}
@@ -101,10 +102,10 @@ namespace VaRest::Http::ExcerptsPrivate
 			Skipped.SkipReason = EVaRestExcerptSkip::Backlog;
 			Skipped.TotalBytes = Job.TotalBytes;
 			Skipped.bTruncated = Job.TotalBytes > 0;
-			Emit(Job.Owner, Job.RequestId, Job.Attempt, MoveTemp(Skipped), Job.Time);
+			Emit(Job.Owner, Job.RequestId, Job.Attempt, Job.DispatchId, MoveTemp(Skipped), Job.Time);
 			return;
 		}
-		Launcher(TEXT("VaRest.TraceExcerpt"), [ForOwner = Job.Owner, Id = Job.RequestId, ForAttempt = Job.Attempt, Held = MoveTemp(Job.Admitted), At = Job.Time,
+		Launcher(TEXT("VaRest.TraceExcerpt"), [ForOwner = Job.Owner, Id = Job.RequestId, ForAttempt = Job.Attempt, ForDispatch = Job.DispatchId, Held = MoveTemp(Job.Admitted), At = Job.Time,
 			Redacting = Job.Redactor, Work = MoveTemp(Job.Redact)]() mutable
 		{
 			LLM_SCOPE_BYTAG(VaRest_Trace);
@@ -117,7 +118,7 @@ namespace VaRest::Http::ExcerptsPrivate
 			FVaRestTraceExcerpt Excerpt = Work(*Redacting);
 			// Counted out before the emit, here rather than when the task body dies, so a test that waits for the pipe sees it
 			Held.Reset();
-			Emit(ForOwner, Id, ForAttempt, MoveTemp(Excerpt), At);
+			Emit(ForOwner, Id, ForAttempt, ForDispatch, MoveTemp(Excerpt), At);
 		});
 	}
 }
@@ -159,8 +160,35 @@ void VaRest::Http::Excerpts::FAdmission::Reset()
 	}
 }
 
+#if WITH_DEV_AUTOMATION_TESTS
+VaRest::Http::Excerpts::FScopedResponseGate* VaRest::Http::Excerpts::FScopedResponseGate::Current = nullptr;
+
+VaRest::Http::Excerpts::FScopedResponseGate::FScopedResponseGate(uint64 Request, uint64 Dispatch, FRedactionGate& InGate)
+	: Previous(Current), RequestId(Request), DispatchId(Dispatch), Gate(&InGate)
+{
+	check(IsInGameThread() && RequestId != 0 && DispatchId != 0);
+	Current = this;
+}
+
+VaRest::Http::Excerpts::FScopedResponseGate::~FScopedResponseGate()
+{
+	check(IsInGameThread() && Current == this);
+	Current = Previous;
+}
+#endif
+
 void VaRest::Http::Excerpts::FJob::Launch()
 {
+#if WITH_DEV_AUTOMATION_TESTS
+	check(IsInGameThread());
+	const FScopedResponseGate* Route = FScopedResponseGate::Current;
+	if (Route && Owner == EVaRestTraceExcerptOwner::Response
+		&& RequestId == Route->RequestId && DispatchId == Route->DispatchId)
+	{
+		LaunchOn(*Route->Gate);
+		return;
+	}
+#endif
 	ExcerptsPrivate::LaunchJob(*this, [](const TCHAR* DebugName, TUniqueFunction<void()>&& Body)
 	{
 		return LaunchRedaction(DebugName, MoveTemp(Body));
@@ -234,7 +262,7 @@ bool VaRest::Http::Excerpts::WillExcerptOnDecode(const FExchangeState& Ex, const
 		&& Result.Body.Num() > 0 && Ex.Handler.IsValid() && Ex.Handler->DecodesBody();
 }
 
-VaRest::Http::Excerpts::FJob VaRest::Http::Excerpts::PrepareResponse(const FExchangeState& Ex, const FVaRestTransportResult& Result, int32 Attempt)
+VaRest::Http::Excerpts::FJob VaRest::Http::Excerpts::PrepareResponse(const FExchangeState& Ex, const FVaRestTransportResult& Result, int32 Attempt, uint64 DispatchId)
 {
 	using namespace ExcerptsPrivate;
 	FJob Job;
@@ -247,6 +275,7 @@ VaRest::Http::Excerpts::FJob VaRest::Http::Excerpts::PrepareResponse(const FExch
 	Job.RequestId = Ex.RequestId;
 	// The dispatch's own attempt (M4a final review A1), as its AttemptEnded carries it
 	Job.Attempt = Attempt;
+	Job.DispatchId = DispatchId;
 	Job.TotalBytes = Result.bBodyInFile ? Result.BytesDown : Result.Body.Num();
 	Job.Time = Ex.Config->Clock->Now();
 	// Read as the result is back, like the log stage's (VaRestLogStage.cpp:130): with what AuthApply joined in for this
@@ -278,19 +307,21 @@ void VaRest::Http::Excerpts::EmitOnDecode(const FFinish& Finish)
 	const int32 Take = FMath::Min(Finish.Body.Num(), FMath::Max(0, Finish.ExcerptCap));
 	FVaRestTraceExcerpt Excerpt = Finish.ExcerptRedactor->RedactBody(Finish.Response.ContentType, TConstArrayView<uint8>(Finish.Body.GetData(), Take), Finish.Body.Num(),
 		Finish.ExcerptCap);
-	ExcerptsPrivate::Emit(EVaRestTraceExcerptOwner::Response, Finish.Response.RequestId, Finish.ExcerptAttempt, MoveTemp(Excerpt),
+	ExcerptsPrivate::Emit(EVaRestTraceExcerptOwner::Response, Finish.Response.RequestId, Finish.ExcerptAttempt, Finish.ExcerptDispatchId, MoveTemp(Excerpt),
 		Finish.Clock.IsValid() ? Finish.Clock->Now() : 0.0);
 }
 
 void VaRest::Http::Excerpts::ResolveDiscarded(FExchangeState& Ex)
 {
 	const int32 Attempt = Ex.ExcerptOnDecodeAttempt;
+	const uint64 DispatchId = Ex.ExcerptOnDecodeDispatchId;
 	if (Attempt <= 0)
 	{
 		return;
 	}
 	// Once: whatever follows, this attempt's excerpt is resolved
 	Ex.ExcerptOnDecodeAttempt = 0;
+	Ex.ExcerptOnDecodeDispatchId = 0;
 	if (!ExcerptsPrivate::Wanted())
 	{
 		return;
@@ -301,5 +332,5 @@ void VaRest::Http::Excerpts::ResolveDiscarded(FExchangeState& Ex)
 	Skipped.SkipReason = EVaRestExcerptSkip::Discarded;
 	Skipped.TotalBytes = Ex.ExcerptOnDecodeBytes;
 	Skipped.bTruncated = Skipped.TotalBytes > 0;
-	ExcerptsPrivate::Emit(EVaRestTraceExcerptOwner::Response, Ex.RequestId, Attempt, MoveTemp(Skipped), Ex.Config->Clock->Now());
+	ExcerptsPrivate::Emit(EVaRestTraceExcerptOwner::Response, Ex.RequestId, Attempt, DispatchId, MoveTemp(Skipped), Ex.Config->Clock->Now());
 }

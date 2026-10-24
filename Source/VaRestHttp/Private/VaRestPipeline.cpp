@@ -571,7 +571,7 @@ namespace VaRest::Http::PipelinePrivate
 			ThisDispatch.Probe = Request.Probe;
 			ThisDispatch.ResponseFile = Ex.TempFile;
 			// IN-2: on the game thread, immediately before the transport starts
-			TracePoints::AttemptDispatched(Ex);
+			TracePoints::AttemptDispatched(Ex, ThisDispatch);
 			// The gap was this attempt's; the next one reports its own (IN-2), and so its own wait behind a refresh
 			Ex.NextGap = EVaRestTraceGap::None;
 			Ex.NextGapSeconds = 0.0;
@@ -1068,6 +1068,12 @@ void VaRest::Http::FClientState::OnChainDone(const FVaRestExchangeRef& Exchange,
 	Finish.Response.ContentType = MoveTemp(Outcome.ContentType);
 	Finish.Response.BytesUp = Outcome.BytesUp;
 	Finish.Response.BytesDown = Outcome.BytesDown;
+	if (FVaRestTrace::Detail() != EVaRestTraceDetail::None)
+	{
+		Finish.TraceResponseStorage = Outcome.bBodyInFile
+			? EVaRestTraceResponseStorage::Stream : EVaRestTraceResponseStorage::Memory;
+		Finish.TraceResponseBodyBytes = Outcome.bBodyInFile ? -1 : static_cast<int64>(Outcome.Body.Num());
+	}
 	Finish.Body = MoveTemp(Outcome.Body);
 	Finish.bBodyInFile = Outcome.bBodyInFile;
 
@@ -1138,7 +1144,8 @@ void VaRest::Http::FClientState::OnChainDone(const FVaRestExchangeRef& Exchange,
 		// IN-14: this response goes to the decoder; the task excerpts it from the body itself. The redactor is taken here, on
 		// the game thread (RedactorFor checks it): the Send() snapshot's secrets, what AuthApply joined in for the attempts
 		// (Task 12 review M-7) and the current ones -- a refresh response's token keys among them (Task 18).
-		Finish.ExcerptAttempt = Ex.Attempt;
+		Finish.ExcerptAttempt = Ex.ExcerptOnDecodeAttempt;
+		Finish.ExcerptDispatchId = Ex.ExcerptOnDecodeDispatchId;
 		Finish.ExcerptRedactor = RedactorFor(Ex);
 		Finish.ExcerptCap = FVaRestTrace::GetDetailSettings().BodyCap;
 		// Task 21 review M-1: handed over, so the decode task resolves it. EmitOnDecode drops a handed-over excerpt only when
@@ -1146,6 +1153,7 @@ void VaRest::Http::FClientState::OnChainDone(const FVaRestExchangeRef& Exchange,
 		// over (an error, an empty body a stage put there, a request finished first) stays marked and resolves as Skipped:
 		// Discarded (Excerpts::ResolveDiscarded).
 		Ex.ExcerptOnDecodeAttempt = 0;
+		Ex.ExcerptOnDecodeDispatchId = 0;
 	}
 	Finish.bTimeDecode = FVaRestTrace::Detail() != EVaRestTraceDetail::None;
 	// Re-review N-6: a stage that waits (a backoff, a park) is ended here, as Complete ends it -- the decode task runs for

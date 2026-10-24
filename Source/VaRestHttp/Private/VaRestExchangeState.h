@@ -219,6 +219,7 @@ namespace VaRest::Http
 		 * over: Excerpts::ResolveDiscarded resolves it (Task 21 review M-1).
 		 */
 		int32 ExcerptOnDecodeAttempt = 0;
+		uint64 ExcerptOnDecodeDispatchId = 0;
 		int64 ExcerptOnDecodeBytes = 0;
 
 		/**

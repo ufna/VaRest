@@ -6,6 +6,8 @@
 #include "HAL/PlatformProcess.h"
 #include "HAL/PlatformTime.h"
 #include "Misc/AutomationTest.h"
+#include "Misc/CommandLine.h"
+#include "Misc/Parse.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Guid.h"
 #include "Misc/Paths.h"
@@ -123,12 +125,12 @@ namespace VaRest::Http::ExcerptTestPrivate
 	FString Unresolved(const VaRest::Http::Testing::FTraceRecorder& Recorder, uint64 Id)
 	{
 		const TArray<FVaRestTraceEvent> Events = Recorder.For(Id);
-		const auto Has = [&Events](EVaRestTraceExcerptOwner Owner, int32 Attempt)
+		const auto Has = [&Events](EVaRestTraceExcerptOwner Owner, uint64 DispatchId)
 		{
-			return Events.ContainsByPredicate([Owner, Attempt](const FVaRestTraceEvent& Event)
+			return Events.ContainsByPredicate([Owner, DispatchId](const FVaRestTraceEvent& Event)
 			{
 				return Event.Kind == EVaRestTraceKind::Excerpt && Event.Payload.Get<FVaRestTraceExcerptEvent>().Owner == Owner
-					&& Event.Payload.Get<FVaRestTraceExcerptEvent>().Attempt == Attempt;
+					&& Event.Payload.Get<FVaRestTraceExcerptEvent>().DispatchId == DispatchId;
 			});
 		};
 		TArray<FString> Missing;
@@ -140,10 +142,10 @@ namespace VaRest::Http::ExcerptTestPrivate
 			}
 			else if (Event.Kind == EVaRestTraceKind::AttemptEnded && Event.Payload.Get<FVaRestTraceAttemptEnded>().bExcerptPending)
 			{
-				const int32 Attempt = Event.Payload.Get<FVaRestTraceAttemptEnded>().Attempt;
-				if (!Has(EVaRestTraceExcerptOwner::Response, Attempt))
+				const uint64 DispatchId = Event.Payload.Get<FVaRestTraceAttemptEnded>().DispatchId;
+				if (!Has(EVaRestTraceExcerptOwner::Response, DispatchId))
 				{
-					Missing.Add(FString::Printf(TEXT("response #%d"), Attempt));
+					Missing.Add(FString::Printf(TEXT("response dispatch #%llu"), DispatchId));
 				}
 			}
 		}
@@ -374,6 +376,20 @@ namespace VaRest::Http::ExcerptTestPrivate
 		TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> FirstEnds = MakeShared<std::atomic<int32>, ESPMode::ThreadSafe>(0);
 	};
 
+	/** Request Id's physical dispatch starts, in order (Attempt need not be unique). */
+	TArray<FVaRestTraceAttemptDispatched> DispatchesOf(const VaRest::Http::Testing::FTraceRecorder& Recorder, uint64 Id)
+	{
+		TArray<FVaRestTraceAttemptDispatched> Out;
+		for (const FVaRestTraceEvent& Event : Recorder.For(Id))
+		{
+			if (Event.Kind == EVaRestTraceKind::AttemptDispatched)
+			{
+				Out.Add(Event.Payload.Get<FVaRestTraceAttemptDispatched>());
+			}
+		}
+		return Out;
+	}
+
 	/** Request Id's AttemptEnded payloads, in order */
 	TArray<FVaRestTraceAttemptEnded> EndsOf(const VaRest::Http::Testing::FTraceRecorder& Recorder, uint64 Id)
 	{
@@ -479,7 +495,7 @@ bool FVaRestHttpExcerptsTest::RunTest(const FString& Parameters)
 	{
 		return false;
 	}
-	TestTrue(TEXT("the request's, before any attempt, redacted"), Sent->Attempt == 0 && Sent->Excerpt.Kind == EVaRestExcerptKind::Json
+	TestTrue(TEXT("the request's, before any attempt, redacted"), Sent->Attempt == 0 && Sent->DispatchId == 0 && Sent->Excerpt.Kind == EVaRestExcerptKind::Json
 		&& Sent->Excerpt.ToText().Contains(TEXT("\"password\":\"***\"")) && Sent->Excerpt.ToText().Contains(TEXT("\"user\":\"neo\"")));
 	TestTrue(TEXT("the response's, for attempt 1, redacted on the decode task"), Got->Attempt == 1 && Got->Excerpt.ToText().Contains(TEXT("\"accessToken\":\"***\""))
 		&& !Got->Excerpt.ToText().Contains(TEXT("tok-abcdef1234")));
@@ -542,10 +558,22 @@ bool FVaRestHttpExcerptBacklogTest::RunTest(const FString& Parameters)
 	FlushRedactionPipe();
 	const TOptional<FVaRestTraceExcerptEvent> Skipped = Find(Scoped.Recorder->ExcerptsOf(BigId), EVaRestTraceExcerptOwner::Request);
 	TestTrue(TEXT("IN-14: past the admission cap, Skipped: Backlog, nothing copied"), Skipped.IsSet() && Skipped->Excerpt.Kind == EVaRestExcerptKind::Skipped
-		&& Skipped->Excerpt.SkipReason == EVaRestExcerptSkip::Backlog && Skipped->Excerpt.TotalBytes == 1000);
+		&& Skipped->Excerpt.SkipReason == EVaRestExcerptSkip::Backlog && Skipped->Excerpt.TotalBytes == 1000 && Skipped->DispatchId == 0);
 	const TOptional<FVaRestTraceExcerptEvent> Admitted = Find(Scoped.Recorder->ExcerptsOf(SmallId), EVaRestTraceExcerptOwner::Request);
 	TestTrue(TEXT("under it: the excerpt"), Admitted.IsSet() && Admitted->Excerpt.Kind == EVaRestExcerptKind::Text);
 	TestEqual(TEXT("the counter is back at 0"), VaRest::Http::Excerpts::PendingBytes(), static_cast<int64>(0));
+
+	Rig.Fake->Enqueue(FVaRestFakeResponse::Text(200, FString::ChrN(1000, TEXT('z'))));
+	auto Response = MakeOutcome<TArray<uint8>>();
+	const uint64 ResponseId = Observe(Rig.Client.Get<TArray<uint8>>(TEXT("/response-backlog")), Response).Send().GetId();
+	if (!TestTrue(TEXT("raw response completed"), Rig.Wait(Response))) { Abandon(Rig); return false; }
+	const auto ResponseEnd = First<FVaRestTraceAttemptEnded>(*Scoped.Recorder, ResponseId, EVaRestTraceKind::AttemptEnded);
+	const auto ResponseSkip = Find(Scoped.Recorder->ExcerptsOf(ResponseId), EVaRestTraceExcerptOwner::Response);
+	TestTrue(TEXT("real response Backlog resolves the captured dispatch promise"), ResponseEnd.IsSet() && ResponseSkip.IsSet()
+		&& ResponseEnd->bExcerptPending && ResponseEnd->DispatchId != 0 && ResponseSkip->DispatchId == ResponseEnd->DispatchId
+		&& ResponseSkip->Excerpt.Kind == EVaRestExcerptKind::Skipped && ResponseSkip->Excerpt.SkipReason == EVaRestExcerptSkip::Backlog);
+	TestEqual(TEXT("response refusal leaves no admission"), VaRest::Http::Excerpts::PendingBytes(), int64(0));
+	TestEqual(TEXT("response promise resolved"), Unresolved(*Scoped.Recorder, ResponseId), FString());
 
 	// Concurrency review M-12: an admission is counted out when its holder goes -- a job prepared and never launched, a
 	// refused launch -- not only after a redaction ran; a leaked count would make every later excerpt Skipped: Backlog
@@ -908,6 +936,8 @@ bool FVaRestHttpExcerptDiscardedTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("/replaced: AttemptEnded announced the decode task's excerpt"), ReplacedEnded.IsSet() && ReplacedEnded->bExcerptPending && ReplacedEnded->Status == 200);
 	const TArray<FVaRestTraceEvent> ReplacedExcerpts = ResponseExcerpts(Recorder, ReplacedId, 1);
 	TestTrue(TEXT("/replaced: one excerpt, Skipped: Discarded"), IsOneDiscarded(ReplacedExcerpts));
+	TestTrue(TEXT("discard preserves the announced physical id"), ReplacedEnded.IsSet() && ReplacedExcerpts.Num() == 1
+		&& ReplacedEnded->DispatchId != 0 && ReplacedExcerpts[0].Payload.Get<FVaRestTraceExcerptEvent>().DispatchId == ReplacedEnded->DispatchId);
 	TestTrue(TEXT("/replaced: ... with the announced response's size"), ReplacedExcerpts.Num() == 1
 		&& ReplacedExcerpts[0].Payload.Get<FVaRestTraceExcerptEvent>().Excerpt.TotalBytes == 7);
 	TestTrue(TEXT("/replaced: ... between its AttemptEnded and its Completed (nothing pending at Completed)"), ReplacedExcerpts.Num() == 1
@@ -979,6 +1009,8 @@ bool FVaRestHttpExcerptDiscardedOnCancelTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("AttemptEnded announced the decode task's excerpt"), Ended.IsSet() && Ended->bExcerptPending && Ended->Status == 200);
 	const TArray<FVaRestTraceEvent> Excerpts = ResponseExcerpts(Recorder, Id, 1);
 	TestTrue(TEXT("one excerpt, Skipped: Discarded"), IsOneDiscarded(Excerpts));
+	TestTrue(TEXT("cancel discard preserves the announced physical id"), Ended.IsSet() && Excerpts.Num() == 1
+		&& Ended->DispatchId != 0 && Excerpts[0].Payload.Get<FVaRestTraceExcerptEvent>().DispatchId == Ended->DispatchId);
 	TestTrue(TEXT("... before Completed"), Excerpts.Num() == 1 && Excerpts[0].Seq > SeqOfAttempt(Recorder, Id, EVaRestTraceKind::AttemptEnded, 1)
 		&& Excerpts[0].Seq < SeqOfAttempt(Recorder, Id, EVaRestTraceKind::Completed, 0));
 	TestEqualSensitive(TEXT("no excerpt pending at the end"), Unresolved(Recorder, Id), FString());
@@ -1202,6 +1234,9 @@ bool FVaRestHttpGoldenStaleEndQueuedTest::RunTest(const FString& Parameters)
 	}
 	const TArray<FVaRestTraceAttemptEnded> Ends = EndsOf(Recorder, Id);
 	TestTrue(TEXT("it is attempt 1's end, not attempt 2's"), Ends.Num() == 1 && Ends[0].Attempt == 1 && Ends[0].Failure == EVaRestTransportFailure::Canceled);
+	const auto OldStarts = DispatchesOf(Recorder, Id);
+	TestTrue(TEXT("queued later attempt cannot relabel the old dispatch"), OldStarts.Num() == 1 && Ends.Num() == 1
+		&& OldStarts[0].DispatchId != 0 && Ends[0].DispatchId == OldStarts[0].DispatchId);
 	Rig.Fake->Complete(1, Json(200, "{}"));
 	if (!TestTrue(TEXT("both complete"), PumpUntil([Outcome, Blocker] { return Outcome->IsDone() && Blocker->IsDone(); })))
 	{
@@ -1268,6 +1303,14 @@ bool FVaRestHttpExcerptPerDispatchTest::RunTest(const FString& Parameters)
 	const TArray<FVaRestTraceAttemptEnded> Ends = EndsOf(Recorder, Id);
 	TestTrue(TEXT("the first (stale) end announces no excerpt; the live one does"), Ends.Num() == 2 && Ends[0].Attempt == 1 && Ends[1].Attempt == 1
 		&& !Ends[0].bExcerptPending && Ends[1].bExcerptPending);
+	const auto Starts = DispatchesOf(Recorder, Id);
+	if (!TestTrue(TEXT("two nonzero distinct dispatch ids under Attempt1"), Starts.Num() == 2 && Ends.Num() == 2
+		&& Starts[0].DispatchId != 0 && Starts[1].DispatchId != 0 && Starts[0].DispatchId != Starts[1].DispatchId)) return false;
+	TestEqual(TEXT("first end matches first dispatch"), Ends[0].DispatchId, Starts[0].DispatchId);
+	TestEqual(TEXT("second end matches second dispatch"), Ends[1].DispatchId, Starts[1].DispatchId);
+	const auto FirstOrderExcerpts = ResponseExcerpts(Recorder, Id, 1);
+	TestTrue(TEXT("decode excerpt belongs to second dispatch"), FirstOrderExcerpts.Num() == 1
+		&& FirstOrderExcerpts[0].Payload.Get<FVaRestTraceExcerptEvent>().DispatchId == Starts[1].DispatchId);
 	TestEqual(TEXT("one Response excerpt for the request"), CountResponseExcerpts(Recorder, Id, /*bOnlyDiscarded*/ false), 1);
 	TestEqual(TEXT("... no Discarded"), CountResponseExcerpts(Recorder, Id, /*bOnlyDiscarded*/ true), 0);
 	TestEqualSensitive(TEXT("every announced excerpt resolved"), Unresolved(Recorder, Id), FString());
@@ -1316,12 +1359,96 @@ bool FVaRestHttpExcerptPerDispatchTest::RunTest(const FString& Parameters)
 	}
 	Later.Drain();
 	FlushRedactionPipe();
+	const auto KeptStarts = DispatchesOf(Recorder, KeptId);
+	const auto KeptEnds = EndsOf(Recorder, KeptId);
+	if (!TestTrue(TEXT("reverse order has two distinct actual starts and ends"), KeptStarts.Num() == 2 && KeptEnds.Num() == 2
+		&& KeptStarts[0].DispatchId != 0 && KeptStarts[1].DispatchId != 0 && KeptStarts[0].DispatchId != KeptStarts[1].DispatchId)) return false;
+	TestEqual(TEXT("live end arrives first with second dispatch id"), KeptEnds[0].DispatchId, KeptStarts[1].DispatchId);
+	TestEqual(TEXT("stale end arrives second with first dispatch id"), KeptEnds[1].DispatchId, KeptStarts[0].DispatchId);
 	const TArray<FVaRestTraceEvent> KeptExcerpts = ResponseExcerpts(Recorder, KeptId, 1);
 	TestTrue(TEXT("the live response's one excerpt is the decode task's, not Discarded"), KeptExcerpts.Num() == 1
-		&& KeptExcerpts[0].Payload.Get<FVaRestTraceExcerptEvent>().Excerpt.Kind == EVaRestExcerptKind::Json);
+		&& KeptExcerpts[0].Payload.Get<FVaRestTraceExcerptEvent>().Excerpt.Kind == EVaRestExcerptKind::Json
+		&& KeptExcerpts[0].Payload.Get<FVaRestTraceExcerptEvent>().DispatchId == KeptStarts[1].DispatchId);
 	TestEqualSensitive(TEXT("... and every announced excerpt resolved"), Unresolved(Recorder, KeptId), FString());
 	return true;
 }
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpMixedExcerptDispatchTest,
+    "VaRest.Http.Trace.MixedExcerptDispatchIdentity",
+    EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+bool FVaRestHttpMixedExcerptDispatchTest::RunTest(const FString& Parameters)
+{
+    using namespace VaRest::Http;
+    using namespace VaRest::Http::Testing;
+    using namespace VaRest::Http::ExcerptTestPrivate;
+    if (!FPlatformProcess::SupportsMultithreading() || FParse::Param(FCommandLine::Get(), TEXT("nothreading")))
+    {
+        AddError(TEXT("MixedExcerptDispatchIdentity requires worker concurrency; unavailable in this configuration"));
+        return false;
+    }
+    FVaRestTrace::FScopedSinkIsolation Isolation;
+    FTestRig Rig;
+    Rig.Fake->bCompleteOnWorker = false;
+    auto Twice = MakeShared<FProceedTwice, ESPMode::ThreadSafe>();
+    Rig.Client.Use(Twice, EVaRestStageSlot::PerAttempt);
+    Rig.Fake->SetResponder([](const FVaRestTransportRequest&) { return FVaRestFakeResponse::Manual(); });
+    FScopedTraceRecorder Scoped(EVaRestTraceDetail::Metadata | EVaRestTraceDetail::Bodies, 1024);
+    auto Result = MakeOutcome<FVaRestJson>();
+    const uint64 Id = Observe(Rig.Client.Get(TEXT("/mixed-excerpt")), Result).Send().GetId();
+    auto Start = First<FVaRestTraceAttemptDispatched>(*Scoped.Recorder, Id, EVaRestTraceKind::AttemptDispatched);
+    if (!TestTrue(TEXT("real first dispatch"), Start.IsSet() && Start->DispatchId != 0)) { Twice->Release(); Abandon(Rig); return false; }
+    const uint64 FirstId = Start->DispatchId;
+    FRedactionGate Gate;
+    auto Release = MakeShared<std::atomic<bool>, ESPMode::ThreadSafe>(false);
+    Gate.Start();
+    ON_SCOPE_EXIT
+    {
+        Release->store(true);
+        Gate.Wait(); // release BEFORE waiting, including assertion failures
+        Twice->Release();
+        Abandon(Rig);
+        Gate.Stop();
+    };
+    HoldPipe(Gate, Release);
+    Excerpts::FScopedResponseGate Route(Id, FirstId, Gate);
+    Rig.Fake->Complete(0, Json(503, R"({"n":1})"));
+    if (!TestTrue(TEXT("first actual current end"), PumpUntil([Twice] { return Twice->FirstEnds->load() == 1; }))) return false;
+    TestTrue(TEXT("raw response admitted to owned held pipe"), Excerpts::PendingBytes() > 0);
+    TestEqual(TEXT("first excerpt still held"), ResponseExcerpts(*Scoped.Recorder, Id, 1).Num(), 0);
+    Twice->ProceedAgain();
+    if (!TestEqual(TEXT("second physical dispatch"), Rig.Fake->NumCalls(), 2)) return false;
+    TestEqual(TEXT("same retry attempt label"), Rig.Fake->GetCall(1).Request.Attempt, 1);
+    const auto Starts = DispatchesOf(*Scoped.Recorder, Id);
+    if (!TestTrue(TEXT("actual second start has a distinct nonzero id"), Starts.Num() == 2
+        && Starts[0].DispatchId == FirstId && Starts[1].DispatchId != 0 && Starts[1].DispatchId != FirstId)) return false;
+    Rig.Fake->Complete(1, Json(200, R"({"n":2})"));
+    if (!TestTrue(TEXT("decoded second outcome"), Rig.Wait(Result))) return false;
+    TArray<FVaRestTraceEvent> Before = ResponseExcerpts(*Scoped.Recorder, Id, 1);
+    if (!TestEqual(TEXT("decode excerpt precedes held pipe"), Before.Num(), 1)) return false;
+    const auto& Second = Before[0].Payload.Get<FVaRestTraceExcerptEvent>();
+    const uint64 SecondId = Second.DispatchId;
+    const auto Ends = EndsOf(*Scoped.Recorder, Id);
+    if (!TestEqual(TEXT("both real ends observed"), Ends.Num(), 2)) return false;
+    TestEqual(TEXT("first end matches first start"), Ends[0].DispatchId, FirstId);
+    TestEqual(TEXT("second end matches second start"), Ends[1].DispatchId, Starts[1].DispatchId);
+    TestEqual(TEXT("second excerpt matches second start"), SecondId, Starts[1].DispatchId);
+    TestTrue(TEXT("both ends promised their own response"), Ends[0].bExcerptPending && Ends[1].bExcerptPending);
+    TestTrue(TEXT("both ends retain Attempt1"), Ends[0].Attempt == 1 && Ends[1].Attempt == 1);
+    TestTrue(TEXT("distinct actual dispatch identities"), FirstId != 0 && SecondId != 0 && FirstId != SecondId);
+    TestEqual(TEXT("decode payload"), Second.Excerpt.ToText(), FString(TEXT("{\"n\":2}")));
+    TestTrue(TEXT("decode is not discarded/backlog"), Second.Excerpt.SkipReason == EVaRestExcerptSkip::None);
+    Release->store(true);
+    Gate.Wait();
+    TArray<FVaRestTraceEvent> After = ResponseExcerpts(*Scoped.Recorder, Id, 1);
+    if (!TestEqual(TEXT("both actual promises resolved"), After.Num(), 2)) return false;
+    const auto& FirstLate = After[1].Payload.Get<FVaRestTraceExcerptEvent>();
+    TestEqual(TEXT("late pipe retains first captured identity"), FirstLate.DispatchId, FirstId);
+    TestEqual(TEXT("late pipe payload"), FirstLate.Excerpt.ToText(), FString(TEXT("{\"n\":1}")));
+    TestTrue(TEXT("late pipe not discarded/backlog"), FirstLate.Excerpt.SkipReason == EVaRestExcerptSkip::None);
+    TestEqual(TEXT("each physical promise resolved"), Unresolved(*Scoped.Recorder, Id), FString());
+    TestEqual(TEXT("source admissions released"), Excerpts::PendingBytes(), int64(0));
+    return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpExcerptBinaryNoCopyTest, "VaRest.Http.Trace.ExcerptBinaryOverCapCopiesNothing",
 	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
 
@@ -1443,6 +1570,9 @@ bool FVaRestHttpTraceCancelAtDispatchTest::RunTest(const FString& Parameters)
 	const TOptional<FVaRestTraceAttemptEnded> Ended = First<FVaRestTraceAttemptEnded>(Recorder, Id, EVaRestTraceKind::AttemptEnded);
 	TestTrue(TEXT("... AttemptEnded{1, Failure Canceled}, no excerpt"), Ended.IsSet() && Ended->Attempt == 1 && Ended->Failure == EVaRestTransportFailure::Canceled
 		&& !Ended->bExcerptPending && Ended->Status == 0);
+	const auto Starts = DispatchesOf(Recorder, Id);
+	TestTrue(TEXT("synthetic canceled end preserves captured dispatch id"), Starts.Num() == 1 && Ended.IsSet()
+		&& Starts[0].DispatchId != 0 && Ended->DispatchId == Starts[0].DispatchId);
 	FString Why;
 	TestTrue(TEXT("Inspector 3.3: the phases hold"), PhasesHold(Recorder, Id, Why));
 	TestEqualSensitive(TEXT("... (why not)"), Why, FString());

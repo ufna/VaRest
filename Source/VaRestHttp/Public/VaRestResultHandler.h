@@ -25,6 +25,9 @@ namespace VaRest::Http
 		FVaRestError Error;
 		/** The response body with its byte of slack; ParseOwned takes it (spec 2.1) */
 		TArray<uint8> Body;
+		/** Delivered entity scalars captured before Body is consumed, only under the trace mask. */
+		int64 TraceResponseBodyBytes = -1;
+		EVaRestTraceResponseStorage TraceResponseStorage = EVaRestTraceResponseStorage::Unknown;
 		/** The body went to TempFile (SaveTo) */
 		bool bBodyInFile = false;
 		FString TempFile;
@@ -61,6 +64,7 @@ namespace VaRest::Http
 		 * taken on the game thread: immutable, any thread may use it) and the cap
 		 */
 		int32 ExcerptAttempt = 0;
+		uint64 ExcerptDispatchId = 0;
 		TSharedPtr<const FVaRestRedactor, ESPMode::ThreadSafe> ExcerptRedactor;
 		int32 ExcerptCap = 0;
 	};
