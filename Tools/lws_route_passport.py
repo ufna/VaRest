@@ -264,8 +264,24 @@ def held_original_continuity(rows, trace, records, intervals):
     keys = ('conn', 'wsi_token', 'ssl_token', 'route', 'actual_route', 'ctx_origin', 'ctx_supplied', 'ctx_exists', 'ssl_exists')
     same = lambda value: all(value.get(key) == anchor.get(key) for key in keys)
     if not same(final): return failure
+    releases = [event for event in rows if event['note'] == 'hold-release-request']
+    if (len(releases) != 1 or releases[0]['conn'] != anchor['conn'] or releases[0]['seq'] <= end
+            or releases[0]['name'] != 'marker' or releases[0]['reason'] != -7 or releases[0]['wsi'] != 0):
+        return failure
+    callbacks = [event for event in rows if event['conn'] == anchor['conn']
+                 and event['name'] in ('PERFORM_SERVER_CERT_VERIFICATION', 'ESTABLISHED')]
+    certs = [event for event in callbacks if event['name'] == 'PERFORM_SERVER_CERT_VERIFICATION']
+    opens = [event for event in callbacks if event['name'] == 'ESTABLISHED']
+    witnesses = [(seq, phase) for seq, value, phase in records if value.get('conn') == anchor['conn']
+                 and phase in ('verify-identity', 'ssl-open')]
+    if (not certs or len(opens) != 1
+            or sum(phase == 'verify-identity' for _, phase in witnesses) != len(certs)
+            or sum(phase == 'ssl-open' for _, phase in witnesses) != 1
+            or any(event['wsi'] != anchor['wsi_token'] for event in callbacks)):
+        return failure
+    if any(seq <= releases[0]['seq'] for seq in [event['seq'] for event in callbacks] + [seq for seq, _ in witnesses]):
+        return failure
     for seq, value, phase in records:
-        if seq < start: continue
         if value.get('conn') == anchor['conn'] and not same(value): return failure
     if trace['mode'] == 'held':
         for phase in ('create-before', 'create-after', 'tls-init-before', 'tls-init-after'):
@@ -793,7 +809,7 @@ def synthetic(mode='held-reuse', provided=True):
         append('RECEIVE', 2, 8, hex=b'neighbor-route-echo'.hex(), len=19)
         append(conn=2, note='neighbor-echo-held', len=1)
         append('WSI_DESTROY', 2, 8); append(conn=2, note='neighbor-retired-held', len=1)
-    note('ssl-after-route', **ident(1, 1)); append(note='hold-release-request')
+    note('ssl-after-route', **ident(1, 1)); append(conn=1, reason=-7, note='hold-release-request')
     append('PERFORM_SERVER_CERT_VERIFICATION', 1, 7, depth=0, preverify=1, x509_error=0)
     note('verify-identity', **ident(1, 1), known_wsi=True, ssl_input=True, store_ssl=True, preverify=1)
     append('ESTABLISHED', 1, 7); note('ssl-open', **ident(1, 1))
@@ -983,6 +999,62 @@ class ValidatorTest(unittest.TestCase):
                     self.assertIn('held original SSL continuity', validate_case(*values))
                     if supplied:
                         self.assertEqual(summarize(values[1], values[0], values[4], values[5])['ownership'], 'supplied use unestablished')
+                faults = ('before-anchor-same', 'before-anchor-different', 'during-hold-same',
+                          'during-hold-different', 'before-release-same', 'before-release-different',
+                          'raw-cert-before-release', 'raw-open-before-release', 'notes-before-anchor',
+                          'missing-release', 'duplicate-release', 'foreign-duplicate-release',
+                          'wrong-release-owner', 'unowned-release', 'wrong-release-name',
+                          'wrong-release-reason', 'wrong-release-wsi', 'release-before-anchor',
+                          'release-during-hold', 'release-after-cert', 'release-after-open',
+                          'missing-cert', 'missing-open', 'missing-cert-note', 'missing-open-note')
+                for fault in faults:
+                    with self.subTest(mode=mode, supplied=supplied, ordering=fault):
+                        values = copy.deepcopy(original); rows = values[1]['events']
+                        def phase(event):
+                            return json.loads(event['note']).get('phase') if event['note'].startswith('{') else None
+                        before = next(e for e in rows if phase(e) == 'ssl-before-route')
+                        after = next(e for e in rows if phase(e) == 'ssl-after-route')
+                        release = next(e for e in rows if e['note'] == 'hold-release-request')
+                        cert = next(e for e in rows if e['conn'] == 1 and e['name'] == 'PERFORM_SERVER_CERT_VERIFICATION')
+                        opened = next(e for e in rows if e['conn'] == 1 and e['name'] == 'ESTABLISHED')
+                        witnesses = [e for e in rows if e['conn'] == 1 and phase(e) in ('verify-identity', 'ssl-open')]
+                        if fault.endswith(('-same', '-different')):
+                            moved = [e for e in rows if e in (cert, opened) or e in witnesses]
+                            if fault.endswith('-different'):
+                                for event in witnesses:
+                                    value = json.loads(event['note']); value['ssl_token'] = 999
+                                    event['note'] = json.dumps(value)
+                            for event in moved: rows.remove(event)
+                            boundary = before if fault.startswith('before-anchor') else after if fault.startswith('during-hold') else release
+                            index = rows.index(boundary); rows[index:index] = moved
+                        elif fault in ('raw-cert-before-release', 'raw-open-before-release', 'notes-before-anchor'):
+                            moved = witnesses if fault == 'notes-before-anchor' else [cert if fault == 'raw-cert-before-release' else opened]
+                            for event in moved: rows.remove(event)
+                            index = rows.index(before if fault == 'notes-before-anchor' else release)
+                            rows[index:index] = moved
+                        elif fault == 'missing-release': rows.remove(release)
+                        elif fault in ('duplicate-release', 'foreign-duplicate-release'):
+                            duplicate = copy.deepcopy(release)
+                            if fault == 'foreign-duplicate-release': duplicate['conn'] = 2
+                            rows.insert(rows.index(release), duplicate)
+                        elif fault in ('wrong-release-owner', 'unowned-release'):
+                            release['conn'] = 2 if fault == 'wrong-release-owner' else 0
+                        elif fault == 'wrong-release-name': release['name'] = 'arbitrary-not-a-marker'
+                        elif fault == 'wrong-release-reason': release['reason'] = 123456
+                        elif fault == 'wrong-release-wsi': release['wsi'] = 7
+                        elif fault.startswith('release-'):
+                            rows.remove(release)
+                            boundary = {'release-before-anchor': before, 'release-during-hold': after,
+                                        'release-after-cert': cert, 'release-after-open': opened}[fault]
+                            rows.insert(rows.index(boundary) + int(fault.startswith('release-after-')), release)
+                        elif fault in ('missing-cert', 'missing-open'): rows.remove(cert if fault == 'missing-cert' else opened)
+                        else:
+                            rows.remove(next(e for e in witnesses if phase(e) == ('verify-identity' if fault == 'missing-cert-note' else 'ssl-open')))
+                        for n, event in enumerate(rows, 1): event.update(seq=n, time=float(n))
+                        self.assertIn('held original SSL continuity', validate_case(*values))
+                        self.assertIn('held original SSL continuity', provenance(rows, values[1])['errors'])
+                        if supplied:
+                            self.assertEqual(summarize(values[1], values[0], values[4], values[5])['ownership'], 'supplied use unestablished')
                 self.assertEqual(validate_case(*original), [])
 
     def test_missing_held_anchor_cannot_certify_supplied_ownership(self):
