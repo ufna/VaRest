@@ -61,9 +61,10 @@ class Ipv6Unavailable(OSError):
 
 
 class RouteProxy(Proxy):
-    def __init__(self, ports, family=socket.AF_INET, hold_tls=False):
+    def __init__(self, ports, family=socket.AF_INET, hold_tls=False, inspect_tls=False):
         super().__init__('tunnel', ports)
         self.hold_tls = hold_tls
+        self.inspect_tls = inspect_tls or hold_tls
         self.hello_seen = threading.Event()
         self.server_held = threading.Event()
         self.release_tls = threading.Event()
@@ -93,8 +94,11 @@ class RouteProxy(Proxy):
             self.next_id += 1
             ident = self.next_id
         deadline = time.monotonic() + self.lifetime_seconds
+        operation = 'read-connect-header'
 
         def send(destination, payload):
+            nonlocal operation
+            operation = 'send-client' if destination is sock else 'send-upstream'
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError('relay lifetime expired')
@@ -110,6 +114,7 @@ class RouteProxy(Proxy):
             if remaining <= 0:
                 self.add(ident, 'relay_deadline')
                 return
+            operation = 'connect-upstream'
             with socket.create_connection(('127.0.0.1', port), timeout=min(1, remaining)) as upstream:
                 upstream.settimeout(1)
                 self.add(ident, 'upstream', host='127.0.0.1', port=port)
@@ -133,18 +138,31 @@ class RouteProxy(Proxy):
                         # later records stay in the socket rather than consuming
                         # the bounded ClientHello accumulation buffer.
                         count = 16384
-                        if source is sock and self.hold_tls and not hello_done:
+                        if source is sock and self.inspect_tls and not hello_done:
                             count = (5 if len(prefix) < 5 else
                                      5 + int.from_bytes(prefix[3:5], 'big')) - len(prefix)
                         source.settimeout(min(1, remaining))
-                        payload = source.recv(count)
+                        operation = 'recv-client' if source is sock else 'recv-upstream'
+                        try:
+                            payload = source.recv(count)
+                        except ConnectionResetError as error:
+                            if source is not sock or error.errno != errno.ECONNRESET or not (self.inspect_tls and hello_done):
+                                raise
+                            if self.stopping.is_set():
+                                self.add(ident, 'stopped')
+                            elif time.monotonic() >= deadline:
+                                self.add(ident, 'relay_deadline')
+                            else:
+                                self.add(ident, 'peer_reset', operation='recv-client', errno=error.errno,
+                                         phase='after-forwarded-client-hello')
+                            return
                         if self.stopping.is_set():
                             self.add(ident, 'stopped')
                             return
                         if not payload:
                             self.add(ident, 'peer_eof' if source is sock else 'upstream_eof')
                             return
-                        if source is sock and self.hold_tls and not hello_done:
+                        if source is sock and self.inspect_tls and not hello_done:
                             prefix.extend(payload)
                             if len(prefix) > 18437:
                                 raise ValueError('ClientHello accumulation bound')
@@ -184,6 +202,7 @@ class RouteProxy(Proxy):
                         send(upstream if source is sock else sock, payload)
                 self.add(ident, 'stopped' if self.stopping.is_set() else 'relay_deadline')
         except (OSError, ValueError, UnicodeError) as error:
-            self.add(ident, 'fixture_error', error_kind=type(error).__name__, detail=str(error))
+            self.add(ident, 'fixture_error', error_kind=type(error).__name__, detail=str(error),
+                     operation=operation, errno=getattr(error, 'errno', None))
         finally:
             self.add(ident, 'end')

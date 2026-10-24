@@ -19,8 +19,35 @@ DEFINE_LOG_CATEGORY(LogVaRestLwsProbe);
 #include "VaRestClient.h"
 #include "VaRestHttpTesting.h"
 
+#if PLATFORM_LINUX
+extern "C" __attribute__((weak)) int openssl_websocket_private_data_index;
+#endif
+
 namespace VaRest::LwsProbe::VaRestLwsProbePrivate
 {
+std::atomic<FRig*> RouteCallbackOwner{nullptr};
+FVaRestJson IndexObservation()
+{
+    FVaRestJson Out = FVaRestJson::Object().Set(TEXT("known"), false);
+#if PLATFORM_LINUX
+    if (&openssl_websocket_private_data_index != nullptr)
+    {
+        Out.Set(TEXT("known"), true).Set(TEXT("value"), openssl_websocket_private_data_index);
+    }
+#endif
+    return Out;
+}
+void RoutePhase(FRig& Rig, int32 RouteId, const TCHAR* Phase, bool bValue)
+{
+    const FVaRestJson Row = FVaRestJson::Object().Set(TEXT("phase"), Phase)
+        .Set(TEXT("route"), RouteId).Set(TEXT("value"), bValue)
+        .Set(TEXT("index"), IndexObservation()).Set(TEXT("watch"), Rig.WatchedSslIdentity());
+    const FString Encoded = Row.ToString();
+    Rig.Record(0, Marker, RouteId, Encoded);
+    UE_LOG(LogVaRestLwsProbe, Display, TEXT("ROUTE-PHASE %s"), *Encoded);
+    GLog->Flush();
+}
+
 	/** "http://127.0.0.1:41234" -> host and port */
 	bool SplitUrl(const FString& Url, const TCHAR* Scheme, FString& OutHost, int32& OutPort)
 	{
@@ -133,6 +160,12 @@ VaRest::LwsProbe::FRig::FRig(const FServer& InServer, FRigOptions InOptions)
 	, Options(MoveTemp(InOptions))
 {
 	check(IsInGameThread());
+if (Options.bExplicitRoutes)
+{
+    FRig* Expected = nullptr;
+    check(VaRestLwsProbePrivate::RouteCallbackOwner.compare_exchange_strong(Expected, this));
+}
+
 	// One protocol, "varest" (WebSocket spec 2.1). per_session_data_size 0: the connection's userdata is ours
 	// (connect_info.userdata), as the engine's (LwsWebSocketsManager.cpp:163-166, LwsWebSocket.cpp:807)
 	Protocols[0].name = "varest";
@@ -146,6 +179,8 @@ VaRest::LwsProbe::FRig::FRig(const FServer& InServer, FRigOptions InOptions)
 	Info.uid = -1;
 	Info.gid = -1;
 	Info.options = Options.ContextOptions;
+if (Options.bExplicitRoutes) { Info.options |= LWS_SERVER_OPTION_EXPLICIT_VHOSTS; }
+
 	// The engine's 32 KiB (LwsWebSocketsManager.cpp:187-190): the handshake header buffer (WebSocket spec 15)
 	Info.max_http_header_data2 = 32 * 1024;
 	Info.pt_serv_buf_size = 32 * 1024;
@@ -225,6 +260,13 @@ void VaRest::LwsProbe::FRig::Shutdown()
 		lws_context_destroy(Context);
 		Context = nullptr;
 	}
+	Routes.Empty();
+if (Options.bExplicitRoutes)
+{
+    FRig* Expected = this;
+    VaRestLwsProbePrivate::RouteCallbackOwner.compare_exchange_strong(Expected, nullptr);
+}
+
 	if (SslModuleContext)
 	{
 		FModuleManager::GetModuleChecked<FSslModule>(TEXT("SSL")).GetSslManager().DestroySslContext(SslModuleContext);
@@ -307,6 +349,18 @@ void VaRest::LwsProbe::FRig::ConnectNow(FConn& Conn)
 
 	lws_client_connect_info Info = {};
 	Info.context = Context;
+if (Options.bExplicitRoutes)
+{
+    FRoute* Selected = FindRoute(Spec.RouteId);
+    if (!Selected || !Selected->Vhost)
+    {
+        Conn.bDestroyed = true;
+        Record(Conn.Id, ConnectReturned, 0, TEXT("null: route absent"));
+        return;
+    }
+    Info.vhost = Selected->Vhost;
+}
+
 	Info.address = Utf8Copy(Address, Conn.AddressUtf8);
 	Info.port = Port;
 	Info.ssl_connection = Spec.bTls ? (LCCSCF_USE_SSL | Spec.SslFlags) : Spec.SslFlags;
@@ -468,6 +522,16 @@ int32 VaRest::LwsProbe::FRig::AppendHeaders(FConn& Conn, void* In, size_t Len)
 
 VaRest::LwsProbe::FConn* VaRest::LwsProbe::FRig::FindConn(lws* Wsi, void* User)
 {
+if (Options.bExplicitRoutes)
+{
+    FScopeLock Lock(&ConnsLock);
+    for (const auto& Each : Conns)
+    {
+        if (!Each->bDestroyed && Each->Wsi && Each->Wsi == Wsi) { return Each.Get(); }
+    }
+    return nullptr;
+}
+
 	// The userdata first, over every connection, and a live wsi only when no connection owns the userdata: a freed wsi's
 	// address may be reused by the next connection (LWS 3.0 does: Probe.VaRest.Lws.Rig.SequentialConnections fails when
 	// a freed wsi is matched first), a FConn's never is. Clearing Wsi at WSI_DESTROY (and on a NULL connect) is what
@@ -499,6 +563,11 @@ VaRest::LwsProbe::FConn* VaRest::LwsProbe::FRig::FindConn(lws* Wsi, void* User)
 
 int VaRest::LwsProbe::FRig::Callback(lws* Wsi, lws_callback_reasons Reason, void* User, void* In, size_t Len)
 {
+if (FRig* RawOwner = VaRestLwsProbePrivate::RouteCallbackOwner.load())
+{
+    return RawOwner->HandleRoute(Wsi, static_cast<int32>(Reason), User, In, Len);
+}
+
 	// Also called inside lws_create_context (protocol init, client TLS setup), before FRig::Context is set: the rig comes
 	// from the context's user pointer (lws_context_creation_info::user), not from the member
 	lws_context* Owner = Wsi ? lws_get_context(Wsi) : nullptr;
@@ -1037,6 +1106,210 @@ bool VaRest::LwsProbe::IsMessageStart(int32 Protocol)
 	// Without LWS_WRITE_NO_FIN (0x40) and LWS_WRITE_H2_STREAM_END (0x80), libwebsockets.h:4819-4827
 	const int32 Kind = Protocol & 0x3F;
 	return Kind == LWS_WRITE_TEXT || Kind == LWS_WRITE_BINARY;
+}
+
+int32 VaRest::LwsProbe::FRig::AddRoute(FRouteSpec InSpec)
+{
+    check(IsInGameThread());
+    if (!Options.bExplicitRoutes || !CanAddRoute(RequestedRoutes)) { return 0; }
+    ++RequestedRoutes;
+    const int32 Assigned = NextRouteId++;
+    Enqueue([this, Assigned, Moved = MoveTemp(InSpec)]() mutable { AddRouteNow(Assigned, MoveTemp(Moved)); });
+    return Assigned;
+}
+VaRest::LwsProbe::FRoute* VaRest::LwsProbe::FRig::FindRoute(int32 InRouteId)
+{
+    for (const TUniquePtr<FRoute>& Item : Routes)
+    {
+        if (Item->Id == InRouteId) { return Item.Get(); }
+    }
+    return nullptr;
+}
+void VaRest::LwsProbe::FRig::AddRouteNow(int32 InRouteId, FRouteSpec InSpec)
+{
+    using namespace VaRestLwsProbePrivate;
+    TUniquePtr<FRoute> Made = MakeUnique<FRoute>();
+    Made->Id = InRouteId;
+    Made->Spec = MoveTemp(InSpec);
+    FRoute* Stable = Made.Get();
+    Routes.Add(MoveTemp(Made));
+    lws_context_creation_info Info = {};
+    Info.port = CONTEXT_PORT_NO_LISTEN;
+    Info.protocols = Protocols;
+    Info.uid = -1;
+    Info.gid = -1;
+    Info.user = this;
+    Info.options = Options.ContextOptions | LWS_SERVER_OPTION_EXPLICIT_VHOSTS;
+    Info.max_http_header_data2 = 32 * 1024;
+    Info.pt_serv_buf_size = 32 * 1024;
+    Info.timeout_secs = Options.TimeoutSecs;
+    Info.vhost_name = Utf8Copy(Stable->Spec.Name, Stable->NameUtf8);
+    Info.http_proxy_address = Stable->Spec.ProxyAddress.IsEmpty() ? nullptr
+        : Utf8Copy(Stable->Spec.ProxyAddress, Stable->ProxyUtf8);
+    Info.http_proxy_port = Stable->Spec.ProxyPort;
+    RoutePhase(*this, InRouteId, TEXT("create-before"), true);
+    Stable->Vhost = lws_create_vhost(Context, &Info);
+    RoutePhase(*this, InRouteId, TEXT("create-after"), Stable->Vhost != nullptr);
+    if (Stable->Vhost && Stable->Spec.bClientTls)
+    {
+        Info.options |= LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT;
+        Info.provided_client_ssl_ctx = Options.Tls == ETls::ProvidedContext
+            ? Options.ProvidedSslContext : SslModuleContext;
+        RoutePhase(*this, InRouteId, TEXT("tls-init-before"), true);
+        const int32 Result = lws_init_vhost_client_ssl(&Info, Stable->Vhost);
+        RoutePhase(*this, InRouteId, TEXT("tls-init-after"), Result == 0);
+        Record(0, Marker, Result, FString::Printf(TEXT("route-tls-result:%d"), InRouteId));
+    }
+    else { RoutePhase(*this, InRouteId, TEXT("tls-init-skipped"), false); }
+    RoutePhase(*this, InRouteId, TEXT("ready"), Stable->Vhost != nullptr);
+}
+void VaRest::LwsProbe::FRig::DestroyRoute(int32 InRouteId)
+{
+    check(IsInGameThread());
+    Enqueue([this, InRouteId]
+    {
+        FRoute* Found = FindRoute(InRouteId);
+        VaRestLwsProbePrivate::RoutePhase(*this, InRouteId, TEXT("destroy-before"), Found && Found->Vhost);
+        if (Options.OnRouteDestroyStage) { Options.OnRouteDestroyStage(*this, true); }
+        if (Found && Found->Vhost)
+        {
+            lws_vhost_destroy(Found->Vhost);
+            Found->Vhost = nullptr;
+        }
+        if (Options.OnRouteDestroyStage) { Options.OnRouteDestroyStage(*this, false); }
+        VaRestLwsProbePrivate::RoutePhase(*this, InRouteId, TEXT("destroy-after"), true);
+    });
+}
+FVaRestJson VaRest::LwsProbe::FRig::SslIdentity(FConn& Connection)
+{
+    // Caller has matched the live owned WSI before entering; no unknown callback pointer is inspected.
+    SSL* Ssl = lws_get_ssl(Connection.Wsi);
+    if (Connection.ObservedSsl && Connection.ObservedSsl != Ssl)
+    { SslTokens.Observe(Connection.ObservedSsl, Connection.Id, true); }
+    Connection.ObservedSsl = Ssl;
+    const auto WsiIdentity = TraceIdentity.Observe(Connection.Wsi, Connection.Id, false);
+    const auto SslIdentityToken = SslTokens.Observe(Ssl, Connection.Id, false);
+    lws_vhost* Actual = lws_get_vhost(Connection.Wsi);
+    int32 ActualRoute = 0;
+    for (const auto& Route : Routes) { if (Route->Vhost && Route->Vhost == Actual) { ActualRoute = Route->Id; } }
+    SSL_CTX* Origin = Ssl ? SSL_get_SSL_CTX(Ssl) : nullptr;
+    const bool bSupplied = Origin && Origin == Options.ProvidedSslContext;
+    bool bIndexKnown = false, bIndexMatches = false;
+#if PLATFORM_LINUX
+    if (&openssl_websocket_private_data_index != nullptr)
+    {
+        bIndexKnown = true;
+        bIndexMatches = Ssl && openssl_websocket_private_data_index >= 0
+            && SSL_get_ex_data(Ssl, openssl_websocket_private_data_index) == Connection.Wsi;
+    }
+#endif
+    return FVaRestJson::Object().Set(TEXT("conn"), Connection.Id)
+        .Set(TEXT("route"), Connection.Spec.RouteId).Set(TEXT("actual_route"), ActualRoute)
+        .Set(TEXT("wsi_token"), WsiIdentity.Id).Set(TEXT("ssl_token"), SslIdentityToken.Id)
+        .Set(TEXT("ssl_exists"), Ssl != nullptr).Set(TEXT("wsi_user"), lws_wsi_user(Connection.Wsi) == &Connection)
+        .Set(TEXT("ctx_exists"), Origin != nullptr).Set(TEXT("ctx_supplied"), bSupplied)
+        .Set(TEXT("ctx_origin"), !Origin ? TEXT("none") : bSupplied ? TEXT("supplied") : TEXT("other"))
+        .Set(TEXT("index_known"), bIndexKnown).Set(TEXT("index_matches_wsi"), bIndexMatches)
+        .Set(TEXT("index"), VaRestLwsProbePrivate::IndexObservation());
+}
+void VaRest::LwsProbe::FRig::RecordSslIdentity(int32 ConnId, const TCHAR* Label)
+{
+    const FString SavedLabel(Label);
+    ExecOn(ConnId, Label, [SavedLabel](FConn& Connection)
+    {
+        const FString Encoded = Connection.Rig->SslIdentity(Connection).Set(TEXT("phase"), SavedLabel).ToString();
+        Connection.Rig->Record(Connection.Id, Marker, 0, Encoded);
+        UE_LOG(LogVaRestLwsProbe, Display, TEXT("ROUTE-IDENTITY %s"), *Encoded);
+        GLog->Flush();
+    });
+}
+
+void VaRest::LwsProbe::FRig::WatchConnection(int32 ConnId)
+{
+    Enqueue([this, ConnId] { WatchedConnectionId = ConnId; });
+}
+FVaRestJson VaRest::LwsProbe::FRig::WatchedSslIdentity()
+{
+    FConn* Found = nullptr;
+    {
+        FScopeLock Guard(&ConnsLock);
+        for (const auto& Item : Conns)
+        {
+            if (Item->Id == WatchedConnectionId && !Item->bDestroyed && Item->Wsi) { Found = Item.Get(); break; }
+        }
+    }
+    return Found ? SslIdentity(*Found) : FVaRestJson::Object().Set(TEXT("conn"), 0)
+        .Set(TEXT("wsi_token"), 0).Set(TEXT("ssl_token"), 0).Set(TEXT("ssl_exists"), false);
+}
+
+int32 VaRest::LwsProbe::FRig::HandleRoute(lws* InWsi, int32 Reason, void* User, void* In, size_t Len)
+{
+    // Context/vhost management callbacks carry non-client WSI values; they need no WSI accessor.
+    switch (Reason)
+    {
+    case LWS_CALLBACK_GET_THREAD_ID:
+    case LWS_CALLBACK_ADD_POLL_FD:
+    case LWS_CALLBACK_DEL_POLL_FD:
+    case LWS_CALLBACK_CHANGE_MODE_POLL_FD:
+    case LWS_CALLBACK_LOCK_POLL:
+    case LWS_CALLBACK_UNLOCK_POLL:
+    case LWS_CALLBACK_EVENT_WAIT_CANCELLED:
+    case LWS_CALLBACK_PROTOCOL_INIT:
+    case LWS_CALLBACK_PROTOCOL_DESTROY:
+        return 0;
+    case LWS_CALLBACK_OPENSSL_LOAD_EXTRA_CLIENT_VERIFY_CERTS:
+        // Documented context-construction argument, not an accessor through an unknown WSI.
+        if (Options.OnLoadExtraClientVerifyCerts && User)
+        { Options.OnLoadExtraClientVerifyCerts(static_cast<SSL_CTX*>(User)); }
+        return 0;
+    default: break;
+    }
+    FConn* Known = FindConn(InWsi, nullptr); // raw branch compares retained pointers only
+    const void* Owned[] = {Known ? Known->Wsi : nullptr};
+    int32 Answer = Reason == LWS_CALLBACK_OPENSSL_PERFORM_SERVER_CERT_VERIFICATION ? 1 : 0;
+    const bool bInspected = WithOwnedToken(InWsi, MakeArrayView(Owned), [&]
+    {
+        if (Reason == LWS_CALLBACK_OPENSSL_PERFORM_SERVER_CERT_VERIFICATION)
+        {
+            SSL* KnownSsl = lws_get_ssl(Known->Wsi);
+            if (!KnownSsl || In != KnownSsl || !User)
+            {
+                const FString Text = FVaRestJson::Object().Set(TEXT("phase"), TEXT("callback-input-mismatch"))
+                    .Set(TEXT("conn"), Known->Id).ToString();
+                Record(Known->Id, Marker, Reason, Text);
+                UE_LOG(LogVaRestLwsProbe, Display, TEXT("ROUTE-IDENTITY %s"), *Text);
+                GLog->Flush();
+                return;
+            }
+        }
+        if (Reason == LWS_CALLBACK_WSI_DESTROY && Known->ObservedSsl)
+        {
+            SslTokens.Observe(Known->ObservedSsl, Known->Id, true);
+            Known->ObservedSsl = nullptr;
+        }
+        Answer = Handle(InWsi, Reason, User, In, Len);
+    });
+    if (!bInspected)
+    {
+        // CREATE may precede pwsi publication. Record its opaque token without treating it as a dereferenceable WSI.
+        if (Reason == LWS_CALLBACK_WSI_CREATE || Reason == LWS_CALLBACK_WSI_DESTROY)
+        {
+            const auto Token = TraceIdentity.Observe(InWsi, ConnectingId, Reason == LWS_CALLBACK_WSI_DESTROY);
+            FEvent Event;
+            Event.Conn = Token.Conn; Event.WsiToken = Token.Id; Event.Reason = Reason;
+            Event.Time = FPlatformTime::Seconds(); Event.Len = static_cast<int64>(Len);
+            Append(MoveTemp(Event));
+        }
+        else
+        {
+            const FString Text = FVaRestJson::Object().Set(TEXT("phase"), TEXT("callback-unowned"))
+                .Set(TEXT("reason"), Reason).Set(TEXT("connecting"), ConnectingId).ToString();
+            Record(0, Marker, Reason, Text);
+            UE_LOG(LogVaRestLwsProbe, Display, TEXT("ROUTE-IDENTITY %s"), *Text);
+            GLog->Flush();
+        }
+    }
+    return Answer;
 }
 
 #endif // WITH_DEV_AUTOMATION_TESTS

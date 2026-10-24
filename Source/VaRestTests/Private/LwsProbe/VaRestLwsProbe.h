@@ -153,6 +153,7 @@ namespace VaRest::LwsProbe
 	/** What one connection does; set on the game thread before Connect, read on the service thread */
 	struct FConnectSpec
 	{
+		int32 RouteId = 0;
 		FString Path = TEXT("/ws/echo");   // request target, query included
 		bool bTls = false;                  // LCCSCF_USE_SSL, to the server's TLS port unless Port says otherwise
 		FString Address;                    // where TCP goes; empty: the server's host
@@ -179,6 +180,7 @@ namespace VaRest::LwsProbe
 	{
 		FRig* Rig = nullptr;
 		int32 Id = 0;
+		SSL* ObservedSsl = nullptr; // Opaque identity only; never dereferenced after retirement.
 		lws* Wsi = nullptr;   // from connect_info.pwsi, cleared at WSI_DESTROY
 		bool bDestroyed = false;
 		FConnectSpec Spec;
@@ -199,8 +201,36 @@ namespace VaRest::LwsProbe
 		ProvidedContext, // FRigOptions::ProvidedSslContext as provided_client_ssl_ctx; the caller frees it after the rig
 	};
 
+struct FRouteSpec
+{
+    FString Name;
+    FString ProxyAddress;
+    uint32 ProxyPort = 0;
+    bool bClientTls = true;
+};
+struct FRoute
+{
+    int32 Id = 0;
+    FRouteSpec Spec;
+    TArray<ANSICHAR> NameUtf8;
+    TArray<ANSICHAR> ProxyUtf8;
+    lws_vhost* Vhost = nullptr;
+};
+/** Any thread, pure: the fixed raw-rig allocation budget. */
+inline bool CanAddRoute(int32 Existing) { return Existing >= 0 && Existing < 8; }
+
+inline bool WithOwnedToken(const void* Candidate, TConstArrayView<const void*> Known, TFunctionRef<void()> Inspect)
+{
+    if (!Candidate || !Known.Contains(Candidate)) { return false; }
+    Inspect();
+    return true;
+}
+
 	struct FRigOptions
 	{
+		bool bExplicitRoutes = false;
+		/** Service thread, synchronous before/after public route destruction; shared captures only. */
+		TFunction<void(FRig&, bool)> OnRouteDestroyStage;
 		/** Unset: null proxy address (LWS may use the environment); set: nonempty host:port. */
 		TOptional<FString> ProxyAddress;
 		/** Explicit event cap; every omitted event increments DroppedEventCount(). */
@@ -238,6 +268,20 @@ namespace VaRest::LwsProbe
 
 		/** Game thread: stops the service thread, then destroys the context (open connections end inside); the events stay readable */
 		void Shutdown();
+/** Game thread: allocate a monotone id and enqueue creation; 0 refuses the eight-route cap. */
+int32 AddRoute(FRouteSpec InSpec);
+/** Game thread: enqueue public vhost destruction; retained route strings survive context destruction. */
+void DestroyRoute(int32 InRouteId);
+/** Game thread: queue a service-thread SSL/WSI identity witness, never exposes addresses. */
+void RecordSslIdentity(int32 ConnId, const TCHAR* Label);
+
+        /** Game thread: queue the connection whose live identity brackets route operations. */
+        void WatchConnection(int32 ConnId);
+        /** Service thread synchronously, or stopped-context destruction: observed live watched identity. */
+        FVaRestJson WatchedSslIdentity();
+        /** Service thread synchronously, only after matching the live owned WSI. */
+        FVaRestJson SslIdentity(FConn& Connection);
+
 
 		/** Game thread: a new connection, connected on the service thread; returns its id (> 0) */
 		int32 Connect(FConnectSpec InSpec);
@@ -278,6 +322,14 @@ namespace VaRest::LwsProbe
 		static int Callback(lws* Wsi, lws_callback_reasons Reason, void* User, void* In, size_t Len);
 
 	private:
+        TArray<TUniquePtr<FRoute>> Routes;
+        int32 NextRouteId = 1;
+        int32 RequestedRoutes = 0; // Game-thread admission, independent of service-thread storage.
+        int32 WatchedConnectionId = 0;
+        FTraceIdentity SslTokens;
+        void AddRouteNow(int32 InRouteId, FRouteSpec InSpec);
+        FRoute* FindRoute(int32 InRouteId);
+        int32 HandleRoute(lws* InWsi, int32 Reason, void* User, void* In, size_t Len);
 		virtual uint32 Run() override;
 		virtual void Stop() override;
 		void Enqueue(TFunction<void()> Command);
