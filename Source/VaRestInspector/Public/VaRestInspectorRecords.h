@@ -94,6 +94,26 @@ struct FVaRestInspectorPacketView
 		return {reinterpret_cast<const FPair*>(Backing.GetData() + S.Offset), int32(S.Count)};
 	}
 };
+// The codec cannot distinguish captured-empty from capture-disabled headers.
+// Neither is evidence that an earlier dispatch's headers remain current.
+enum class EVaRestInspectorHeadersState : uint8
+{
+	Unknown,
+	Captured,
+	MetadataOmitted
+};
+struct FVaRestInspectorDispatchView
+{
+	uint64 DispatchId = 0;
+	int32 Attempt = 0;
+	bool bHasDispatched = false, bHasEnded = false, bCombinedSendWait = false;
+	double AttemptStart = -1, DispatchAt = -1, UploadDoneAt = -1, StatusAt = -1, TransportDoneAt = -1;
+	EVaRestTraceGap GapKind = EVaRestTraceGap::None;
+	double GapSeconds = 0;
+	EVaRestInspectorHeadersState HeadersState = EVaRestInspectorHeadersState::Unknown;
+	FVaRestInspectorPacketView Dispatched, Ended, ResponseExcerpt;
+	FVaRestInspectorPhase Auth, Queued, Prepare, Send, Wait, Receive, Wall, Gap;
+};
 // Byte counters report admitted payload/retained-owner charges, not RSS or
 // hidden post-destruction controller free tails; see decision8.
 struct FVaRestInspectorDiagnostics
@@ -118,7 +138,19 @@ struct FVaRestInspectorRecordView
 	FStringView ScopeLabel, ClientLabel;
 	EVaRestInspectorEndState EndState = EVaRestInspectorEndState::CaptureInterrupted;
 	bool bPartial = false, bPinned = false, bSealed = false, bTerminalKnown = false;
+	// Observations survive optional detail refusal. Identities not retained in
+	// the bounded slots have no perfect duplicate-suppression guarantee.
+	uint64 ObservedDispatches = 0, ObservedEnds = 0;
+	uint64 OmittedDispatches = 0, OmittedEnds = 0, OmittedExcerpts = 0;
+	uint64 WireBytesUp = 0, WireBytesDown = 0;
+	bool bWireBytesUnknown = false, bCountersSaturated = false;
+	int32 FinalStatus = 0;
+	int64 FinalBodyBytes = -1;
+	EVaRestTraceResponseStorage FinalStorage = EVaRestTraceResponseStorage::Unknown;
+	double CompletedAt = -1, DecodeStartAt = -1, DecodeEndAt = -1;
+	FVaRestInspectorPhase Total, Decode, Deliver;
 	FVaRestInspectorPacketView Started, Completed, Marker;
+	TConstArrayView<FVaRestInspectorDispatchView> Dispatches;
 	TConstArrayView<FVaRestInspectorPacketView> DispatchEvents, Notes, Excerpts;
 	TConstArrayView<FVaRestInspectorTimelineEntry> Timeline;
 };

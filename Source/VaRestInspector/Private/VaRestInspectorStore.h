@@ -22,6 +22,7 @@ class FStorePacketOwner
 {
 public:
 	static TOptional<int64> Charge(const FPacket& Packet, const FAllocationAdapter& Allocator);
+	static bool CanTake(const FPacket& Packet, const FBudgetAccount* Budget, const FAllocationAdapter& Allocator);
 	static bool TryTake(FPacket& InOut, TRefCountPtr<FBudgetAccount> Budget, FAllocationAdapter& Allocator, FStorePacketPtr& Out);
 	const FPacket& Get() const { return Data; }
 	FVaRestInspectorPacketView View() const;
@@ -32,6 +33,41 @@ private:
 	FStoreCredit Credit;
 	FPacket Data;
 	FAllocationAdapter* Allocator;
+};
+
+// Published only as const after the existing independently charged packet
+// transfer succeeds. Equal headers share this one real packet/backing owner.
+class FDispatchHeaderOwner
+{
+public:
+	FDispatchHeaderOwner() = default;
+	static bool TryTake(FPacket& InOut, TRefCountPtr<FBudgetAccount> Budget, FAllocationAdapter& Allocator,
+		TSharedPtr<const FDispatchHeaderOwner, ESPMode::ThreadSafe>& Out);
+	FVaRestInspectorPacketView View() const;
+	bool Matches(const FPacket& Other) const;
+
+private:
+	FStorePacketPtr Packet;
+};
+
+struct FDispatchSlot;
+struct FDispatchSlotDeleter
+{
+	void operator()(FDispatchSlot* Slot) const;
+};
+using FDispatchSlotPtr = TUniquePtr<FDispatchSlot, FDispatchSlotDeleter>;
+// One allocation per admitted slot; the row contains only sixteen pointers.
+struct FDispatchSlot
+{
+	explicit FDispatchSlot(FStoreCredit&& InCredit) : Credit(MoveTemp(InCredit)) {}
+	FStoreCredit Credit;
+	uint64 DispatchId = 0;
+	int32 Attempt = 0;
+	bool bHasDispatched = false, bHasEnded = false;
+	FPacketFixed DispatchedFixed, EndedFixed;
+	EVaRestInspectorHeadersState HeadersState = EVaRestInspectorHeadersState::Unknown;
+	TSharedPtr<const FDispatchHeaderOwner, ESPMode::ThreadSafe> Headers;
+	FStorePacketPtr Ended, ResponseExcerpt;
 };
 
 class FStore
@@ -75,6 +111,10 @@ private:
 	};
 	FRow* Find(uint64 RequestId) const;
 	FRow* AdmitRow(uint64 RequestId, bool bPartial);
+	FDispatchSlot* FindDispatch(FRow& Row, const FPacketScalars& Scalars) const;
+	FDispatchSlot* AdmitDispatch(FRow& Row, const FPacketScalars& Scalars);
+	void ApplyPhysical(FRow& Row, FPacket& Packet);
+	void ApplyExcerpt(FRow& Row, FPacket& Packet);
 	EAttachedBase PrepareAttachedBase(uint64 RequestId, bool& bNeedsStarted);
 	void AdoptAttachedPacket(uint64 RequestId, FStorePacketPtr&& Packet);
 	void NoteAttachLoss(uint64 RequestId);

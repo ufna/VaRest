@@ -1,6 +1,7 @@
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 
 #include "VaRestInspectorStore.h"
+#include "VaRestInspectorPhases.h"
 
 #include "CoreGlobals.h"
 #include "HAL/UnrealMemory.h"
@@ -17,6 +18,30 @@ void Increment(uint64& Value)
 {
 	if (Value != MAX_uint64)
 		++Value;
+}
+FPacketFixed ScalarCopy(const FPacketFixed& Input)
+{
+	FPacketFixed Result;
+	Result.Header = Input.Header;
+	Result.Scalars = Input.Scalars;
+	return Result;
+}
+void AddObservation(uint64& Value, uint64 Amount, bool& bSaturated)
+{
+	if (Amount > MAX_uint64 - Value)
+	{
+		Value = MAX_uint64;
+		bSaturated = true;
+	}
+	else
+		Value += Amount;
+}
+void AddWire(uint64& Value, int64 Amount, FVaRestInspectorRecordView& Row)
+{
+	if (Amount < 0)
+		Row.bWireBytesUnknown = true;
+	else
+		AddObservation(Value, uint64(Amount), Row.bCountersSaturated);
 }
 // Fixed storage is acquired transactionally. No container can grow outside its
 // credit, and every element/backing is destroyed before that credit releases.
@@ -117,10 +142,14 @@ TOptional<int64> FStorePacketOwner::Charge(const FPacket& Packet, const FAllocat
 		return {};
 	return Total;
 }
+bool FStorePacketOwner::CanTake(const FPacket& Packet, const FBudgetAccount* Budget, const FAllocationAdapter& Allocator)
+{
+	return Packet.IsValid() && Packet.Pending.IsValid() && Budget && Budget->Lifetime &&
+		&Budget->Lifetime->Allocator == &Allocator && Packet.Allocator == &Allocator;
+}
 bool FStorePacketOwner::TryTake(FPacket& InOut, TRefCountPtr<FBudgetAccount> Budget, FAllocationAdapter& Allocator, FStorePacketPtr& Out)
 {
-	if (!InOut.IsValid() || !InOut.Pending.IsValid() || Out.IsValid() || !Budget || !Budget->Lifetime ||
-		&Budget->Lifetime->Allocator != &Allocator || InOut.Allocator != &Allocator)
+	if (Out.IsValid() || !CanTake(InOut, Budget.GetReference(), Allocator))
 		return false;
 	const auto Needed = Charge(InOut, Allocator);
 	if (!Needed.IsSet())
@@ -164,12 +193,59 @@ FVaRestInspectorPacketView FStorePacketOwner::View() const
 	return Result;
 }
 
+bool FDispatchHeaderOwner::TryTake(FPacket& InOut, TRefCountPtr<FBudgetAccount> Budget, FAllocationAdapter& Allocator,
+	TSharedPtr<const FDispatchHeaderOwner, ESPMode::ThreadSafe>& Out)
+{
+	if (Out || !FStorePacketOwner::CanTake(InOut, Budget.GetReference(), Allocator) ||
+		InOut.Fixed().Header.Kind != EVaRestTraceKind::AttemptDispatched || InOut.Fixed().Header.bMetadataOmitted || InOut.Headers().IsEmpty())
+		return false;
+	const auto Bound = Allocator.Bound(sizeof(FDispatchHeaderOwner), alignof(FDispatchHeaderOwner));
+	if (!Bound.IsSet())
+		return false;
+	auto Candidate = MakeInspectorOwner<FDispatchHeaderOwner>(Budget, Allocator.GetSupport(), Bound.GetValue(), false);
+	if (!Candidate || !FStorePacketOwner::TryTake(InOut, Budget, Allocator, Candidate->Packet))
+		return false;
+	Out = MoveTemp(Candidate);
+	return true;
+}
+FVaRestInspectorPacketView FDispatchHeaderOwner::View() const
+{
+	return Packet ? Packet->View() : FVaRestInspectorPacketView();
+}
+bool FDispatchHeaderOwner::Matches(const FPacket& Other) const
+{
+	if (!Packet || !Other.IsValid() || Other.Fixed().Header.bMetadataOmitted)
+		return false;
+	const auto Existing = View();
+	const auto Left = Existing.Pairs(Existing.Fixed->Headers);
+	const auto Right = Other.Headers();
+	if (Left.IsEmpty() || Left.Num() != Right.Num())
+		return false;
+	for (int32 Index = 0; Index < Left.Num(); ++Index)
+		if (Existing.Read(Left[Index].First) != Other.Read(Right[Index].First) ||
+			Existing.Read(Left[Index].Second) != Other.Read(Right[Index].Second))
+			return false;
+	return true;
+}
+void FDispatchSlotDeleter::operator()(FDispatchSlot* Slot) const
+{
+	if (!Slot)
+		return;
+	FStoreCredit Credit = MoveTemp(Slot->Credit);
+	FAllocationAdapter& Allocator = Credit.GetAccount()->Lifetime->Allocator;
+	Slot->~FDispatchSlot();
+	Allocator.Free(Slot);
+	Credit.Reset();
+}
+
 struct FStore::FRow
 {
 	FVaRestInspectorRecordView Value;
 	ELivenessEvidence Evidence = ELivenessEvidence::None;
 	uint64 PresenceStamp = 0;
-	FStorePacketPtr Started, Completed;
+	FStorePacketPtr Started, Completed, RequestExcerpt;
+	FDispatchSlotPtr Dispatches[16];
+	int32 NumDispatches = 0, PreviousDispatchSlot = INDEX_NONE;
 };
 struct FStore::FStorage
 {
@@ -219,7 +295,15 @@ bool FStore::CalibrateRows(FAllocationLifetime& Lifetime, std::atomic<int64>& St
 	check(IsInGameThread());
 	using D = TInspectorDeleter<FRow>;
 	using C = SharedPointerInternals::TReferenceControllerWithDeleter<FRow, D, ESPMode::ThreadSafe>;
-	return Lifetime.Allocator.Calibrate(StartupUsed, StartupLimit, sizeof(C), alignof(C)) && HasInspectorControllerCalibration<FRow>(Lifetime);
+	using HeaderD = TInspectorDeleter<FDispatchHeaderOwner>;
+	using HeaderC = SharedPointerInternals::TReferenceControllerWithDeleter<FDispatchHeaderOwner, HeaderD, ESPMode::ThreadSafe>;
+	constexpr uint32 RowNewAlignment = sizeof(C) <= 8 ? 8 : __STDCPP_DEFAULT_NEW_ALIGNMENT__;
+	constexpr uint32 HeaderNewAlignment = sizeof(HeaderC) <= 8 ? 8 : __STDCPP_DEFAULT_NEW_ALIGNMENT__;
+	static_assert(sizeof(C) == sizeof(HeaderC) && sizeof(C) > 0 && sizeof(C) <= 1024, "Shared retained calibration requires equal concrete controller requests");
+	static_assert(alignof(C) > 0 && alignof(C) <= 16 && alignof(HeaderC) > 0 && alignof(HeaderC) <= 16 &&
+		RowNewAlignment == HeaderNewAlignment, "Both concrete controllers must use the calibrated ordinary new alignment");
+	return Lifetime.Allocator.Calibrate(StartupUsed, StartupLimit, sizeof(C), alignof(C)) &&
+		HasInspectorControllerCalibration<FRow>(Lifetime) && HasInspectorControllerCalibration<FDispatchHeaderOwner>(Lifetime);
 }
 bool FStore::Initialize(TRefCountPtr<FBudgetAccount> InAccount)
 {
@@ -229,7 +313,8 @@ bool FStore::Initialize(TRefCountPtr<FBudgetAccount> InAccount)
 	if (!InAccount || !InAccount->Lifetime || InAccount->Limit != Limits.StoreBytes ||
 		InAccount->BootstrapBytes < 4096 || InAccount->BootstrapBytes > InAccount->Limit ||
 		Limits.MaxRecords < 1 || Limits.MaxRecords > 65536 || Limits.StoreBytes <= 0 ||
-		!HasInspectorControllerCalibration<FRow>(*InAccount->Lifetime))
+		!HasInspectorControllerCalibration<FRow>(*InAccount->Lifetime) ||
+		!HasInspectorControllerCalibration<FDispatchHeaderOwner>(*InAccount->Lifetime))
 	{
 		Increment(State.UnsupportedAllocator);
 		return false;
@@ -368,6 +453,7 @@ FStore::FRow* FStore::AdmitRow(uint64 RequestId, bool bPartial)
 }
 void FStore::Touch(FRow& Row)
 {
+	DeriveCompletionPhases(Row.Value);
 	Increment(RevisionValue);
 	Row.Value.Revision = RevisionValue;
 }
@@ -375,11 +461,18 @@ void FStore::SetStartedScalars(FRow& Row, const FPacketScalars& Scalars)
 {
 	Row.Value.ScopeId = Scalars.ScopeId;
 	Row.Value.ClientId = Scalars.ClientId;
-	Row.Value.CurrentAttempt = Scalars.CurrentAttempt;
-	Row.Value.StartedAt = Scalars.StartedAt;
-	Row.Value.StartUtc = Scalars.StartUtc;
-	Row.Value.bStartedAtKnown = FMath::IsFinite(Scalars.StartedAt) && Scalars.StartedAt >= 0;
-	Row.Value.bStartUtcKnown = Scalars.StartUtc.GetTicks() != 0;
+	if (!Row.Started && Row.Value.ObservedDispatches == 0 && Row.Evidence != ELivenessEvidence::Snapshot)
+		Row.Value.CurrentAttempt = FMath::Max(Row.Value.CurrentAttempt, Scalars.CurrentAttempt);
+	if (!Row.Value.bStartedAtKnown && FMath::IsFinite(Scalars.StartedAt) && Scalars.StartedAt >= 0)
+	{
+		Row.Value.StartedAt = Scalars.StartedAt;
+		Row.Value.bStartedAtKnown = true;
+	}
+	if (!Row.Value.bStartUtcKnown && Scalars.StartUtc.GetTicks() != 0)
+	{
+		Row.Value.StartUtc = Scalars.StartUtc;
+		Row.Value.bStartUtcKnown = true;
+	}
 	Row.Value.bPartial |= EnumHasAnyFlags(Scalars.Flags, EVaRestTraceRequestFlags::Partial);
 }
 FStore::EAttachedBase FStore::PrepareAttachedBase(uint64 RequestId, bool& bNeedsStarted)
@@ -434,7 +527,7 @@ bool FStore::ApplyAttachedStarted(const FVaRestTraceStarted& Borrowed, const FCa
 	const EAttachedBase Base = PrepareAttachedBase(Borrowed.RequestId, bNeedsStarted);
 	if (Base == EAttachedBase::Refused)
 		return false;
-	if (Base == EAttachedBase::Terminal || !bNeedsStarted)
+	if (Base == EAttachedBase::Terminal)
 		return true;
 	// Retain independently available scalar history even if optional text fails.
 	FRow* Row = Find(Borrowed.RequestId);
@@ -442,10 +535,19 @@ bool FStore::ApplyAttachedStarted(const FVaRestTraceStarted& Borrowed, const FCa
 	Row->Value.ScopeId = Borrowed.ScopeId;
 	Row->Value.ClientId = Borrowed.ClientId;
 	Row->Value.CurrentAttempt = Borrowed.CurrentAttempt;
-	Row->Value.StartedAt = Borrowed.StartedAt;
-	Row->Value.StartUtc = Borrowed.StartUtc;
-	Row->Value.bStartedAtKnown = FMath::IsFinite(Borrowed.StartedAt) && Borrowed.StartedAt >= 0;
-	Row->Value.bStartUtcKnown = Borrowed.StartUtc.GetTicks() != 0;
+	if (!Row->Value.bStartedAtKnown && FMath::IsFinite(Borrowed.StartedAt) && Borrowed.StartedAt >= 0)
+	{
+		Row->Value.StartedAt = Borrowed.StartedAt;
+		Row->Value.bStartedAtKnown = true;
+	}
+	if (!Row->Value.bStartUtcKnown && Borrowed.StartUtc.GetTicks() != 0)
+	{
+		Row->Value.StartUtc = Borrowed.StartUtc;
+		Row->Value.bStartUtcKnown = true;
+	}
+	Touch(*Row);
+	if (!bNeedsStarted)
+		return true;
 	FPacketHeader Header;
 	Header.bSnapshot = true;
 	Header.Generation = Generation;
@@ -579,6 +681,135 @@ void FStore::ApplyAttached(const FVaRestTraceSnapshot& Snapshot, const FCaptureP
 		Touch(Row);
 	}
 }
+FDispatchSlot* FStore::FindDispatch(FRow& Row, const FPacketScalars& Scalars) const
+{
+	// Attempt is a retry label; multiple physical dispatches can share it.
+	for (int32 Index = 0; Index < Row.NumDispatches; ++Index)
+		if (Row.Dispatches[Index]->DispatchId == Scalars.DispatchId)
+			return Row.Dispatches[Index].Get();
+	return nullptr;
+}
+FDispatchSlot* FStore::AdmitDispatch(FRow& Row, const FPacketScalars& Scalars)
+{
+	if (Row.NumDispatches == UE_ARRAY_COUNT(Row.Dispatches))
+		return nullptr;
+	FAllocationAdapter& Allocator = Budget->Lifetime->Allocator;
+	const auto Bound = Allocator.Bound(sizeof(FDispatchSlot), alignof(FDispatchSlot));
+	if (!Bound.IsSet() || Bound.GetValue() > SIZE_T(MAX_int64))
+		return nullptr;
+	auto Credit = FStoreCredit::Acquire(Budget, int64(Bound.GetValue()));
+	if (!Credit.IsSet())
+		return nullptr;
+	void* Memory = Allocator.AllocateReserved(sizeof(FDispatchSlot), alignof(FDispatchSlot), Bound.GetValue());
+	if (!Memory)
+		return nullptr;
+	auto* Slot = new (Memory) FDispatchSlot(MoveTemp(Credit.GetValue()));
+	Slot->DispatchId = Scalars.DispatchId;
+	Slot->Attempt = Scalars.Attempt;
+	Row.Dispatches[Row.NumDispatches++].Reset(Slot);
+	return Slot;
+}
+void FStore::ApplyPhysical(FRow& Row, FPacket& Packet)
+{
+	const FPacketFixed& Fixed = Packet.Fixed();
+	const bool bDispatched = Fixed.Header.Kind == EVaRestTraceKind::AttemptDispatched;
+	FDispatchSlot* Slot = FindDispatch(Row, Fixed.Scalars);
+	if (Slot && (bDispatched ? Slot->bHasDispatched : Slot->bHasEnded))
+		return;
+	if (bDispatched)
+	{
+		AddObservation(Row.Value.ObservedDispatches, 1, Row.Value.bCountersSaturated);
+		Row.Value.CurrentAttempt = FMath::Max(Row.Value.CurrentAttempt, Fixed.Scalars.Attempt);
+	}
+	else
+	{
+		AddObservation(Row.Value.ObservedEnds, 1, Row.Value.bCountersSaturated);
+		AddWire(Row.Value.WireBytesUp, Fixed.Scalars.BytesUp, Row.Value);
+		AddWire(Row.Value.WireBytesDown, Fixed.Scalars.BytesDown, Row.Value);
+	}
+	if (!Slot)
+		Slot = AdmitDispatch(Row, Fixed.Scalars);
+	if (!Slot)
+	{
+		AddObservation(bDispatched ? Row.Value.OmittedDispatches : Row.Value.OmittedEnds, 1, Row.Value.bCountersSaturated);
+		Row.Value.bMetadataOmitted = true;
+		Increment(State.MetadataOmitted);
+		if (bDispatched)
+			Row.PreviousDispatchSlot = INDEX_NONE;
+		return;
+	}
+	if (bDispatched)
+	{
+		// Copy current identity and raw scalars before either sharing an old
+		// header backing or moving this packet into a new immutable owner.
+		Slot->DispatchedFixed = ScalarCopy(Fixed);
+		Slot->bHasDispatched = true;
+		Slot->Attempt = Fixed.Scalars.Attempt;
+		if (Fixed.Header.bMetadataOmitted)
+			Slot->HeadersState = EVaRestInspectorHeadersState::MetadataOmitted;
+		else if (!Packet.Headers().IsEmpty())
+		{
+			const FDispatchSlot* Previous = Row.PreviousDispatchSlot != INDEX_NONE ? Row.Dispatches[Row.PreviousDispatchSlot].Get() : nullptr;
+			if (Previous && Previous->HeadersState == EVaRestInspectorHeadersState::Captured && Previous->Headers && Previous->Headers->Matches(Packet))
+				Slot->Headers = Previous->Headers;
+			else if (!FDispatchHeaderOwner::TryTake(Packet, Budget, Budget->Lifetime->Allocator, Slot->Headers))
+			{
+				Slot->HeadersState = EVaRestInspectorHeadersState::MetadataOmitted;
+				Slot->DispatchedFixed.Header.bMetadataOmitted = true;
+				Row.Value.bMetadataOmitted = true;
+				Increment(State.MetadataOmitted);
+			}
+			if (Slot->Headers)
+				Slot->HeadersState = EVaRestInspectorHeadersState::Captured;
+		}
+		// Unknown/omitted observations are barriers, never evidence that a
+		// previously captured set remains current.
+		Row.PreviousDispatchSlot = INDEX_NONE;
+		if (Slot->HeadersState == EVaRestInspectorHeadersState::Captured)
+			for (int32 Index = 0; Index < Row.NumDispatches; ++Index)
+				if (Row.Dispatches[Index].Get() == Slot)
+					Row.PreviousDispatchSlot = Index;
+	}
+	else
+	{
+		Slot->EndedFixed = ScalarCopy(Fixed);
+		Slot->bHasEnded = true;
+		if (!Slot->bHasDispatched)
+			Slot->Attempt = Fixed.Scalars.Attempt;
+		if (!FStorePacketOwner::TryTake(Packet, Budget, Budget->Lifetime->Allocator, Slot->Ended))
+		{
+			Slot->EndedFixed.Header.bMetadataOmitted = true;
+			Row.Value.bMetadataOmitted = true;
+			Increment(State.MetadataOmitted);
+		}
+	}
+}
+void FStore::ApplyExcerpt(FRow& Row, FPacket& Packet)
+{
+	FStorePacketPtr* Destination = &Row.RequestExcerpt;
+	if (Packet.Fixed().Scalars.Owner == EVaRestTraceExcerptOwner::Response)
+	{
+		FDispatchSlot* Slot = FindDispatch(Row, Packet.Fixed().Scalars);
+		if (!Slot)
+			Slot = AdmitDispatch(Row, Packet.Fixed().Scalars);
+		if (!Slot)
+		{
+			AddObservation(Row.Value.OmittedExcerpts, 1, Row.Value.bCountersSaturated);
+			Row.Value.bMetadataOmitted = true;
+			Increment(State.MetadataOmitted);
+			return;
+		}
+		Destination = &Slot->ResponseExcerpt;
+	}
+	if (*Destination)
+		return;
+	if (!FStorePacketOwner::TryTake(Packet, Budget, Budget->Lifetime->Allocator, *Destination))
+	{
+		AddObservation(Row.Value.OmittedExcerpts, 1, Row.Value.bCountersSaturated);
+		Row.Value.bMetadataOmitted = true;
+		Increment(State.MetadataOmitted);
+	}
+}
 bool FStore::Apply(FPacket&& Incoming)
 {
 	check(IsInGameThread());
@@ -606,6 +837,15 @@ bool FStore::Apply(FPacket&& Incoming)
 							 Fixed.Header.Kind == EVaRestTraceKind::Note || Fixed.Header.Kind == EVaRestTraceKind::Excerpt;
 	if ((!bStarted && !bCompleted && !bOrphanKind) || Fixed.Scalars.RequestId == 0)
 		return false;
+	if (((Fixed.Header.Kind == EVaRestTraceKind::AttemptDispatched || Fixed.Header.Kind == EVaRestTraceKind::AttemptEnded) && Fixed.Scalars.DispatchId == 0) ||
+		(Fixed.Header.Kind == EVaRestTraceKind::Excerpt &&
+			((Fixed.Scalars.Owner == EVaRestTraceExcerptOwner::Response && Fixed.Scalars.DispatchId == 0) ||
+			 (Fixed.Scalars.Owner == EVaRestTraceExcerptOwner::Request && Fixed.Scalars.DispatchId != 0) ||
+			 (Fixed.Scalars.Owner != EVaRestTraceExcerptOwner::Request && Fixed.Scalars.Owner != EVaRestTraceExcerptOwner::Response))))
+	{
+		Increment(State.ContractViolations);
+		return false;
+	}
 	FRow* Row = Find(Fixed.Scalars.RequestId);
 	if (Row && (Row->Value.bTerminalKnown || Row->Value.bSealed))
 	{
@@ -617,6 +857,9 @@ bool FStore::Apply(FPacket&& Incoming)
 		Row = AdmitRow(Fixed.Scalars.RequestId, !bStarted || Fixed.Header.bSnapshot);
 	if (!Row)
 		return false;
+	// Queue-origin omission is already counted upstream. Preserve its row
+	// truth without adding a second Store omission diagnostic.
+	Row->Value.bMetadataOmitted |= Fixed.Header.bMetadataOmitted;
 	if (bStarted)
 	{
 		SetStartedScalars(*Row, Fixed.Scalars);
@@ -639,6 +882,12 @@ bool FStore::Apply(FPacket&& Incoming)
 	{
 		Row->Value.bTerminalKnown = true;
 		Row->Value.bPinned = false;
+		Row->Value.FinalStatus = Fixed.Scalars.Status;
+		Row->Value.FinalBodyBytes = Fixed.Scalars.DeliveredBodyBytes;
+		Row->Value.FinalStorage = Fixed.Scalars.Storage;
+		Row->Value.CompletedAt = Fixed.Header.Time;
+		Row->Value.DecodeStartAt = Fixed.Scalars.DecodeStartAt;
+		Row->Value.DecodeEndAt = Fixed.Scalars.DecodeEndAt;
 		switch (Fixed.Scalars.Outcome)
 		{
 		case EVaRestTraceOutcome::Success: Row->Value.EndState = EVaRestInspectorEndState::Success; break;
@@ -658,7 +907,13 @@ bool FStore::Apply(FPacket&& Incoming)
 		Row->Value.EndState = EVaRestInspectorEndState::CaptureInterrupted;
 		Increment(OrphanEpoch);
 	}
-	// Tasks5–7 add bounded dispatch/note/excerpt detail to these admitted bases.
+	if (!bStarted && !bCompleted)
+	{
+		if (Fixed.Header.Kind == EVaRestTraceKind::AttemptDispatched || Fixed.Header.Kind == EVaRestTraceKind::AttemptEnded)
+			ApplyPhysical(*Row, Packet);
+		else if (Fixed.Header.Kind == EVaRestTraceKind::Excerpt)
+			ApplyExcerpt(*Row, Packet);
+	}
 	Touch(*Row);
 	return true;
 }
@@ -740,6 +995,61 @@ bool FStore::ForEachRecord(TFunctionRef<void(const FVaRestInspectorRecordView&)>
 			View.Started = Row.Started->View();
 		if (Row.Completed)
 			View.Completed = Row.Completed->View();
+		// All composition is visitor-local. Persistent row state never borrows
+		// these arrays, and shared header backing keeps its initialized extent.
+		FPacketFixed DispatchFixed[16];
+		FVaRestInspectorDispatchView DispatchViews[16];
+		FVaRestInspectorPacketView DispatchEvents[32], Excerpts[17];
+		int32 NumEvents = 0, NumExcerpts = 0;
+		if (Row.RequestExcerpt)
+			Excerpts[NumExcerpts++] = Row.RequestExcerpt->View();
+		for (int32 DispatchIndex = 0; DispatchIndex < Row.NumDispatches; ++DispatchIndex)
+		{
+			const FDispatchSlot& Slot = *Row.Dispatches[DispatchIndex];
+			auto& Dispatch = DispatchViews[DispatchIndex];
+			Dispatch.DispatchId = Slot.DispatchId;
+			Dispatch.Attempt = Slot.Attempt;
+			Dispatch.bHasDispatched = Slot.bHasDispatched;
+			Dispatch.bHasEnded = Slot.bHasEnded;
+			Dispatch.HeadersState = Slot.HeadersState;
+			if (Slot.bHasDispatched)
+			{
+				auto& Fixed = DispatchFixed[DispatchIndex];
+				Fixed = Slot.DispatchedFixed;
+				Dispatch.Dispatched.Fixed = &Fixed;
+				if (Slot.Headers)
+				{
+					const auto Headers = Slot.Headers->View();
+					Fixed.Headers = Headers.Fixed->Headers;
+					Dispatch.Dispatched.Backing = Headers.Backing;
+				}
+				Dispatch.AttemptStart = Fixed.Scalars.AttemptStart;
+				Dispatch.DispatchAt = Fixed.Header.Time;
+				Dispatch.GapKind = Fixed.Scalars.GapKind;
+				Dispatch.GapSeconds = Fixed.Scalars.GapSeconds;
+				DispatchEvents[NumEvents++] = Dispatch.Dispatched;
+			}
+			if (Slot.bHasEnded)
+			{
+				if (Slot.Ended)
+					Dispatch.Ended = Slot.Ended->View();
+				else
+					Dispatch.Ended.Fixed = &Slot.EndedFixed;
+				Dispatch.UploadDoneAt = Slot.EndedFixed.Scalars.UploadDoneAt;
+				Dispatch.StatusAt = Slot.EndedFixed.Scalars.StatusAt;
+				Dispatch.TransportDoneAt = Slot.EndedFixed.Scalars.TransportDoneAt;
+				DispatchEvents[NumEvents++] = Dispatch.Ended;
+			}
+			if (Slot.ResponseExcerpt)
+			{
+				Dispatch.ResponseExcerpt = Slot.ResponseExcerpt->View();
+				Excerpts[NumExcerpts++] = Dispatch.ResponseExcerpt;
+			}
+			DeriveDispatchPhases(Dispatch);
+		}
+		View.Dispatches = {DispatchViews, Row.NumDispatches};
+		View.DispatchEvents = {DispatchEvents, NumEvents};
+		View.Excerpts = {Excerpts, NumExcerpts};
 		if (View.ScopeId == 0)
 			View.ScopeLabel = TEXT("Process");
 		for (int32 ClientIndex = 0; ClientIndex < Storage->NumClients; ++ClientIndex)
