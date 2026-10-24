@@ -31,6 +31,12 @@
 			"PlatformAllowList" : [ "Win64", "Mac", "Linux", "Android", "IOS" ]
 		},
 		{
+			"Name" : "VaRestInspector",
+			"Type" : "Runtime",
+			"LoadingPhase" : "Default",
+			"PlatformAllowList" : [ "Win64", "Mac", "Linux", "Android", "IOS" ]
+		},
+		{
 			"Name" : "VaRest",
 			"Type" : "Runtime",
 			"LoadingPhase": "PreDefault"
