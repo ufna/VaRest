@@ -1172,8 +1172,38 @@ bool FVaRestInspectorStoreBudgetTest::RunTest(const FString& Parameters)
 			C.Test.TestTrue(TEXT("retained private key survives mutable store destruction"), FSnapshotBuilder::HasPrivateStatsGroup(*Old, {0, 1, NAME_None, FStringView(Key)}));
 		C.Test.TestTrue(TEXT("all real copied512-bin payloads remain initialized"), FSnapshotBuilder::PrivateStatsHistogramsAreZero(*Old));
 		int32 PublicStats = 0;
-		Old->ForEachStats([&](const auto&) { ++PublicStats; });
-		C.Test.TestEqual(TEXT("public stats remain staged empty"), PublicStats, 0);
+		bool SeenKeys[3] = {};
+		int32 PublicOverflow = 0;
+		Old->ForEachStats([&](const FVaRestInspectorHttpStats& Group) {
+			++PublicStats;
+			PublicOverflow += Group.bOverflow ? 1 : 0;
+			C.Test.TestEqual(TEXT("public copied group scope is real Process"), Group.ScopeId, uint64(0));
+			C.Test.TestEqual(TEXT("public copied group client preserves overflow distinction"), Group.ClientId, Group.bOverflow ? uint64(0) : uint64(1));
+			C.Test.TestTrue(TEXT("manual copied group has no invented endpoint"), Group.Endpoint.IsNone());
+			if (Group.bOverflow)
+				C.Test.TestTrue(TEXT("single public overflow has no rejected key"), Group.Key.IsEmpty());
+			else
+			{
+				int32 Matches = 0;
+				for (int32 Index = 0; Index < 3; ++Index)
+					if (Group.Key.Equals(Keys[Index], ESearchCase::CaseSensitive)) { SeenKeys[Index] = true; ++Matches; }
+				C.Test.TestEqual(TEXT("actual admitted public key survives Clear exactly"), Matches, 1);
+			}
+			const uint64 Scalars[] = {Group.Started, Group.Completed, Group.Success, Group.Error, Group.Queued, Group.Canceled,
+				Group.Dispatches, Group.Retries, Group.AuthReplays, Group.RetryScheduled, Group.UnknownDispatchClassification,
+				Group.CacheHit, Group.CacheDisk, Group.Revalidated, Group.Stale, Group.Replayed, Group.WireBytesUp, Group.WireBytesDown,
+				Group.Partial, Group.Incomplete, Group.Dropped, Group.DurationCount, Group.DurationUnderflow, Group.DurationOverflow,
+				Group.DurationUnknown, Group.DurationNonFinite, Group.ErrorsByKind.Canceled, Group.ErrorsByKind.Connection,
+				Group.ErrorsByKind.Timeout, Group.ErrorsByKind.Http, Group.ErrorsByKind.Server, Group.ErrorsByKind.Decode,
+				Group.ErrorsByKind.Auth, Group.ErrorsByKind.Offline, Group.ErrorsByKind.Config, Group.ErrorsByKind.Unknown};
+			for (uint64 Value : Scalars) C.Test.TestEqual(TEXT("manual public copy invents no observation"), Value, uint64(0));
+			for (uint64 Bin : Group.Histogram) C.Test.TestEqual(TEXT("all512 public copied bins survive Clear"), Bin, uint64(0));
+			C.Test.TestTrue(TEXT("manual public copy preserves zero extrema and flags"), Group.DurationSum == 0 && Group.DurationMin == 0 &&
+				Group.DurationMax == 0 && !Group.bSaturated && !Group.bWireBytesUnknown && !Group.bDurationCountsSaturated && !Group.ErrorsByKind.bSaturated);
+		});
+		C.Test.TestEqual(TEXT("public snapshot owns the actual four copied groups"), PublicStats, 4);
+		C.Test.TestEqual(TEXT("one public overflow is independently counted"), PublicOverflow, 1);
+		for (bool Seen : SeenKeys) C.Test.TestTrue(TEXT("each actual admitted key appears publicly"), Seen);
 		C.Test.TestTrue(TEXT("public links remain staged empty"), Old->GetLinks().IsEmpty());
 		Old.Reset();
 		C.Test.TestEqual(TEXT("final private-copy release returns exact fixed charge"), C.Roots.Budget->UsedBytes.load(), Fixed);

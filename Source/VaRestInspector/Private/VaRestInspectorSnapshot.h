@@ -21,7 +21,6 @@ enum class ESnapshotAllocationKind : uint8
 	Notes,
 	Timeline,
 	StatsGroups,
-	StatsKeys,
 	Links,
 	Raw
 };

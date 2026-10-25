@@ -171,7 +171,6 @@ void DestroyRecord(const FAllocationRecord& Record)
 		}
 		break;
 	}
-	case ESnapshotAllocationKind::StatsKeys: break;
 	case ESnapshotAllocationKind::Links: DestroyElements<FVaRestInspectorLink>(Record.Address, Record.Constructed); break;
 	case ESnapshotAllocationKind::Raw: break;
 	}
@@ -832,7 +831,7 @@ bool FSnapshotBuilder::MeasureStatsGroup(const FStatsGroupSlot& Group)
 	if (bMeasurementFinished || bReserved)
 		return false;
 	const FStringView Key = Group.Key.View();
-	return Key.IsEmpty() || MeasureAllocation(SIZE_T(Key.Len() + 1) * sizeof(TCHAR), alignof(TCHAR));
+	return MeasurePublicString(Key);
 }
 bool FSnapshotBuilder::ConstructStats(int32 Count)
 {
@@ -875,20 +874,8 @@ bool FSnapshotBuilder::ConstructStatsGroup(const FStatsGroupSlot& Group, int32 D
 	if (!Segment)
 		return false;
 	FSnapshotStatsGroup& Out = Segment->Values()[Destination];
-	Out.Value = Group.Value;
-	const FStringView Key = Group.Key.View();
-	if (!Key.IsEmpty())
-	{
-		void* KeyMemory = AllocateChild(SIZE_T(Key.Len() + 1) * sizeof(TCHAR), alignof(TCHAR), ESnapshotAllocationKind::StatsKeys);
-		if (!KeyMemory)
-			return false;
-		FMemory::Memcpy(KeyMemory, Key.GetData(), SIZE_T(Key.Len()) * sizeof(TCHAR));
-		static_cast<TCHAR*>(KeyMemory)[Key.Len()] = TCHAR(0);
-		Allocator->Counters().TextBytesCopied.fetch_add(int64(SIZE_T(Key.Len() + 1) * sizeof(TCHAR)));
-		Out.Key = static_cast<const TCHAR*>(KeyMemory);
-		Out.KeyChars = Key.Len();
-	}
-	return true;
+	CopyStatsScalars(Group.Value, Out.Value);
+	return ConstructPublicString(Group.Key.View(), Out.Value.Key);
 }
 bool FSnapshotBuilder::MeasureLinks(int32 Count)
 {
@@ -952,7 +939,7 @@ bool FSnapshotBuilder::HasPrivateStatsGroup(const FVaRestInspectorSnapshot& Snap
 		for (int32 Index = 0; Index < Segment->Count; ++Index)
 		{
 			const auto& Group = Segment->Values()[Index];
-			const FStringView Text = Group.Key ? FStringView(Group.Key, Group.KeyChars) : FStringView();
+			const FStringView Text(Group.Value.Key);
 			if (Group.Value.ScopeId == Key.ScopeId && Group.Value.ClientId == Key.ClientId &&
 				Group.Value.Endpoint == Key.Endpoint && Text == Key.Key)
 				return true;
@@ -1049,9 +1036,17 @@ void FVaRestInspectorSnapshot::ForEachRecord(TFunctionRef<void(const FVaRestInsp
 	(void)Visitor;
 #endif
 }
-void FVaRestInspectorSnapshot::ForEachStats(TFunctionRef<void(const FVaRestInspectorHttpStats&)>) const
+void FVaRestInspectorSnapshot::ForEachStats(TFunctionRef<void(const FVaRestInspectorHttpStats&)> Visitor) const
 {
 	check(IsInGameThread());
+#if VAREST_WITH_INSPECTOR
+	if (Data)
+		for (const auto* Segment = Data->FirstStats; Segment; Segment = Segment->Next)
+			for (int32 Index = 0; Index < Segment->Count; ++Index)
+				Visitor(Segment->Values()[Index].Value);
+#else
+	(void)Visitor;
+#endif
 }
 TConstArrayView<FVaRestInspectorLink> FVaRestInspectorSnapshot::GetLinks() const
 {

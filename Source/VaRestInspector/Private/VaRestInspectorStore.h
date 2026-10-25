@@ -2,10 +2,13 @@
 
 #pragma once
 
+#include "Containers/ArrayView.h"
+#include "Containers/StringView.h"
 #include "Templates/UniquePtr.h"
 #include "VaRestInspectorBudget.h"
 #include "VaRestInspectorPacket.h"
 #include "VaRestInspectorRecords.h"
+#include "VaRestInspectorStats.h"
 
 class IVaRestClock;
 
@@ -79,17 +82,12 @@ struct FStatsKeyView
 	FName Endpoint;
 	FStringView Key;
 };
-struct FStatsErrorValues
-{
-	uint64 Canceled = 0, Connection = 0, Timeout = 0, Http = 0, Server = 0;
-	uint64 Decode = 0, Auth = 0, Offline = 0, Config = 0, Unknown = 0;
-	bool bSaturated = false;
-};
+using FStatsErrorValues = FVaRestInspectorErrorCounts;
 struct FStatsGroup
 {
 	uint64 ScopeId = 0, ClientId = 0;
 	FName Endpoint;
-	bool bOverflow = false, bSaturated = false, bWireBytesUnknown = false;
+	bool bOverflow = false, bSaturated = false, bWireBytesUnknown = false, bDurationCountsSaturated = false;
 	uint64 Started = 0, Completed = 0, Success = 0, Error = 0, Queued = 0, Canceled = 0;
 	uint64 Dispatches = 0, Retries = 0, AuthReplays = 0, RetryScheduled = 0;
 	uint64 UnknownDispatchClassification = 0;
@@ -97,9 +95,53 @@ struct FStatsGroup
 	uint64 WireBytesUp = 0, WireBytesDown = 0, Partial = 0, Incomplete = 0, Dropped = 0;
 	FStatsErrorValues ErrorsByKind;
 	uint64 Histogram[512] = {};
-	uint64 DurationCount = 0, DurationUnderflow = 0, DurationOverflow = 0;
+	uint64 DurationCount = 0, DurationUnderflow = 0, DurationOverflow = 0, DurationUnknown = 0, DurationNonFinite = 0;
 	double DurationSum = 0, DurationMin = 0, DurationMax = 0;
 };
+struct FStatsKeyParts
+{
+	uint64 ScopeId = 0, ClientId = 0;
+	FName Endpoint;
+	bool bContextKnown = false;
+	FStringView Verb, PathTemplate, Url;
+};
+struct FStatsDurationSample
+{
+	enum class EKind : uint8 { Unknown, Finite, NonFinite, ExcludedQueued };
+	EKind Kind = EKind::Unknown;
+	double Seconds = 0;
+};
+struct FStatsGroupToken { int32 IndexSlot = INDEX_NONE; };
+enum class EStatsStartTime : uint8 { Unknown, Known, NonFinite };
+enum class EStatsClass : uint8 { Pending, KnownNone, Retry, AuthReplay, FinalUnknown };
+struct FStatsPhysicalCell
+{
+	uint64 DispatchId = 0;
+	FStatsGroupToken Group;
+	bool bDispatchedSeen = false, bEndedSeen = false;
+	EStatsClass Classification = EStatsClass::Pending;
+};
+struct FStatsCaptureState
+{
+	FStatsGroupToken Group, CompletedGroup;
+	bool bKeyBound = false, bCompletedSeen = false, bStartedSeen = false, bPartialSeen = false, bIncompleteSeen = false;
+	bool bStaleSeen = false, bRevalidatedSeen = false, bReplayedSeen = false;
+	EStatsStartTime StartTime = EStatsStartTime::Unknown;
+	uint8 NumPhysical = 0;
+	FStatsPhysicalCell Physical[16];
+};
+struct FStatsPhysicalDecision
+{
+	enum class EKind : uint8 { NewIdentity, NewSameIdentityKind, Duplicate, CapacityRefused };
+	FStatsPhysicalCell* Cell = nullptr;
+	EKind Kind = EKind::CapacityRefused;
+};
+bool BuildStatsKey(const FStatsKeyParts& Parts, TArrayView<TCHAR> Scratch, FStatsKeyView& Out);
+void AccumulateStatsStarted(FStatsGroup& Group);
+void AccumulateStatsCompleted(FStatsGroup& Group, const FPacketScalars& Scalars, const FStatsDurationSample& Duration);
+void AccumulateStatsDispatched(FStatsGroup& Group, const FPacketScalars& Scalars, bool bNewPhysical, bool bNewClassification);
+void AccumulateStatsEnded(FStatsGroup& Group, const FPacketScalars& Scalars, bool bNewPhysical);
+void CopyStatsScalars(const FStatsGroup& Source, FVaRestInspectorHttpStats& Out);
 struct FTicketedText
 {
 	const TCHAR* Data = nullptr;
@@ -147,9 +189,7 @@ struct FStatsGroupSlotDeleter
 using FStatsGroupSlotPtr = TUniquePtr<FStatsGroupSlot, FStatsGroupSlotDeleter>;
 struct FSnapshotStatsGroup
 {
-	FStatsGroup Value;
-	const TCHAR* Key = nullptr;
-	int32 KeyChars = 0;
+	FVaRestInspectorHttpStats Value;
 };
 struct FLinkSeed
 {
@@ -226,6 +266,10 @@ namespace LinksTesting
 {
 struct FStoreAccess;
 }
+namespace StatsTesting
+{
+struct FStoreAccess;
+}
 #endif
 
 class FStore
@@ -266,6 +310,7 @@ private:
 	friend struct SnapshotTesting::FStoreAccess;
 	friend struct BudgetTesting::FStoreAccess;
 	friend struct LinksTesting::FStoreAccess;
+	friend struct StatsTesting::FStoreAccess;
 #endif
 	enum class EAttachedBase : uint8
 	{
@@ -331,6 +376,17 @@ private:
 	bool ApplyAttachedStarted(const FVaRestTraceStarted& Borrowed, const FCapturePolicy& Policy,
 		TSharedRef<FPendingAccount, ESPMode::ThreadSafe> Pending, FAllocationAdapter& Allocator);
 	void SetStartedScalars(FRow& Row, const FPacketScalars& Scalars);
+	void BindStatsKey(FRow& Row, const FStatsKeyView* Key);
+	void ObserveStatsStarted(FRow& Row, const FPacketFixed& Fixed, const FStatsKeyView* Key, bool bSnapshot, bool bReplay);
+	FStatsPhysicalDecision ObserveStatsPhysical(FRow& Row, const FPacketHeader& Header, const FPacketScalars& Scalars);
+	void ObserveStatsCompletion(FRow& Row, const FPacketFixed& Fixed);
+	void ObserveStatsFlags(FRow& Row);
+	void ObserveStatsNote(FRow& Row, const FPacketScalars& Scalars, bool bDuplicate);
+	enum class EStatsClosure : uint8 { Completed, AttachedAbsent, Removed };
+	void CloseStats(FRow& Row, EStatsClosure Closure);
+	FStatsGroup* ResolveStats(FStatsGroupToken Token);
+	const FStatsGroup* ResolveStats(FStatsGroupToken Token) const;
+	const FStatsCaptureState* RetainedStats(uint64 RequestId) const;
 	void Touch(FRow& Row) const;
 	void CompleteMutation(FRow& Row);
 	static bool HasPendingExcerpt(const FRow& Row);
@@ -348,7 +404,7 @@ private:
 	void FlushDeferred();
 	void FlushDeferredRemovals();
 	bool IsIdRetained(uint64 RequestId) const;
-	void RetainRemovedId(uint64 RequestId);
+	void RetainRemovedId(const FRow& Row);
 	void ResetRetainedIds();
 	int32 IndexCapacity() const;
 	int32 RetainedIdCapacity() const;
