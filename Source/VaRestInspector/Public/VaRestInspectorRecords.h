@@ -103,7 +103,14 @@ enum class EVaRestInspectorHeadersState : uint8
 {
 	Unknown,
 	Captured,
-	MetadataOmitted
+	MetadataOmitted,
+	Evicted
+};
+enum class EVaRestInspectorDispatchHistory : uint8
+{
+	Unknown,
+	KnownNeverDispatched,
+	Dispatched
 };
 struct FVaRestInspectorDispatchView
 {
@@ -125,6 +132,7 @@ struct FVaRestInspectorDiagnostics
 	uint64 DroppedEvents = 0, DroppedBytes = 0, RefusedRows = 0;
 	uint64 MetadataOmitted = 0, UnsupportedAllocator = 0, InterruptedRows = 0;
 	uint64 AttachLosses = 0, OmittedClients = 0, ContractViolations = 0;
+	uint64 OmittedStatsGroups = 0, OmittedLinks = 0, OmittedMarkers = 0;
 	int64 StoreBytes = 0, StorePeakBytes = 0, PendingBytes = 0, PendingPeakBytes = 0;
 	int32 SnapshotControllers = 0;
 	bool bCapturing = false, bPendingLimits = false;
@@ -140,6 +148,8 @@ struct FVaRestInspectorRecordView
 	FDateTime StartUtc;
 	bool bStartedAtKnown = false, bStartUtcKnown = false, bInitiatorKnown = false, bMetadataOmitted = false;
 	FStringView ScopeLabel, ClientLabel;
+	EVaRestInspectorDispatchHistory DispatchHistory = EVaRestInspectorDispatchHistory::Unknown;
+	EVaRestInspectorHeadersState StartedHeadersState = EVaRestInspectorHeadersState::Unknown;
 	EVaRestInspectorEndState EndState = EVaRestInspectorEndState::CaptureInterrupted;
 	bool bPartial = false, bPinned = false, bSealed = false, bTerminalKnown = false;
 	// Observations survive optional detail refusal. Identities not retained in

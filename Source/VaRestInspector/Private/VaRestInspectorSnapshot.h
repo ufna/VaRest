@@ -20,6 +20,9 @@ enum class ESnapshotAllocationKind : uint8
 	Packets,
 	Notes,
 	Timeline,
+	StatsGroups,
+	StatsKeys,
+	Links,
 	Raw
 };
 
@@ -43,6 +46,19 @@ public:
 	bool MeasureTimeline(int32 Count);
 	bool MeasurePacket(const FVaRestInspectorPacketView& Source,
 		const TSharedPtr<const TArray<uint8>, ESPMode::ThreadSafe>* Excerpt);
+	bool MeasureStats(int32 Count);
+	bool MeasureStatsGroup(const FStatsGroupSlot& Group);
+	bool ConstructStats(int32 Count);
+	bool ConstructStatsGroup(const FStatsGroupSlot& Group, int32 Destination);
+	bool MeasureLinks(int32 Count);
+	bool MeasureLink(const FStoreLinkView& Link);
+	bool ConstructLinks(int32 Count);
+	bool ConstructLink(const FStoreLinkView& Link, int32 Destination);
+	bool HasUnsupportedPublicStrings() const { return bUnsupportedPublicStrings; }
+	bool MeasuredCosts(int64& Outer, int64& Nested) const;
+	static int32 PrivateStatsCount(const FVaRestInspectorSnapshot& Snapshot);
+	static bool HasPrivateStatsGroup(const FVaRestInspectorSnapshot& Snapshot, const FStatsKeyView& Key);
+	static bool PrivateStatsHistogramsAreZero(const FVaRestInspectorSnapshot& Snapshot);
 	bool FinishMeasurement();
 	bool Reserve();
 	FSnapshotRowCopy* ConstructMutableRow();
@@ -59,6 +75,8 @@ public:
 	static void DestroyDomain(FVaRestInspectorSnapshot::FData& Data, FAllocationAdapter& Allocator);
 
 private:
+	bool MeasurePublicString(FStringView Source);
+	bool ConstructPublicString(FStringView Source, FString& Out);
 	bool AddNestedBytes(int64 Amount);
 	bool AddBuiltBytes(SIZE_T Amount);
 	bool MeasureAllocation(SIZE_T Request, uint32 Alignment);
@@ -84,7 +102,9 @@ private:
 	int32 NumDirectoryPages = 0, BuiltDirectoryPages = 0;
 	int32 NumMutableRows = 0, BuiltMutableRows = 0;
 	int32 NumExcerptReferences = 0, BuiltExcerptReferences = 0;
+	int32 NumPublicText = 0, BuiltPublicText = 0;
 	bool bMeasurementFinished = false, bReserved = false;
+	bool bUnsupportedPublicStrings = false;
 };
 
 struct FSnapshotPacket
@@ -127,8 +147,8 @@ struct FSnapshotRowCopy
 	uint64 PresenceStamp = 0;
 	int32 IndexSlot = INDEX_NONE, DeadlineIndex = INDEX_NONE;
 	FPacketFixed CompletionFixed;
-	FSnapshotPacket Started, Completed, RequestExcerpt;
-	bool bHasStarted = false, bHasCompletedOwner = false, bHasRequestExcerpt = false;
+	FSnapshotPacket Started, Completed, RequestExcerpt, Marker;
+	bool bHasStarted = false, bHasCompletedOwner = false, bHasRequestExcerpt = false, bHasMarker = false;
 	FSnapshotDispatch* Dispatches = nullptr;
 	FSnapshotPacket* Headers = nullptr;
 	FSnapshotNote* Notes = nullptr;

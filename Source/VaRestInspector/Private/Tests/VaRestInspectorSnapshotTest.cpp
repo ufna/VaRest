@@ -693,6 +693,15 @@ bool FVaRestInspectorSealingTest::RunTest(const FString& Parameters)
 		TestTrue(TEXT("unadmitted early physical excerpt diagnosed"), C.Store.Diagnostics().MetadataOmitted > Before.MetadataOmitted);
 		Visit(*this, C.Store, 50, [&](const auto& R) { TestEqual(TEXT("unadmitted early physical excerpt counted exactly"), R.OmittedExcerpts, uint64(1)); });
 		b &= Deliver(C, Started(51));
+		FVaRestTraceSnapshot BothPinned;
+		BothPinned.InFlight.Add(Started(50).Payload.Get<FVaRestTraceStarted>());
+		BothPinned.InFlight.Add(Started(51).Payload.Get<FVaRestTraceStarted>());
+		b &= Mutate(C, [&] { return C.Store.ApplyAttached(BothPinned, C.Policy, C.Roots.Pending.ToSharedRef(), C.Roots.Lifetime->Allocator); });
+		Visit(*this, C.Store, 50, [&](const auto& R) {
+			TestTrue(TEXT("actual source snapshot pins early base at row cap"), R.bPinned);
+			TestEqual(TEXT("source pinning retains all sixteen physical slots"), R.Dispatches.Num(), 16);
+		});
+		Visit(*this, C.Store, 51, [&](const auto& R) { TestTrue(TEXT("actual source snapshot pins second base at row cap"), R.bPinned); });
 		const auto Full = C.Store.Diagnostics();
 		b &= EventMutation(C, Excerpt(52), EPush::Accepted, false);
 		TestEqual(TEXT("no unbounded orphan base past actual row cap"), CountRows(C.Store), 2);

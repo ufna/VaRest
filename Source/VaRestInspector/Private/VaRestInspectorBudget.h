@@ -13,12 +13,38 @@ struct FBudgetAccount : public FRefCountedObject
 {
 	FBudgetAccount(int64 InLimit, int64 InBootstrap, TRefCountPtr<FAllocationLifetime> InLifetime);
 	~FBudgetAccount();
+	void InheritLifetime(const FBudgetAccount& Previous);
+	const uint64 Identity;
 	const int64 Limit, BootstrapBytes;
 	std::atomic<int64> UsedBytes, PeakBytes;
 	std::atomic<int64> SnapshotControllers{0};
+	std::atomic<int32> ControlLeases{0};
+	std::atomic<bool> PublicStringsUnsupported{false};
 	FAllocationCounters Probe;
 	const TRefCountPtr<FAllocationLifetime> Lifetime;
 };
+
+class FBudgetControlLease
+{
+public:
+	explicit FBudgetControlLease(FBudgetAccount& InAccount)
+		: Account(&InAccount)
+	{
+		Account->ControlLeases.fetch_add(1, std::memory_order_acq_rel);
+	}
+	~FBudgetControlLease()
+	{
+		if (Account)
+			Account->ControlLeases.fetch_sub(1, std::memory_order_acq_rel);
+	}
+	FBudgetControlLease(const FBudgetControlLease&) = delete;
+	FBudgetControlLease& operator=(const FBudgetControlLease&) = delete;
+
+private:
+	FBudgetAccount* Account;
+};
+
+void CarryPendingLifetime(const FPendingAccount& Previous, FPendingAccount& Next);
 
 class FStoreCredit
 {
@@ -31,6 +57,7 @@ public:
 	~FStoreCredit();
 	static TOptional<FStoreCredit> Acquire(TRefCountPtr<FBudgetAccount> Account, int64 Charge, bool bSnapshotSlot = false);
 	FBudgetAccount* GetAccount() const { return Account.GetReference(); }
+	int64 Charge() const { return Bytes; }
 	void Reset();
 
 private:

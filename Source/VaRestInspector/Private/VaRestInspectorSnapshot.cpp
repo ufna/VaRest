@@ -3,6 +3,7 @@
 #include "VaRestInspectorSnapshot.h"
 
 #include "CoreGlobals.h"
+#include "Containers/Array.h"
 #include "HAL/UnrealMemory.h"
 #include "Math/UnrealMathUtility.h"
 #include "Templates/AlignmentTemplates.h"
@@ -47,6 +48,20 @@ struct FRowEntrySegment
 	}
 };
 
+struct FStatsSegment
+{
+	FStatsSegment* Next = nullptr;
+	int32 Count = 0;
+	FSnapshotStatsGroup* Values()
+	{
+		return reinterpret_cast<FSnapshotStatsGroup*>(reinterpret_cast<uint8*>(this) + Align(sizeof(FStatsSegment), alignof(FSnapshotStatsGroup)));
+	}
+	const FSnapshotStatsGroup* Values() const
+	{
+		return reinterpret_cast<const FSnapshotStatsGroup*>(reinterpret_cast<const uint8*>(this) + Align(sizeof(FStatsSegment), alignof(FSnapshotStatsGroup)));
+	}
+};
+
 namespace
 {
 constexpr int32 DirectoryRecordsPerPage = 64;
@@ -64,6 +79,19 @@ constexpr uint32 DirectoryAlignment = alignof(FDirectoryPage) > alignof(FAllocat
 static_assert(EntrySegmentAlignment <= 16 && DirectoryAlignment <= 16, "Snapshot directories require the audited allocation alignment");
 static_assert(alignof(FSnapshotRowCopy) <= 16 && alignof(FSnapshotDispatch) <= 16 && alignof(FSnapshotPacket) <= 16 &&
 	alignof(FSnapshotNote) <= 16 && alignof(FSnapshotTimeline) <= 16, "Snapshot clone alignment must remain supported");
+
+constexpr uint32 StatsSegmentAlignment = alignof(FStatsSegment) > alignof(FSnapshotStatsGroup) ? alignof(FStatsSegment) : alignof(FSnapshotStatsGroup);
+static_assert(StatsSegmentAlignment <= 16, "Private stats chunks require audited alignment");
+int32 StatsPerSegment()
+{
+	const SIZE_T Header = Align(sizeof(FStatsSegment), alignof(FSnapshotStatsGroup));
+	return Header < SIZE_T(FNormalizedLimits::MaxMetadataBytes) ?
+		int32((SIZE_T(FNormalizedLimits::MaxMetadataBytes) - Header) / sizeof(FSnapshotStatsGroup)) : 0;
+}
+SIZE_T StatsSegmentRequest(int32 Count)
+{
+	return Align(sizeof(FStatsSegment), alignof(FSnapshotStatsGroup)) + SIZE_T(Count) * sizeof(FSnapshotStatsGroup);
+}
 
 bool SnapshotLabelRequest(FStringView Label, SIZE_T& OutRequest)
 {
@@ -133,6 +161,18 @@ void DestroyRecord(const FAllocationRecord& Record)
 	case ESnapshotAllocationKind::Packets: DestroyElements<FSnapshotPacket>(Record.Address, Record.Constructed); break;
 	case ESnapshotAllocationKind::Notes: DestroyElements<FSnapshotNote>(Record.Address, Record.Constructed); break;
 	case ESnapshotAllocationKind::Timeline: DestroyElements<FSnapshotTimeline>(Record.Address, Record.Constructed); break;
+	case ESnapshotAllocationKind::StatsGroups:
+	{
+		auto* Segment = static_cast<FStatsSegment*>(Record.Address);
+		if (Record.Constructed > 0)
+		{
+			DestroyElements<FSnapshotStatsGroup>(Segment->Values(), Record.Constructed);
+			Segment->~FStatsSegment();
+		}
+		break;
+	}
+	case ESnapshotAllocationKind::StatsKeys: break;
+	case ESnapshotAllocationKind::Links: DestroyElements<FVaRestInspectorLink>(Record.Address, Record.Constructed); break;
 	case ESnapshotAllocationKind::Raw: break;
 	}
 }
@@ -155,6 +195,8 @@ void VisitSnapshotCopy(const FSnapshotRowCopy& Copy, FStringView Label,
 		View.Completed = PacketView(Copy.Completed);
 	else if (View.bActualCompletionObserved)
 		View.Completed.Fixed = &Copy.CompletionFixed;
+	if (Copy.bHasMarker)
+		View.Marker = PacketView(Copy.Marker);
 
 	FPacketFixed DispatchFixed[16];
 	FVaRestInspectorDispatchView DispatchViews[16];
@@ -233,6 +275,10 @@ struct FVaRestInspectorSnapshot::FData
 	VaRest::Inspector::Private::FDirectoryPage* Directory = nullptr;
 	VaRest::Inspector::Private::FRowEntrySegment* FirstEntries = nullptr;
 	VaRest::Inspector::Private::FRowEntrySegment* LastEntries = nullptr;
+	VaRest::Inspector::Private::FStatsSegment* FirstStats = nullptr;
+	VaRest::Inspector::Private::FStatsSegment* LastStats = nullptr;
+	FVaRestInspectorLink* Links = nullptr;
+	int32 NumStats = 0, NumLinks = 0;
 	uint64 Revision = 0;
 	FVaRestInspectorDiagnostics Diagnostics;
 };
@@ -258,6 +304,9 @@ void FSnapshotBuilder::DestroyDomain(FVaRestInspectorSnapshot::FData& Data, FAll
 	Data.Directory = nullptr;
 	Data.FirstEntries = nullptr;
 	Data.LastEntries = nullptr;
+	Data.FirstStats = Data.LastStats = nullptr;
+	Data.Links = nullptr;
+	Data.NumStats = Data.NumLinks = 0;
 }
 
 FSnapshotBuilder::FSnapshotBuilder() = default;
@@ -668,12 +717,266 @@ bool FSnapshotBuilder::ConstructMutableEntry(FSnapshotRowCopy* Copy, FStringView
 	Entry->Mutable = Copy;
 	return true;
 }
+bool FSnapshotBuilder::MeasurePublicString(FStringView Source)
+{
+	if (Source.IsEmpty())
+		return true;
+	if (Account->PublicStringsUnsupported.load(std::memory_order_acquire))
+	{
+		bUnsupportedPublicStrings = true;
+		return false;
+	}
+#if UE_ENABLE_ARRAY_SLACK_TRACKING
+	bUnsupportedPublicStrings = true;
+	return false;
+#else
+	if (bMeasurementFinished || bReserved || Source.Len() < 0 || Source.Len() > FNormalizedLimits::MaxStringChars || !Source.GetData())
+		return false;
+	using FStringArray = TArray<FString::ElementType, FString::AllocatorType>;
+	using FInstance = FStringArray::ElementAllocatorType;
+	FInstance MeasureInstance;
+	const int32 N = Source.Len() + 1;
+	int32 ReserveElements = 0;
+	if constexpr (TAllocatorTraits<FString::AllocatorType>::SupportsElementAlignment)
+		ReserveElements = MeasureInstance.CalculateSlackReserve(N, sizeof(TCHAR), alignof(TCHAR));
+	else
+		ReserveElements = MeasureInstance.CalculateSlackReserve(N, sizeof(TCHAR));
+	if (ReserveElements < N || ReserveElements > MAX_int32)
+		return false;
+	const uint64 Request = uint64(ReserveElements) * sizeof(TCHAR);
+	if (Request == 0 || Request > SIZE_T(FNormalizedLimits::MaxMetadataBytes))
+		return false;
+	const auto Bound = Allocator->Bound(SIZE_T(Request), alignof(TCHAR));
+	if (!Bound.IsSet() || Bound.GetValue() > SIZE_T(MAX_int64))
+	{
+		bUnsupportedPublicStrings = true;
+		return false;
+	}
+	++NumPublicText;
+	return AddNestedBytes(int64(Bound.GetValue()));
+#endif
+}
+bool FSnapshotBuilder::ConstructPublicString(FStringView Source, FString& Out)
+{
+	if (Source.IsEmpty())
+	{
+		Out.Reset();
+		return true;
+	}
+	if (Account->PublicStringsUnsupported.load(std::memory_order_acquire))
+	{
+		bUnsupportedPublicStrings = true;
+		return false;
+	}
+#if UE_ENABLE_ARRAY_SLACK_TRACKING
+	bUnsupportedPublicStrings = true;
+	return false;
+#else
+	using FStringArray = TArray<FString::ElementType, FString::AllocatorType>;
+	using FInstance = FStringArray::ElementAllocatorType;
+	FInstance MeasureInstance;
+	const int32 N = Source.Len() + 1;
+	int32 ReserveElements = 0;
+	if constexpr (TAllocatorTraits<FString::AllocatorType>::SupportsElementAlignment)
+		ReserveElements = MeasureInstance.CalculateSlackReserve(N, sizeof(TCHAR), alignof(TCHAR));
+	else
+		ReserveElements = MeasureInstance.CalculateSlackReserve(N, sizeof(TCHAR));
+	if (ReserveElements < N || ReserveElements > MAX_int32)
+		return false;
+	const uint64 Request = uint64(ReserveElements) * sizeof(TCHAR);
+	const auto Bound = Allocator->Bound(SIZE_T(Request), alignof(TCHAR));
+	if (!Bound.IsSet() || Bound.GetValue() > SIZE_T(MAX_int64))
+	{
+		bUnsupportedPublicStrings = true;
+		return false;
+	}
+	FString Value;
+	Value.Reserve(Source.Len());
+	if (Value.GetAllocatedSize() != Request)
+	{
+		bUnsupportedPublicStrings = true;
+		return false;
+	}
+	const SIZE_T Actual = FMemory::GetAllocSize(Value.GetCharArray().GetData());
+	if (Actual < Request || Actual > Bound.GetValue())
+	{
+		bUnsupportedPublicStrings = true;
+		return false;
+	}
+	Value.GetCharArray().AddUninitialized(N);
+	FMemory::Memcpy(Value.GetCharArray().GetData(), Source.GetData(), SIZE_T(Source.Len()) * sizeof(TCHAR));
+	Value.GetCharArray()[N - 1] = TCHAR(0);
+	Allocator->Counters().TextBytesCopied.fetch_add(int64(N) * sizeof(TCHAR));
+	Out = MoveTemp(Value);
+	++BuiltPublicText;
+	return AddBuiltBytes(Bound.GetValue());
+#endif
+}
+bool FSnapshotBuilder::MeasureStats(int32 Count)
+{
+	if (bMeasurementFinished || bReserved || Count < 0 || Count > FNormalizedLimits::StatsGroups)
+		return false;
+	const int32 PerSegment = StatsPerSegment();
+	if (Count && PerSegment <= 0)
+		return false;
+	for (int32 Offset = 0; Offset < Count;)
+	{
+		const int32 Elements = FMath::Min(PerSegment, Count - Offset);
+		if (!MeasureAllocation(StatsSegmentRequest(Elements), StatsSegmentAlignment))
+			return false;
+		Offset += Elements;
+	}
+	return true;
+}
+bool FSnapshotBuilder::MeasureStatsGroup(const FStatsGroupSlot& Group)
+{
+	if (bMeasurementFinished || bReserved)
+		return false;
+	const FStringView Key = Group.Key.View();
+	return Key.IsEmpty() || MeasureAllocation(SIZE_T(Key.Len() + 1) * sizeof(TCHAR), alignof(TCHAR));
+}
+bool FSnapshotBuilder::ConstructStats(int32 Count)
+{
+	if (!bReserved || Count < 0 || Count > FNormalizedLimits::StatsGroups || Data->FirstStats)
+		return false;
+	const int32 PerSegment = StatsPerSegment();
+	if (Count && PerSegment <= 0)
+		return false;
+	for (int32 Offset = 0; Offset < Count;)
+	{
+		const int32 Elements = FMath::Min(PerSegment, Count - Offset);
+		void* Memory = AllocateChild(StatsSegmentRequest(Elements), StatsSegmentAlignment, ESnapshotAllocationKind::StatsGroups);
+		if (!Memory)
+			return false;
+		auto* Segment = new (Memory) FStatsSegment();
+		Segment->Count = Elements;
+		for (int32 Index = 0; Index < Elements; ++Index)
+			new (Segment->Values() + Index) FSnapshotStatsGroup();
+		SetConstructed(Memory, Elements);
+		if (Data->LastStats)
+			Data->LastStats->Next = Segment;
+		else
+			Data->FirstStats = Segment;
+		Data->LastStats = Segment;
+		Offset += Elements;
+		Data->NumStats = Offset;
+	}
+	return true;
+}
+bool FSnapshotBuilder::ConstructStatsGroup(const FStatsGroupSlot& Group, int32 Destination)
+{
+	if (Destination < 0 || Destination >= Data->NumStats)
+		return false;
+	FStatsSegment* Segment = Data->FirstStats;
+	while (Segment && Destination >= Segment->Count)
+	{
+		Destination -= Segment->Count;
+		Segment = Segment->Next;
+	}
+	if (!Segment)
+		return false;
+	FSnapshotStatsGroup& Out = Segment->Values()[Destination];
+	Out.Value = Group.Value;
+	const FStringView Key = Group.Key.View();
+	if (!Key.IsEmpty())
+	{
+		void* KeyMemory = AllocateChild(SIZE_T(Key.Len() + 1) * sizeof(TCHAR), alignof(TCHAR), ESnapshotAllocationKind::StatsKeys);
+		if (!KeyMemory)
+			return false;
+		FMemory::Memcpy(KeyMemory, Key.GetData(), SIZE_T(Key.Len()) * sizeof(TCHAR));
+		static_cast<TCHAR*>(KeyMemory)[Key.Len()] = TCHAR(0);
+		Allocator->Counters().TextBytesCopied.fetch_add(int64(SIZE_T(Key.Len() + 1) * sizeof(TCHAR)));
+		Out.Key = static_cast<const TCHAR*>(KeyMemory);
+		Out.KeyChars = Key.Len();
+	}
+	return true;
+}
+bool FSnapshotBuilder::MeasureLinks(int32 Count)
+{
+	if (bMeasurementFinished || bReserved || Count < 0)
+		return false;
+	return Count == 0 || MeasureAllocation(SIZE_T(Count) * sizeof(FVaRestInspectorLink), alignof(FVaRestInspectorLink));
+}
+bool FSnapshotBuilder::MeasureLink(const FStoreLinkView& Link)
+{
+	return !bMeasurementFinished && !bReserved && MeasurePublicString(Link.QueueId);
+}
+bool FSnapshotBuilder::ConstructLinks(int32 Count)
+{
+	if (!bReserved || Count < 0)
+		return false;
+	if (!Count)
+	{
+		Data->Links = nullptr;
+		Data->NumLinks = 0;
+		return true;
+	}
+	void* Memory = AllocateChild(SIZE_T(Count) * sizeof(FVaRestInspectorLink), alignof(FVaRestInspectorLink), ESnapshotAllocationKind::Links);
+	if (!Memory)
+		return false;
+	auto* Values = static_cast<FVaRestInspectorLink*>(Memory);
+	for (int32 Index = 0; Index < Count; ++Index)
+		new (Values + Index) FVaRestInspectorLink();
+	SetConstructed(Memory, Count);
+	Data->Links = Values;
+	Data->NumLinks = Count;
+	return true;
+}
+bool FSnapshotBuilder::ConstructLink(const FStoreLinkView& Link, int32 Destination)
+{
+	if (!Data->Links || Destination < 0 || Destination >= Data->NumLinks)
+		return false;
+	FVaRestInspectorLink& Out = Data->Links[Destination];
+	Out.FromRequestId = Link.FromRequestId;
+	Out.ToRequestId = Link.ToRequestId;
+	Out.bAuth = Link.bAuth;
+	Out.bTargetEvicted = Link.bTargetEvicted;
+	return ConstructPublicString(Link.QueueId, Out.QueueId);
+}
+bool FSnapshotBuilder::MeasuredCosts(int64& Outer, int64& Nested) const
+{
+	if (!bMeasurementFinished || !PayloadBound.IsSet())
+		return false;
+	Outer = int64(PayloadBound.GetValue());
+	Nested = NestedBytes;
+	return true;
+}
+int32 FSnapshotBuilder::PrivateStatsCount(const FVaRestInspectorSnapshot& Snapshot)
+{
+	return Snapshot.Data ? Snapshot.Data->NumStats : 0;
+}
+bool FSnapshotBuilder::HasPrivateStatsGroup(const FVaRestInspectorSnapshot& Snapshot, const FStatsKeyView& Key)
+{
+	if (!Snapshot.Data)
+		return false;
+	for (const FStatsSegment* Segment = Snapshot.Data->FirstStats; Segment; Segment = Segment->Next)
+		for (int32 Index = 0; Index < Segment->Count; ++Index)
+		{
+			const auto& Group = Segment->Values()[Index];
+			const FStringView Text = Group.Key ? FStringView(Group.Key, Group.KeyChars) : FStringView();
+			if (Group.Value.ScopeId == Key.ScopeId && Group.Value.ClientId == Key.ClientId &&
+				Group.Value.Endpoint == Key.Endpoint && Text == Key.Key)
+				return true;
+		}
+	return false;
+}
+bool FSnapshotBuilder::PrivateStatsHistogramsAreZero(const FVaRestInspectorSnapshot& Snapshot)
+{
+	if (!Snapshot.Data)
+		return false;
+	for (const FStatsSegment* Segment = Snapshot.Data->FirstStats; Segment; Segment = Segment->Next)
+		for (int32 Index = 0; Index < Segment->Count; ++Index)
+			for (uint64 Bin : Segment->Values()[Index].Value.Histogram)
+				if (Bin != 0)
+					return false;
+	return true;
+}
 bool FSnapshotBuilder::Publish(TSharedPtr<const FVaRestInspectorSnapshot, ESPMode::ThreadSafe>& Out)
 {
 	if (!bReserved || !Data || BuiltNestedBytes != NestedBytes || BuiltAllocationRecords != NumAllocationRecords ||
 		BuiltDirectoryPages != NumDirectoryPages || BuiltEntrySegments != NumEntrySegments || BuiltEntries != RowCount ||
 		BuiltMutableRows != NumMutableRows || BuiltExcerptReferences != NumExcerptReferences ||
-		!HasInspectorControllerCalibration<FVaRestInspectorSnapshot>(*Account->Lifetime))
+		BuiltPublicText != NumPublicText || !HasInspectorControllerCalibration<FVaRestInspectorSnapshot>(*Account->Lifetime))
 		return false;
 	const auto CurrentPayload = Allocator->Bound(sizeof(FVaRestInspectorSnapshot), alignof(FVaRestInspectorSnapshot));
 	if (!CurrentPayload.IsSet() || CurrentPayload.GetValue() != PayloadBound.GetValue())
@@ -754,6 +1057,10 @@ void FVaRestInspectorSnapshot::ForEachStats(TFunctionRef<void(const FVaRestInspe
 TConstArrayView<FVaRestInspectorLink> FVaRestInspectorSnapshot::GetLinks() const
 {
 	check(IsInGameThread());
+#if VAREST_WITH_INSPECTOR
+	if (Data && Data->NumLinks > 0)
+		return {Data->Links, Data->NumLinks};
+#endif
 	return {};
 }
 const FVaRestInspectorDiagnostics& FVaRestInspectorSnapshot::GetDiagnostics() const
