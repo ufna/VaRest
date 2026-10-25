@@ -23,10 +23,12 @@ public:
 	static IVaRestInspector& Get();
 	static IVaRestInspector* TryGet();
 	static constexpr bool IsCompiledIn() { return VAREST_WITH_INSPECTOR != 0; }
+	// GT controls are deferred during observers/visitors; initial-off first use is lazy and checked.
 	virtual void SetCapture(bool bEnabled) = 0;
 	virtual bool IsCapturing() const = 0;
 	virtual void Clear() = 0;
 	virtual uint64 GetRevision() const = 0;
+	// Stable delegate identity, including before the first capture service exists.
 	virtual FVaRestInspectorChanged& OnChanged() = 0;
 	virtual bool TrySnapshot(
 		TSharedPtr<const FVaRestInspectorSnapshot, ESPMode::ThreadSafe>& Out) const = 0;

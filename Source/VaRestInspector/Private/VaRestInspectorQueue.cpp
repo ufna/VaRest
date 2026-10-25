@@ -1,6 +1,7 @@
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 
 #include "VaRestInspectorQueue.h"
+#include "VaRestInspectorService.h"
 
 #include "Containers/MpscQueue.h"
 #include "CoreGlobals.h"
@@ -72,6 +73,7 @@ void RecordLoss(FPendingAccount& Account, int64 Bytes, bool bDropped, bool bMeta
 	if (bExcerpt)
 		AddSaturated(Account.ExcerptsSkipped);
 	AddSaturated(Account.LossEpoch);
+ if (Account.Domain && Account.LossEpoch.load(std::memory_order_acquire)==MAX_uint64) Account.Domain->LossSaturated.store(true,std::memory_order_release);
 }
 bool ScalarLayout(FPacketLayout& Layout, const FAllocationAdapter& Allocator, bool bBacklog)
 {
@@ -144,15 +146,25 @@ TOptional<int64> FCaptureQueue::BaselineCharge(const FAllocationAdapter& Allocat
 		return {};
 	return Charge;
 }
+TOptional<int64> FCaptureQueue::InternalBaselineCharge(const FAllocationAdapter& A)
+{
+ auto All=BaselineCharge(A); auto Wrapper=A.Bound(sizeof(FCaptureQueue),alignof(FCaptureQueue));
+ if (!All.IsSet() || !Wrapper.IsSet() || All.GetValue()<int64(Wrapper.GetValue())) return {};
+ return All.GetValue()-int64(Wrapper.GetValue());
+}
+FCaptureQueue::FCaptureQueue(const FCapturePolicy& P,uint64 G,TSharedRef<FPendingAccount,ESPMode::ThreadSafe> A,FAllocationAdapter& L)
+ : FCaptureQueue(P,G,MoveTemp(A),L,false) {}
+FCaptureQueue::FCaptureQueue(FQueueWrapperAdmission,const FCapturePolicy& P,uint64 G,TSharedRef<FPendingAccount,ESPMode::ThreadSafe> A,FAllocationAdapter& L)
+ : FCaptureQueue(P,G,MoveTemp(A),L,true) {}
 FCaptureQueue::FCaptureQueue(const FCapturePolicy& InPolicy, uint64 InGeneration,
-	TSharedRef<FPendingAccount, ESPMode::ThreadSafe> InAccount, FAllocationAdapter& InAllocator)
+	TSharedRef<FPendingAccount, ESPMode::ThreadSafe> InAccount,FAllocationAdapter& InAllocator,bool bFactoryWrapper)
 	: Policy(InPolicy)
 	, Generation(InGeneration)
 	, Account(MoveTemp(InAccount))
 	, Allocator(&InAllocator)
 	, Impl(static_cast<FImpl*>(nullptr), FImplDeleter{&InAllocator})
 {
-	const auto Charge = BaselineCharge(InAllocator);
+	const auto Charge=bFactoryWrapper ? InternalBaselineCharge(InAllocator) : BaselineCharge(InAllocator);
 	if (!Charge.IsSet())
 	{
 		AddSaturated(InAllocator.Counters().UnsupportedAllocator);
@@ -205,6 +217,7 @@ int64 FCaptureQueue::OutstandingExcerptReservations() const
 	return Account->ExcerptReservations.load(std::memory_order_acquire);
 }
 #if WITH_DEV_AUTOMATION_TESTS
+void FCaptureQueue::SetPublishedOrdinalForTest(uint64 Ordinal) { check(IsInGameThread() && Impl); Impl->LastPublished=Ordinal; }
 void FCaptureQueue::SetTestHooks(FQueueTestHooks* InHooks)
 {
 	check(IsInGameThread() && Impl);
@@ -213,6 +226,8 @@ void FCaptureQueue::SetTestHooks(FQueueTestHooks* InHooks)
 #endif
 EPush FCaptureQueue::TryPush(const FVaRestTraceEvent& Borrowed)
 {
+ FAdmissionEntry Entry(*Account);
+ if (!Entry) return EPush::Closed;
 	if (bClosed.load(std::memory_order_acquire))
 		return EPush::Closed;
 	if (!Impl)
@@ -250,7 +265,10 @@ EPush FCaptureQueue::TryPush(const FVaRestTraceEvent& Borrowed)
 		RecordLoss(*Account, OriginalCharge, true, Measured == EMeasure::ScalarOnly, bExcerpt);
 		return EPush::Dropped;
 	}
-	if (bClosed.load(std::memory_order_acquire))
+	// Complete admission before exposing a held reservation. After this point,
+	// the entry, ticket and queue owner keep the old generation alive through
+	// publication, even if Close or a same-bank resume changes the gate.
+	if (bClosed.load(std::memory_order_acquire) || !Entry.StillCurrent())
 		return EPush::Closed;
 	if (bScalar)
 		RecordLoss(*Account, OriginalCharge, false, !bExcerpt, bExcerpt);
@@ -273,7 +291,8 @@ EPush FCaptureQueue::TryPush(const FVaRestTraceEvent& Borrowed)
 	{
 		if (Impl->LastPublished == MAX_uint64)
 		{
-			// The GT service may now rotate to a fresh generation; never wrap.
+			// The GT service rotates through the same BeginGeneration/attach path.
+			bOrdinalOverflow.store(true,std::memory_order_release);
 			Close();
 			RecordLoss(*Account, Layout.PendingCharge, true, false, false);
 			return EPush::Dropped;
@@ -313,6 +332,11 @@ TOptional<FPacket> FCaptureQueue::TryPopExcerpt()
 {
 	check(IsInGameThread());
 	return Impl ? Impl->Excerpts.Dequeue() : TOptional<FPacket>();
+}
+uint32 FCaptureQueue::DescribeTypes(FTypeLayoutRow* Out,uint32 Capacity)
+{
+ const FTypeLayoutRow Rows[]={{TEXT("QueueWrapper"),sizeof(FCaptureQueue),alignof(FCaptureQueue),sizeof(FCaptureQueue)},{TEXT("QueueImpl"),sizeof(FImpl),alignof(FImpl),sizeof(FImpl)},{TEXT("QueueNode"),sizeof(FNodeMirror),alignof(FNodeMirror),sizeof(FNodePrefix)+sizeof(FNodeMirror)},{TEXT("QueuePrefix"),sizeof(FNodePrefix),alignof(FNodePrefix),sizeof(FNodePrefix)}};
+ for (uint32 N=0;N<UE_ARRAY_COUNT(Rows) && N<Capacity;++N) Out[N]=Rows[N]; return UE_ARRAY_COUNT(Rows);
 }
 } // namespace VaRest::Inspector::Private
 #endif

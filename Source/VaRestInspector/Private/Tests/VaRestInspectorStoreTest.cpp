@@ -1179,8 +1179,8 @@ bool FVaRestInspectorCompletionTest::RunTest(const FString& Parameters)
 			});
 			return true;
 		});
-	bAll &= WithDiagnosticStore(*this, TEXT("Completion: REQUIRED6.1 scalar queue omission and independent local owner refusal"),
-		[&](FStore& Store, FCaptureQueue& Queue, auto& Budget, auto& Pending, FAllocationLifetime& Lifetime, FVaRestVirtualClock& Clock) {
+	bAll &= WithDiagnosticStore(*this, TEXT("Completion: REQUIRED6.1 scalar queue omission"),
+		[&](FStore& Store, FCaptureQueue& Queue, auto&, auto& Pending, auto&, FVaRestVirtualClock&) {
 			if (!PushApplyExpected(*this, Queue, Store, Started(400), EPush::Accepted)) return false;
 			VisitRow(*this, Store, 400, [&](const auto& Row) { TestFalse(TEXT("ScalarOnly regression begins with clean row"), Row.bMetadataOmitted); });
 			auto Scalar = Completion(400);
@@ -1208,7 +1208,23 @@ bool FVaRestInspectorCompletionTest::RunTest(const FString& Parameters)
 				TestTrue(TEXT("upstream scalar packet really retained"), Row.Completed.Backing.Num() > 0);
 				TestTrue(TEXT("over-cap source error text never appears"), Row.Completed.Text(EText::ErrorMessage).IsEmpty());
 			});
+			return true;
+		});
+	bAll &= WithDiagnosticStore(*this, TEXT("Completion: REQUIRED6.1 independent local owner refusal"),
+		[&](FStore& Store, FCaptureQueue& Queue, auto& Budget, auto& Pending, FAllocationLifetime& Lifetime, FVaRestVirtualClock& Clock) {
 			if (!PushApplyExpected(*this, Queue, Store, Started(401), EPush::Accepted)) return false;
+			if (!TestEqual(TEXT("local refusal fixture has exactly its mutation anchor"), CountRows(Store), 1)) return false;
+			bool bOnlyStartedAnchor = false;
+			if (!VisitRow(*this, Store, 401, [&](const auto& Row) {
+				bOnlyStartedAnchor = Row.Kind == EVaRestInspectorRecordKind::Http && Row.Started.Fixed &&
+					Row.Started.Fixed->Header.Kind == EVaRestTraceKind::Started && !Row.Started.Fixed->Header.bSnapshot &&
+					Row.Started.Fixed->Scalars.RequestId == 401 && Row.bPinned && !Row.bPartial && !Row.bTerminalKnown &&
+					!Row.bActualCompletionObserved && !Row.bSealed && Row.EndState == EVaRestInspectorEndState::InFlight &&
+					!Row.Completed.Fixed && Row.Dispatches.Num() == 0 && Row.DispatchEvents.Num() == 0 &&
+					Row.Notes.Num() == 0 && Row.Excerpts.Num() == 0 && Row.Started.Excerpt.Num() == 0;
+			})) return false;
+			if (!TestTrue(TEXT("local refusal has only real nonterminal Started and no optional owners"), bOnlyStartedAnchor)) return false;
+			if (!TestTrue(TEXT("local refusal preserves genuine record count slack64"), CountRows(Store) < 64)) return false;
 			Clock.Advance(3);
 			auto Refused = Completion(401);
 			auto& Expected = Refused.Payload.Get<FVaRestTraceCompleted>();
@@ -1235,7 +1251,7 @@ bool FVaRestInspectorCompletionTest::RunTest(const FString& Parameters)
 			const uint64 UpstreamRefusalBefore = Pending->MetadataOmitted.load();
 			{
 				auto Pressure = FStoreCredit::Acquire(Budget, Budget->Limit - Budget->UsedBytes.load());
-				if (!TestTrue(TEXT("local completion pressure reserved with row count slack"), Pressure.IsSet() && CountRows(Store) == 2)) return false;
+				if (!TestTrue(TEXT("local completion pressure reserved with row count slack"), Pressure.IsSet() && CountRows(Store) == 1)) return false;
 				if (!PushApplyExpected(*this, Queue, Store, Refused, EPush::Accepted)) return false;
 				TestEqual(TEXT("local refusal does not invent upstream omission"), Pending->MetadataOmitted.load(), UpstreamRefusalBefore);
 				TestEqual(TEXT("local completion ownership refusal counted once"), Store.Diagnostics().MetadataOmitted, LocalRefusalBefore + 1);

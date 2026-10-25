@@ -1,6 +1,7 @@
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 
 #include "VaRestInspectorStore.h"
+#include "VaRestInspectorService.h"
 #include "VaRestInspectorLinks.h"
 #include "VaRestInspectorPhases.h"
 #include "VaRestInspectorSnapshot.h"
@@ -65,10 +66,10 @@ struct FStoreBlockMeasure
 	bool bSupported = false;
 };
 template <typename T>
-FStoreBlockMeasure MeasureStoreBlock(const FBudgetAccount& Account, int32 Count)
+FStoreBlockMeasure MeasureStoreBlock(const FAllocationAdapter& Adapter, int32 Count)
 {
 	FStoreBlockMeasure Result;
-	if (!Account.Lifetime || Count < 0)
+	if (Count < 0)
 		return Result;
 	if (Count == 0)
 	{
@@ -85,7 +86,6 @@ FStoreBlockMeasure MeasureStoreBlock(const FBudgetAccount& Account, int32 Count)
 	if (PerChunk <= 0)
 		return Result;
 	const int32 NumChunks = int32((int64(Count) + PerChunk - 1) / PerChunk);
-	FAllocationAdapter& Adapter = Account.Lifetime->Allocator;
 	const auto DirectoryBound = Adapter.Bound(SIZE_T(NumChunks) * sizeof(TStoreChunk<T>*), alignof(TStoreChunk<T>*));
 	if (!DirectoryBound.IsSet() || DirectoryBound.GetValue() > SIZE_T(MAX_int64) || !AddChecked(Result.Bytes, int64(DirectoryBound.GetValue()), MAX_int64))
 		return FStoreBlockMeasure{};
@@ -102,6 +102,9 @@ FStoreBlockMeasure MeasureStoreBlock(const FBudgetAccount& Account, int32 Count)
 	Result.bSupported = true;
 	return Result;
 }
+template <typename T>
+FStoreBlockMeasure MeasureStoreBlock(const FBudgetAccount& A,int32 Count)
+{ return A.Lifetime ? MeasureStoreBlock<T>(A.Lifetime->Allocator,Count) : FStoreBlockMeasure{}; }
 template <typename T>
 class TStoreBlock
 {
@@ -598,11 +601,22 @@ void FStore::FStorageDeleter::operator()(FStorage* Object) const
 FStore::FStore(const FNormalizedLimits& InLimits, TSharedRef<IVaRestClock, ESPMode::ThreadSafe> InClock)
 	: Limits(InLimits)
 	, RequestedLimits(InLimits)
-	, Clock(MoveTemp(InClock))
+	, Clock(TInPlaceType<TSharedRef<IVaRestClock,ESPMode::ThreadSafe>>(),MoveTemp(InClock))
 {
 	check(IsInGameThread());
 	State.EffectiveStoreLimit = Limits.StoreBytes;
 	State.RequestedStoreLimit = Limits.StoreBytes;
+}
+FStore::FStore(const FNormalizedLimits& L,FProductionClockTag,TSharedRef<FMonotonicReceiptClock,ESPMode::ThreadSafe> C)
+ : Limits(L),RequestedLimits(L),Clock(TInPlaceType<TSharedRef<FMonotonicReceiptClock,ESPMode::ThreadSafe>>(),MoveTemp(C))
+{
+ check(IsInGameThread());
+ State.EffectiveStoreLimit = Limits.StoreBytes;
+ State.RequestedStoreLimit = Limits.StoreBytes;
+}
+double FStore::ReceiptNow() const
+{
+ return Clock.IsType<TSharedRef<IVaRestClock,ESPMode::ThreadSafe>>() ? Clock.Get<TSharedRef<IVaRestClock,ESPMode::ThreadSafe>>()->Now() : Clock.Get<TSharedRef<FMonotonicReceiptClock,ESPMode::ThreadSafe>>()->Now();
 }
 FStore::~FStore()
 {
@@ -630,12 +644,11 @@ bool FStore::CalibrateRows(FAllocationLifetime& Lifetime, std::atomic<int64>& St
 		HasInspectorControllerCalibration<FRow>(Lifetime) && HasInspectorControllerCalibration<FDispatchHeaderOwner>(Lifetime) &&
 		HasInspectorControllerCalibration<FVaRestInspectorSnapshot>(Lifetime);
 }
-FStoreStoragePlan FStore::MeasureStoragePlan(const FNormalizedLimits& InLimits, const FBudgetAccount& Account)
+FStoreStoragePlan FStore::MeasureStoragePlan(const FNormalizedLimits& L,const FBudgetAccount& A)
+{ if (!A.Lifetime) return {}; FNormalizedLimits Measured=L; Measured.StoreBytes=A.Limit; return MeasureProductionStoragePlan(Measured,A.Lifetime->Allocator,A.BootstrapBytes); }
+FStoreStoragePlan FStore::MeasureProductionStoragePlan(const FNormalizedLimits& InLimits,const FAllocationAdapter& Allocator,int64 Bootstrap)
 {
 	FStoreStoragePlan Plan;
-	if (!Account.Lifetime)
-		return Plan;
-	FAllocationAdapter& Allocator = Account.Lifetime->Allocator;
 	const auto SelfBound = Allocator.Bound(sizeof(FStorage), alignof(FStorage));
 	const auto RowBound = Allocator.Bound(sizeof(FRow), alignof(FRow));
 	const auto PacketBound = Allocator.Bound(sizeof(FPacketFixed), alignof(FPacketFixed));
@@ -665,7 +678,7 @@ FStoreStoragePlan FStore::MeasureStoragePlan(const FNormalizedLimits& InLimits, 
 		Plan.StatsIndexCapacity = NamedStats ? NextPow2(NamedStats * 2) : 0;
 		Plan.LinkIndexCapacity = NextPow2(Plan.LinkCapacity * 2);
 		Plan.LinkTargetCapacity = NextPow2(Plan.LinkCapacity * 2);
-		Plan.FixedBytes = Account.BootstrapBytes;
+		Plan.FixedBytes = Bootstrap;
 		Plan.MinimumHttpBytes = 0;
 		bool bValid = AddChecked(Plan.FixedBytes, int64(SelfBound.GetValue()), MAX_int64) &&
 			AddChecked(Plan.FixedBytes, int64(OverflowBound.GetValue()), MAX_int64) &&
@@ -676,17 +689,17 @@ FStoreStoragePlan FStore::MeasureStoragePlan(const FNormalizedLimits& InLimits, 
 		const auto AddMeasure = [&Plan](const FStoreBlockMeasure& Measure) {
 			return Measure.bSupported && AddChecked(Plan.FixedBytes, Measure.Bytes, MAX_int64);
 		};
-		bValid = bValid && AddMeasure(MeasureStoreBlock<FStorage::FIndexEntry>(Account, Plan.IndexCapacity)) &&
-			AddMeasure(MeasureStoreBlock<FArrivalEntry>(Account, Plan.ArrivalCapacity)) &&
-			AddMeasure(MeasureStoreBlock<FClientEntry>(Account, Plan.ClientCapacity)) &&
-			AddMeasure(MeasureStoreBlock<FClientLookupEntry>(Account, Plan.ClientLookupCapacity)) &&
-			AddMeasure(MeasureStoreBlock<FStorage::FDeadlineEntry>(Account, Plan.DeadlineCapacity)) &&
-			AddMeasure(MeasureStoreBlock<FStorage::FRetainedIdEntry>(Account, Plan.RetainedCapacity)) &&
-			AddMeasure(MeasureStoreBlock<FStorage::FRetainedLookupEntry>(Account, Plan.RetainedLookupCapacity)) &&
-			AddMeasure(MeasureStoreBlock<FStatsIndexEntry>(Account, Plan.StatsIndexCapacity)) &&
-			AddMeasure(MeasureStoreBlock<FLinkEntry>(Account, Plan.LinkCapacity)) &&
-			AddMeasure(MeasureStoreBlock<FLinkForwardEntry>(Account, Plan.LinkIndexCapacity)) &&
-			AddMeasure(MeasureStoreBlock<FLinkTargetEntry>(Account, Plan.LinkTargetCapacity));
+		bValid = bValid && AddMeasure(MeasureStoreBlock<FStorage::FIndexEntry>(Allocator, Plan.IndexCapacity)) &&
+			AddMeasure(MeasureStoreBlock<FArrivalEntry>(Allocator, Plan.ArrivalCapacity)) &&
+			AddMeasure(MeasureStoreBlock<FClientEntry>(Allocator, Plan.ClientCapacity)) &&
+			AddMeasure(MeasureStoreBlock<FClientLookupEntry>(Allocator, Plan.ClientLookupCapacity)) &&
+			AddMeasure(MeasureStoreBlock<FStorage::FDeadlineEntry>(Allocator, Plan.DeadlineCapacity)) &&
+			AddMeasure(MeasureStoreBlock<FStorage::FRetainedIdEntry>(Allocator, Plan.RetainedCapacity)) &&
+			AddMeasure(MeasureStoreBlock<FStorage::FRetainedLookupEntry>(Allocator, Plan.RetainedLookupCapacity)) &&
+			AddMeasure(MeasureStoreBlock<FStatsIndexEntry>(Allocator, Plan.StatsIndexCapacity)) &&
+			AddMeasure(MeasureStoreBlock<FLinkEntry>(Allocator, Plan.LinkCapacity)) &&
+			AddMeasure(MeasureStoreBlock<FLinkForwardEntry>(Allocator, Plan.LinkIndexCapacity)) &&
+			AddMeasure(MeasureStoreBlock<FLinkTargetEntry>(Allocator, Plan.LinkTargetCapacity));
 		if (!bValid)
 		{
 			Plan.bSupported = false;
@@ -694,7 +707,7 @@ FStoreStoragePlan FStore::MeasureStoragePlan(const FNormalizedLimits& InLimits, 
 			return Plan;
 		}
 		Plan.bSupported = true;
-		Plan.bFits = Plan.FixedBytes <= Account.Limit / 4 && Plan.FixedBytes + Plan.MinimumHttpBytes <= Account.Limit;
+		Plan.bFits = Plan.FixedBytes <= InLimits.StoreBytes / 4 && Plan.FixedBytes + Plan.MinimumHttpBytes <= InLimits.StoreBytes;
 		if (Plan.bFits)
 			return Plan;
 		if (Plan.ClientCapacity > 1)
@@ -721,51 +734,58 @@ bool FStore::Initialize(TRefCountPtr<FBudgetAccount> InAccount)
 	OriginatingAccountIdentity = Identity;
 	return true;
 }
-bool FStore::InitializeStorage(TRefCountPtr<FBudgetAccount> InAccount)
+bool FStore::InitializeStorage(TRefCountPtr<FBudgetAccount> A)
 {
+ check(IsInGameThread());
+ if (bEnumerating) return false;
+ if (Storage) return Budget==A;
+ FStoragePtr Candidate;
+ EStorageFailure Failure=EStorageFailure::None;
+ if (!BuildStorage(Limits,A,Candidate,Failure)) { if (Failure==EStorageFailure::Unsupported) Increment(State.UnsupportedAllocator); else Increment(State.RefusedRows); return false; }
+ ProductionDomain=A->Domain; Budget=MoveTemp(A); Storage=MoveTemp(Candidate); return true;
+}
+bool FStore::BuildStorage(const FNormalizedLimits& ExplicitLimits,TRefCountPtr<FBudgetAccount> InAccount,FStoragePtr& Out,EStorageFailure& Failure)
+{
+ Failure=EStorageFailure::Unsupported;
 	check(IsInGameThread());
-	if (bEnumerating)
-		return false;
-	if (!InAccount || !InAccount->Lifetime || InAccount->Limit != Limits.StoreBytes ||
+	if (!InAccount || !InAccount->Lifetime || InAccount->Limit != ExplicitLimits.StoreBytes ||
 		InAccount->BootstrapBytes < 4096 || InAccount->BootstrapBytes > InAccount->Limit ||
-		Limits.MaxRecords < 1 || Limits.MaxRecords > 65536 || Limits.StoreBytes <= 0 ||
+		ExplicitLimits.MaxRecords < 1 || ExplicitLimits.MaxRecords > 65536 || ExplicitLimits.StoreBytes <= 0 ||
 		!HasInspectorControllerCalibration<FRow>(*InAccount->Lifetime) ||
 		!HasInspectorControllerCalibration<FDispatchHeaderOwner>(*InAccount->Lifetime) ||
 		!HasInspectorControllerCalibration<FVaRestInspectorSnapshot>(*InAccount->Lifetime))
 	{
-		Increment(State.UnsupportedAllocator);
+
 		return false;
 	}
-	if (Storage)
-		return Budget == InAccount;
-	const FStoreStoragePlan Plan = MeasureStoragePlan(Limits, *InAccount);
+	const FStoreStoragePlan Plan = MeasureStoragePlan(ExplicitLimits, *InAccount);
 	if (!Plan.bSupported)
 	{
-		Increment(State.UnsupportedAllocator);
+
 		return false;
 	}
 	if (!Plan.bFits)
 	{
-		Increment(State.RefusedRows);
+		Failure=EStorageFailure::Refused;
 		return false;
 	}
 	FAllocationAdapter& Allocator = InAccount->Lifetime->Allocator;
 	const auto SelfBound = Allocator.Bound(sizeof(FStorage), alignof(FStorage));
 	if (!SelfBound.IsSet())
 	{
-		Increment(State.UnsupportedAllocator);
+
 		return false;
 	}
 	auto Credit = FStoreCredit::Acquire(InAccount, int64(SelfBound.GetValue()));
 	if (!Credit.IsSet())
 	{
-		Increment(State.RefusedRows);
+		Failure=EStorageFailure::Refused;
 		return false;
 	}
 	void* Memory = Allocator.AllocateReserved(sizeof(FStorage), alignof(FStorage), SelfBound.GetValue());
 	if (!Memory)
 	{
-		Increment(State.UnsupportedAllocator);
+
 		return false;
 	}
 	TUniquePtr<FStorage, FStorageDeleter> Candidate(new (Memory) FStorage(MoveTemp(Credit.GetValue())));
@@ -776,25 +796,25 @@ bool FStore::InitializeStorage(TRefCountPtr<FBudgetAccount> InAccount)
 		!Candidate->Links.Allocate(InAccount, Plan.LinkCapacity) || !Candidate->LinkForward.Allocate(InAccount, Plan.LinkIndexCapacity) ||
 		!Candidate->LinkTargets.Allocate(InAccount, Plan.LinkTargetCapacity))
 	{
-		Increment(State.RefusedRows);
+		Failure=EStorageFailure::Refused;
 		return false;
 	}
 	const auto OverflowBound = Allocator.Bound(sizeof(FStatsGroupSlot), alignof(FStatsGroupSlot));
 	if (!OverflowBound.IsSet())
 	{
-		Increment(State.UnsupportedAllocator);
+
 		return false;
 	}
 	auto OverflowCredit = FStoreCredit::Acquire(InAccount, int64(OverflowBound.GetValue()));
 	if (!OverflowCredit.IsSet())
 	{
-		Increment(State.RefusedRows);
+		Failure=EStorageFailure::Refused;
 		return false;
 	}
 	void* OverflowMemory = Allocator.AllocateReserved(sizeof(FStatsGroupSlot), alignof(FStatsGroupSlot), OverflowBound.GetValue());
 	if (!OverflowMemory)
 	{
-		Increment(State.UnsupportedAllocator);
+
 		return false;
 	}
 	Candidate->OverflowStats.Reset(new (OverflowMemory) FStatsGroupSlot());
@@ -807,8 +827,7 @@ bool FStore::InitializeStorage(TRefCountPtr<FBudgetAccount> InAccount)
 	Candidate->RetainedCapacity = Plan.RetainedCapacity;
 	Candidate->RetainedLookupCapacity = Plan.RetainedLookupCapacity;
 	Candidate->Plan = Plan;
-	Budget = MoveTemp(InAccount);
-	Storage = MoveTemp(Candidate);
+	Out=MoveTemp(Candidate); Failure=EStorageFailure::None;
 	return true;
 }
 FStore::FRow* FStore::Find(uint64 RequestId) const
@@ -1538,8 +1557,11 @@ void FStore::ApplyClient(uint64 ClientId, uint64 ScopeId, bool bCreated, FString
 	Entry->Label = static_cast<TCHAR*>(Memory);
 	Entry->Chars = Label.Len();
 }
-bool FStore::ApplyAttached(const FVaRestTraceSnapshot& Snapshot, const FCapturePolicy& Policy,
-	TSharedRef<FPendingAccount, ESPMode::ThreadSafe> Pending, FAllocationAdapter& Allocator)
+bool FStore::ApplyAttached(const FVaRestTraceSnapshot& S,const FCapturePolicy& P,TSharedRef<FPendingAccount,ESPMode::ThreadSafe> A,FAllocationAdapter& V)
+{ return ApplyAttachedAtWatermark(S,P,MoveTemp(A),V,LastConsumedMetadataOrdinal); }
+bool FStore::ApplyAttached(const FVaRestTraceSnapshot& S,const FCapturePolicy& P,TSharedRef<FPendingAccount,ESPMode::ThreadSafe> A,FAllocationAdapter& V,uint64 W)
+{ return ApplyAttachedAtWatermark(S,P,MoveTemp(A),V,W); }
+bool FStore::ApplyAttachedAtWatermark(const FVaRestTraceSnapshot& Snapshot,const FCapturePolicy& Policy,TSharedRef<FPendingAccount,ESPMode::ThreadSafe> Pending,FAllocationAdapter& Allocator,uint64 BirthEligibilityWatermark)
 {
 	check(IsInGameThread());
 	if (!Storage || bEnumerating)
@@ -1566,7 +1588,7 @@ bool FStore::ApplyAttached(const FVaRestTraceSnapshot& Snapshot, const FCaptureP
 	for (const FVaRestTraceStarted& Borrowed : Snapshot.InFlight)
 		ApplyAttachedStarted(Borrowed, Policy, Pending, Allocator);
 	ForEachRow([&](FRow& Row) {
-		if (Row.Value.bTerminalKnown || Row.Value.bSealed || Row.Value.BirthMetadataOrdinal > LastConsumedMetadataOrdinal || Row.PresenceStamp == CurrentReconciliationStamp)
+		if (Row.Value.bTerminalKnown || Row.Value.bSealed || Row.Value.BirthMetadataOrdinal > BirthEligibilityWatermark || Row.PresenceStamp == CurrentReconciliationStamp)
 			return;
 		if (Row.Value.bPinned)
 			Increment(State.InterruptedRows);
@@ -1753,7 +1775,7 @@ void FStore::ApplyCompletion(FRow& Row, FPacket& Packet)
 	Row.Value.bPinned = false;
 	// Keep even a nonfinite receipt unknown. Only the first real completion
 	// reaches this path; source absence/attachment never creates this evidence.
-	Row.Value.CompletedObservedAt = Clock->Now();
+	Row.Value.CompletedObservedAt = ReceiptNow();
 	Row.Value.CompletedAt = Row.CompletionFixed.Header.Time;
 	Row.Value.FinalStatus = Scalars.Status;
 	Row.Value.FinalBodyBytes = Scalars.DeliveredBodyBytes;
@@ -1913,7 +1935,7 @@ int32 FStore::ExpirePendingExcerpts()
 		bExpiryPending = true;
 		return 0;
 	}
-	const double Now = Clock->Now();
+	const double Now = ReceiptNow();
 	if (!FMath::IsFinite(Now))
 		return 0;
 	int32 Expired = 0;
@@ -1942,6 +1964,20 @@ int32 FStore::ExpirePendingExcerpts()
 		++Expired;
 	}
 	return Expired;
+}
+void FStore::InterruptOpenRows()
+{
+ check(IsInGameThread());
+ if (bEnumerating) { bInterruptPending=true; return; }
+ ForEachRow([&](FRow& Row) {
+  if (Row.Value.bSealed || Row.Value.bTerminalKnown || (!Row.Value.bPinned && Row.Value.EndState==EVaRestInspectorEndState::CaptureInterrupted && !HasPendingExcerpt(Row))) return;
+  if (Row.Value.bPinned) Increment(State.InterruptedRows);
+  Row.Value.bPinned=false; Row.Value.bPartial=true; Row.Value.EndState=EVaRestInspectorEndState::CaptureInterrupted; Row.Evidence=ELivenessEvidence::None;
+  if (Row.Value.RequestExcerptState==EVaRestInspectorDetailState::Pending) Row.Value.RequestExcerptState=EVaRestInspectorDetailState::CaptureStopped;
+  for (int32 N=0;N<Row.NumDispatches;++N) if (Row.Dispatches[N]->ResponseExcerptState==EVaRestInspectorDetailState::Pending) Row.Dispatches[N]->ResponseExcerptState=EVaRestInspectorDetailState::CaptureStopped;
+  CloseStats(Row,EStatsClosure::AttachedAbsent);
+  CompleteMutation(Row);
+ });
 }
 void FStore::StopPendingExcerpts()
 {
@@ -2240,7 +2276,7 @@ bool FStore::TryAdmitQueueExpiredMarker(FRow& SourceRow, uint64 NoteSerial)
 		Info.SourceSeq = Fixed.Header.Seq;
 		Info.SourceTime = Fixed.Header.Time;
 		Info.CauseRequestId = Fixed.Scalars.RequestId;
-		Info.ObservedAt = Clock->Now();
+		Info.ObservedAt = ReceiptNow();
 		Info.QueueId = Note.Text(EText::QueueId);
 		return TryAdmitInternalMarker(Info, SourceRow.Value.ScopeId, SourceRow.Value.ClientId,
 			SourceRow.Value.bContextKnown, Fixed.Header.bMetadataOmitted, {SourceRow.IndexSlot, SourceRow.IndexSlot});
@@ -2737,7 +2773,7 @@ void FStore::ObserveQueueLoss(uint64 InGeneration, const FPendingAccount& Source
 	Storage->bLossEpisode = true;
 	if (bAttempt)
 	{
-		Info.ObservedAt = Clock->Now();
+		Info.ObservedAt = ReceiptNow();
 		TryAdmitInternalMarker(Info, 0, 0, false, false, {});
 	}
 }
@@ -2805,6 +2841,7 @@ void FStore::FlushDeferred()
 		Clear();
 		return;
 	}
+	if (bInterruptPending) { bInterruptPending=false; InterruptOpenRows(); }
 	if (bStopPending)
 	{
 		bStopPending = false;
@@ -2847,6 +2884,7 @@ void FStore::BeginGeneration(uint64 InGeneration, uint64 ConsumedOrdinal)
 }
 void FStore::Clear()
 {
+	RecordCumulativeDiagnostics();
 	check(IsInGameThread());
 	if (bEnumerating)
 	{
@@ -2885,6 +2923,7 @@ void FStore::Clear()
 	Storage->bProcessObserved = Storage->bProcessOpen = false;
 	State.DroppedEvents = State.DroppedBytes = State.MetadataOmitted = State.ExcerptsSkipped = 0;
 	State.bLossCountersSaturated = false;
+	RecordCumulativeDiagnostics();
 	ResetLossObservation();
 	CurrentReconciliationStamp = 0;
 	OrphanEpoch = 0;
@@ -2903,6 +2942,7 @@ void FStore::RequestLimits(const FNormalizedLimits& Requested)
 }
 void FStore::ReleaseFixedStorage()
 {
+	RecordCumulativeDiagnostics();
 	check(IsInGameThread() && !bEnumerating);
 	if (Budget)
 	{
@@ -3696,6 +3736,7 @@ void FStore::NoteUnsupportedPublicStrings() const
 }
 bool FStore::TrySnapshot(TSharedPtr<const FVaRestInspectorSnapshot, ESPMode::ThreadSafe>& Out) const
 {
+	if (ProductionDomain && ProductionDomain->Identity.DomainPhase==EDomainPhase::Recreating) return false;
 	check(IsInGameThread());
 	if (!Storage || !Budget || !Budget->Lifetime ||
 		!HasInspectorControllerCalibration<FRow>(*Budget->Lifetime) ||
@@ -3874,6 +3915,7 @@ bool FStore::ForEachRecord(TFunctionRef<void(const FVaRestInspectorRecordView&)>
 FVaRestInspectorDiagnostics FStore::Diagnostics() const
 {
 	check(IsInGameThread());
+	RecordCumulativeDiagnostics();
 	FVaRestInspectorDiagnostics Result = State;
 	if (Budget)
 	{
@@ -3881,7 +3923,74 @@ FVaRestInspectorDiagnostics FStore::Diagnostics() const
 		Result.StorePeakBytes = Budget->PeakBytes.load();
 		Result.SnapshotControllers = int32(Budget->SnapshotControllers.load());
 	}
+ if (ProductionDomain)
+ { Result.StoreBytes=ProductionDomain->StoreTotal.load(); Result.StorePeakBytes=ProductionDomain->StorePeak.load(); Result.PendingBytes=ProductionDomain->PendingTotal.load(); Result.PendingPeakBytes=ProductionDomain->PendingPeak.load(); }
 	return Result;
+}
+
+bool FStore::CalibrateRows(FAllocationLifetime& L,FReservationDomain& D)
+{
+ using R=SharedPointerInternals::TReferenceControllerWithDeleter<FRow,TInspectorDeleter<FRow>,ESPMode::ThreadSafe>;
+ using H=SharedPointerInternals::TReferenceControllerWithDeleter<FDispatchHeaderOwner,TInspectorDeleter<FDispatchHeaderOwner>,ESPMode::ThreadSafe>;
+ using S=SharedPointerInternals::TReferenceControllerWithDeleter<FVaRestInspectorSnapshot,TInspectorDeleter<FVaRestInspectorSnapshot>,ESPMode::ThreadSafe>;
+ static_assert(sizeof(R)==sizeof(H) && sizeof(R)==sizeof(S)); static_assert(alignof(R)==alignof(H) && alignof(R)==alignof(S));
+ if (!L.Allocator.Calibrate(D,EControllerShape::Row,sizeof(R),alignof(R))) return false;
+ D.Identity.Certificates[uint8(EControllerShape::DispatchHeader)]=D.Identity.Certificates[uint8(EControllerShape::Row)];
+ D.Identity.Certificates[uint8(EControllerShape::Snapshot)]=D.Identity.Certificates[uint8(EControllerShape::Row)];
+ return HasInspectorControllerCalibration<FRow>(L) && HasInspectorControllerCalibration<FDispatchHeaderOwner>(L) && HasInspectorControllerCalibration<FVaRestInspectorSnapshot>(L);
+}
+FStore::FPreparedAccountChange::FPreparedAccountChange()=default;
+FStore::FPreparedAccountChange::~FPreparedAccountChange() { Storage.Reset(); Control.Reset(); Pending.Reset(); Budget.SafeRelease(); }
+FStore::FPreparedAccountChange::FPreparedAccountChange(FPreparedAccountChange&& O) noexcept
+ : Effective(O.Effective),Plan(O.Plan),Storage(MoveTemp(O.Storage)),Budget(MoveTemp(O.Budget)),Pending(MoveTemp(O.Pending)),Control(MoveTemp(O.Control)),BankSerial(O.BankSerial) {}
+TOptional<FStore::FPreparedAccountChange> FStore::PrepareAccountChange(const FNormalizedLimits& E,TRefCountPtr<FBudgetAccount> A,TSharedRef<FPendingAccount,ESPMode::ThreadSafe> P,FRecreationStagingPermit& Permit)
+{
+ check(IsInGameThread());
+ if (Storage || Budget || bEnumerating || !A || !A->Domain || !Permit.Valid(*A->Domain,A->Bank) || A->Domain!=P->Domain || A->Domain->Identity.DomainPhase!=EDomainPhase::Recreating || A->Domain->GateWord.load()!=FReservationDomain::ClosedBit) return {};
+ FPreparedAccountChange Prepared; Prepared.Effective=E; Prepared.Budget=A; Prepared.Pending=P; Prepared.BankSerial=A->Domain->Identity.Banks[A->Bank].Serial;
+ Prepared.Control.Emplace(*A); Prepared.Plan=MeasureStoragePlan(E,*A);
+ EStorageFailure Failure=EStorageFailure::None;
+ if (!Prepared.Plan.bSupported || !Prepared.Plan.bFits || !BuildStorage(E,A,Prepared.Storage,Failure)) { if (Failure==EStorageFailure::Unsupported) Increment(State.UnsupportedAllocator); else Increment(State.RefusedRows); return {}; }
+ return TOptional<FPreparedAccountChange>(MoveTemp(Prepared));
+}
+void FStore::CommitAccountChange(FPreparedAccountChange&& P,FRootQuiescenceProof&& Proof) noexcept
+{
+ check(!bEnumerating && !Storage && !Budget && P.Storage && P.Budget && P.Pending);
+ check(Proof.Permit && Proof.Permit->Valid(*P.Budget->Domain,P.Budget->Bank));
+ check(P.Budget->Domain && P.Budget->Domain->Identity.DomainPhase==EDomainPhase::Recreating && P.Budget->Domain->GateWord.load()==FReservationDomain::ClosedBit);
+ Limits=P.Effective; RequestedLimits=P.Effective; Storage=MoveTemp(P.Storage); Budget=MoveTemp(P.Budget);
+ OriginatingPending=P.Pending; OriginatingAccountIdentity=Budget->Identity; bOriginatingPendingBound=true;
+ LossWitness=P.Pending; bLossWitnessBound=true; GenerationLossEpoch=LossWitness->LossEpoch.load(); bLossDirty=true;
+ State.EffectiveStoreLimit=Limits.StoreBytes; State.RequestedStoreLimit=Limits.StoreBytes; State.bPendingLimits=false;
+}
+uint32 FStore::DescribeTypes(FTypeLayoutRow* Out,uint32 Capacity)
+{
+ using R=SharedPointerInternals::TReferenceControllerWithDeleter<FRow,TInspectorDeleter<FRow>,ESPMode::ThreadSafe>;
+ using H=SharedPointerInternals::TReferenceControllerWithDeleter<FDispatchHeaderOwner,TInspectorDeleter<FDispatchHeaderOwner>,ESPMode::ThreadSafe>;
+ using S=SharedPointerInternals::TReferenceControllerWithDeleter<FVaRestInspectorSnapshot,TInspectorDeleter<FVaRestInspectorSnapshot>,ESPMode::ThreadSafe>;
+ const FTypeLayoutRow Rows[]={{TEXT("StoreRow"),sizeof(FRow),alignof(FRow),sizeof(FRow)},{TEXT("StoreFixed"),sizeof(FStorage),alignof(FStorage),sizeof(FStorage)},{TEXT("Controller:Row"),sizeof(R),alignof(R),sizeof(R)},{TEXT("Controller:Header"),sizeof(H),alignof(H),sizeof(H)},{TEXT("Controller:Snapshot"),sizeof(S),alignof(S),sizeof(S)},{TEXT("PrivateStatsGroup"),sizeof(FStatsGroup),alignof(FStatsGroup),sizeof(FStatsGroup)},{TEXT("PublicStatsGroup"),sizeof(FVaRestInspectorHttpStats),alignof(FVaRestInspectorHttpStats),sizeof(FVaRestInspectorHttpStats)}};
+ for (uint32 N=0;N<UE_ARRAY_COUNT(Rows) && N<Capacity;++N) Out[N]=Rows[N]; return UE_ARRAY_COUNT(Rows);
+}
+void FStore::RecordCumulativeDiagnostics() const
+{
+ if (!ProductionDomain) return;
+ // Checkpoint of per-capture diagnostics, never an admission meter. Clear may reset its semantic counters.
+ auto Add=[](uint64& C,uint64 Delta) { C=Delta>MAX_uint64-C?MAX_uint64:C+Delta; };
+ { const uint64 Current=State.DroppedEvents; const uint64 Delta=Current>=CumulativeCheckpoint.DroppedEvents?Current-CumulativeCheckpoint.DroppedEvents:Current; Add(ProductionDomain->Identity.CumulativeRefusals.DroppedEvents,Delta); CumulativeCheckpoint.DroppedEvents=Current; }
+ { const uint64 Current=State.DroppedBytes; const uint64 Delta=Current>=CumulativeCheckpoint.DroppedBytes?Current-CumulativeCheckpoint.DroppedBytes:Current; Add(ProductionDomain->Identity.CumulativeRefusals.DroppedBytes,Delta); CumulativeCheckpoint.DroppedBytes=Current; }
+ { const uint64 Current=State.RefusedRows; const uint64 Delta=Current>=CumulativeCheckpoint.RefusedRows?Current-CumulativeCheckpoint.RefusedRows:Current; Add(ProductionDomain->Identity.CumulativeRefusals.RefusedRows,Delta); CumulativeCheckpoint.RefusedRows=Current; }
+ { const uint64 Current=State.MetadataOmitted; const uint64 Delta=Current>=CumulativeCheckpoint.MetadataOmitted?Current-CumulativeCheckpoint.MetadataOmitted:Current; Add(ProductionDomain->Identity.CumulativeRefusals.MetadataOmitted,Delta); CumulativeCheckpoint.MetadataOmitted=Current; }
+ { const uint64 Current=State.UnsupportedAllocator; const uint64 Delta=Current>=CumulativeCheckpoint.UnsupportedAllocator?Current-CumulativeCheckpoint.UnsupportedAllocator:Current; Add(ProductionDomain->Identity.CumulativeRefusals.UnsupportedAllocator,Delta); CumulativeCheckpoint.UnsupportedAllocator=Current; }
+ { const uint64 Current=State.InterruptedRows; const uint64 Delta=Current>=CumulativeCheckpoint.InterruptedRows?Current-CumulativeCheckpoint.InterruptedRows:Current; Add(ProductionDomain->Identity.CumulativeRefusals.InterruptedRows,Delta); CumulativeCheckpoint.InterruptedRows=Current; }
+ { const uint64 Current=State.AttachLosses; const uint64 Delta=Current>=CumulativeCheckpoint.AttachLosses?Current-CumulativeCheckpoint.AttachLosses:Current; Add(ProductionDomain->Identity.CumulativeRefusals.AttachLosses,Delta); CumulativeCheckpoint.AttachLosses=Current; }
+ { const uint64 Current=State.OmittedClients; const uint64 Delta=Current>=CumulativeCheckpoint.OmittedClients?Current-CumulativeCheckpoint.OmittedClients:Current; Add(ProductionDomain->Identity.CumulativeRefusals.OmittedClients,Delta); CumulativeCheckpoint.OmittedClients=Current; }
+ { const uint64 Current=State.ContractViolations; const uint64 Delta=Current>=CumulativeCheckpoint.ContractViolations?Current-CumulativeCheckpoint.ContractViolations:Current; Add(ProductionDomain->Identity.CumulativeRefusals.ContractViolations,Delta); CumulativeCheckpoint.ContractViolations=Current; }
+ { const uint64 Current=State.OmittedStatsGroups; const uint64 Delta=Current>=CumulativeCheckpoint.OmittedStatsGroups?Current-CumulativeCheckpoint.OmittedStatsGroups:Current; Add(ProductionDomain->Identity.CumulativeRefusals.OmittedStatsGroups,Delta); CumulativeCheckpoint.OmittedStatsGroups=Current; }
+ { const uint64 Current=State.OmittedLinks; const uint64 Delta=Current>=CumulativeCheckpoint.OmittedLinks?Current-CumulativeCheckpoint.OmittedLinks:Current; Add(ProductionDomain->Identity.CumulativeRefusals.OmittedLinks,Delta); CumulativeCheckpoint.OmittedLinks=Current; }
+ { const uint64 Current=State.OmittedMarkers; const uint64 Delta=Current>=CumulativeCheckpoint.OmittedMarkers?Current-CumulativeCheckpoint.OmittedMarkers:Current; Add(ProductionDomain->Identity.CumulativeRefusals.OmittedMarkers,Delta); CumulativeCheckpoint.OmittedMarkers=Current; }
+ { const uint64 Current=State.OmittedScopes; const uint64 Delta=Current>=CumulativeCheckpoint.OmittedScopes?Current-CumulativeCheckpoint.OmittedScopes:Current; Add(ProductionDomain->Identity.CumulativeRefusals.OmittedScopes,Delta); CumulativeCheckpoint.OmittedScopes=Current; }
+ { const uint64 Current=State.ExcerptsSkipped; const uint64 Delta=Current>=CumulativeCheckpoint.ExcerptsSkipped?Current-CumulativeCheckpoint.ExcerptsSkipped:Current; Add(ProductionDomain->Identity.CumulativeRefusals.ExcerptsSkipped,Delta); CumulativeCheckpoint.ExcerptsSkipped=Current; }
+ if (State.bLossCountersSaturated || ProductionDomain->Pending.LossEpoch.load()==MAX_uint64) ProductionDomain->LossSaturated.store(true,std::memory_order_release);
 }
 } // namespace VaRest::Inspector::Private
 #endif

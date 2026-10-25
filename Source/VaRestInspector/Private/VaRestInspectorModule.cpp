@@ -15,6 +15,10 @@
 #include "Misc/Parse.h"
 #include "Modules/ModuleManager.h"
 #include "VaRestInspectorPolicy.h"
+#include "VaRestInspectorService.h"
+#include "VaRestInspectorSettings.h"
+#include "Misc/App.h"
+#include "UObject/UObjectGlobals.h"
 
 namespace VaRest::Inspector::Private
 {
@@ -77,6 +81,9 @@ void BeginShutdown()
 }
 } // namespace
 
+FSupportedAllocator InspectCurrentAllocatorForFactory()
+{ return !bShuttingDown ? InspectAllocator() : FSupportedAllocator(); }
+
 FSupportedAllocator GetSupportedAllocator()
 {
 	check(IsInGameThread());
@@ -87,61 +94,108 @@ FSupportedAllocator GetSupportedAllocator()
 class FVaRestInspectorModule final : public IVaRestInspector
 {
 public:
-	virtual void StartupModule() override
-	{
-		check(IsInGameThread());
-		VaRest::Inspector::Private::BootstrapSupport = VaRest::Inspector::Private::InspectAllocator();
-		VaRest::Inspector::Private::bBootstrapInspected = true;
-		PreExitHandle = FCoreDelegates::OnPreExit.AddStatic(&VaRest::Inspector::Private::BeginShutdown);
-	}
-	virtual void ShutdownModule() override
-	{
-		check(IsInGameThread());
-		VaRest::Inspector::Private::BeginShutdown();
-		FCoreDelegates::OnPreExit.Remove(PreExitHandle);
-		PreExitHandle.Reset();
-		Changed.Clear();
-	}
-	virtual bool SupportsDynamicReloading() override { return false; }
-	virtual void SetCapture(bool bEnabled) override { check(IsInGameThread()); }
-	virtual bool IsCapturing() const override
-	{
-		check(IsInGameThread());
-		return false;
-	}
-	virtual void Clear() override { check(IsInGameThread()); }
-	virtual uint64 GetRevision() const override
-	{
-		check(IsInGameThread());
-		return 0;
-	}
-	virtual FVaRestInspectorChanged& OnChanged() override
-	{
-		check(IsInGameThread());
-		return Changed;
-	}
-	virtual bool TrySnapshot(TSharedPtr<const FVaRestInspectorSnapshot, ESPMode::ThreadSafe>& Out) const override
-	{
-		check(IsInGameThread());
-		if (VaRest::Inspector::Private::bShuttingDown)
-			return false;
+ void StartupModule() override
+ {
+  check(IsInGameThread());
+  using namespace VaRest::Inspector::Private;
+  bShuttingDown=false;
+  BootstrapSupport=InspectAllocator(); bBootstrapInspected=true; // Pure facts, always uncalibrated, including meaningful initial-off.
 #if VAREST_WITH_INSPECTOR
-		(void)Out;
-		return false;
-#else
-		Out = MakeShared<FVaRestInspectorSnapshot, ESPMode::ThreadSafe>();
-		return true;
+  Policy=CurrentPolicy();
+  const auto* Settings=GetDefault<UVaRestInspectorSettings>();
+  const bool Enabled=FService::InitialCapturePolicy(GIsEditor,FApp::IsUnattended(),Settings->bCaptureInEditor,Settings->bCaptureInPackaged,FCommandLine::Get());
+#if WITH_DEV_AUTOMATION_TESTS
+  if (!Enabled)
+  {
+   FTypeLayoutRow Rows[64]; const uint32 Count=FService::DescribeProductionTypes(Rows,UE_ARRAY_COUNT(Rows));
+   for (uint32 N=0;N<FMath::Min(Count,uint32(UE_ARRAY_COUNT(Rows)));++N)
+    UE_LOG(LogTemp,Display,TEXT("VaRestInspectorType %s Size=%llu Align=%u Request=%llu"),Rows[N].Name,uint64(Rows[N].Size),Rows[N].Alignment,uint64(Rows[N].Request));
+  }
 #endif
-	}
-	virtual bool ForEachRecord(TFunctionRef<void(const FVaRestInspectorRecordView&)>) const override
-	{
-		check(IsInGameThread());
-		return !VaRest::Inspector::Private::bShuttingDown;
-	}
-
+  if (Enabled) SetCapture(true);
+#endif
+ }
+ void ShutdownModule() override
+ {
+  check(IsInGameThread()); VaRest::Inspector::Private::BeginShutdown();
+#if VAREST_WITH_INSPECTOR
+  auto Keep=MoveTemp(Service);
+  if (Keep) { Keep->DetachFacade(); Keep->Shutdown(); }
+  Keep.Reset();
+#endif
+  Changed.Clear();
+ }
+ bool SupportsDynamicReloading() override { return false; }
+ void SetCapture(bool Enabled) override
+ {
+  check(IsInGameThread()); if (VaRest::Inspector::Private::bShuttingDown) return;
+#if VAREST_WITH_INSPECTOR
+  Policy=CurrentPolicy();
+  auto Keep=Service;
+  if (Enabled && !Keep)
+  {
+   if (!VaRest::Inspector::Private::FService::TryCreate(Policy,Keep)) return;
+   Keep->AttachFacade(Changed,&VaRest::Inspector::Private::bShuttingDown); Service=Keep;
+  }
+  if (Keep) { if (Enabled) Keep->Start(Policy); else { Keep->RequestPolicy(Policy); Keep->Pause(); } }
+#endif
+ }
+ bool IsCapturing() const override
+ {
+  check(IsInGameThread());
+#if VAREST_WITH_INSPECTOR
+  return !VaRest::Inspector::Private::bShuttingDown && Service && Service->IsCapturing();
+#else
+  return false;
+#endif
+ }
+ void Clear() override
+ {
+  check(IsInGameThread());
+#if VAREST_WITH_INSPECTOR
+  auto Keep=Service; if (Keep && !VaRest::Inspector::Private::bShuttingDown)
+  { Policy=CurrentPolicy(); Keep->RequestPolicy(Policy); Keep->Clear(); }
+#endif
+ }
+ uint64 GetRevision() const override
+ {
+  check(IsInGameThread());
+#if VAREST_WITH_INSPECTOR
+  auto Keep=Service; return Keep?Keep->Revision():0;
+#else
+  return 0;
+#endif
+ }
+ FVaRestInspectorChanged& OnChanged() override { check(IsInGameThread()); return Changed; }
+ bool TrySnapshot(TSharedPtr<const FVaRestInspectorSnapshot,ESPMode::ThreadSafe>& Out) const override
+ {
+  check(IsInGameThread()); if (VaRest::Inspector::Private::bShuttingDown) return false;
+#if VAREST_WITH_INSPECTOR
+  auto Keep=Service; return Keep && Keep->TrySnapshot(Out);
+#else
+  Out=MakeShared<FVaRestInspectorSnapshot,ESPMode::ThreadSafe>(); return true;
+#endif
+ }
+ bool ForEachRecord(TFunctionRef<void(const FVaRestInspectorRecordView&)> Visitor) const override
+ {
+  check(IsInGameThread()); if (VaRest::Inspector::Private::bShuttingDown) return false;
+#if VAREST_WITH_INSPECTOR
+  auto Keep=Service; return !Keep || Keep->ForEachRecord(Visitor);
+#else
+  return true;
+#endif
+ }
 private:
-	FVaRestInspectorChanged Changed;
-	FDelegateHandle PreExitHandle;
+ FVaRestInspectorChanged Changed;
+#if VAREST_WITH_INSPECTOR
+ static VaRest::Inspector::Private::FCapturePolicy CurrentPolicy()
+ {
+  const auto* Settings=GetDefault<UVaRestInspectorSettings>(); VaRest::Inspector::Private::FCapturePolicy P;
+  P.Limits=VaRest::Inspector::Private::NormalizeLimits(GIsEditor?Settings->Editor:Settings->Packaged); P.bHeaders=Settings->bCaptureHeaders; P.bBodies=Settings->bCaptureBodies; return P;
+ }
+ VaRest::Inspector::Private::FCapturePolicy Policy;
+ TSharedPtr<VaRest::Inspector::Private::FService,ESPMode::ThreadSafe> Service;
+#endif
 };
 
 IVaRestInspector& IVaRestInspector::Get()

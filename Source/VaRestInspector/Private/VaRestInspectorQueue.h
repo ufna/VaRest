@@ -34,6 +34,9 @@ struct FQueueTestHooks
 	FEvent* ReleaseEnqueue = nullptr;
 };
 #endif
+struct FTypeLayoutRow;
+class FService;
+struct FQueueWrapperAdmission { private: FQueueWrapperAdmission()=default; friend class FService; };
 class FCaptureQueue
 {
 public:
@@ -42,11 +45,15 @@ public:
 	// retroactively. The service factory owns that later integration boundary.
 	FCaptureQueue(const FCapturePolicy& InPolicy, uint64 InGeneration,
 		TSharedRef<FPendingAccount, ESPMode::ThreadSafe> InAccount, FAllocationAdapter& InAllocator);
+	FCaptureQueue(FQueueWrapperAdmission,const FCapturePolicy&,uint64,TSharedRef<FPendingAccount,ESPMode::ThreadSafe>,FAllocationAdapter&);
 	~FCaptureQueue();
 	FCaptureQueue(const FCaptureQueue&) = delete;
 	FCaptureQueue& operator=(const FCaptureQueue&) = delete;
 	static TOptional<int64> BaselineCharge(const FAllocationAdapter& Allocator);
+	static uint32 DescribeTypes(FTypeLayoutRow*,uint32);
+	static TOptional<int64> InternalBaselineCharge(const FAllocationAdapter&);
 	bool IsSupported() const;
+	bool NeedsRotation() const { return bOrdinalOverflow.load(std::memory_order_acquire); }
 	EPush TryPush(const FVaRestTraceEvent& Borrowed);
 	TOptional<FPacket> TryPopMetadata();
 	TOptional<FPacket> TryPopExcerpt();
@@ -56,8 +63,10 @@ public:
 	int64 OutstandingExcerptReservations() const;
 #if WITH_DEV_AUTOMATION_TESTS
 	void SetTestHooks(FQueueTestHooks* InHooks);
+	void SetPublishedOrdinalForTest(uint64);
 #endif
 private:
+	FCaptureQueue(const FCapturePolicy&,uint64,TSharedRef<FPendingAccount,ESPMode::ThreadSafe>,FAllocationAdapter&,bool bFactoryWrapper);
 	struct FImpl;
 	struct FImplDeleter
 	{
@@ -70,7 +79,7 @@ private:
 	FAllocationAdapter* Allocator;
 	FPendingBaseline Baseline;
 	TUniquePtr<FImpl, FImplDeleter> Impl;
-	std::atomic<bool> bClosed{false};
+	std::atomic<bool> bClosed{false},bOrdinalOverflow{false};
 };
 } // namespace VaRest::Inspector::Private
 #endif

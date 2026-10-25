@@ -9,19 +9,32 @@
 #if VAREST_WITH_INSPECTOR
 namespace VaRest::Inspector::Private
 {
-struct FBudgetAccount : public FRefCountedObject
+struct FBudgetLocalCells
 {
-	FBudgetAccount(int64 InLimit, int64 InBootstrap, TRefCountPtr<FAllocationLifetime> InLifetime);
+	std::atomic<int64> Used{0},Peak{0},SnapshotControllers{0};
+	std::atomic<int32> ControlLeases{0}; std::atomic<bool> PublicStringsUnsupported{false};
+	FAllocationCounters Probe;
+};
+struct FBudgetAccount : public TRefCountingMixin<FBudgetAccount>
+{
+private:
+	TLocalCells<FBudgetLocalCells> Local;
+public:
+	FBudgetAccount(int64 InLimit,int64 InBootstrap,TRefCountPtr<FAllocationLifetime> InLifetime);
+	FBudgetAccount(FReservationDomain&,uint8,TRefCountPtr<FAllocationLifetime>,FRootRegionLease&&);
 	~FBudgetAccount();
+	static void StaticDestroyObject(const FBudgetAccount*);
+	static uint64 AllocateIdentity();
 	void InheritLifetime(const FBudgetAccount& Previous);
 	const uint64 Identity;
-	const int64 Limit, BootstrapBytes;
-	std::atomic<int64> UsedBytes, PeakBytes;
-	std::atomic<int64> SnapshotControllers{0};
-	std::atomic<int32> ControlLeases{0};
-	std::atomic<bool> PublicStringsUnsupported{false};
-	FAllocationCounters Probe;
+	const int64 Limit,BootstrapBytes;
+	std::atomic<int64>& UsedBytes; std::atomic<int64>& PeakBytes;
+	std::atomic<int64>& SnapshotControllers; std::atomic<int32>& ControlLeases;
+	std::atomic<bool>& PublicStringsUnsupported;
+	FAllocationCounters& Probe;
 	const TRefCountPtr<FAllocationLifetime> Lifetime;
+	FReservationDomain* Domain=nullptr; uint8 Bank=0;
+	FRootRegionLease Region;
 };
 
 class FBudgetControlLease
@@ -37,6 +50,9 @@ public:
 		if (Account)
 			Account->ControlLeases.fetch_sub(1, std::memory_order_acq_rel);
 	}
+	FBudgetControlLease(FBudgetControlLease&& Other) noexcept : Account(Other.Account) { Other.Account=nullptr; }
+	FBudgetControlLease& operator=(FBudgetControlLease&& Other) noexcept
+ { if (this!=&Other) { if (Account) Account->ControlLeases.fetch_sub(1,std::memory_order_acq_rel); Account=Other.Account; Other.Account=nullptr; } return *this; }
 	FBudgetControlLease(const FBudgetControlLease&) = delete;
 	FBudgetControlLease& operator=(const FBudgetControlLease&) = delete;
 

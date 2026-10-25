@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "Misc/TVariant.h"
+
 #include "Containers/ArrayView.h"
 #include "Containers/StringView.h"
 #include "Templates/UniquePtr.h"
@@ -272,11 +274,21 @@ struct FStoreAccess;
 }
 #endif
 
+class FMonotonicReceiptClock
+{
+public:
+ virtual ~FMonotonicReceiptClock()=default;
+ virtual double Now() const;
+};
+struct FProductionClockTag {};
+struct FTypeLayoutRow;
+class FService;
 class FStore
 {
 public:
 	// Allocation-free GT shell. Task11 pre-admits production wrapper/root storage.
 	FStore(const FNormalizedLimits& InLimits, TSharedRef<IVaRestClock, ESPMode::ThreadSafe> InClock);
+	FStore(const FNormalizedLimits&,FProductionClockTag,TSharedRef<FMonotonicReceiptClock,ESPMode::ThreadSafe>);
 	~FStore();
 	FStore(const FStore&) = delete;
 	FStore& operator=(const FStore&) = delete;
@@ -304,6 +316,7 @@ public:
 		TRefCountPtr<FBudgetAccount> NewBudget, TSharedRef<FPendingAccount, ESPMode::ThreadSafe> NewPending);
 
 private:
+	friend class FService;
 	friend class FSnapshotBuilder;
 	friend class ::FVaRestInspectorSnapshot;
 #if WITH_DEV_AUTOMATION_TESTS
@@ -336,7 +349,29 @@ private:
 	{
 		void operator()(FStorage* Storage) const;
 	};
-	static FStoreStoragePlan MeasureStoragePlan(const FNormalizedLimits& InLimits, const FBudgetAccount& Account);
+	static FStoreStoragePlan MeasureStoragePlan(const FNormalizedLimits& InLimits,const FBudgetAccount& Account);
+ static FStoreStoragePlan MeasureProductionStoragePlan(const FNormalizedLimits&,const FAllocationAdapter&,int64 Bootstrap);
+ static bool CalibrateRows(FAllocationLifetime&,FReservationDomain&);
+ static uint32 DescribeTypes(FTypeLayoutRow*,uint32);
+ struct FSchedulerObservation { uint64 LastConsumedMetadataOrdinal=0,OrphanEpoch=0; };
+ FSchedulerObservation ObserveScheduler() const { return {LastConsumedMetadataOrdinal,OrphanEpoch}; }
+ bool ApplyAttached(const FVaRestTraceSnapshot&,const FCapturePolicy&,TSharedRef<FPendingAccount,ESPMode::ThreadSafe>,FAllocationAdapter&,uint64 CapturedWatermark);
+ bool ApplyAttachedAtWatermark(const FVaRestTraceSnapshot&,const FCapturePolicy&,TSharedRef<FPendingAccount,ESPMode::ThreadSafe>,FAllocationAdapter&,uint64);
+ void InterruptOpenRows();
+ using FStoragePtr=TUniquePtr<FStorage,FStorageDeleter>;
+ struct FPreparedAccountChange
+ {
+  FNormalizedLimits Effective; FStoreStoragePlan Plan; FStoragePtr Storage;
+  TRefCountPtr<FBudgetAccount> Budget; TSharedPtr<FPendingAccount,ESPMode::ThreadSafe> Pending;
+  TOptional<FBudgetControlLease> Control; uint64 BankSerial=0;
+  FPreparedAccountChange(); ~FPreparedAccountChange();
+  FPreparedAccountChange(FPreparedAccountChange&&) noexcept;
+  FPreparedAccountChange(const FPreparedAccountChange&)=delete;
+ };
+ enum class EStorageFailure:uint8 { None,Unsupported,Refused };
+ static bool BuildStorage(const FNormalizedLimits&,TRefCountPtr<FBudgetAccount>,FStoragePtr&,EStorageFailure&);
+ TOptional<FPreparedAccountChange> PrepareAccountChange(const FNormalizedLimits&,TRefCountPtr<FBudgetAccount>,TSharedRef<FPendingAccount,ESPMode::ThreadSafe>,FRecreationStagingPermit&);
+ void CommitAccountChange(FPreparedAccountChange&&,FRootQuiescenceProof&&) noexcept;
 	FStoreStoragePlan EffectiveStoragePlan() const;
 	int32 NumClients() const;
 	int32 NumStatsGroups() const;
@@ -429,9 +464,13 @@ private:
 	void InvalidateKnownNeverHistory() const;
 	void NoteUnsupportedPublicStrings() const;
 	void ReleaseFixedStorage();
+	void RecordCumulativeDiagnostics() const;
+	FReservationDomain* ProductionDomain=nullptr;
+	mutable FRefusalImage CumulativeCheckpoint;
 	FNormalizedLimits Limits;
 	FNormalizedLimits RequestedLimits;
-	TSharedRef<IVaRestClock, ESPMode::ThreadSafe> Clock;
+	TVariant<TSharedRef<IVaRestClock,ESPMode::ThreadSafe>,TSharedRef<FMonotonicReceiptClock,ESPMode::ThreadSafe>> Clock;
+	double ReceiptNow() const;
 	TRefCountPtr<FBudgetAccount> Budget;
 	TSharedPtr<FPendingAccount, ESPMode::ThreadSafe> LossWitness;
 	TWeakPtr<FPendingAccount, ESPMode::ThreadSafe> OriginatingPending;
@@ -442,7 +481,7 @@ private:
 	uint64 OrphanEpoch = 0, NextArrival = 0, NextMarkerOrdinal = 0;
 	uint64 DeferredGeneration = 0, DeferredConsumedOrdinal = 0, GenerationLossEpoch = 0;
 	mutable uint64 RevisionValue = 0;
-	bool bGenerationPending = false, bStopPending = false, bExpiryPending = false;
+	bool bGenerationPending = false, bStopPending = false, bExpiryPending = false, bInterruptPending=false;
 	bool bOriginatingPendingBound = false;
 	mutable bool bLossWitnessBound = false;
 	mutable bool bLossDirty = true;
