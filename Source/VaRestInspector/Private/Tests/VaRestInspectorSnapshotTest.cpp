@@ -56,6 +56,7 @@ struct FStoreAccess
 	static uint64 Generation(const FStore& Store) { return Store.Generation; }
 	static uint64 Ordinal(const FStore& Store) { return Store.LastConsumedMetadataOrdinal; }
 	static uint64 OrphanEpoch(const FStore& Store) { return Store.OrphanEpoch; }
+	static int32 NumLinks(const FStore& Store) { return Store.NumLinks(); }
 };
 
 // Upstream clock fixture, including invalid-receipt controls. No real timer is
@@ -485,7 +486,7 @@ static FSnapshot Take(FCase& C)
 		C.Test.TestEqual(TEXT("snapshot captures current revision"), Out->GetRevision(), C.Store.Revision());
 		int32 Stats = 0; Out->ForEachStats([&](const auto&) { ++Stats; });
 		C.Test.TestEqual(TEXT("Stats remain truthfully empty until Task10"), Stats, 0);
-		C.Test.TestEqual(TEXT("Links remain empty until Task9"), Out->GetLinks().Num(), 0);
+		C.Test.TestEqual(TEXT("snapshot publishes the actual link domain"), Out->GetLinks().Num(), FStoreAccess::NumLinks(C.Store));
 	}
 	return Out;
 }

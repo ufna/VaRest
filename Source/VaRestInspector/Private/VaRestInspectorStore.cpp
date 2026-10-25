@@ -1,6 +1,7 @@
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 
 #include "VaRestInspectorStore.h"
+#include "VaRestInspectorLinks.h"
 #include "VaRestInspectorPhases.h"
 #include "VaRestInspectorSnapshot.h"
 
@@ -402,6 +403,7 @@ struct FStore::FRow
 	ELivenessEvidence Evidence = ELivenessEvidence::None;
 	uint64 PresenceStamp = 0;
 	FStorePacketPtr Started, Completed, RequestExcerpt, Marker;
+	FTicketedText MarkerQueueId;
 	// This permanently admitted fixed slot preserves all actual terminal
 	// scalars even when optional Completed packet ownership is refused.
 	FPacketFixed CompletionFixed;
@@ -464,6 +466,14 @@ struct FStore::FStorage
 	TStoreBlock<FLinkForwardEntry> LinkForward;
 	TStoreBlock<FLinkTargetEntry> LinkTargets;
 	FStoreStoragePlan Plan;
+	// Fixed, measured metadata. Process is canonical even before a Scope
+	// observation; no weak UObject or arbitrary scope label is retained.
+	bool bProcessObserved = false, bProcessOpen = false;
+	struct FQueueLossTotals
+	{
+		uint64 Dropped = 0, Bytes = 0, Metadata = 0, Excerpts = 0;
+	} ObservedLoss;
+	bool bLossEpisode = false;
 	int32 IndexCapacity = 0, MaxRows = 0, ClientCapacity = 0;
 	int32 RetainedCapacity = 0, RetainedLookupCapacity = 0;
 	int32 RetainedHead = 0, NumRetained = 0, NumDeadline = 0;
@@ -945,7 +955,7 @@ bool FStore::TakeHeader(FRow& Anchor, FPacket& Packet, TSharedPtr<const FDispatc
 		return false;
 	return FDispatchHeaderOwner::TryTake(Packet, Budget, Allocator, Out);
 }
-FStore::FRow* FStore::AdmitRow(const FRowKey& Key, bool bPartial)
+FStore::FRow* FStore::AdmitRow(const FRowKey& Key, bool bPartial, const FAdmissionAnchors& Anchors)
 {
 	if (!Storage || Key.Id == 0 || (Key.Kind == ERowKeyKind::Http && Key.Id == 0) || NextArrival == MAX_uint64)
 	{
@@ -994,7 +1004,7 @@ FStore::FRow* FStore::AdmitRow(const FRowKey& Key, bool bPartial)
 		Increment(State.RefusedRows);
 		return nullptr;
 	}
-	if (!MakeAdmissionRoom({1, Needed, {}}))
+	if (!MakeAdmissionRoom({1, Needed, Anchors}))
 	{
 		Increment(State.RefusedRows);
 		return nullptr;
@@ -1033,6 +1043,7 @@ void FStore::SetStartedScalars(FRow& Row, const FPacketScalars& Scalars)
 {
 	Row.Value.ScopeId = Scalars.ScopeId;
 	Row.Value.ClientId = Scalars.ClientId;
+	Row.Value.bContextKnown = true;
 	if (!Row.Started && Row.Value.ObservedDispatches == 0 && Row.Evidence != ELivenessEvidence::Snapshot)
 		Row.Value.CurrentAttempt = FMath::Max(Row.Value.CurrentAttempt, Scalars.CurrentAttempt);
 	if (!Row.Value.bStartedAtKnown && FMath::IsFinite(Scalars.StartedAt) && Scalars.StartedAt >= 0)
@@ -1090,7 +1101,7 @@ void FStore::AdoptAttachedPacket(uint64 RequestId, FStorePacketPtr&& Packet)
 void FStore::NoteAttachLoss(uint64 RequestId)
 {
 	Increment(State.AttachLosses);
-	Increment(State.MetadataOmitted);
+	AddObservation(State.MetadataOmitted, 1, State.bLossCountersSaturated);
 	Increment(OrphanEpoch);
 	if (FRow* Row = Find(RequestId))
 	{
@@ -1112,6 +1123,7 @@ bool FStore::ApplyAttachedStarted(const FVaRestTraceStarted& Borrowed, const FCa
 	check(Row);
 	Row->Value.ScopeId = Borrowed.ScopeId;
 	Row->Value.ClientId = Borrowed.ClientId;
+	Row->Value.bContextKnown = true;
 	Row->Value.CurrentAttempt = Borrowed.CurrentAttempt;
 	if (!Row->Value.bStartedAtKnown && FMath::IsFinite(Borrowed.StartedAt) && Borrowed.StartedAt >= 0)
 	{
@@ -1126,6 +1138,12 @@ bool FStore::ApplyAttachedStarted(const FVaRestTraceStarted& Borrowed, const FCa
 	if (Policy.bBodies && Borrowed.bExcerptPending && Row->Value.RequestExcerptState == EVaRestInspectorDetailState::Absent)
 		Row->Value.RequestExcerptState = EVaRestInspectorDetailState::Pending;
 	Touch(*Row);
+	FPacketScalars Observed;
+	Observed.RequestId = Borrowed.RequestId;
+	Observed.OriginalRequestId = Borrowed.QueueReplayOf.OriginalRequestId;
+	FLinkSeed Link;
+	if (InferObservedLink(EVaRestTraceKind::Started, Observed, FStringView(Borrowed.QueueReplayOf.QueueId), Link))
+		TryAdmitLink(Link, {Row->IndexSlot, INDEX_NONE});
 	if (!bNeedsStarted)
 		return true;
 	FPacketHeader Header;
@@ -1171,6 +1189,25 @@ bool FStore::ApplyAttachedStarted(const FVaRestTraceStarted& Borrowed, const FCa
 	if (Measured == EMeasure::ScalarOnly)
 		NoteAttachLoss(Borrowed.RequestId);
 	return true;
+}
+void FStore::ApplyScope(uint64 ScopeId, bool bOpened, FStringView Label, bool bMetadataOmitted)
+{
+	if (!Storage)
+		return;
+	if (ScopeId != 0 || bMetadataOmitted || (!Label.IsEmpty() && Label != FStringView(TEXT("Process"))))
+	{
+		Increment(State.OmittedScopes);
+		AddObservation(State.MetadataOmitted, 1, State.bLossCountersSaturated);
+		Increment(RevisionValue);
+	}
+	if (ScopeId != 0)
+		return;
+	if (!Storage->bProcessObserved || Storage->bProcessOpen != bOpened)
+	{
+		Storage->bProcessObserved = true;
+		Storage->bProcessOpen = bOpened;
+		Increment(RevisionValue);
+	}
 }
 void FStore::ApplyClient(uint64 ClientId, uint64 ScopeId, bool bCreated, FStringView Label)
 {
@@ -1283,6 +1320,8 @@ bool FStore::ApplyAttached(const FVaRestTraceSnapshot& Snapshot, const FCaptureP
 		CurrentReconciliationStamp = 0;
 	}
 	++CurrentReconciliationStamp;
+	for (const FVaRestTraceScope& Scope : Snapshot.Scopes)
+		ApplyScope(Scope.ScopeId, Scope.bOpened, FStringView(Scope.Label));
 	for (const FVaRestTraceClient& Client : Snapshot.Clients)
 		ApplyClient(Client.ClientId, Client.ScopeId, Client.bCreated, FStringView(Client.DisplayName));
 	for (const FVaRestTraceStarted& Borrowed : Snapshot.InFlight)
@@ -1360,7 +1399,7 @@ void FStore::ApplyPhysical(FRow& Row, FPacket& Packet)
 	{
 		AddObservation(bDispatched ? Row.Value.OmittedDispatches : Row.Value.OmittedEnds, 1, Row.Value.bCountersSaturated);
 		Row.Value.bMetadataOmitted = true;
-		Increment(State.MetadataOmitted);
+		AddObservation(State.MetadataOmitted, 1, State.bLossCountersSaturated);
 		if (bDispatched)
 			Row.PreviousDispatchSlot = INDEX_NONE;
 		return;
@@ -1384,7 +1423,7 @@ void FStore::ApplyPhysical(FRow& Row, FPacket& Packet)
 				Slot->HeadersState = EVaRestInspectorHeadersState::MetadataOmitted;
 				Slot->DispatchedFixed.Header.bMetadataOmitted = true;
 				Row.Value.bMetadataOmitted = true;
-				Increment(State.MetadataOmitted);
+				AddObservation(State.MetadataOmitted, 1, State.bLossCountersSaturated);
 			}
 			if (Slot->Headers)
 				Slot->HeadersState = EVaRestInspectorHeadersState::Captured;
@@ -1409,7 +1448,7 @@ void FStore::ApplyPhysical(FRow& Row, FPacket& Packet)
 		{
 			Slot->EndedFixed.Header.bMetadataOmitted = true;
 			Row.Value.bMetadataOmitted = true;
-			Increment(State.MetadataOmitted);
+			AddObservation(State.MetadataOmitted, 1, State.bLossCountersSaturated);
 		}
 	}
 }
@@ -1434,7 +1473,7 @@ FStore::EExcerptApplication FStore::ApplyExcerpt(FRow& Row, FPacket& Packet, EVa
 		{
 			AddObservation(Row.Value.OmittedExcerpts, 1, Row.Value.bCountersSaturated);
 			Row.Value.bMetadataOmitted = true;
-			Increment(State.MetadataOmitted);
+			AddObservation(State.MetadataOmitted, 1, State.bLossCountersSaturated);
 			OutDetail = EVaRestInspectorDetailState::MetadataOmitted;
 			return EExcerptApplication::Refused;
 		}
@@ -1449,7 +1488,7 @@ FStore::EExcerptApplication FStore::ApplyExcerpt(FRow& Row, FPacket& Packet, EVa
 	{
 		AddObservation(Row.Value.OmittedExcerpts, 1, Row.Value.bCountersSaturated);
 		Row.Value.bMetadataOmitted = true;
-		Increment(State.MetadataOmitted);
+		AddObservation(State.MetadataOmitted, 1, State.bLossCountersSaturated);
 		OutDetail = EVaRestInspectorDetailState::MetadataOmitted;
 		return EExcerptApplication::Refused;
 	}
@@ -1497,7 +1536,7 @@ void FStore::ApplyCompletion(FRow& Row, FPacket& Packet)
 	{
 		Row.Value.CompletedMetadataState = EVaRestInspectorDetailState::MetadataOmitted;
 		Row.Value.bMetadataOmitted = true;
-		Increment(State.MetadataOmitted);
+		AddObservation(State.MetadataOmitted, 1, State.bLossCountersSaturated);
 	}
 	// The fallback never contains slices, even when the admitted full owner
 	// has text. Its metadata is always unavailable without that separate owner.
@@ -1732,7 +1771,7 @@ EVaRestInspectorDetailState FStore::ApplyNote(FRow& Row, FPacket& Packet, uint64
 	const auto Omit = [&] {
 		AddObservation(Row.Value.OmittedNotes, 1, Row.Value.bCountersSaturated);
 		Row.Value.bMetadataOmitted = true;
-		Increment(State.MetadataOmitted);
+		AddObservation(State.MetadataOmitted, 1, State.bLossCountersSaturated);
 		return EVaRestInspectorDetailState::MetadataOmitted;
 	};
 	// Private association serials must never wrap into a still-retained slot.
@@ -1776,7 +1815,7 @@ void FStore::AppendTimeline(FRow& Row, const FVaRestInspectorTimelineEntry& Entr
 	{
 		AddObservation(Row.Value.OmittedTimeline, 1, Row.Value.bCountersSaturated);
 		Row.Value.bMetadataOmitted = true;
-		Increment(State.MetadataOmitted);
+		AddObservation(State.MetadataOmitted, 1, State.bLossCountersSaturated);
 		return;
 	}
 	int32 Destination = (Row.TimelineHead + Row.NumTimeline) % FNormalizedLimits::TimelineSlots;
@@ -1897,12 +1936,83 @@ bool FStore::TrimPinnedDetails(FRow& Row)
 		Touch(Row);
 	return bChanged;
 }
+bool FStore::TryAdmitInternalMarker(const FVaRestInspectorMarkerInfo& Info, uint64 ScopeId, uint64 ClientId,
+	bool bContextKnown, bool bMetadataOmitted, const FAdmissionAnchors& Anchors)
+{
+	const auto Omit = [this] {
+		Increment(State.OmittedMarkers);
+		AddObservation(State.MetadataOmitted, 1, State.bLossCountersSaturated);
+		Increment(RevisionValue);
+		return false;
+	};
+	if (!Storage || !Budget || bEnumerating || NextMarkerOrdinal == MAX_uint64 || !FMath::IsFinite(Info.ObservedAt) ||
+		(Info.Kind != EVaRestInspectorMarkerKind::CaptureOverflow && Info.Kind != EVaRestInspectorMarkerKind::DerivedQueueExpired) ||
+		Info.QueueId.Len() < 0 || Info.QueueId.Len() > FNormalizedLimits::MaxStringChars ||
+		(!Info.QueueId.IsEmpty() && !Info.QueueId.GetData()) || !ValidateBorrowedSource(Info.QueueId, Anchors))
+		return Omit();
+	FAllocationAdapter& Allocator = Budget->Lifetime->Allocator;
+	const auto RowBound = Allocator.Bound(sizeof(FRow), alignof(FRow));
+	const auto TextBound = Info.QueueId.IsEmpty() ? TOptional<SIZE_T>(0) :
+		Allocator.Bound(SIZE_T(Info.QueueId.Len() + 1) * sizeof(TCHAR), alignof(TCHAR));
+	int64 Needed = 4096;
+	if (!RowBound.IsSet() || !TextBound.IsSet() || !AddChecked(Needed, int64(RowBound.GetValue()), MAX_int64) ||
+		!AddChecked(Needed, int64(TextBound.GetValue()), MAX_int64) || !MakeAdmissionRoom({1, Needed, Anchors}))
+		return Omit();
+	// Keep the accepted Note and its text anchored through BOTH admissions.
+	// The complete charge was admitted while all source owners were live.
+	FTicketedText QueueId;
+	if (!CopyTextAdmitted(Info.QueueId, QueueId))
+		return Omit();
+	const ERowKeyKind Kind = Info.Kind == EVaRestInspectorMarkerKind::CaptureOverflow ?
+		ERowKeyKind::CaptureOverflow : ERowKeyKind::DerivedQueueExpired;
+	FRow* Row = AdmitRow({Kind, NextMarkerOrdinal + 1}, false, Anchors);
+	if (!Row)
+		return Omit();
+	Row->MarkerQueueId = MoveTemp(QueueId);
+	Row->Value.MarkerInfo = Info;
+	Row->Value.MarkerInfo.QueueId = Row->MarkerQueueId.View();
+	Row->Value.ScopeId = ScopeId;
+	Row->Value.ClientId = ClientId;
+	Row->Value.bContextKnown = bContextKnown;
+	Row->Value.bMetadataOmitted = bMetadataOmitted;
+	Row->Value.bSealed = true;
+	++NextMarkerOrdinal;
+	Touch(*Row);
+	return true;
+}
+bool FStore::TryAdmitQueueExpiredMarker(FRow& SourceRow, uint64 NoteSerial)
+{
+	if (!NoteSerial)
+		return false;
+	for (int32 Index = 0; Index < SourceRow.NumNotes; ++Index)
+	{
+		const auto& Entry = SourceRow.Notes[(SourceRow.NoteHead + Index) % FNormalizedLimits::NoteSlots];
+		if (Entry.Serial != NoteSerial || !Entry.Owner)
+			continue;
+		const FPacket& Note = Entry.Owner->Get();
+		const auto& Fixed = Note.Fixed();
+		if (Fixed.Header.Kind != EVaRestTraceKind::Note || Fixed.Scalars.NoteKind != EVaRestTraceNoteKind::QueueExpired ||
+			Fixed.Scalars.RequestId != SourceRow.Value.RequestId)
+			return false;
+		FVaRestInspectorMarkerInfo Info;
+		Info.Kind = EVaRestInspectorMarkerKind::DerivedQueueExpired;
+		Info.bHasSourceObservation = true;
+		Info.SourceSeq = Fixed.Header.Seq;
+		Info.SourceTime = Fixed.Header.Time;
+		Info.CauseRequestId = Fixed.Scalars.RequestId;
+		Info.ObservedAt = Clock->Now();
+		Info.QueueId = Note.Text(EText::QueueId);
+		return TryAdmitInternalMarker(Info, SourceRow.Value.ScopeId, SourceRow.Value.ClientId,
+			SourceRow.Value.bContextKnown, Fixed.Header.bMetadataOmitted, {SourceRow.IndexSlot, SourceRow.IndexSlot});
+	}
+	return false;
+}
 bool FStore::ApplyMarker(FPacket& Packet)
 {
 	if (NextMarkerOrdinal == MAX_uint64 || Packet.Fixed().Header.Kind != EVaRestTraceKind::Marker)
 	{
 		Increment(State.OmittedMarkers);
-		Increment(State.MetadataOmitted);
+		AddObservation(State.MetadataOmitted, 1, State.bLossCountersSaturated);
 		return false;
 	}
 	const FRowKey Key(ERowKeyKind::CoreMarker, NextMarkerOrdinal + 1);
@@ -1910,7 +2020,7 @@ bool FStore::ApplyMarker(FPacket& Packet)
 	if (!Row)
 	{
 		Increment(State.OmittedMarkers);
-		Increment(State.MetadataOmitted);
+		AddObservation(State.MetadataOmitted, 1, State.bLossCountersSaturated);
 		return false;
 	}
 	FStorePacketPtr Owner;
@@ -1918,13 +2028,19 @@ bool FStore::ApplyMarker(FPacket& Packet)
 	{
 		RemoveEligibleRowNow(Row->IndexSlot);
 		Increment(State.OmittedMarkers);
-		Increment(State.MetadataOmitted);
+		AddObservation(State.MetadataOmitted, 1, State.bLossCountersSaturated);
 		return false;
 	}
 	const FPacketFixed& Fixed = Owner->Get().Fixed();
 	Row->Value.ScopeId = Fixed.Scalars.ScopeId;
 	Row->Value.ClientId = Fixed.Scalars.ClientId;
+	Row->Value.bContextKnown = true;
 	Row->Value.bMetadataOmitted = Fixed.Header.bMetadataOmitted;
+	Row->Value.MarkerInfo.Kind = EVaRestInspectorMarkerKind::Core;
+	Row->Value.MarkerInfo.bHasSourceObservation = true;
+	Row->Value.MarkerInfo.SourceSeq = Fixed.Header.Seq;
+	Row->Value.MarkerInfo.SourceTime = Fixed.Header.Time;
+	Row->Value.MarkerInfo.CauseRequestId = Fixed.Scalars.CauseRequestId;
 	Row->Marker = MoveTemp(Owner);
 	Row->Value.bSealed = true;
 	++NextMarkerOrdinal;
@@ -1954,7 +2070,10 @@ bool FStore::Apply(FPacket&& Incoming)
 		return true;
 	}
 	if (Fixed.Header.Kind == EVaRestTraceKind::Scope)
+	{
+		ApplyScope(Fixed.Scalars.ScopeId, Fixed.Scalars.bOpened, Packet.Text(EText::ScopeLabel), Fixed.Header.bMetadataOmitted);
 		return true;
+	}
 	const bool bStarted = Fixed.Header.Kind == EVaRestTraceKind::Started;
 	const bool bCompleted = Fixed.Header.Kind == EVaRestTraceKind::Completed;
 	const bool bExcerpt = Fixed.Header.Kind == EVaRestTraceKind::Excerpt;
@@ -2020,6 +2139,8 @@ bool FStore::Apply(FPacket&& Incoming)
 	Timeline.DispatchId = Fixed.Scalars.DispatchId;
 	const FPacketScalars SourceScalars = Fixed.Scalars;
 	const bool bSourceMetadataOmitted = Fixed.Header.bMetadataOmitted;
+	FLinkSeed ObservedLink;
+	const bool bHasObservedLink = InferObservedLink(Fixed.Header.Kind, SourceScalars, Packet.Text(EText::QueueId), ObservedLink);
 	uint64 NoteSerial = 0;
 	if (bStarted)
 	{
@@ -2040,7 +2161,7 @@ bool FStore::Apply(FPacket&& Incoming)
 			else
 			{
 				Row->Value.bMetadataOmitted = true;
-				Increment(State.MetadataOmitted);
+				AddObservation(State.MetadataOmitted, 1, State.bLossCountersSaturated);
 			}
 		}
 		Timeline.DetailState = Row->Started && !Row->Started->Get().Fixed().Header.bMetadataOmitted ?
@@ -2077,6 +2198,10 @@ bool FStore::Apply(FPacket&& Incoming)
 		Timeline.DetailState = EVaRestInspectorDetailState::MetadataOmitted;
 	AppendTimeline(*Row, Timeline, NoteSerial);
 	CompleteMutation(*Row);
+	if (bHasObservedLink)
+		TryAdmitLink(ObservedLink, {Row->IndexSlot, Packet.IsValid() ? INDEX_NONE : Row->IndexSlot});
+	if (NoteSerial != 0 && SourceScalars.NoteKind == EVaRestTraceNoteKind::QueueExpired)
+		TryAdmitQueueExpiredMarker(*Row, NoteSerial);
 	return true;
 }
 bool FStore::IsIdRetained(uint64 RequestId) const
@@ -2230,7 +2355,74 @@ bool FStore::BindLossWitness(TSharedRef<FPendingAccount, ESPMode::ThreadSafe> Pe
 	GenerationLossEpoch = 0;
 	bLossWitnessBound = false;
 	bLossDirty = true;
+	ResetLossObservation();
 	return true;
+}
+void FStore::ResetLossObservation()
+{
+	if (!Storage)
+		return;
+	Storage->ObservedLoss = {};
+	Storage->bLossEpisode = false;
+	if (LossWitness)
+	{
+		Storage->ObservedLoss.Dropped = LossWitness->DroppedCount.load(std::memory_order_acquire);
+		Storage->ObservedLoss.Bytes = LossWitness->DroppedBytes.load(std::memory_order_acquire);
+		Storage->ObservedLoss.Metadata = LossWitness->MetadataOmitted.load(std::memory_order_acquire);
+		Storage->ObservedLoss.Excerpts = LossWitness->ExcerptsSkipped.load(std::memory_order_acquire);
+	}
+}
+void FStore::ObserveQueueLoss(uint64 InGeneration, const FPendingAccount& Source)
+{
+	check(IsInGameThread());
+	if (!Storage || !Budget || bEnumerating || InGeneration != Generation || LossWitness.Get() != &Source ||
+		!Source.Lifetime || Source.Lifetime != Budget->Lifetime)
+		return;
+	RefreshLossWitness();
+	const FStorage::FQueueLossTotals Current{
+		Source.DroppedCount.load(std::memory_order_acquire), Source.DroppedBytes.load(std::memory_order_acquire),
+		Source.MetadataOmitted.load(std::memory_order_acquire), Source.ExcerptsSkipped.load(std::memory_order_acquire)};
+	const auto Previous = Storage->ObservedLoss;
+	Storage->ObservedLoss = Current;
+	const bool bWasSaturated = State.bLossCountersSaturated;
+	State.bLossCountersSaturated |= Current.Dropped == MAX_uint64 || Current.Bytes == MAX_uint64 ||
+		Current.Metadata == MAX_uint64 || Current.Excerpts == MAX_uint64;
+	if (Current.Dropped < Previous.Dropped || Current.Bytes < Previous.Bytes ||
+		Current.Metadata < Previous.Metadata || Current.Excerpts < Previous.Excerpts)
+	{
+		Increment(State.ContractViolations);
+		Storage->bLossEpisode = false;
+		Increment(RevisionValue);
+		return;
+	}
+	FVaRestInspectorMarkerInfo Info;
+	Info.Kind = EVaRestInspectorMarkerKind::CaptureOverflow;
+	Info.DroppedEvents = Current.Dropped - Previous.Dropped;
+	Info.DroppedBytes = Current.Bytes - Previous.Bytes;
+	Info.MetadataOmitted = Current.Metadata - Previous.Metadata;
+	Info.ExcerptsSkipped = Current.Excerpts - Previous.Excerpts;
+	Info.bLossSaturated = State.bLossCountersSaturated;
+	const bool bNewLoss = Info.DroppedEvents || Info.DroppedBytes || Info.MetadataOmitted || Info.ExcerptsSkipped;
+	if (!bNewLoss)
+	{
+		Storage->bLossEpisode = false;
+		if (bWasSaturated != State.bLossCountersSaturated)
+			Increment(RevisionValue);
+		return;
+	}
+	AddObservation(State.DroppedEvents, Info.DroppedEvents, State.bLossCountersSaturated);
+	AddObservation(State.DroppedBytes, Info.DroppedBytes, State.bLossCountersSaturated);
+	AddObservation(State.MetadataOmitted, Info.MetadataOmitted, State.bLossCountersSaturated);
+	AddObservation(State.ExcerptsSkipped, Info.ExcerptsSkipped, State.bLossCountersSaturated);
+	Info.bLossSaturated = State.bLossCountersSaturated;
+	Increment(RevisionValue);
+	const bool bAttempt = !Storage->bLossEpisode;
+	Storage->bLossEpisode = true;
+	if (bAttempt)
+	{
+		Info.ObservedAt = Clock->Now();
+		TryAdmitInternalMarker(Info, 0, 0, false, false, {});
+	}
 }
 void FStore::RefreshLossWitness() const
 {
@@ -2328,6 +2520,7 @@ void FStore::BeginGeneration(uint64 InGeneration, uint64 ConsumedOrdinal)
 	CurrentReconciliationStamp = 0;
 	if (!Storage)
 		return;
+	ResetLossObservation();
 	ForEachRow([&](FRow& Row) {
 		if (Row.Value.bTerminalKnown || Row.Value.bSealed)
 			return;
@@ -2372,6 +2565,10 @@ void FStore::Clear()
 	Storage->NumClients = 0;
 	ClearStats();
 	ClearLinks();
+	Storage->bProcessObserved = Storage->bProcessOpen = false;
+	State.DroppedEvents = State.DroppedBytes = State.MetadataOmitted = State.ExcerptsSkipped = 0;
+	State.bLossCountersSaturated = false;
+	ResetLossObservation();
 	CurrentReconciliationStamp = 0;
 	OrphanEpoch = 0;
 	ResetRetainedIds();
@@ -2462,7 +2659,7 @@ uint64 FStore::Revision() const
 	check(IsInGameThread());
 	return RevisionValue;
 }
-FStringView FStore::ClientLabel(uint64 ClientId) const
+FStringView FStore::ClientLabel(uint64 ClientId, TOptional<uint64> ExpectedScope) const
 {
 	if (!Storage || ClientId == 0)
 		return {};
@@ -2476,10 +2673,17 @@ FStringView FStore::ClientLabel(uint64 ClientId) const
 		if (Lookup.State == FStorage::EIndexState::Occupied && Lookup.ClientId == ClientId)
 		{
 			const FClientEntry& Client = Storage->Clients[Lookup.ClientSlot];
+			if (ExpectedScope.IsSet() && Client.ScopeId != ExpectedScope.GetValue())
+				return {};
 			return Client.Label ? FStringView(Client.Label, Client.Chars) : FStringView();
 		}
 	}
 	return {};
+}
+FStringView FStore::RowClientLabel(const FRow& Row) const
+{
+	return Row.Value.Kind == EVaRestInspectorRecordKind::Http && Row.Value.bContextKnown ?
+		ClientLabel(Row.Value.ClientId, Row.Value.ScopeId) : FStringView();
 }
 bool FStore::CopyTextAdmitted(FStringView Source, FTicketedText& Out)
 {
@@ -2584,7 +2788,7 @@ FStatsGroup* FStore::FindOrAdmitStatsGroup(const FStatsKeyView& Key, const FAdmi
 	if (!Storage || Key.Key.Len() < 0 || Key.Key.Len() > FNormalizedLimits::MaxStringChars || (Key.Key.Len() > 0 && !Key.Key.GetData()) || !ValidateBorrowedSource(Key.Key, Anchors))
 	{
 		Increment(State.OmittedStatsGroups);
-		Increment(State.MetadataOmitted);
+		AddObservation(State.MetadataOmitted, 1, State.bLossCountersSaturated);
 		return Overflow;
 	}
 	if (const FStatsGroup* Existing = FindStatsGroup(Key))
@@ -2597,7 +2801,7 @@ FStatsGroup* FStore::FindOrAdmitStatsGroup(const FStatsKeyView& Key, const FAdmi
 	if (Storage->NumStatsGroups - 1 >= NamedCapacity || ClientGroups >= FMath::Min(FNormalizedLimits::KeysPerClient, NamedCapacity))
 	{
 		Increment(State.OmittedStatsGroups);
-		Increment(State.MetadataOmitted);
+		AddObservation(State.MetadataOmitted, 1, State.bLossCountersSaturated);
 		return Overflow;
 	}
 	FAllocationAdapter& Allocator = Budget->Lifetime->Allocator;
@@ -2614,14 +2818,14 @@ FStatsGroup* FStore::FindOrAdmitStatsGroup(const FStatsKeyView& Key, const FAdmi
 	if (!AddChecked(Needed, int64(TextBound.GetValue()), MAX_int64) || !MakeAdmissionRoom({0, Needed, Anchors}))
 	{
 		Increment(State.OmittedStatsGroups);
-		Increment(State.MetadataOmitted);
+		AddObservation(State.MetadataOmitted, 1, State.bLossCountersSaturated);
 		return Overflow;
 	}
 	auto Credit = FStoreCredit::Acquire(Budget, int64(ObjectBound.GetValue()));
 	if (!Credit.IsSet())
 	{
 		Increment(State.OmittedStatsGroups);
-		Increment(State.MetadataOmitted);
+		AddObservation(State.MetadataOmitted, 1, State.bLossCountersSaturated);
 		return Overflow;
 	}
 	void* Memory = Allocator.AllocateReserved(sizeof(FStatsGroupSlot), alignof(FStatsGroupSlot), ObjectBound.GetValue());
@@ -2639,7 +2843,7 @@ FStatsGroup* FStore::FindOrAdmitStatsGroup(const FStatsKeyView& Key, const FAdmi
 	if (!CopyTextAdmitted(Key.Key, Slot->Key))
 	{
 		Increment(State.OmittedStatsGroups);
-		Increment(State.MetadataOmitted);
+		AddObservation(State.MetadataOmitted, 1, State.bLossCountersSaturated);
 		return Overflow;
 	}
 	const uint32 Mask = uint32(Storage->Plan.StatsIndexCapacity - 1);
@@ -2658,7 +2862,7 @@ FStatsGroup* FStore::FindOrAdmitStatsGroup(const FStatsKeyView& Key, const FAdmi
 	if (IndexSlot == INDEX_NONE)
 	{
 		Increment(State.OmittedStatsGroups);
-		Increment(State.MetadataOmitted);
+		AddObservation(State.MetadataOmitted, 1, State.bLossCountersSaturated);
 		return Overflow;
 	}
 	Slot->IndexSlot = IndexSlot;
@@ -2786,12 +2990,12 @@ int32 FStore::NumLinksForTarget(uint64 RequestId) const
 }
 ELinkAdmission FStore::TryAdmitLink(const FLinkSeed& Seed, const FAdmissionAnchors& Anchors)
 {
-	if (!Storage || Seed.FromRequestId == 0 || (Seed.bAuth && Seed.ToRequestId == 0) ||
+	if (!Storage || Seed.FromRequestId == 0 || (Seed.ToRequestId == 0 && (Seed.bAuth || Seed.QueueId.IsEmpty())) ||
 		Seed.QueueId.Len() < 0 || Seed.QueueId.Len() > FNormalizedLimits::MaxStringChars ||
 		(Seed.QueueId.Len() > 0 && !Seed.QueueId.GetData()) || !ValidateBorrowedSource(Seed.QueueId, Anchors))
 	{
 		Increment(State.OmittedLinks);
-		Increment(State.MetadataOmitted);
+		AddObservation(State.MetadataOmitted, 1, State.bLossCountersSaturated);
 		return ELinkAdmission::Refused;
 	}
 	const uint32 Mask = uint32(Storage->Plan.LinkIndexCapacity - 1);
@@ -2823,7 +3027,7 @@ ELinkAdmission FStore::TryAdmitLink(const FLinkSeed& Seed, const FAdmissionAncho
 	if (ForwardSlot == INDEX_NONE)
 	{
 		Increment(State.OmittedLinks);
-		Increment(State.MetadataOmitted);
+		AddObservation(State.MetadataOmitted, 1, State.bLossCountersSaturated);
 		return ELinkAdmission::Refused;
 	}
 	FAllocationAdapter& Allocator = Budget->Lifetime->Allocator;
@@ -2832,14 +3036,14 @@ ELinkAdmission FStore::TryAdmitLink(const FLinkSeed& Seed, const FAdmissionAncho
 	if (!TextBound.IsSet() || !MakeAdmissionRoom({0, int64(TextBound.GetValue()), Anchors}))
 	{
 		Increment(State.OmittedLinks);
-		Increment(State.MetadataOmitted);
+		AddObservation(State.MetadataOmitted, 1, State.bLossCountersSaturated);
 		return ELinkAdmission::Refused;
 	}
 	FTicketedText QueueId;
 	if (!CopyTextAdmitted(Seed.QueueId, QueueId))
 	{
 		Increment(State.OmittedLinks);
-		Increment(State.MetadataOmitted);
+		AddObservation(State.MetadataOmitted, 1, State.bLossCountersSaturated);
 		return ELinkAdmission::Refused;
 	}
 	bool bReplaced = false;
@@ -2848,7 +3052,7 @@ ELinkAdmission FStore::TryAdmitLink(const FLinkSeed& Seed, const FAdmissionAncho
 		RemoveLinkAt(Storage->LinkHead);
 		bReplaced = true;
 	}
-	if (auto* Target = FindLinkTarget(Seed.ToRequestId, false))
+	if (auto* Target = Seed.ToRequestId != 0 ? FindLinkTarget(Seed.ToRequestId, false) : nullptr)
 	{
 		const int32 TargetLimit = FMath::Min(FNormalizedLimits::LinksPerTarget, Storage->Plan.LinkCapacity);
 		if (Target->Count >= TargetLimit)
@@ -2857,8 +3061,8 @@ ELinkAdmission FStore::TryAdmitLink(const FLinkSeed& Seed, const FAdmissionAncho
 			bReplaced = true;
 		}
 	}
-	auto* Target = FindLinkTarget(Seed.ToRequestId, true);
-	check(Target);
+	auto* Target = Seed.ToRequestId != 0 ? FindLinkTarget(Seed.ToRequestId, true) : nullptr;
+	check(Seed.ToRequestId == 0 || Target);
 	int32 Slot = Storage->LinkFreeHead;
 	if (Slot != INDEX_NONE)
 		Storage->LinkFreeHead = Storage->Links[Slot].NextFree;
@@ -2873,10 +3077,10 @@ ELinkAdmission FStore::TryAdmitLink(const FLinkSeed& Seed, const FAdmissionAncho
 	Entry.bTargetEvicted = false;
 	Entry.bOccupied = true;
 	Entry.ForwardIndexSlot = ForwardSlot;
-	Entry.TargetIndexSlot = Target->IndexSlot;
+	Entry.TargetIndexSlot = Target ? Target->IndexSlot : INDEX_NONE;
 	Entry.PrevFifo = Storage->LinkTail;
 	Entry.NextFifo = INDEX_NONE;
-	Entry.PrevForTarget = Target->TailSlot;
+	Entry.PrevForTarget = Target ? Target->TailSlot : INDEX_NONE;
 	Entry.NextForTarget = INDEX_NONE;
 	Entry.NextFree = INDEX_NONE;
 	if (Storage->LinkTail != INDEX_NONE)
@@ -2884,12 +3088,15 @@ ELinkAdmission FStore::TryAdmitLink(const FLinkSeed& Seed, const FAdmissionAncho
 	else
 		Storage->LinkHead = Slot;
 	Storage->LinkTail = Slot;
-	if (Target->TailSlot != INDEX_NONE)
-		Storage->Links[Target->TailSlot].NextForTarget = Slot;
-	else
-		Target->HeadSlot = Slot;
-	Target->TailSlot = Slot;
-	++Target->Count;
+	if (Target)
+	{
+		if (Target->TailSlot != INDEX_NONE)
+			Storage->Links[Target->TailSlot].NextForTarget = Slot;
+		else
+			Target->HeadSlot = Slot;
+		Target->TailSlot = Slot;
+		++Target->Count;
+	}
 	Storage->LinkForward[ForwardSlot].State = FStorage::EIndexState::Occupied;
 	Storage->LinkForward[ForwardSlot].LinkSlot = Slot;
 	++Storage->NumLinks;
@@ -3097,7 +3304,7 @@ bool FStore::MeasureSnapshot(FSnapshotBuilder& Builder) const
 	ForEachRow([&](FRow& Row) {
 		if (!bMeasured)
 			return;
-		const FStringView Label = ClientLabel(Row.Value.ClientId);
+		const FStringView Label = RowClientLabel(Row);
 		if (ShouldShareRow(Row))
 			bMeasured = Builder.MeasureSealedRow(Label);
 		else
@@ -3116,7 +3323,18 @@ bool FStore::MeasureSnapshot(FSnapshotBuilder& Builder) const
 	MeasureGroup(Storage->OverflowStats);
 	for (int32 Index = 0; Index < Storage->Plan.StatsIndexCapacity; ++Index)
 		MeasureGroup(Storage->StatsIndex[Index].Group);
-	if (NumMeasuredStats != Storage->NumStatsGroups || !bMeasured || !Builder.FinishMeasurement())
+	if (bMeasured)
+		bMeasured = Builder.MeasureLinks(Storage->NumLinks);
+	int32 NumMeasuredLinks = 0;
+	for (int32 Slot = Storage->LinkHead; Slot != INDEX_NONE; Slot = Storage->Links[Slot].NextFifo)
+	{
+		const auto& Link = Storage->Links[Slot];
+		if (bMeasured)
+			bMeasured = Builder.MeasureLink({Link.FromRequestId, Link.ToRequestId, Link.QueueId.View(), Link.bAuth,
+				Link.ToRequestId != 0 && !Find(Link.ToRequestId) && IsIdRetained(Link.ToRequestId)});
+		++NumMeasuredLinks;
+	}
+	if (NumMeasuredStats != Storage->NumStatsGroups || NumMeasuredLinks != Storage->NumLinks || !bMeasured || !Builder.FinishMeasurement())
 		return false;
 	return true;
 }
@@ -3166,7 +3384,7 @@ bool FStore::TrySnapshot(TSharedPtr<const FVaRestInspectorSnapshot, ESPMode::Thr
 		if (!bConstructed)
 			return;
 		const auto& Entry = Storage->Index[Row.IndexSlot];
-		const FStringView Label = ClientLabel(Row.Value.ClientId);
+		const FStringView Label = RowClientLabel(Row);
 		if (ShouldShareRow(Row))
 		{
 			TSharedPtr<const FRow, ESPMode::ThreadSafe> Owner = Entry.Row;
@@ -3192,6 +3410,19 @@ bool FStore::TrySnapshot(TSharedPtr<const FVaRestInspectorSnapshot, ESPMode::Thr
 	for (int32 Index = 0; Index < Storage->Plan.StatsIndexCapacity; ++Index)
 		ConstructGroup(Storage->StatsIndex[Index].Group);
 	if (NumConstructedStats != Storage->NumStatsGroups)
+		bConstructed = false;
+	if (bConstructed)
+		bConstructed = Builder.ConstructLinks(Storage->NumLinks);
+	int32 NumConstructedLinks = 0;
+	for (int32 Slot = Storage->LinkHead; Slot != INDEX_NONE; Slot = Storage->Links[Slot].NextFifo)
+	{
+		const auto& Link = Storage->Links[Slot];
+		if (bConstructed)
+			bConstructed = Builder.ConstructLink({Link.FromRequestId, Link.ToRequestId, Link.QueueId.View(), Link.bAuth,
+				Link.ToRequestId != 0 && !Find(Link.ToRequestId) && IsIdRetained(Link.ToRequestId)}, NumConstructedLinks);
+		++NumConstructedLinks;
+	}
+	if (NumConstructedLinks != Storage->NumLinks)
 		bConstructed = false;
 	if (!bConstructed || !Builder.Publish(Out))
 	{
@@ -3278,9 +3509,8 @@ void FStore::VisitImmutableRow(const FRow& Row, FStringView Label, TFunctionRef<
 	View.Dispatches = {DispatchViews, Row.NumDispatches};
 	View.DispatchEvents = {DispatchEvents, NumEvents};
 	View.Excerpts = {Excerpts, NumExcerpts};
-	if (View.ScopeId == 0)
-		View.ScopeLabel = TEXT("Process");
-	View.ClientLabel = Label;
+	View.ScopeLabel = View.bContextKnown && View.ScopeId == 0 ? FStringView(TEXT("Process")) : FStringView();
+	View.ClientLabel = View.bContextKnown && View.Kind == EVaRestInspectorRecordKind::Http ? Label : FStringView();
 	Visitor(View);
 }
 bool FStore::ForEachRecord(TFunctionRef<void(const FVaRestInspectorRecordView&)> Visitor) const
@@ -3296,7 +3526,7 @@ bool FStore::ForEachRecord(TFunctionRef<void(const FVaRestInspectorRecordView&)>
 		const_cast<FStore*>(this)->FlushDeferred();
 	};
 	ForEachRow([&](FRow& Row) {
-		VisitImmutableRow(Row, ClientLabel(Row.Value.ClientId), Visitor);
+		VisitImmutableRow(Row, RowClientLabel(Row), Visitor);
 	});
 	return true;
 }

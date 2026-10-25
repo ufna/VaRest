@@ -800,7 +800,18 @@ bool FVaRestInspectorStoreBudgetTest::RunTest(const FString& Parameters)
 		C.Test.TestEqual(TEXT("global link cap enforced"), FStoreAccess::NumLinks(C.Store), 4096);
 		FSnapshot EmptyLinks;
 		if (!Take(C, EmptyLinks)) return false;
-		C.Test.TestTrue(TEXT("public links remain staged empty"), EmptyLinks->GetLinks().Num() == 0);
+		C.Test.TestEqual(TEXT("all 4096 independently retained links published"), EmptyLinks->GetLinks().Num(), 4096);
+		if (EmptyLinks->GetLinks().Num() != 4096) return false;
+		for (int32 Index = 0; Index < 4096; ++Index)
+		{
+			const uint64 From = uint64(Index) + 905;
+			const auto& Link = EmptyLinks->GetLinks()[Index];
+			C.Test.TestEqual(TEXT("surviving link source FIFO identity"), Link.FromRequestId, From);
+			C.Test.TestEqual(TEXT("surviving link exact target"), Link.ToRequestId, From % 64 + 1000);
+			C.Test.TestEqualSensitive(TEXT("surviving link owned QueueId"), Link.QueueId, FString::Printf(TEXT("queue-%llu"), From));
+			C.Test.TestFalse(TEXT("manual queue link is not auth"), Link.bAuth);
+			C.Test.TestFalse(TEXT("absent target without tombstone stays unknown"), Link.bTargetEvicted);
+		}
 		EmptyLinks.Reset();
 		for (uint64 Cause = 1; Cause <= 20; ++Cause)
 			if (!Deliver(C, Marker(Cause))) return false;

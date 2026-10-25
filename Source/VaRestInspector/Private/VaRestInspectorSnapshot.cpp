@@ -257,9 +257,8 @@ void VisitSnapshotCopy(const FSnapshotRowCopy& Copy, FStringView Label,
 	View.Dispatches = {DispatchViews, Copy.NumDispatches};
 	View.DispatchEvents = {DispatchEvents, NumEvents};
 	View.Excerpts = {Excerpts, NumExcerpts};
-	if (View.ScopeId == 0)
-		View.ScopeLabel = TEXT("Process");
-	View.ClientLabel = Label;
+	View.ScopeLabel = View.bContextKnown && View.ScopeId == 0 ? FStringView(TEXT("Process")) : FStringView();
+	View.ClientLabel = View.bContextKnown && View.Kind == EVaRestInspectorRecordKind::Http ? Label : FStringView();
 	Visitor(View);
 }
 } // namespace

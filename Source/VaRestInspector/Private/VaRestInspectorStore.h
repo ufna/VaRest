@@ -222,6 +222,10 @@ namespace BudgetTesting
 {
 struct FStoreAccess;
 }
+namespace LinksTesting
+{
+struct FStoreAccess;
+}
 #endif
 
 class FStore
@@ -244,6 +248,7 @@ public:
 	bool ForEachRecord(TFunctionRef<void(const FVaRestInspectorRecordView&)> Visitor) const;
 	FVaRestInspectorDiagnostics Diagnostics() const;
 	bool BindLossWitness(TSharedRef<FPendingAccount, ESPMode::ThreadSafe> Pending);
+	void ObserveQueueLoss(uint64 InGeneration, const FPendingAccount& Source);
 	FStatsGroup* FindOrAdmitStatsGroup(const FStatsKeyView& Key, const FAdmissionAnchors& Anchors);
 	FStatsGroup* FindOrAdmitOverflowStatsGroup();
 	const FStatsGroup* FindStatsGroup(const FStatsKeyView& Key) const;
@@ -260,6 +265,7 @@ private:
 #if WITH_DEV_AUTOMATION_TESTS
 	friend struct SnapshotTesting::FStoreAccess;
 	friend struct BudgetTesting::FStoreAccess;
+	friend struct LinksTesting::FStoreAccess;
 #endif
 	enum class EAttachedBase : uint8
 	{
@@ -299,7 +305,7 @@ private:
 	void ForEachRow(TFunctionRef<void(FRow&)> Visitor) const;
 	FRow* Find(uint64 RequestId) const;
 	FRow* FindRow(const FRowKey& Key) const;
-	FRow* AdmitRow(const FRowKey& Key, bool bPartial);
+	FRow* AdmitRow(const FRowKey& Key, bool bPartial, const FAdmissionAnchors& Anchors = {});
 	bool TakePacket(FRow& Anchor, FPacket& Packet, FStorePacketPtr& Out);
 	bool TakeHeader(FRow& Anchor, FPacket& Packet, TSharedPtr<const FDispatchHeaderOwner, ESPMode::ThreadSafe>& Out);
 	bool MakeAdmissionRoom(const FAdmissionRequest& Request);
@@ -312,6 +318,9 @@ private:
 	void ApplyCompletion(FRow& Row, FPacket& Packet);
 	EVaRestInspectorDetailState ApplyNote(FRow& Row, FPacket& Packet, uint64& OutNoteSerial);
 	bool ApplyMarker(FPacket& Packet);
+	bool TryAdmitInternalMarker(const FVaRestInspectorMarkerInfo& Info, uint64 ScopeId, uint64 ClientId,
+		bool bContextKnown, bool bMetadataOmitted, const FAdmissionAnchors& Anchors);
+	bool TryAdmitQueueExpiredMarker(FRow& SourceRow, uint64 NoteSerial);
 	bool EnsureNoteStorage(FRow& Row);
 	bool EnsureTimelineStorage(FRow& Row);
 	void AppendTimeline(FRow& Row, const FVaRestInspectorTimelineEntry& Entry, uint64 NoteSerial = 0);
@@ -344,7 +353,9 @@ private:
 	int32 IndexCapacity() const;
 	int32 RetainedIdCapacity() const;
 	void ApplyClient(uint64 ClientId, uint64 ScopeId, bool bCreated, FStringView Label);
-	FStringView ClientLabel(uint64 ClientId) const;
+	void ApplyScope(uint64 ScopeId, bool bOpened, FStringView Label, bool bMetadataOmitted = false);
+	FStringView ClientLabel(uint64 ClientId, TOptional<uint64> ExpectedScope = {}) const;
+	FStringView RowClientLabel(const FRow& Row) const;
 	bool AdmitText(FStringView Source, const FAdmissionAnchors& Anchors, FTicketedText& Out);
 	bool CopyTextAdmitted(FStringView Source, FTicketedText& Out);
 	bool ValidateBorrowedSource(FStringView Source, const FAdmissionAnchors& Anchors) const;
@@ -358,6 +369,7 @@ private:
 	bool MeasureSnapshot(FSnapshotBuilder& Builder) const;
 	static void VisitImmutableRow(const FRow& Row, FStringView Label, TFunctionRef<void(const FVaRestInspectorRecordView&)> Visitor);
 	void RefreshLossWitness() const;
+	void ResetLossObservation();
 	void InvalidateKnownNeverHistory() const;
 	void NoteUnsupportedPublicStrings() const;
 	void ReleaseFixedStorage();
