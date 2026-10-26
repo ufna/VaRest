@@ -17,6 +17,7 @@ public class VaRestTests : ModuleRules
 			"Engine",
 			"VaRestJson",
 			"VaRestHttp",
+			"VaRestInspector",
 			// WebSocket W1: the transport's integration suite (VaRest.Integration.WebSocket.Transport.*) and its test hooks
 			// (VaRestSocketTesting.h)
 			"VaRestWebSocket",
