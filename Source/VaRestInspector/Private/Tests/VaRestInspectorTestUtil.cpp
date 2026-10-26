@@ -69,7 +69,61 @@ void CheckCompleted(FAutomationTestBase& T, const FVaRestInspectorRecordView& R,
   }
  T.TestTrue(TEXT("real terminal observed"),R.bTerminalKnown && R.bActualCompletionObserved);
 }
-FCaptureFixture::FCaptureFixture(FAutomationTestBase& InTest,bool bPersistence,bool bAutoStart,bool bRecord):Test(InTest)
+void FRedactionScan::Text(FStringView Value)
+{
+ if(Value.IsEmpty()) return;
+ FString Copy(Value);
+ for(const FString& Needle:Needles)
+  if(!Needle.IsEmpty() && Copy.Contains(Needle,ESearchCase::CaseSensitive)) Leaks.Add(Needle);
+ Seen.Add(MoveTemp(Copy));
+}
+bool FRedactionScan::Contains(FStringView Needle) const
+{
+ const FString Copy(Needle);
+ for(const FString& Value:Seen) if(Value.Contains(Copy,ESearchCase::CaseSensitive)) return true;
+ return false;
+}
+void FRedactionScan::Packet(const FVaRestInspectorPacketView& P)
+{
+ if(!P.Fixed) return;
+ ++Packets;
+ for(int32 I=0;I<static_cast<int32>(View::EText::Count);++I) { ++TextSlots; Text(P.Text(static_cast<View::EText>(I))); }
+ for(const auto& Pair:P.Pairs(P.Fixed->Headers)) { ++HeaderPairs; Text(P.Read(Pair.First)); Text(P.Read(Pair.Second)); }
+ for(const auto& Pair:P.Pairs(P.Fixed->Warnings)) { ++WarningPairs; Text(P.Read(Pair.First)); Text(P.Read(Pair.Second)); }
+ const auto& S=P.Fixed->Scalars;
+ if(P.Fixed->Header.Kind==EVaRestTraceKind::Excerpt) {if(S.bRedacted)++Redacted;if(S.bTruncated)++Truncated;}
+ for(FName N:{S.Endpoint,S.Tag,S.CachePolicy,S.FailureDetail,S.ResultType,S.Reason}) Text(N.ToString());
+ if(!P.Excerpt.IsEmpty()) {
+  ++Excerpts;
+  // These are the producer's UTF-8 redacted excerpt/descriptor bytes, never a raw body cast.
+  // Also compare byte ranges directly, so malformed UTF-8 cannot hide an ASCII canary.
+  for(const FString& Needle:Needles) {
+   FTCHARToUTF8 N(*Needle);
+   if(N.Length()>0) for(int32 I=0;I+N.Length()<=P.Excerpt.Num();++I)
+    if(FMemory::Memcmp(P.Excerpt.GetData()+I,N.Get(),N.Length())==0) { Leaks.Add(Needle); break; }
+  }
+  FUTF8ToTCHAR U(reinterpret_cast<const ANSICHAR*>(P.Excerpt.GetData()),P.Excerpt.Num());
+  Text(FStringView(U.Get(),U.Length()));
+ }
+}
+void FRedactionScan::Record(const FVaRestInspectorRecordView& R)
+{
+ ++Rows; if(R.Kind==EVaRestInspectorRecordKind::Marker) ++Markers;
+ Text(R.ScopeLabel); Text(R.ClientLabel); Text(R.MarkerInfo.QueueId);
+ Packet(R.Started); Packet(R.Completed); Packet(R.Marker);
+ for(const auto& D:R.Dispatches) { Packet(D.Dispatched); Packet(D.Ended); Packet(D.ResponseExcerpt); }
+ for(const auto& P:R.DispatchEvents) Packet(P);
+ for(const auto& P:R.Notes) Packet(P);
+ for(const auto& P:R.Excerpts) Packet(P);
+}
+void FRedactionScan::Snapshot(const FVaRestInspectorSnapshot& S)
+{
+ S.ForEachRecord([this](const auto& R){Record(R);});
+ S.ForEachStats([this](const auto& V){++Stats;Text(V.Key);Text(V.Endpoint.ToString());});
+ for(const auto& L:S.GetLinks()) {++Links;Text(L.QueueId);}
+}
+
+FCaptureFixture::FCaptureFixture(FAutomationTestBase& InTest,bool bPersistence,bool bAutoStart,bool bRecord,const FCapturePolicy* InPolicy):Test(InTest)
 {
  using namespace VaRest::Http::Testing;
  if(bPersistence) {
@@ -79,8 +133,9 @@ FCaptureFixture::FCaptureFixture(FAutomationTestBase& InTest,bool bPersistence,b
  Policy.Limits.StoreBytes=16ll*1024*1024; Policy.Limits.MaxRecords=512;
  Policy.Limits.PendingBytes=4ll*1024*1024; Policy.Limits.PendingEvents=4096;
  Policy.Limits.BodyBytes=1024;
+ if(InPolicy) Policy=*InPolicy;
  Recorder=MakeShared<FTraceRecorder,ESPMode::ThreadSafe>(EVaRestTraceDetail::Metadata|EVaRestTraceDetail::Headers|EVaRestTraceDetail::Bodies);
- Recorder->Detail.BodyCap=1024; Recorder->Detail.FrameCap=0;
+ Recorder->Detail.BodyCap=Policy.Limits.BodyBytes; Recorder->Detail.BinaryCap=Policy.Limits.BinaryBytes; Recorder->Detail.FrameCap=0;
  FServiceTestOptions O; O.Witness=&Witness;
  if (!Test.TestTrue(TEXT("real capture factory admission"),FService::TryCreateForTest(Policy,O,Service))) return;
  Clock=Service->ClockForTest(); Test.TestTrue(TEXT("independent admitted receipt clock"),Clock.IsValid());
