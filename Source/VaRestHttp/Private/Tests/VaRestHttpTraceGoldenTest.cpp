@@ -233,6 +233,77 @@ bool FVaRestHttpGoldenEnvelopeTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpGoldenEnvelopeConfigRedactionTest, "VaRest.Http.Trace.Golden.EnvelopeConfigRedaction",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpGoldenEnvelopeConfigRedactionTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::GoldenTestPrivate;
+	// Configured envelope strings obey the same known-secret contract as server text; the unregistered case proves
+	// ordinary nonempty configuration and the existing Actual/Code/Message still reach the real Metadata sink.
+	for (const bool bKnownSecret : { false, true })
+	{
+		AddInfo(bKnownSecret ? TEXT("EnvelopeConfigRedaction: registered-secret configuration") : TEXT("EnvelopeConfigRedaction: benign configuration control"));
+		FScopedTraceRecorder Scoped(EVaRestTraceDetail::Metadata);
+		FTestRig Rig;
+		Rig.Client.WithRetry(Exact());
+		if (bKnownSecret)
+		{
+			Rig.Client.SetSecretValue(TEXT("EnvelopeData"), TEXT("EnvelopeDataCanary57391"));
+			Rig.Client.SetSecretValue(TEXT("EnvelopePredicate"), TEXT("EnvelopePredicateCanary68402"));
+			Rig.Client.SetSecretValue(TEXT("EnvelopeExpected"), TEXT("EnvelopeExpectedCanary79513"));
+		}
+		Rig.Client.WithEnvelope(FVaRestEnvelope::DataAt(TEXT("data.EnvelopeDataCanary57391"))
+			.SuccessWhen(TEXT("checks.EnvelopePredicateCanary68402"), { TEXT("accepted-EnvelopeExpectedCanary79513") })
+			.ErrorCodeAt(TEXT("code")).ErrorMessageAt(TEXT("message")));
+		Rig.Fake->Enqueue(Json(200, R"({"data":{"EnvelopeDataCanary57391":{"value":7}},"checks":{"EnvelopePredicateCanary68402":"ordinary-denied"},"code":"E_CONFIG","message":"ordinary configuration refused"})"));
+		auto Outcome = MakeOutcome<FVaRestJson>();
+		const uint64 Id = Observe(Rig.Client.Get(TEXT("/envelope-config")), Outcome).Send().GetId();
+		if (!TestTrue(TEXT("envelope configuration case completes"), Rig.Wait(Outcome)))
+		{
+			Abandon(Rig);
+			return false;
+		}
+		Settle(Rig);
+		const FTraceRecorder& Recorder = *Scoped.Recorder;
+		TestEqualSensitive(TEXT("envelope configuration sequence has one attempt and no retry note"), Recorder.KindsOf(Id), FString(TEXT("Started,Dispatched,Ended,Completed")));
+		TestTrue(TEXT("envelope configuration Seq increases"), SeqIncreases(Recorder, Id));
+		FString Why;
+		TestTrue(TEXT("envelope configuration phases hold"), PhasesHold(Recorder, Id, Why));
+		TestEqualSensitive(TEXT("envelope configuration phase explanation empty"), Why, FString());
+		const auto Ended = All<FVaRestTraceAttemptEnded>(Recorder, Id, EVaRestTraceKind::AttemptEnded);
+		TestTrue(TEXT("envelope configuration transport really ended 200"), Ended.Num() == 1 && Ended[0].Value.Status == 200
+			&& Ended[0].Value.Failure == EVaRestTransportFailure::None);
+		const auto Completed = All<FVaRestTraceCompleted>(Recorder, Id, EVaRestTraceKind::Completed);
+		if (!TestEqual(TEXT("envelope configuration has one Completed"), Completed.Num(), 1)) return false;
+		const FVaRestTraceCompleted& Done = Completed[0].Value;
+		TestTrue(TEXT("envelope configuration is a real applied Server predicate failure"), Done.RequestId == Id && Done.Envelope.bApplied
+			&& Done.Outcome == EVaRestTraceOutcome::Error && Done.Error.Kind == EVaRestErrorKind::Server
+			&& Done.Error.HttpStatus == 200 && Done.Response.Status == 200 && Outcome->Error.Kind == EVaRestErrorKind::Server);
+		TestTrue(TEXT("envelope configuration fields remain nonempty"), !Done.Envelope.DataPath.IsEmpty() && !Done.Envelope.PredicatePath.IsEmpty() && !Done.Envelope.Expected.IsEmpty());
+		if (bKnownSecret)
+		{
+			TestEqualSensitive(TEXT("IN-5 Envelope.DataPath configured secret value-scrubbed"), Done.Envelope.DataPath, FString(TEXT("data.***")));
+			TestEqualSensitive(TEXT("IN-5 Envelope.PredicatePath configured secret value-scrubbed"), Done.Envelope.PredicatePath, FString(TEXT("checks.***")));
+			TestEqualSensitive(TEXT("IN-5 Envelope.Expected configured secret value-scrubbed"), Done.Envelope.Expected, FString(TEXT("accepted-***")));
+		}
+		else
+		{
+			TestEqualSensitive(TEXT("benign configured DataPath preserved"), Done.Envelope.DataPath, FString(TEXT("data.EnvelopeDataCanary57391")));
+			TestEqualSensitive(TEXT("benign configured PredicatePath preserved"), Done.Envelope.PredicatePath, FString(TEXT("checks.EnvelopePredicateCanary68402")));
+			TestEqualSensitive(TEXT("benign configured Expected preserved"), Done.Envelope.Expected, FString(TEXT("accepted-EnvelopeExpectedCanary79513")));
+		}
+		TestEqualSensitive(TEXT("envelope configuration benign Actual preserved"), Done.Envelope.Actual, FString(TEXT("ordinary-denied")));
+		TestEqualSensitive(TEXT("envelope configuration benign Code preserved"), Done.Envelope.Code, FString(TEXT("E_CONFIG")));
+		TestEqualSensitive(TEXT("envelope configuration benign Message preserved"), Done.Envelope.Message, FString(TEXT("ordinary configuration refused")));
+		TestTrue(TEXT("envelope configuration Error code and message preserved"), Done.Error.Code == TEXT("E_CONFIG") && Done.Error.Message == TEXT("ordinary configuration refused"));
+		TestTrue(TEXT("envelope configuration decode timed and receipt unchanged"), Done.DecodeStartAt >= 0.0 && Done.DecodeEndAt >= Done.DecodeStartAt && Completed[0].Key == 0.0);
+		TestEqual(TEXT("envelope configuration callback sees one attempt"), Outcome->Error.Attempts, 1);
+	}
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpGoldenAttachTest, "VaRest.Http.Trace.Golden.AttachMidFlight",
 	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
 

@@ -330,8 +330,11 @@ void VaRest::Http::TracePoints::Completed(FExchangeState& Ex, const FFinish& Fin
 		Warning.Path = Redactor.ScrubText(Warnings[Index].Path);
 		Warning.Message = Redactor.ScrubText(Warnings[Index].Message);
 	}
-	// IN-5 Envelope; Actual, Code and Message are the server's text: scrubbed like every captured string (Inspector 2.2 layer 3)
+	// IN-5 Envelope: configured paths/expected values and server text are captured strings, so scrub both (Inspector 2.2 layer 3).
 	Payload.Envelope = Finish.EnvelopeTrace;
+	Payload.Envelope.DataPath = Redactor.ScrubText(Payload.Envelope.DataPath);
+	Payload.Envelope.PredicatePath = Redactor.ScrubText(Payload.Envelope.PredicatePath);
+	Payload.Envelope.Expected = Redactor.ScrubText(Payload.Envelope.Expected);
 	Payload.Envelope.Actual = Redactor.ScrubText(Payload.Envelope.Actual);
 	Payload.Envelope.Code = Redactor.ScrubText(Payload.Envelope.Code);
 	Payload.Envelope.Message = Redactor.ScrubText(Payload.Envelope.Message);
