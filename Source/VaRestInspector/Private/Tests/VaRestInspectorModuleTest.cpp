@@ -12,6 +12,7 @@
 #include "VaRestInspectorPolicy.h"
 #include "VaRestInspectorSettings.h"
 #include "VaRestTrace.h"
+#include "VaRestHttpTesting.h"
 #if VAREST_WITH_INSPECTOR
 #include "VaRestInspectorService.h"
 #endif
@@ -340,6 +341,43 @@ bool FVaRestInspectorModuleTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("no pending limits"), Diagnostics.bPendingLimits);
 	const auto After = FVaRestTrace::GetSinks();
 	TestEqual(TEXT("compiled-out controls and snapshot register no sink"), After ? After->Num() : 0, SinkCount);
+	{
+		// The compiled-out native facade must not disturb a real unrelated consumer.
+		using namespace VaRest::Http::Testing;
+		FVaRestTrace::FScopedSinkIsolation Isolation;
+		FTestRig Rig;
+		const auto Recorder = MakeShared<FTraceRecorder, ESPMode::ThreadSafe>(EVaRestTraceDetail::Metadata);
+		FVaRestTrace::AddSink(Recorder);
+		ON_SCOPE_EXIT { Rig.Client.CancelAll(); Rig.Drain(); FlushRedactionPipe(); FVaRestTrace::RemoveSink(Recorder); };
+		const auto OwnedList = FVaRestTrace::GetSinks();
+		const auto OwnedDetail = FVaRestTrace::GetDetailSettings();
+		Inspector->SetCapture(true); Inspector->Clear(); Inspector->SetCapture(false);
+		TSharedPtr<const FVaRestInspectorSnapshot, ESPMode::ThreadSafe> Empty;
+		TestTrue(TEXT("compiled-out controls still produce a valid native empty snapshot"),
+			Inspector->TrySnapshot(Empty) && Empty.IsValid() && Empty->GetRevision() == 0);
+		const auto UnchangedList = FVaRestTrace::GetSinks();
+		TestTrue(TEXT("compiled-out facade preserves another consumer's exact registry and metadata demand"),
+			OwnedList == UnchangedList && UnchangedList && UnchangedList->Num() == 1 && UnchangedList->Contains(Recorder)
+			&& FVaRestTrace::GetDetailSettings().Flags == OwnedDetail.Flags);
+		Rig.Fake->Enqueue(FVaRestFakeResponse::Text(200, TEXT("native-noop-body")));
+		const auto Outcome = MakeOutcome<void>();
+		const auto Handle = Observe(Rig.Client.Get<void>(TEXT("/task14/native-noop")).NoRetry(), Outcome).Send();
+		const bool Completed = Rig.Wait(Outcome);
+		TestTrue(TEXT("compiled-out facade leaves real fake HTTP callbacks usable"),
+			Completed && Outcome->SuccessCalls.load() == 1 && Outcome->ErrorCalls.load() == 0 && Outcome->CompleteCalls.load() == 1);
+		TestTrue(TEXT("compiled-out facade recorder work drains"), Rig.Drain());
+		FlushRedactionPipe();
+		int32 SourceCompletions = 0;
+		for (const auto& Event : Recorder->For(Handle.GetId()))
+			if (Event.Kind == EVaRestTraceKind::Completed)
+			{
+				++SourceCompletions;
+				TestTrue(TEXT("compiled-out facade preserves real completed response metadata"),
+					Event.Payload.Get<FVaRestTraceCompleted>().Response.Status == 200);
+			}
+		TestEqual(TEXT("compiled-out facade leaves the independent recorder served"), SourceCompletions, 1);
+		TestEqual(TEXT("metadata-only control needs no raw excerpt event"), Recorder->ExcerptsOf(Handle.GetId()).Num(), 0);
+	}
 #endif
 #if VAREST_WITH_INSPECTOR
  AddCommand(new VaRest::Inspector::Private::ModuleTesting::FCheckPublicPolicy(

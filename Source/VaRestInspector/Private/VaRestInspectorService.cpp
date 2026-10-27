@@ -624,25 +624,82 @@ template<class T,class... Args> TSharedPtr<T,ESPMode::ThreadSafe> FService::Make
  LLM_SCOPE_BYTAG(VaRest_Inspector); return TSharedPtr<T,ESPMode::ThreadSafe>(Object,MoveTemp(Deleter));
 }
 
+bool FService::BindCallback(bool bExit)
+{
+ check(IsInGameThread());
+ if (Refuses(RefuseBefore,bExit?EStage::PreExitBinding:EStage::FrameBinding) || !Lifetime) return false;
+ const uint8 Slot=bExit?7:6; const auto& Claim=Domain->Claims[Slot];
+ const auto Current=InspectCurrentAllocatorForFactory(); const auto Supported=Lifetime->Allocator.GetSupport();
+ const auto Bound=Lifetime->Allocator.Bound(CallbackRequest,16);
+ if (Current.Family==FSupportedAllocator::EFamily::Unsupported || Current.Family!=Supported.Family ||
+  Current.bCalibrationPassed || !Current.bVerifiedModuleNew || !Current.bVerifiedNoInflatingProxy ||
+  !Supported.bCalibrationPassed || !Supported.bVerifiedModuleNew || !Supported.bVerifiedNoInflatingProxy ||
+  !Bound.IsSet() || Bound.GetValue()>SIZE_T(MAX_int64) ||
+  Claim.Serial==0 || Claim.Kind!=(bExit?EClaimKind::PreExitBinding:EClaimKind::FrameBinding) ||
+  Claim.Ledgers!=ELedgers::Both || Claim.State!=EClaimState::Reserved || Claim.ObservedCapacity!=0 ||
+  Claim.Request!=CallbackRequest || Claim.Alignment!=16 || Claim.Reserved!=int64(Bound.GetValue()) ||
+  (bExit?CallbackState->PreExit.IsValid():CallbackState->EndFrame.IsValid())) return false;
+ FCheckedSimpleDelegate Delegate;
+ FCallbackArgument Argument{Self,CallbackState};
+ Delegate.BindStatic(bExit?&FService::PreExit:&FService::EndFrame,MoveTemp(Argument));
+ const void* Instance=Delegate.Allocation(); const SIZE_T Actual=Instance?FMemory::GetAllocSize(const_cast<void*>(Instance)):0;
+ if (!Instance || Delegate.GetAllocatedSize()!=CallbackRequest || Actual<CallbackRequest || Actual>SIZE_T(Claim.Reserved))
+ { Delegate.Unbind(); AddSaturated(Domain->ContextProbe.BoundFailures); return false; }
+ Domain->ObserveClaim(Slot,int64(Actual));
+ ObservePeak(Domain->ContextProbe.PeakBacking,Domain->ContextProbe.LiveBacking.fetch_add(int64(Actual))+int64(Actual));
+ if (bExit) { CallbackState->ExitActual=int64(Actual); CallbackState->PreExit=FCoreDelegates::OnPreExit.Add(MoveTemp(static_cast<FSimpleDelegate&>(Delegate))); }
+ else { CallbackState->FrameActual=int64(Actual); CallbackState->EndFrame=FCoreDelegates::OnEndFrame.Add(MoveTemp(static_cast<FSimpleDelegate&>(Delegate))); }
+ if (!(bExit?CallbackState->PreExit.IsValid():CallbackState->EndFrame.IsValid()))
+  TerminalInvariantFailure(TEXT("checked binding publication lost its owned handle"));
+ return true;
+}
 bool FService::BindCallbacks()
 {
  check(IsInGameThread());
- const auto Bind=[&](bool bExit)->bool {
-  if (Refuses(RefuseBefore,bExit?EStage::PreExitBinding:EStage::FrameBinding)) return false;
-  const uint8 Slot=bExit?7:6; auto& Claim=Domain->Claims[Slot];
-  if (Claim.State!=EClaimState::Reserved || Claim.Request!=CallbackRequest || Claim.Alignment!=16) return false;
-  FCheckedSimpleDelegate Delegate;
-  FCallbackArgument Argument{Self,CallbackState};
-  Delegate.BindStatic(bExit?&FService::PreExit:&FService::EndFrame,MoveTemp(Argument));
-  const void* Instance=Delegate.Allocation(); const SIZE_T Actual=Instance?FMemory::GetAllocSize(const_cast<void*>(Instance)):0;
-  if (!Instance || Delegate.GetAllocatedSize()!=CallbackRequest || Actual<CallbackRequest || Actual>SIZE_T(Claim.Reserved)) { Delegate.Unbind(); AddSaturated(Domain->ContextProbe.BoundFailures); return false; }
-  Domain->ObserveClaim(Slot,int64(Actual)); ObservePeak(Domain->ContextProbe.PeakBacking,Domain->ContextProbe.LiveBacking.fetch_add(int64(Actual))+int64(Actual));
-  if (bExit) { CallbackState->ExitActual=int64(Actual); CallbackState->PreExit=FCoreDelegates::OnPreExit.Add(MoveTemp(static_cast<FSimpleDelegate&>(Delegate))); }
-  else { CallbackState->FrameActual=int64(Actual); CallbackState->EndFrame=FCoreDelegates::OnEndFrame.Add(MoveTemp(static_cast<FSimpleDelegate&>(Delegate))); }
-  return true;
- };
- if (!Bind(false) || !Bind(true)) { RemoveCallbacks(); return false; }
+ if (!BindCallback(false) || !BindCallback(true)) { RemoveCallbacks(); return false; }
  return true;
+}
+bool FService::EnsureFrameCallback()
+{
+ check(IsInGameThread());
+ if (bShutdown || CallbackState->Closed || CallbackState->Constructing) return false;
+ if (CallbackState->EndFrame.IsValid()) return true;
+ return BindCallback(false);
+}
+bool FService::EnsureFrameOrShutdown()
+{
+ if (EnsureFrameCallback()) return true;
+ // Never destroy borrowed visitor/observer state. The guaranteed outer flush
+ // performs the real shutdown after the current dispatch/tick has unwound.
+ if (CallbackState->FacadeClosed) *CallbackState->FacadeClosed=true;
+ if (DispatchDepth || bTicking) bDeferredShutdown=true;
+ else ShutdownNow();
+ return false;
+}
+void FService::SuspendIdleFrameCallback()
+{
+ check(IsInGameThread());
+ if (bShutdown || DispatchDepth || bTicking || bCapturing || bDirty || Store.Revision()!=NotifiedRevision ||
+  bDeferredShutdown || bDeferredClear || bHasCaptureRequest || bHasPolicyRequest || !CallbackState->EndFrame.IsValid()) return;
+ // A real EndFrame calls this with FrameDepth1, before its copied weak unwinds.
+ const auto& Claim=Domain->Claims[6]; const auto Bound=Lifetime->Allocator.Bound(CallbackRequest,16);
+ const int64 Actual=CallbackState->FrameActual;
+ if (CallbackState->Closed || CallbackState->Constructing || CallbackState->FrameDepth>1 ||
+  Domain->Identity.AuthorityPhase!=EAuthorityPhase::Active || Domain->Identity.Closed || Domain->Identity.Place!=ELedgerPlace::Domain ||
+  (Domain->Identity.DomainPhase!=EDomainPhase::Unpublished && Domain->Identity.DomainPhase!=EDomainPhase::Live) ||
+  Claim.Serial==0 || Claim.Kind!=EClaimKind::FrameBinding || Claim.Ledgers!=ELedgers::Both ||
+  Claim.State!=EClaimState::BackingLive || Claim.Request!=CallbackRequest || Claim.Alignment!=16 ||
+  !Bound.IsSet() || Bound.GetValue()>SIZE_T(MAX_int64) || Claim.Reserved!=int64(Bound.GetValue()) ||
+  Actual<=0 || Claim.ObservedCapacity!=Actual || Actual>Claim.Reserved ||
+  Domain->PendingTotal.load()<Claim.Reserved || Domain->StoreTotal.load()<Claim.Reserved ||
+  Domain->ContextProbe.LiveBacking.load()<Actual)
+  TerminalInvariantFailure(TEXT("idle frame reservation did not match its owned binding"));
+ const FDelegateHandle Handle=CallbackState->EndFrame; CallbackState->EndFrame.Reset();
+ if (!FCoreDelegates::OnEndFrame.Remove(Handle))
+  TerminalInvariantFailure(TEXT("idle owned binding actual free not proved"));
+ if (!Domain->RetainFrameReservationAfterFree(CallbackRequest,Actual))
+  TerminalInvariantFailure(TEXT("idle freed binding could not retain its reservation"));
+ CallbackState->FrameActual=0;
 }
 void FService::RemoveCallbacks()
 {
@@ -651,6 +708,12 @@ void FService::RemoveCallbacks()
  const FDelegateHandle Frame=CallbackState->EndFrame,Exit=CallbackState->PreExit;
  CallbackState->EndFrame.Reset(); CallbackState->PreExit.Reset();
  if (Frame.IsValid()) { const bool Removed=FCoreDelegates::OnEndFrame.Remove(Frame); if (!Removed) TerminalInvariantFailure(TEXT("owned binding actual free not proved")); Domain->ContextProbe.LiveBacking.fetch_sub(CallbackState->FrameActual); CallbackState->FrameActual=0; Domain->RetireClaim(6); }
+ else if (Domain->Claims[6].State==EClaimState::Reserved)
+ {
+  if (CallbackState->FrameActual!=0 || Domain->Claims[6].ObservedCapacity!=0)
+   TerminalInvariantFailure(TEXT("idle reserved binding retained physical backing"));
+  Domain->RetireClaim(6);
+ }
  if (Exit.IsValid()) { const bool Removed=FCoreDelegates::OnPreExit.Remove(Exit); if (!Removed) TerminalInvariantFailure(TEXT("owned binding actual free not proved")); Domain->ContextProbe.LiveBacking.fetch_sub(CallbackState->ExitActual); CallbackState->ExitActual=0; Domain->RetireClaim(7); }
 }
 void FService::EndFrame(FCallbackArgument Argument)
@@ -673,6 +736,7 @@ void FService::DetachFacade()
 { check(IsInGameThread()); ChangedRoute=nullptr; CallbackState->FacadeClosed=nullptr; }
 void FService::MarkChanged()
 {
+ if (bShutdown || !EnsureFrameOrShutdown()) return;
  if (Store.RevisionValue!=MAX_uint64) ++Store.RevisionValue;
  ServiceRevision=Store.Revision(); bDirty=true;
 }
@@ -680,7 +744,7 @@ uint64 FService::Revision() const { check(IsInGameThread()); return Store.Revisi
 void FService::SetCapture(bool Enabled) { RequestControl(Enabled?EControl::Start:EControl::Pause); }
 void FService::RequestPolicy(const FCapturePolicy& P)
 {
- check(IsInGameThread()); if (bShutdown) return;
+ check(IsInGameThread()); if (bShutdown || !EnsureFrameOrShutdown()) return;
  RequestedPolicy=P; bHasPolicyRequest=true;
  FlushDeferredControl();
 }
@@ -696,6 +760,7 @@ void FService::ApplyRequestedPolicy()
 bool FService::Start(const FCapturePolicy& P)
 {
  check(IsInGameThread()); if (bShutdown) return false;
+ if (!DispatchDepth && !bTicking && !EnsureFrameCallback()) return false;
  RequestedPolicy=P; bHasPolicyRequest=true;
  if (DispatchDepth || bTicking) { bHasCaptureRequest=true; bRequestedCapture=true; return true; }
  ApplyRequestedPolicy();
@@ -707,6 +772,7 @@ bool FService::StartNow(const FCapturePolicy& P)
  if (bShutdown || InspectCurrentAllocatorForFactory().Family==FSupportedAllocator::EFamily::Unsupported) return false;
  if (bCapturing) return true;
  if (!(Domain->GateWord.load(std::memory_order_acquire)&FReservationDomain::ClosedBit) || !Budget || !Pending || Generation==MAX_uint64 || Domain->Identity.NextGenerationSerial==MAX_uint64) return false;
+ if (!EnsureFrameCallback()) return false;
  // Adopt complete detail policy at restart; the four accounting capacities
  // remain tied to their real old accounts until explicit Clear commits.
  Policy=P;
@@ -783,6 +849,7 @@ void FService::RequestControl(EControl C)
 {
  check(IsInGameThread());
  if (bShutdown) return;
+ if (C!=EControl::None && C!=EControl::Shutdown && !EnsureFrameOrShutdown()) return;
  if (C==EControl::Shutdown) bDeferredShutdown=true;
  else if (C==EControl::Clear) bDeferredClear=true;
  else if (C==EControl::Start || C==EControl::Pause) { bHasCaptureRequest=true; bRequestedCapture=C==EControl::Start; }
@@ -792,6 +859,7 @@ void FService::FlushDeferredControl()
 {
  if (DispatchDepth || bTicking || bShutdown) return;
  if (bDeferredShutdown) { bDeferredShutdown=false; ShutdownNow(); return; }
+ if ((bHasPolicyRequest || bDeferredClear || bHasCaptureRequest) && !EnsureFrameOrShutdown()) return;
  if (bHasPolicyRequest) ApplyRequestedPolicy();
  const bool ClearRequest=bDeferredClear,HasCapture=bHasCaptureRequest,Capture=bRequestedCapture;
  bDeferredClear=bHasCaptureRequest=false;
@@ -853,6 +921,7 @@ void FService::Tick()
  Notify();
  Domain->AddRole(-1,uint8(ERootRole::ServiceFrame),true,-1); --DispatchDepth; bTicking=false;
  FlushDeferredControl();
+ SuspendIdleFrameCallback();
 }
 bool FService::TrySnapshot(TSharedPtr<const FVaRestInspectorSnapshot,ESPMode::ThreadSafe>& Out) const
 { check(IsInGameThread()); return !bShutdown && Store.TrySnapshot(Out); }

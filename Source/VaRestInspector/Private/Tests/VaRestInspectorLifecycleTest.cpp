@@ -10,6 +10,7 @@
 #include "HAL/PlatformProcess.h"
 #include "Misc/AutomationTest.h"
 #include "Misc/ScopeExit.h"
+#include "Templates/UniquePtr.h"
 #include "VaRestInspectorPacket.h"
 #include "VaRestInspectorService.h"
 #include "VaRestInspectorSink.h"
@@ -31,6 +32,11 @@ struct FServiceTestAccess
 	{
 		S.Recovery.Observe(S.Pending->LossEpoch.load(), S.Recovery.HandledOrphan, S.ActiveQueue->LastPublishedMetadata());
 	}
+	static bool FrameBound(const FService& S) { return S.CallbackState->EndFrame.IsValid(); }
+	static bool ExitBound(const FService& S) { return S.CallbackState->PreExit.IsValid(); }
+	static bool CallbacksClosed(const FService& S) { return S.CallbackState->Closed; }
+	static uint64 LastFrame(const FService& S) { return S.CallbackState->LastFrame; }
+	static int32 FrameDepth(const FService& S) { return S.CallbackState->FrameDepth; }
 	static FCallbackArgument Argument(FService& S) { return {S.Self, S.CallbackState}; }
 	static void EndFrame(FCallbackArgument A) { FService::EndFrame(MoveTemp(A)); }
 	static void PreExit(FCallbackArgument A) { FService::PreExit(MoveTemp(A)); }
@@ -542,6 +548,264 @@ bool QueueActualFrameRemoval(FAutomationTestBase& T)
 	F.Service->AttachFacade(State->Changed, nullptr); F.AddLive();
 	// No global Broadcast or direct thunk invocation: the engine owns this frame.
 	T.AddCommand(new FCheckFrameRemoval(State)); return true;
+}
+
+// Actual engine frames own this test's notifications and idle transitions.
+// The first behavioral failure exits through real shutdown, so accepted13
+// production has one specific idle-unregister RED rather than a cascade.
+struct FIdlePauseState
+{
+ explicit FIdlePauseState(FAutomationTestBase& T) : Fixture(MakeShared<FFixture,ESPMode::ThreadSafe>(T)) {}
+ ~FIdlePauseState() { Cleanup(); }
+ void Cleanup()
+ {
+  if (Unstarted) { if (Unstarted->Service) Unstarted->Service->Shutdown(); Unstarted->Clock.Reset(); Unstarted->Service.Reset(); Unstarted.Reset(); }
+  if (Fixture && Fixture->Service) { Fixture->Service->DetachFacade(); Fixture->Service->Shutdown(); }
+  if (Held)
+  {
+   Held->Finish();
+   if (HeldQueue) { while (HeldQueue->TryPopExcerpt().IsSet()) {} }
+  }
+  Held.Reset(); HeldSink.Reset(); HeldQueue.Reset(); HeldList.Reset();
+  Changed.Clear();
+  if (Fixture) { Fixture->Clock.Reset(); Fixture->Service.Reset(); }
+  Argument.Reset(); WeakService.Reset();
+  Receipt=nullptr; Root.Reset(); Fixture.Reset();
+ }
+ TSharedPtr<FFixture,ESPMode::ThreadSafe> Fixture,Unstarted;
+ FVaRestInspectorChanged Changed;
+ TUniquePtr<FExcerptHold> Held;
+ TSharedPtr<FCaptureQueue,ESPMode::ThreadSafe> HeldQueue;
+ TSharedPtr<FSink,ESPMode::ThreadSafe> HeldSink;
+ TSharedPtr<const FVaRestTrace::FSinkList,ESPMode::ThreadSafe> HeldList;
+ TOptional<FCallbackArgument> Argument;
+ TWeakPtr<FService,ESPMode::ThreadSafe> WeakService;
+ TWeakPtr<FProductionRootBlock,ESPMode::ThreadSafe> Root;
+ FRootRetireReceipt* Receipt=nullptr;
+ FBothLedgerImage BeforeIdle,Idle,PressureIdle;
+ uint64 RequestId=0,Frame=0,IdleLastFrame=0;
+ int64 HeldCharge=0,OriginalPending=0;
+ int32 Phase=0,Calls=0,BeforeCalls=0,Depth=0,MaxDepth=0;
+ uint32 Polls=0;
+ bool BeforeIdleSampled=false,Reenter=false,ObserverStable=false,FacadeClosed=false;
+};
+bool SameFrameAdmission(const FRootClaim& A,const FRootClaim& B)
+{
+ return A.Serial==B.Serial && A.Serial!=0 && A.Reserved==B.Reserved && A.Request==B.Request &&
+  A.Alignment==B.Alignment && A.Ledgers==B.Ledgers && A.Kind==B.Kind;
+}
+bool SameIdleCertificates(const FBothLedgerImage& A,const FBothLedgerImage& B)
+{
+ for (uint8 N=0;N<uint8(EControllerShape::Count);++N)
+ {
+  const auto& X=A.Identity.Certificates[N]; const auto& Y=B.Identity.Certificates[N];
+  if (X.Request!=Y.Request || X.Capacity!=Y.Capacity || X.CertifiedBound!=Y.CertifiedBound ||
+   X.TypeAlignment!=Y.TypeAlignment || X.OrdinaryAlignment!=Y.OrdinaryAlignment ||
+   X.Support.Family!=Y.Support.Family || X.Support.bVerifiedModuleNew!=Y.Support.bVerifiedModuleNew ||
+   X.Support.bVerifiedNoInflatingProxy!=Y.Support.bVerifiedNoInflatingProxy ||
+   X.Support.bCalibrationPassed!=Y.Support.bCalibrationPassed || X.Attempted!=Y.Attempted || X.Failed!=Y.Failed) return false;
+ }
+ return true;
+}
+class FCheckIdlePause final : public IAutomationLatentCommand
+{
+public:
+ explicit FCheckIdlePause(TSharedRef<FIdlePauseState,ESPMode::ThreadSafe> S) : State(MoveTemp(S)) {}
+ bool Update() override
+ {
+  if (Done) return true;
+  auto& F=*State->Fixture; auto& T=F.Test;
+  if (State->Phase==0)
+  {
+   if (!F.Create()) return Finish();
+   State->RequestId=F.AddLive(false);
+   TWeakPtr<FIdlePauseState,ESPMode::ThreadSafe> Weak=State;
+   State->Changed.AddLambda([Weak](uint64) {
+    if (auto S=Weak.Pin())
+    {
+     ++S->Depth; S->MaxDepth=FMath::Max(S->MaxDepth,S->Depth); ++S->Calls;
+     auto& Service=*S->Fixture->Service;
+     if (S->Phase==2) { S->BeforeIdle=FServiceTestAccess::Image(Service); S->BeforeIdleSampled=true; }
+     if (S->Reenter)
+     {
+      S->Reenter=false;
+      const uint64 BeforeGeneration=Service.TestImage().Generation;
+      Service.Clear(); Service.SetCapture(true);
+      S->ObserverStable=!Service.IsCapturing() && Service.TestImage().Generation==BeforeGeneration;
+     }
+     --S->Depth;
+    }
+   });
+   F.Service->AttachFacade(State->Changed,&State->FacadeClosed);
+   if (!F.Start()) return Finish();
+   T.TestEqual(TEXT("IdlePause Start never notifies synchronously"),State->Calls,0);
+   Next(1); return false;
+  }
+  if (State->Phase==1)
+  {
+   if (!Await(State->Calls>0 && GFrameCounter>State->Frame,TEXT("IdlePause actual Start notification across a normal frame"))) return Done;
+   T.TestTrue(TEXT("IdlePause capturing frame is actually bound"),FServiceTestAccess::FrameBound(*F.Service));
+   State->BeforeCalls=State->Calls; Next(2);
+   F.Service->Pause();
+   T.TestEqual(TEXT("IdlePause Pause never notifies synchronously"),State->Calls,State->BeforeCalls);
+   return false;
+  }
+  if (State->Phase==2)
+  {
+   if (!Await(State->Calls>State->BeforeCalls && GFrameCounter>State->Frame,TEXT("IdlePause genuine Pause notification arrives before idle assertion"))) return Done;
+   if (!T.TestFalse(TEXT("Task14 paused idle EndFrame is unregistered after notification"),FServiceTestAccess::FrameBound(*F.Service))) return Finish();
+   // This point is unreachable for the original always-bound production pump.
+   if (!T.TestTrue(TEXT("IdlePause sampled a genuine notification frame"),State->BeforeIdleSampled)) return Finish();
+   State->Idle=FServiceTestAccess::Image(*F.Service);
+   const auto& Before=State->BeforeIdle; const auto& After=State->Idle;
+   T.TestTrue(TEXT("IdlePause keeps PreExit alive and service callback state open"),FServiceTestAccess::ExitBound(*F.Service) && !FServiceTestAccess::CallbacksClosed(*F.Service));
+   T.TestTrue(TEXT("IdlePause demotes actual live frame to reserved with no observed backing"),
+    Before.Claims[6].State==EClaimState::BackingLive && Before.Claims[6].ObservedCapacity>0 &&
+    After.Claims[6].State==EClaimState::Reserved && After.Claims[6].ObservedCapacity==0);
+   T.TestTrue(TEXT("IdlePause preserves exact admitted frame identity"),SameFrameAdmission(Before.Claims[6],After.Claims[6]));
+   T.TestEqual(TEXT("IdlePause retains BOTH Pending reservation"),After.PendingTotal,Before.PendingTotal);
+   T.TestEqual(TEXT("IdlePause retains BOTH Store reservation"),After.StoreTotal,Before.StoreTotal);
+   T.TestEqual(TEXT("IdlePause actual callback free reduces live backing only"),After.ContextProbe.LiveBacking,Before.ContextProbe.LiveBacking-Before.Claims[6].ObservedCapacity);
+   T.TestEqual(TEXT("IdlePause callback frame has unwound"),FServiceTestAccess::FrameDepth(*F.Service),0);
+   State->IdleLastFrame=FServiceTestAccess::LastFrame(*F.Service);
+   Next(3); return false;
+  }
+  if (State->Phase==3)
+  {
+   if (!Await(GFrameCounter>State->Frame && GFrameCounter-State->Frame>=2,TEXT("IdlePause two actual quiet engine frames advance"))) return Done;
+   T.TestFalse(TEXT("IdlePause quiet frames keep EndFrame absent"),FServiceTestAccess::FrameBound(*F.Service));
+   T.TestEqual(TEXT("IdlePause no hidden paused callback updates LastFrame"),FServiceTestAccess::LastFrame(*F.Service),State->IdleLastFrame);
+   T.TestTrue(TEXT("IdlePause quiet fixed owner baseline leaves full authority unchanged"),EqualAuthorityImages(State->Idle,FServiceTestAccess::Image(*F.Service)));
+   State->Unstarted=MakeShared<FFixture,ESPMode::ThreadSafe>(T);
+   if (!State->Unstarted->Create()) return Finish();
+   State->Unstarted->Service->SetCapture(false);
+   T.TestTrue(TEXT("IdlePause genuine never-started factory is still unpublished"),
+    FServiceTestAccess::Image(*State->Unstarted->Service).Identity.DomainPhase==EDomainPhase::Unpublished);
+   Next(30); return false;
+  }
+  if (State->Phase==30)
+  {
+   if (!Await(GFrameCounter>State->Frame && GFrameCounter-State->Frame>=2,TEXT("IdlePause never-started service settles through normal frames"))) return Done;
+   auto& Unstarted=*State->Unstarted->Service;
+   T.TestFalse(TEXT("IdlePause never-started paused service unregisters its frame"),FServiceTestAccess::FrameBound(Unstarted));
+   const auto InitialIdle=FServiceTestAccess::Image(Unstarted);
+   T.TestTrue(TEXT("IdlePause unpublished idle claim remains genuinely reserved"),
+    InitialIdle.Identity.DomainPhase==EDomainPhase::Unpublished && InitialIdle.Claims[6].State==EClaimState::Reserved &&
+    InitialIdle.Claims[6].ObservedCapacity==0 && FServiceTestAccess::ExitBound(Unstarted) && !FServiceTestAccess::CallbacksClosed(Unstarted));
+   State->Unstarted->Service->Shutdown(); State->Unstarted->Clock.Reset(); State->Unstarted->Service.Reset(); State->Unstarted.Reset();
+   State->BeforeCalls=State->Calls; State->Reenter=true;
+   F.Service->Clear();
+   T.TestEqual(TEXT("IdlePause paused Clear remains asynchronous"),State->Calls,State->BeforeCalls);
+   T.TestTrue(TEXT("IdlePause real Clear rebinds an actual frame"),FServiceTestAccess::FrameBound(*F.Service));
+   Next(4); return false;
+  }
+  if (State->Phase==4)
+  {
+   if (!Await(State->Calls>=State->BeforeCalls+2 && F.Service->IsCapturing() && GFrameCounter>State->Frame,TEXT("IdlePause reentrant Clear then Start produces later normal-frame notification"))) return Done;
+   const auto Current=FServiceTestAccess::Image(*F.Service);
+   T.TestTrue(TEXT("IdlePause rearm retains frame claim and calibration certificates"),SameFrameAdmission(State->Idle.Claims[6],Current.Claims[6]) && SameIdleCertificates(State->Idle,Current));
+   T.TestEqual(TEXT("IdlePause frame rearm allocates no claim serial"),Current.Identity.NextClaimSerial,State->Idle.Identity.NextClaimSerial);
+   T.TestEqual(TEXT("IdlePause frame rearm allocates no binding serial"),Current.Identity.LastBindingSerial,State->Idle.Identity.LastBindingSerial);
+   T.TestTrue(TEXT("IdlePause observer controls deferred until after consistent batch"),State->ObserverStable);
+   T.TestEqual(TEXT("IdlePause Changed never recurses"),State->MaxDepth,1);
+   T.TestTrue(TEXT("IdlePause restarted source identity is genuinely attached"),Row(*F.Service,State->RequestId).Found && Row(*F.Service,State->RequestId).Pinned);
+   State->HeldQueue=F.Service->QueueForTest(); State->HeldSink=F.Service->SinkForTest(); State->HeldList=FVaRestTrace::GetSinks();
+   State->Held=MakeUnique<FExcerptHold>(State->HeldQueue);
+   if (!ExhaustWithHeldExcerpt(F,*State->Held,State->RequestId,&State->HeldCharge)) return Finish();
+   State->OriginalPending=F.Service->TestImage().EffectivePending;
+   FNormalizedLimits Requested=F.Policy.Limits; Requested.PendingBytes/=2;
+   F.Service->RequestLimitsForTest(Requested);
+   bool Visited=false,Stable=true;
+   const bool Enumerated=F.Service->ForEachRecord([&](const FVaRestInspectorRecordView& R) {
+    if (R.RequestId!=State->RequestId) return;
+    Visited=true; const uint64 BeforeGeneration=F.Service->TestImage().Generation;
+    F.Service->Clear(); F.Service->SetCapture(false);
+    Stable=Stable && F.Service->IsCapturing() && F.Service->TestImage().Generation==BeforeGeneration;
+   });
+   if (!T.TestTrue(TEXT("IdlePause actual visitor defers controls while row is borrowed"),Enumerated && Visited && Stable)) return Finish();
+   T.TestFalse(TEXT("IdlePause visitor's final Pause wins"),F.Service->IsCapturing());
+   State->BeforeCalls=State->Calls; Next(5); return false;
+  }
+  if (State->Phase==5)
+  {
+   if (!Await(State->Calls>State->BeforeCalls && GFrameCounter>State->Frame,TEXT("IdlePause pressured Pause notification completes on normal frame"))) return Done;
+   if (!T.TestFalse(TEXT("IdlePause pressure does not keep an empty paused pump"),FServiceTestAccess::FrameBound(*F.Service))) return Finish();
+   State->PressureIdle=FServiceTestAccess::Image(*F.Service);
+   T.TestTrue(TEXT("IdlePause real old publisher remains admitted while frame is idle"),F.Service->TestImage().Entries>0 && F.Service->TestImage().PendingDynamic>=State->HeldCharge);
+   State->BeforeCalls=State->Calls;
+   F.Service->Clear();
+   T.TestEqual(TEXT("IdlePause pressured paused Clear never notifies synchronously"),State->Calls,State->BeforeCalls);
+   T.TestTrue(TEXT("IdlePause retained reservation rebinds under actual byte pressure"),FServiceTestAccess::FrameBound(*F.Service));
+   Next(6); return false;
+  }
+  if (State->Phase==6)
+  {
+   if (!Await(State->Calls>State->BeforeCalls && GFrameCounter>State->Frame,TEXT("IdlePause pressured Clear gets actual asynchronous Changed"))) return Done;
+   const auto Pressure=FServiceTestAccess::Image(*F.Service);
+   T.TestFalse(TEXT("IdlePause pressured Clear returns to idle"),FServiceTestAccess::FrameBound(*F.Service));
+   T.TestTrue(TEXT("IdlePause pressure rearm preserves frame admission"),SameFrameAdmission(State->PressureIdle.Claims[6],Pressure.Claims[6]));
+   T.TestEqual(TEXT("IdlePause pressure rearm consumes no serial"),Pressure.Identity.NextClaimSerial,State->PressureIdle.Identity.NextClaimSerial);
+   T.TestTrue(TEXT("IdlePause real retained old publisher blocks account recreation"),F.Service->TestImage().bPendingLimits);
+   T.TestEqual(TEXT("IdlePause pressure preserves old effective Pending cap"),F.Service->TestImage().EffectivePending,State->OriginalPending);
+   T.TestTrue(TEXT("IdlePause actual held packet charge is never reset"),F.Service->TestImage().PendingDynamic>=State->HeldCharge);
+   State->Held->Finish();
+   T.TestTrue(TEXT("IdlePause already admitted old publisher completes safely"),State->Held->Result==EPush::Accepted);
+   while (State->HeldQueue->TryPopExcerpt().IsSet()) {}
+   State->Held.Reset(); State->HeldSink.Reset(); State->HeldQueue.Reset(); State->HeldList.Reset();
+   T.TestTrue(TEXT("IdlePause final old-owner release does not auto-apply limits"),F.Service->TestImage().bPendingLimits);
+   State->BeforeCalls=State->Calls;
+   F.Service->Clear();
+   T.TestFalse(TEXT("IdlePause explicit Clear commits only after genuine old-owner quiescence"),F.Service->TestImage().bPendingLimits);
+   T.TestEqual(TEXT("IdlePause committed Pending cap is the real request"),F.Service->TestImage().EffectivePending,State->OriginalPending/2);
+   Next(7); return false;
+  }
+  if (State->Phase==7)
+  {
+   if (!Await(State->Calls>State->BeforeCalls && GFrameCounter>State->Frame,TEXT("IdlePause final Clear notification settles before PreExit"))) return Done;
+   if (!T.TestFalse(TEXT("IdlePause final normal frame suspends again"),FServiceTestAccess::FrameBound(*F.Service))) return Finish();
+   State->Argument.Emplace(FServiceTestAccess::Argument(*F.Service));
+   State->WeakService=F.Service; State->Root=F.Service->RootForTest(); State->Receipt=F.Service->ReceiptForTest();
+   if (!T.TestNotNull(TEXT("IdlePause actual stored root receipt exists"),State->Receipt)) return Finish();
+   FServiceTestAccess::PreExit(State->Argument.GetValue());
+   T.TestTrue(TEXT("IdlePause real PreExit closes facade and paused service"),State->FacadeClosed && F.Service->IsShutdown());
+   const auto Closed=FServiceTestAccess::Image(*F.Service);
+   T.TestTrue(TEXT("IdlePause shutdown retires idle Reserved6 and actual PreExit7"),Closed.Claims[6].IsEmpty() && Closed.Claims[7].IsEmpty());
+   T.TestTrue(TEXT("IdlePause shutdown leaves neither callback handle"),!FServiceTestAccess::FrameBound(*F.Service) && !FServiceTestAccess::ExitBound(*F.Service));
+   F.Clock.Reset(); F.Service.Reset();
+   T.TestFalse(TEXT("IdlePause actual service last strong ended"),State->WeakService.IsValid());
+   FBothLedgerImage Freed;
+   T.TestFalse(TEXT("IdlePause copied weak keeps callback State before actual root free"),State->Receipt->ReadFreed(Freed));
+   FServiceTestAccess::EndFrame(State->Argument.GetValue());
+   T.TestFalse(TEXT("IdlePause failed Pin callback still protects State"),State->Receipt->ReadFreed(Freed));
+   State->Argument.Reset(); State->WeakService.Reset();
+   T.TestFalse(TEXT("IdlePause root payload actually freed after callback weak release"),State->Root.IsValid());
+   if (T.TestTrue(TEXT("IdlePause owned root weak reads post-free receipt"),State->Receipt->ReadFreed(Freed)))
+   {
+    T.TestEqual(TEXT("IdlePause final Pending retains only root controller"),Freed.PendingTotal,int64(4096));
+    T.TestEqual(TEXT("IdlePause final Store retains only root controller"),Freed.StoreTotal,int64(4096));
+    T.TestEqual(TEXT("IdlePause physical root backing is zero before receipt"),Freed.ContextProbe.LiveBacking,int64(0));
+   }
+   State->Receipt=nullptr; State->Root.Reset();
+   return Finish();
+  }
+  return Finish();
+ }
+private:
+ void Next(int32 Phase) { State->Phase=Phase; State->Frame=GFrameCounter; State->Polls=0; }
+ bool Await(bool Ready,const TCHAR* Label)
+ {
+  if (Ready) { State->Polls=0; return true; }
+  if (++State->Polls<128) return false;
+  State->Fixture->Test.TestTrue(Label,false); Finish(); return false;
+ }
+ bool Finish() { Done=true; State->Cleanup(); return true; }
+ TSharedRef<FIdlePauseState,ESPMode::ThreadSafe> State;
+ bool Done=false;
+};
+bool QueueIdlePause(FAutomationTestBase& T)
+{
+ T.AddCommand(new FCheckIdlePause(MakeShared<FIdlePauseState,ESPMode::ThreadSafe>(T)));
+ return true;
 }
 
 bool ReadersAndLimits(FAutomationTestBase& T)
@@ -1108,6 +1372,13 @@ bool FVaRestInspectorLifecycleTest::RunTest(const FString& Parameters)
 	Good = BothLedgerRefusalCases(*this) && Good;
 	Good = QueueActualFrameRemoval(*this) && Good;
 	return Good;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestInspectorIdlePauseTest, "VaRest.Inspector.Capture.IdlePause",
+ EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FVaRestInspectorIdlePauseTest::RunTest(const FString& Parameters)
+{
+ return VaRest::Inspector::Private::LifecycleTesting::QueueIdlePause(*this);
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestInspectorOverflowRecoveryTest, "VaRest.Inspector.Store.OverflowRecovery",

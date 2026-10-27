@@ -183,7 +183,8 @@ private:
 #endif
  );
  static void EndFrame(FCallbackArgument); static void PreExit(FCallbackArgument);
- bool BindCallbacks(); void RemoveCallbacks();
+ bool BindCallback(bool bExit); bool BindCallbacks(); void RemoveCallbacks();
+ bool EnsureFrameCallback(); bool EnsureFrameOrShutdown(); void SuspendIdleFrameCallback();
  bool StartNow(const FCapturePolicy&); void PauseNow(); void ClearNow(); void ShutdownNow();
  void CloseGeneration(); bool RecreateAccounts(); void ApplyRequestedPolicy();
  void MarkChanged(); void Notify();

@@ -391,6 +391,20 @@ void FReservationDomain::ObserveClaim(uint8 Slot,int64 Actual)
  check(Slot<16 && Claims[Slot].State==EClaimState::Reserved);
  Claims[Slot].ObservedCapacity=Actual; Claims[Slot].State=EClaimState::BackingLive;
 }
+bool FReservationDomain::RetainFrameReservationAfterFree(SIZE_T ExpectedRequest,int64 Actual)
+{
+ check(IsInGameThread());
+ FRootClaim& Claim=Claims[6];
+ if (Identity.AuthorityPhase!=EAuthorityPhase::Active || Identity.Closed || Identity.Place!=ELedgerPlace::Domain ||
+  (Identity.DomainPhase!=EDomainPhase::Unpublished && Identity.DomainPhase!=EDomainPhase::Live) ||
+  Claim.Serial==0 || Claim.Kind!=EClaimKind::FrameBinding || Claim.Ledgers!=ELedgers::Both ||
+  Claim.State!=EClaimState::BackingLive || ExpectedRequest==0 || Claim.Request!=ExpectedRequest ||
+  Claim.Alignment!=16 || Actual<=0 || Actual!=Claim.ObservedCapacity || Actual>Claim.Reserved ||
+  PendingTotal.load()<Claim.Reserved || StoreTotal.load()<Claim.Reserved || ContextProbe.LiveBacking.load()<Actual) return false;
+ ContextProbe.LiveBacking.fetch_sub(Actual);
+ Claim.ObservedCapacity=0; Claim.State=EClaimState::Reserved;
+ return true;
+}
 void FReservationDomain::RetireClaim(uint8 Slot)
 {
  check(Slot<16 && Claims[Slot].State!=EClaimState::Empty);

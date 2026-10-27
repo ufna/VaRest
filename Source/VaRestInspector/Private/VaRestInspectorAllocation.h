@@ -299,6 +299,10 @@ struct FReservationDomain
 	void AddRole(int8 Bank,uint8 Role,bool bRootRole,int32 Delta);
 	FBothLedgerImage Export() const;
 	bool Adopt(FReservationDomain& Source,ELedgerPlace NewPlace);
+private:
+	friend class FService;
+	// The owned frame instance has already been removed/freed; its admission stays held.
+	bool RetainFrameReservationAfterFree(SIZE_T ExpectedRequest,int64 Actual);
 };
 class FAdmissionEntry
 {
