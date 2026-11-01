@@ -3,6 +3,7 @@
 #pragma once
 
 #include "Containers/StringView.h"
+#include "VaRestInspector.h"
 #include "VaRestInspectorPacketView.h"
 
 #if VAREST_WITH_INSPECTOR
