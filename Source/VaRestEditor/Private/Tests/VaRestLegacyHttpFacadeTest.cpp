@@ -24,6 +24,7 @@ void UVaRestLegacyHttpTestProbe::CallCompleted(UVaRestRequestJSON* Request)
 }
 
 #if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
+#include "VaRestJson.h"
 #include "VaRestJsonObject.h"
 #include "VaRestJsonValue.h"
 #include "VaRestSettings.h"
@@ -104,6 +105,35 @@ public:
    Test.TestTrue(TEXT("valid JSON result"),Request->bIsValidJsonResponse);
    Test.TestEqual(TEXT("parsed response field"),Request->GetResponseObject()->GetIntegerField(TEXT("ok")),7);
    Test.TestEqual(TEXT("response header"),Request->GetResponseHeader(TEXT("X-M6")),FString(TEXT("present")));
+   // The actual engine-mock result must expose one mutable response graph through both public views.
+   if (!Test.TestEqual(TEXT("object response value type"),Request->GetResponseValue()->GetType(),EVaJson::Object)) return true;
+   TStrongObjectPtr<UVaRestJsonObject> ValueView(Request->GetResponseValue()->AsObject());
+   if (!Test.TestNotNull(TEXT("owned response-value object view"),ValueView.Get())) return true;
+   auto* ObjectView=Request->GetResponseObject();
+   Test.TestTrue(TEXT("response object and value views share the actual engine root"),&ObjectView->GetRootObject().Get()==&ValueView->GetRootObject().Get());
+   const TArray<uint8> OriginalResponse=Request->GetResponseContent();
+   const TArray<uint8> ExpectedResponse={'{','"','o','k','"',':','7','}'};
+   Test.TestTrue(TEXT("actual object response starts with the original wire bytes"),OriginalResponse==ExpectedResponse);
+   ObjectView->SetIntegerField(TEXT("ok"),11);
+   Test.TestEqual(TEXT("object-view field mutation reaches the response-value view"),ValueView->GetIntegerField(TEXT("ok")),11);
+   ValueView->SetIntegerField(TEXT("ok"),13);
+   Test.TestEqual(TEXT("response-value field mutation reaches the response-object view"),ObjectView->GetIntegerField(TEXT("ok")),13);
+   TStrongObjectPtr<UVaRestJsonObject> InsertedChild(NewObject<UVaRestJsonObject>());
+   InsertedChild->SetIntegerField(TEXT("n"),17); ObjectView->SetObjectField(TEXT("child"),InsertedChild.Get());
+   if (!Test.TestTrue(TEXT("object-view nested field reaches the response-value view"),ValueView->HasField(TEXT("child")))) return true;
+   TStrongObjectPtr<UVaRestJsonObject> ObjectChild(ObjectView->GetObjectField(TEXT("child")));
+   TStrongObjectPtr<UVaRestJsonObject> ValueChild(ValueView->GetObjectField(TEXT("child")));
+   if (!Test.TestNotNull(TEXT("owned nested response-object view"),ObjectChild.Get())
+    || !Test.TestNotNull(TEXT("owned nested response-value view"),ValueChild.Get())) return true;
+   ObjectChild->SetIntegerField(TEXT("n"),19);
+   Test.TestEqual(TEXT("nested object mutation reaches the response-value graph"),ValueChild->GetIntegerField(TEXT("n")),19);
+   ValueChild->SetIntegerField(TEXT("n"),23);
+   Test.TestEqual(TEXT("nested value mutation reaches the response-object graph"),ObjectChild->GetIntegerField(TEXT("n")),23);
+   auto Projected=FVaRestJson::Parse(FStringView(Request->GetResponseContentAsString(false)));
+   if (!Test.TestTrue(TEXT("uncached mutated response projection is valid JSON"),Projected.HasValue())) return true;
+   Test.TestEqual(TEXT("uncached content projection sees value-view field mutation"),Projected.GetValue().Get(TEXT("ok")).AsInt(),13);
+   Test.TestEqual(TEXT("uncached content projection sees nested value-view mutation"),Projected.GetValue().Get(TEXT("child")).Get(TEXT("n")).AsInt(),23);
+   Test.TestTrue(TEXT("view mutations never rewrite the retained raw response bytes"),Request->GetResponseContent()==OriginalResponse);
   }
   else if (Case==1)
   {

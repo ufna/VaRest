@@ -7,6 +7,7 @@
 #include "VaRestJsonValue.h"
 #include "VaRestLibrary.h"
 #include "VaRestSettings.h"
+#include "VaRestSubsystem.h"
 #include "VaRestHub.h"
 #include "VaRestApiClient.h"
 #include "VaRestTransport.h"
@@ -15,6 +16,7 @@
 #include "UObject/ObjectKey.h"
 #include "UObject/StrongObjectPtr.h"
 
+#include "Dom/JsonValue.h"
 #include "Engine/Engine.h"
 #include "Engine/LatentActionManager.h"
 #include "Engine/World.h"
@@ -149,7 +151,20 @@ void UVaRestRequestJSON::ResetResponseData()
 
 void UVaRestRequestJSON::Cancel()
 {
-	check(IsInGameThread());const uint64 RetiredEpoch=CoreEpoch==MAX_uint64 ? MAX_uint64 : CoreEpoch+1;RetireCoreOnGT(true);
+	check(IsInGameThread());
+	// A live explicit cancellation must outlast removal of its CallURL map pin.
+	// Destruction/unreachable schedules gain no new root or owner callback.
+	const TStrongObjectPtr<UVaRestRequestJSON> Self(IsValid(this) && !IsUnreachable() ? this : nullptr);
+	if (Self.Get())
+	{
+		auto* Owner = Cast<UVaRestSubsystem>(GetOuter());
+		if (IsValid(Owner) && !Owner->IsUnreachable())
+		{
+			const TStrongObjectPtr<UVaRestSubsystem> KeptOwner(Owner);
+			Owner->RetireCallURLSilently(this);
+		}
+	}
+	const uint64 RetiredEpoch=CoreEpoch==MAX_uint64 ? MAX_uint64 : CoreEpoch+1;RetireCoreOnGT(true);
 	if (CoreEpoch==RetiredEpoch) { CoreStatus=EVaRestRequestStatus::Failed;ResetResponseData(); }
 }
 void UVaRestRequestJSON::RetireCoreOnGT(bool bClearContinuation)
@@ -438,7 +453,7 @@ void UVaRestRequestJSON::FinishCoreOnGT(uint64 Epoch,FVaRestResponse Response,EV
 		auto Parsed=FVaRestJson::Parse(ResponseBytes);if (Parsed.HasValue())
 		{
 			auto Value=Parsed.GetValue().ToJsonValue();ResponseJsonValue->SetRootValue(Value);bIsValidJsonResponse=Value.IsValid();
-			if (Parsed.GetValue().IsObject()) ResponseJsonObj->SetRootObject(Parsed.GetValue().ToJsonObject());
+			if (Value.IsValid() && Value->Type==EJson::Object) ResponseJsonObj->SetRootObject(Value->AsObject());
 		}
 	}
 	if (!bIsValidJsonResponse)

@@ -516,3 +516,24 @@ Source304 changes documentation only; all825 Source files are exactly303. The re
 The matching ordinary private-loopback wire run passes5/0 in29.4323s, with all876 preservation checks and the original1048576 fd limit. FIFO, message contents, empty frames,48 repeated pauses,5 partial-message cycles and physical cleanup assertions pass. Known startup warnings remain visible. Actual current binary instructions/DWARF are captured for separate static qualification; passing compilation and ordinary wire do not prove the complete native stack bound or Host ownership.
 
 Actual Host frame/retention and every-normal-exit/unload veto, sourceH/provider, production selection, cooked/Shipping/platform and whole-release acceptance remain open. Host/Target/Launch/Core are unchanged and native Host/Profile runtime remains closed. Inspector I1 Tasks16-17 remain deferred. The Goal continues.
+
+
+### Source305 - reviewed M5 correctness source, pending matching native checks
+
+Four CPP files now correct the required M5/v1 durable queue identity (full API/fallback-name ASCII folding, explicit partitions unchanged) and generated UserAgent asset validation, with focused existing-fixture assertions. Independent whole-file source reviewsd4d0547d/abcc5a18 are C0/I0/M0; Root checked both patches/all43 input records/full825-source projection and821 unaffected sources. The new code has not been built or run. A genuine two-process acknowledged-work restart/replay remains required; source string logic is not that evidence.
+
+The latest actual binary is still303/normal242 with ordinaryWire5/0. M6 copy/retirement corrections and authorized Host5/Launch work continue. Source304 WIP checkpointabb81bc is pushed to origin/checkpoint/varest2-progress-01a1a188. No release/wholeM5/Host/native activation is accepted by this source update.
+
+
+### Source306 - M6 correctness source and Host5 implementation in progress
+
+Six reviewed files now preserve counted JSON keys, share the legacy response root, retire silently canceled CallURL ownership and close subsystem records before teardown callouts. Existing tests gain meaningful counted-key/copy-isolation and shared-response mutation assertions. Three independent source reviews are C0/I0/M0; the825-file projection preserves819 other Source files. These changes remain unbuilt; real pending-cancellation and cross-process queue-restart tests are still being authored.
+
+The reviewed Host5/Launch contractba10c715 is adopted, including honest mode-OFF metadata allocation costs. Its implementation is staged in recovery only; Host/SDK source remains unchanged and native activation/lifecycle qualification remains open. Source303/normal242 is still the latest actual binary. Goal continues.
+
+
+### Source307 - current M5/M6 corrections built and exercised
+
+All825 Source files remain306. Fresh normal243 builds7 plugin Compile and5 plugin Link actions successfully in28.09s;1348 preservation checks pass. The matching no-build run passes6/0 in19.45s: four legacy JSON cases including new counted-key/copy-isolation coverage, the eight-case engine-mock HTTP facade with shared-root mutation assertions, and API AssetValidation including UserAgent rejection/positive controls. All928 preservation records pass;674 known warning lines including automation replays remain. No Engine/Host/PCH-creation action occurs.
+
+This validates those Linux Editor behaviors. Real pending CallURL teardown, acknowledged-work cross-process M5 queue recovery, Host5/sourceH/global-exit/full-stack, production/cooked/platform and full-release qualification remain open. Goal continues.

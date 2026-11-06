@@ -224,7 +224,7 @@ namespace VaRest::Json::BridgePrivate
 					{
 						return nullptr;
 					}
-					SetMember(Doc, *Result, FString(*Pair.Key), Member); // FSharedString or FString key: both dereference to TCHAR*
+					SetMember(Doc, *Result, FString::ConstructFromPtrSize(*Pair.Key, Pair.Key.Len()), Member); // Preserve counted FString/FSharedString keys.
 				}
 			}
 			return Result;

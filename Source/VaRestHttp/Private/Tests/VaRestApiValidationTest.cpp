@@ -42,6 +42,25 @@ bool FVaRestApiValidationTest::RunTest(const FString& Parameters)
 	FVaRestApiValidationContext Valid;
 	Api->Validate(Valid);
 	TestFalse(TEXT("ordinary configured asset is valid"), Valid.HasErrors());
+	const TCHAR UserAgentWithNul[] = {TEXT('u'), 0, TEXT('a')};
+	for (const FString& BadAgent : {FString(TEXT("agent\rvalue")), FString(TEXT("agent\nX-Test: value")),
+		FString(TEXT("agent\x01" "value")), FString::ConstructFromPtrSize(UserAgentWithNul, UE_ARRAY_COUNT(UserAgentWithNul))})
+	{
+		Api->UserAgent = BadAgent;
+		FVaRestApiValidationContext InvalidAgent;
+		Api->Validate(InvalidAgent);
+		TestTrue(TEXT("invalid generated User-Agent is diagnosed at its asset property"), InvalidAgent.Issues.ContainsByPredicate([](const FVaRestApiValidationIssue& Issue) {
+			return !Issue.bWarning && Issue.Code == TEXT("Header.Invalid") && Issue.PropertyPath == TEXT("UserAgent");
+		}));
+	}
+	Api->UserAgent = TEXT("VaRest/2.0 unit-test");
+	FVaRestApiValidationContext OrdinaryAgent;
+	Api->Validate(OrdinaryAgent);
+	TestFalse(TEXT("ordinary generated User-Agent remains valid"), OrdinaryAgent.HasErrors());
+	Api->UserAgent.Reset();
+	FVaRestApiValidationContext EmptyAgent;
+	Api->Validate(EmptyAgent);
+	TestFalse(TEXT("empty User-Agent retains the default behavior"), EmptyAgent.HasErrors());
 	TestTrue(TEXT("asset retries are enabled by default"), Api->Retry.IsEnabled());
 	TestEqual(TEXT("asset retry count is visible as three"), Api->Retry.MaxRetries, 3);
 	TestEqual(TEXT("native explicit disabled policy is unchanged"), FVaRestRetryPolicy::Disabled().MaxRetries, 0);

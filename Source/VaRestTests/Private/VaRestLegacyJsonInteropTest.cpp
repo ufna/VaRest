@@ -44,6 +44,68 @@ bool FVaRestLegacyJsonCopiesTest::RunTest(const FString& Parameters)
  return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestLegacyJsonKeyCopiesTest,"VaRest.Compat.Legacy.CountedKeyCopies",
+ EAutomationTestFlags::EditorContext|EAutomationTestFlags::EngineFilter)
+bool FVaRestLegacyJsonKeyCopiesTest::RunTest(const FString& Parameters)
+{
+ const TCHAR KeyUnits[]={TEXT('a'),TCHAR(0),TEXT('x')};
+ const FString Key=FString::ConstructFromPtrSize(KeyUnits,UE_ARRAY_COUNT(KeyUnits));
+ auto Native=FVaRestJson::Object().Set(TEXT("a"),1).Set(FStringView(Key),2)
+  .Set(TEXT("child"),FVaRestJson::Object().Set(TEXT("a"),3).Set(FStringView(Key),4));
+ TStrongObjectPtr<UVaRestJsonObject> Legacy(UVaRestJsonObject::FromVaRestJson(Native));
+ if (!TestNotNull(TEXT("counted-key object migration result"),Legacy.Get())) return false;
+ Native.Set(FStringView(Key),12); Native.Get(TEXT("child")).Set(FStringView(Key),14);
+ auto Copy=Legacy->ToVaRestJson();
+ TestEqual(TEXT("object copy keeps the real top-level prefix key"),Copy.Get(TEXT("a")).AsInt(),1);
+ TestEqual(TEXT("object copy keeps top-level NUL key distinct and isolated from v2 mutation"),Copy.Get(FStringView(Key)).AsInt(),2);
+ TestEqual(TEXT("object copy keeps the real nested prefix key"),Copy.Get(TEXT("child")).Get(TEXT("a")).AsInt(),3);
+ TestEqual(TEXT("object copy keeps nested NUL key distinct and isolated from v2 mutation"),Copy.Get(TEXT("child")).Get(FStringView(Key)).AsInt(),4);
+ TStrongObjectPtr<UVaRestJsonObject> Child(Legacy->GetObjectField(TEXT("child")));
+ if (!TestNotNull(TEXT("owned legacy nested object view"),Child.Get())) return false;
+ Legacy->SetIntegerField(Key,20); Child->SetIntegerField(Key,40);
+ const auto Changed=Legacy->ToVaRestJson();
+ TestEqual(TEXT("engine mutation reaches the top-level counted key"),Changed.Get(FStringView(Key)).AsInt(),20);
+ TestEqual(TEXT("engine mutation reaches the nested counted key"),Changed.Get(TEXT("child")).Get(FStringView(Key)).AsInt(),40);
+ TestEqual(TEXT("engine mutation does not overwrite the real top-level prefix"),Changed.Get(TEXT("a")).AsInt(),1);
+ TestEqual(TEXT("engine mutation does not overwrite the real nested prefix"),Changed.Get(TEXT("child")).Get(TEXT("a")).AsInt(),3);
+ TestEqual(TEXT("engine mutation leaves the earlier top-level v2 copy independent"),Copy.Get(FStringView(Key)).AsInt(),2);
+ TestEqual(TEXT("engine mutation leaves the earlier nested v2 copy independent"),Copy.Get(TEXT("child")).Get(FStringView(Key)).AsInt(),4);
+ Copy.Set(FStringView(Key),22); Copy.Get(TEXT("child")).Set(FStringView(Key),44);
+ TestEqual(TEXT("mutating the copied top-level handle leaves engine storage independent"),Legacy->GetIntegerField(Key),20);
+ TestEqual(TEXT("mutating the copied nested handle leaves engine storage independent"),Child->GetIntegerField(Key),40);
+ TestEqual(TEXT("original top-level v2 source remains independent of engine and copied mutations"),Native.Get(FStringView(Key)).AsInt(),12);
+ TestEqual(TEXT("original nested v2 source remains independent of engine and copied mutations"),Native.Get(TEXT("child")).Get(FStringView(Key)).AsInt(),14);
+
+ auto ValueSource=FVaRestJson::Object().Set(TEXT("a"),5).Set(FStringView(Key),6)
+  .Set(TEXT("child"),FVaRestJson::Object().Set(TEXT("a"),7).Set(FStringView(Key),8));
+ TStrongObjectPtr<UVaRestJsonValue> Value(UVaRestJsonValue::FromVaRestJson(ValueSource));
+ if (!TestNotNull(TEXT("counted-key value migration result"),Value.Get())) return false;
+ ValueSource.Set(FStringView(Key),60); ValueSource.Get(TEXT("child")).Set(FStringView(Key),80);
+ auto ValueCopy=Value->ToVaRestJson();
+ TestEqual(TEXT("value copy keeps the real top-level prefix"),ValueCopy.Get(TEXT("a")).AsInt(),5);
+ TestEqual(TEXT("value copy preserves its distinct top-level NUL key"),ValueCopy.Get(FStringView(Key)).AsInt(),6);
+ TestEqual(TEXT("value copy keeps the real nested prefix"),ValueCopy.Get(TEXT("child")).Get(TEXT("a")).AsInt(),7);
+ TestEqual(TEXT("value copy preserves its distinct nested NUL key"),ValueCopy.Get(TEXT("child")).Get(FStringView(Key)).AsInt(),8);
+ TStrongObjectPtr<UVaRestJsonObject> ValueObject(Value->AsObject());
+ if (!TestNotNull(TEXT("owned object view of the legacy value"),ValueObject.Get())) return false;
+ TStrongObjectPtr<UVaRestJsonObject> ValueChild(ValueObject->GetObjectField(TEXT("child")));
+ if (!TestNotNull(TEXT("owned nested view of the legacy value"),ValueChild.Get())) return false;
+ ValueObject->SetIntegerField(Key,61); ValueChild->SetIntegerField(Key,81);
+ const auto ChangedValue=Value->ToVaRestJson();
+ TestEqual(TEXT("value root observes engine top-level mutation"),ChangedValue.Get(FStringView(Key)).AsInt(),61);
+ TestEqual(TEXT("value root observes engine nested mutation"),ChangedValue.Get(TEXT("child")).Get(FStringView(Key)).AsInt(),81);
+ TestEqual(TEXT("value top-level prefix survives engine mutation"),ChangedValue.Get(TEXT("a")).AsInt(),5);
+ TestEqual(TEXT("value nested prefix survives engine mutation"),ChangedValue.Get(TEXT("child")).Get(TEXT("a")).AsInt(),7);
+ TestEqual(TEXT("value top-level copy is independent of engine mutation"),ValueCopy.Get(FStringView(Key)).AsInt(),6);
+ TestEqual(TEXT("value nested copy is independent of engine mutation"),ValueCopy.Get(TEXT("child")).Get(FStringView(Key)).AsInt(),8);
+ ValueCopy.Set(FStringView(Key),62); ValueCopy.Get(TEXT("child")).Set(FStringView(Key),82);
+ TestEqual(TEXT("value copied top-level mutation leaves engine storage independent"),ValueObject->GetIntegerField(Key),61);
+ TestEqual(TEXT("value copied nested mutation leaves engine storage independent"),ValueChild->GetIntegerField(Key),81);
+ TestEqual(TEXT("value original top-level source remains independent"),ValueSource.Get(FStringView(Key)).AsInt(),60);
+ TestEqual(TEXT("value original nested source remains independent"),ValueSource.Get(TEXT("child")).Get(FStringView(Key)).AsInt(),80);
+ return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestLegacyJsonParserTest,"VaRest.Compat.Legacy.CountedParser",
  EAutomationTestFlags::EditorContext|EAutomationTestFlags::EngineFilter)
 bool FVaRestLegacyJsonParserTest::RunTest(const FString& Parameters)

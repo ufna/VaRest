@@ -27,24 +27,55 @@ void UVaRestSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 
 void UVaRestSubsystem::Deinitialize()
 {
-	// Do nothing for now
+	check(IsInGameThread());
+	if (bCallURLClosing) return;
+	bCallURLClosing = true; // Close admission and callback delivery before any retirement callout.
+
+	TArray<TStrongObjectPtr<UVaRestRequestJSON>> Requests;
+	Requests.Reserve(RequestMap.Num());
+	for (const auto& Pair : RequestMap)
+		if (IsValid(Pair.Key) && !Pair.Key->IsUnreachable()) Requests.Emplace(Pair.Key);
+
+	// Every live request is pinned before reflected ownership moves away.
+	auto Retiring = MoveTemp(RequestMap);
+	RequestMap.Reset();
+	for (auto& Pair : Retiring)
+	{
+		UVaRestRequestJSON* Request = Pair.Key;
+		if (IsValid(Request) && !Request->IsUnreachable())
+		{
+			Request->OnStaticRequestComplete.Remove(Pair.Value.CompleteDelegateHandle);
+			Request->OnStaticRequestFail.Remove(Pair.Value.FailDelegateHandle);
+		}
+		Pair.Value.Callback.Unbind();
+	}
+	Retiring.Empty(); // Release all callback records before cancelling any live target.
+	for (const auto& Request : Requests)
+		if (IsValid(Request.Get()) && !Request->IsUnreachable()) Request->Cancel();
 	Super::Deinitialize();
 }
 
 void UVaRestSubsystem::CallURL(const FString& URL, EVaRestRequestVerb Verb, EVaRestRequestContentType ContentType, UVaRestJsonObject* VaRestJson, const FVaRestCallDelegate& Callback)
 {
+	check(IsInGameThread());
+	if (!IsValid(this) || IsUnreachable() || bCallURLClosing) return;
+	const TStrongObjectPtr<UVaRestSubsystem> Self(this);
 	// Check we have valid data json
 	if (VaRestJson == nullptr)
 	{
 		VaRestJson = ConstructVaRestJsonObject();
 	}
 
+	if (!IsValid(this) || IsUnreachable() || bCallURLClosing) return;
 	UVaRestRequestJSON* Request = ConstructVaRestRequest();
+	if (!IsValid(Request) || Request->IsUnreachable()) return;
+	const TStrongObjectPtr<UVaRestRequestJSON> Kept(Request);
 
 	Request->SetVerb(Verb);
 	Request->SetContentType(ContentType);
 	Request->SetRequestObject(VaRestJson);
 
+	if (!IsValid(this) || IsUnreachable() || bCallURLClosing) return;
 	FVaRestCallResponse Response;
 	Response.Request = Request;
 	Response.Callback = Callback;
@@ -52,14 +83,23 @@ void UVaRestSubsystem::CallURL(const FString& URL, EVaRestRequestVerb Verb, EVaR
 	Response.CompleteDelegateHandle = Request->OnStaticRequestComplete.AddUObject(this, &UVaRestSubsystem::OnCallComplete);
 	Response.FailDelegateHandle = Request->OnStaticRequestFail.AddUObject(this, &UVaRestSubsystem::OnCallComplete);
 
+	if (!IsValid(this) || IsUnreachable() || bCallURLClosing)
+	{
+		Request->OnStaticRequestComplete.Remove(Response.CompleteDelegateHandle);
+		Request->OnStaticRequestFail.Remove(Response.FailDelegateHandle);
+		return;
+	}
 	RequestMap.Add(Request, Response);
 
 	Request->ResetResponseData();
+	if (!IsValid(this) || IsUnreachable() || bCallURLClosing) return;
 	Request->ProcessURL(URL);
 }
 
 void UVaRestSubsystem::OnCallComplete(UVaRestRequestJSON* Request)
 {
+	check(IsInGameThread());
+	if (bCallURLClosing) return; // Deinitialize owns all entries; never deliver user code while closing.
 	FVaRestCallResponse Response;
 	if (!RequestMap.RemoveAndCopyValue(Request, Response))
 	{
@@ -74,6 +114,18 @@ void UVaRestSubsystem::OnCallComplete(UVaRestRequestJSON* Request)
 	// independently of the map while delivering the callback.
 	const TStrongObjectPtr<UVaRestRequestJSON> Kept(Request);
 	Response.Callback.ExecuteIfBound(Request);
+}
+
+void UVaRestSubsystem::RetireCallURLSilently(UVaRestRequestJSON* Request)
+{
+	check(IsInGameThread());
+	if (!IsValid(this) || IsUnreachable() || bCallURLClosing || !IsValid(Request) || Request->IsUnreachable()) return;
+	const TStrongObjectPtr<UVaRestRequestJSON> Kept(Request);
+	FVaRestCallResponse Response;
+	if (!RequestMap.RemoveAndCopyValue(Request, Response)) return;
+	Request->OnStaticRequestComplete.Remove(Response.CompleteDelegateHandle);
+	Request->OnStaticRequestFail.Remove(Response.FailDelegateHandle);
+	Response.Callback.Unbind(); // Internal retirement only; no OnCallComplete/user callback.
 }
 
 UVaRestRequestJSON* UVaRestSubsystem::ConstructVaRestRequest()

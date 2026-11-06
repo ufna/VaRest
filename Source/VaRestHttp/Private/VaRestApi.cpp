@@ -172,6 +172,10 @@ void UVaRestApi::Validate(FVaRestApiValidationContext& Context) const
 		Context.Error(TEXT("Requests.InvalidLimits"), TEXT("Requests"), LOCTEXT("InvalidLimits", "Timeouts and response limits must be nonnegative and finite; MaxConcurrent must be positive."));
 	}
 	ValidateHeaders(Headers, Context, TEXT("Headers"));
+	if (!UserAgent.IsEmpty() && !IsValidHeaderValue(UserAgent))
+	{
+		Context.Error(TEXT("Header.Invalid"), TEXT("UserAgent"), LOCTEXT("InvalidUserAgent", "UserAgent must be a valid HTTP header value without forbidden control characters."));
+	}
 	ValidateRetry(Retry, Context, TEXT("Retry"));
 	ValidateCache(Cache, Context, TEXT("Cache"));
 	if (Offline.MaxQueued <= 0 || Offline.MaxQueued > 4096 || !FMath::IsFinite(Offline.MaxAgeSeconds) || Offline.MaxAgeSeconds <= 0 || Offline.MaxAgeSeconds > 315360000 || Offline.MaxItemBytes <= 0 || Offline.MaxItemBytes > 32 * 1024 * 1024 || Offline.MaxBodyBytes < Offline.MaxItemBytes || Offline.MaxBodyBytes > 1024LL * 1024 * 1024)

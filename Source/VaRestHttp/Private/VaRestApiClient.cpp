@@ -30,9 +30,13 @@ bool UVaRestApiClient::BuildTargetOnGT(FName Name,FStringView Account,VaRest::Ht
 	FString Namespace=Selected->QueueNamespace;
 	if (Namespace.IsEmpty())
 	{
-		Namespace=Selected->Name.GetComparisonNameEntry()->GetPlainNameString();
-		if (Selected->Name.GetNumber()!=NAME_NO_NUMBER_INTERNAL)
-			Namespace+=FString::Printf(TEXT("_%d"),NAME_INTERNAL_TO_EXTERNAL(Selected->Name.GetNumber()));
+		Namespace=Selected->Name.ToString(); // Complete text, including its numeric suffix.
+		for (int32 Index=0;Index<Namespace.Len();++Index)
+		{
+			const TCHAR Character=Namespace[Index];
+			if (Character>=0x41 && Character<=0x5a)
+				Namespace[Index]=static_cast<TCHAR>(Character+0x20); // ASCII A-Z only.
+		}
 	}
 	FString QueueName;
 	if (!FHubRuntime::QueueName(Asset->GetPathName(),Owner->StorageProfileOnGT(),Namespace,Account,QueueName,Error)) return false;

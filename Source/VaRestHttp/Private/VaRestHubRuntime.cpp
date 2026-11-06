@@ -25,11 +25,22 @@ bool FHubRuntime::QueueName(FStringView ApiPath,FStringView StorageProfile,FStri
 	if (!ValidatePartition(StorageProfile,false,Error) || !ValidatePartition(Environment,false,Error) || !ValidatePartition(Account,true,Error)) return false;
 	if (Account.IsEmpty()) return true; // explicit account is required before any native named registration exists
 	if (ApiPath.IsEmpty() || ApiPath.Len()>1024) { Error=TEXT("InvalidApiStoragePath"); return false; }
-	FString Result(TEXT("M5"));
+	FString Result(TEXT("M5/v1"));
+	int32 FieldIndex=0;
 	for (FStringView Field:{ApiPath,StorageProfile,Environment,Account})
 	{
 		for (TCHAR Character:Field) if (Character<0x20 || Character==0x7f) { Error=TEXT("InvalidStoragePartition"); return false; }
-		const FString Text(Field); const FTCHARToUTF8 Utf8(*Text);
+		FString Text(Field);
+		if (FieldIndex++==0) // Only the complete API path is FName-derived here.
+		{
+			for (int32 Index=0;Index<Text.Len();++Index)
+			{
+				const TCHAR Character=Text[Index];
+				if (Character>=0x41 && Character<=0x5a)
+					Text[Index]=static_cast<TCHAR>(Character+0x20); // ASCII A-Z only.
+			}
+		}
+		const FTCHARToUTF8 Utf8(*Text);
 		const FString RoundTrip=FString::ConstructFromPtrSize(Utf8.Get(),Utf8.Length());
 		if (Text.Len()!=RoundTrip.Len() || (!Text.IsEmpty() && FMemory::Memcmp(*Text,*RoundTrip,Text.Len()*sizeof(TCHAR))!=0))
 			{ Error=TEXT("InvalidStoragePartitionEncoding"); return false; }
