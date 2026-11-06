@@ -2,25 +2,31 @@
 
 #include "VaRestJsonDocument.h"
 
-#include "HAL/PlatformTime.h"
-#include "Misc/Guid.h"
-
-uint64 VaRest::Json::GetHashSeed()
-{
-	// FGuid::NewGuid takes the platform's random source; a function-local static is initialised once, thread-safely,
-	// on first use -- no static-initialisation order with the engine's own startup
-	static const uint64 Seed = []
-	{
-		const FGuid Guid = FGuid::NewGuid();
-		return ((static_cast<uint64>(Guid.A) << 32) | Guid.B) ^ ((static_cast<uint64>(Guid.C) << 32) | Guid.D) ^ FPlatformTime::Cycles64();
-	}();
-	return Seed;
-}
-
 namespace VaRest::Json
 {
 	namespace DocumentPrivate
 	{
+		FMember* NewMembers(FArena& Arena, uint32 Count)
+		{
+			if (!Count)
+				return nullptr;
+			const SIZE_T Bytes = sizeof(FMemberStorage) + SIZE_T(Count) * sizeof(FMember);
+			auto* Storage = new (Arena.Allocate(Bytes, alignof(FMemberStorage))) FMemberStorage();
+			return reinterpret_cast<FMember*>(Storage + 1);
+		}
+
+		void GrowMembers(FArena& Arena, FNode::FObj& Object)
+		{
+			const uint32 NewMax = FMath::Max<uint32>(4, Object.Max * 2);
+			FMember* New = NewMembers(Arena, NewMax);
+			if (Object.Num)
+				FMemory::Memcpy(New, Object.Members, sizeof(FMember) * Object.Num);
+			FIndex* Index = Object.GetIndex();
+			Object.Members = New;
+			Object.Max = NewMax;
+			Object.SetIndex(Index); // Member order did not change; the existing slots remain valid.
+		}
+
 		template <typename T>
 		T* GrowVector(FArena& Arena, T* Old, uint32 Num, uint32& InOutMax)
 		{
@@ -169,7 +175,7 @@ namespace VaRest::Json
 	FNode* FDocument::NewObject(uint32 Reserve)
 	{
 		FNode* Node = NewNode(EVaRestJsonType::Object);
-		Node->Obj = FNode::FObj{ Arena.NewArray<FMember>(Reserve), 0, Reserve, nullptr };
+		Node->Obj = FNode::FObj{ DocumentPrivate::NewMembers(Arena, Reserve), 0, Reserve };
 		return Node;
 	}
 
@@ -177,7 +183,7 @@ namespace VaRest::Json
 	{
 		check(Object.Type == EVaRestJsonType::Object);
 		const FNode::FObj& O = Object.Obj;
-		if (const FIndex* Index = O.Index)
+		if (const FIndex* Index = O.GetIndex())
 		{
 			const uint32 Mask = Index->Capacity - 1;
 			for (uint32 Slot = Hash & Mask;; Slot = (Slot + 1) & Mask)
@@ -265,14 +271,14 @@ namespace VaRest::Json
 		FNode::FObj& O = Object.Obj;
 		if (O.Num == O.Max)
 		{
-			O.Members = DocumentPrivate::GrowVector(Arena, O.Members, O.Num, O.Max);
+			DocumentPrivate::GrowMembers(Arena, O);
 		}
 		O.Members[O.Num] = FMember{ Key, Value };
 		++O.Num;
 
-		if (O.Index)
+		if (const FIndex* Index = O.GetIndex())
 		{
-			if (O.Num * 2 > O.Index->Capacity)
+			if (O.Num * 2 > Index->Capacity)
 			{
 				BuildIndex(Object);
 			}
@@ -289,7 +295,7 @@ namespace VaRest::Json
 
 	bool FDocument::IndexInsert(FNode& Object, uint32 MemberIndex)
 	{
-		FIndex& Index = *Object.Obj.Index;
+		FIndex& Index = *Object.Obj.GetIndex();
 		const FMember& M = Object.Obj.Members[MemberIndex];
 		const uint32 Mask = Index.Capacity - 1;
 		for (uint32 Slot = M.Key.Hash & Mask;; Slot = (Slot + 1) & Mask)
@@ -312,12 +318,17 @@ namespace VaRest::Json
 	bool FDocument::BuildIndex(FNode& Object)
 	{
 		FNode::FObj& O = Object.Obj;
+		if (!O.Num)
+		{
+			O.SetIndex(nullptr);
+			return false;
+		}
 		const uint32 Capacity = FMath::RoundUpToPowerOfTwo(FMath::Max<uint32>(16, O.Num * 2));
 		FIndex* Index = Arena.New<FIndex>();
 		Index->Capacity = Capacity;
 		Index->Slots = Arena.NewArray<uint32>(Capacity);
 		FMemory::Memzero(Index->Slots, sizeof(uint32) * Capacity);
-		O.Index = Index;
+		O.SetIndex(Index);
 		bool bDuplicates = false;
 		for (uint32 i = 0; i < O.Num; ++i)
 		{
@@ -334,13 +345,14 @@ namespace VaRest::Json
 		// Members shifted, so every index slot after the first removal is stale. The arena never frees, so the existing
 		// slot array is cleared and refilled while it is large enough instead of allocating a new one.
 		FNode::FObj& O = Object.Obj;
+		FIndex* Index = O.GetIndex();
 		if (O.Num <= IndexThreshold)
 		{
-			O.Index = nullptr;
+			O.SetIndex(nullptr);
 		}
-		else if (O.Index && O.Index->Capacity >= O.Num * 2)
+		else if (Index && Index->Capacity >= O.Num * 2)
 		{
-			FMemory::Memzero(O.Index->Slots, sizeof(uint32) * O.Index->Capacity);
+			FMemory::Memzero(Index->Slots, sizeof(uint32) * Index->Capacity);
 			for (uint32 i = 0; i < O.Num; ++i)
 			{
 				IndexInsert(Object, i);
@@ -424,12 +436,12 @@ namespace VaRest::Json
 	void FDocument::AssignObject(FNode& Object, TConstArrayView<FMember> Members)
 	{
 		const uint32 Num = static_cast<uint32>(Members.Num());
-		FMember* Data = Arena.NewArray<FMember>(Num);
+		FMember* Data = DocumentPrivate::NewMembers(Arena, Num);
 		if (Num)
 		{
 			FMemory::Memcpy(Data, Members.GetData(), sizeof(FMember) * Num);
 		}
-		Object.Obj = FNode::FObj{ Data, Num, Num, nullptr };
+		Object.Obj = FNode::FObj{ Data, Num, Num };
 		// Recorded once, here at parse time, so Set pays for duplicate handling only on objects that have duplicates
 		// (spec 2.2): above IndexThreshold the index build sees every collision, below it a pairwise check does.
 		Object.bDuplicateKeys = Num > IndexThreshold ? BuildIndex(Object) : DocumentPrivate::HasDuplicateKeys(Data, Num);

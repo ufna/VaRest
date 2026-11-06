@@ -11,6 +11,7 @@
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "Subsystems/SubsystemBlueprintLibrary.h"
+#include "UObject/StrongObjectPtr.h"
 
 UVaRestSubsystem::UVaRestSubsystem()
 	: UEngineSubsystem()
@@ -59,18 +60,20 @@ void UVaRestSubsystem::CallURL(const FString& URL, EVaRestRequestVerb Verb, EVaR
 
 void UVaRestSubsystem::OnCallComplete(UVaRestRequestJSON* Request)
 {
-	if (!RequestMap.Contains(Request))
+	FVaRestCallResponse Response;
+	if (!RequestMap.RemoveAndCopyValue(Request, Response))
 	{
 		return;
 	}
 
-	const auto Response = RequestMap.Find(Request);
-	Request->OnStaticRequestComplete.Remove(Response->CompleteDelegateHandle);
-	Request->OnStaticRequestFail.Remove(Response->FailDelegateHandle);
+	Request->OnStaticRequestComplete.Remove(Response.CompleteDelegateHandle);
+	Request->OnStaticRequestFail.Remove(Response.FailDelegateHandle);
 
-	Response->Callback.ExecuteIfBound(Request);
-	Response->Request = nullptr;
-	RequestMap.Remove(Request);
+	// A callback may start more CallURL requests and reallocate the map, or run
+	// GC. Retire its entry before entering user code; keep this request alive
+	// independently of the map while delivering the callback.
+	const TStrongObjectPtr<UVaRestRequestJSON> Kept(Request);
+	Response.Callback.ExecuteIfBound(Request);
 }
 
 UVaRestRequestJSON* UVaRestSubsystem::ConstructVaRestRequest()
@@ -168,27 +171,25 @@ UVaRestJsonValue* UVaRestSubsystem::ConstructJsonValue(const TSharedPtr<FJsonVal
 
 UVaRestJsonValue* UVaRestSubsystem::DecodeJsonValue(const FString& JsonString)
 {
-	const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(*JsonString);
-	TSharedPtr<FJsonValue> OutJsonValue;
-	if (FJsonSerializer::Deserialize(Reader, OutJsonValue))
+	auto Parsed=FVaRestJson::Parse(JsonString);
+	if (Parsed.HasValue())
 	{
-		return ConstructJsonValue(OutJsonValue);
+		return ConstructJsonValue(Parsed.GetValue().ToJsonValue());
 	}
-
+	const auto& Error=Parsed.GetError();UE_LOG(LogVaRest,Warning,TEXT("Legacy JSON decoding failed at %d:%d: %s"),Error.Line,Error.Column,*Error.Message);
 	return nullptr;
 }
 
 UVaRestJsonObject* UVaRestSubsystem::DecodeJsonObject(const FString& JsonString)
 {
-	const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(*JsonString);
-	TSharedPtr<FJsonObject> OutJsonObj;
-	if (FJsonSerializer::Deserialize(Reader, OutJsonObj))
+	auto Parsed=FVaRestJson::Parse(JsonString);
+	if (Parsed.HasValue() && Parsed.GetValue().IsObject())
 	{
 		auto NewJsonObj = NewObject<UVaRestJsonObject>(this);
-		NewJsonObj->SetRootObject(OutJsonObj);
+		NewJsonObj->SetRootObject(Parsed.GetValue().ToJsonObject());
 		return NewJsonObj;
 	}
-
+	if (Parsed.HasError()) { const auto& Error=Parsed.GetError();UE_LOG(LogVaRest,Warning,TEXT("Legacy JSON decoding failed at %d:%d: %s"),Error.Line,Error.Column,*Error.Message); }
 	return nullptr;
 }
 

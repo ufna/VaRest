@@ -13,6 +13,9 @@ public class VaRestHttp : ModuleRules
 			"Core",
 			"CoreUObject",
 
+			// PUBLIC: M5 API assets, subsystem hosts and Blueprint actions expose Engine runtime types.
+			"Engine",
+
 			// PUBLIC: FVaRestError carries an FVaRestJson; bodies and results are FVaRestJson and structs (FVaRestJsonConvert)
 			"VaRestJson",
 
@@ -22,9 +25,10 @@ public class VaRestHttp : ModuleRules
 
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
-			// The default IVaRestTransport is FHttpModule (spec 0.4: UE's HTTP module is the transport). No public
-			// header names an engine HTTP type, so a game that only links VaRestHttp's API does not need HTTP's headers.
+			// The default transport uses FHttpModule. The optional legacy adapter only forward-declares IHttpRequest,
+			// so ordinary VaRestHttp consumers do not need to include the engine HTTP headers.
 			"HTTP",
+			"Projects", // version metadata, without depending on the legacy VaRest module
 		});
 	}
 }

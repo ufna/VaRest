@@ -7,11 +7,23 @@
 
 int32 VaRest::WebSocket::Lws::FConn::OnReceive(FService& Service, lws* InWsi, const void* In, size_t Len)
 {
+#if WITH_DEV_AUTOMATION_TESTS
+	if (const auto& Probe = Link->GetPressureProbeForTests())
+	{
+		PressureTesting::FReceiveWitness Value;
+		Value.MessageOrdinal = static_cast<uint64>(Probe->Count(EVaRestSocketEventType::Message));
+		Value.Length = Len; Value.Remaining = lws_remaining_packet_payload(InWsi);
+		Value.bFinal = lws_is_final_fragment(InWsi); Value.bBinary = lws_frame_is_binary(InWsi);
+		Value.bAssembling = bAssembling; Value.AssemblyBytes = Assembly.Num(); Value.Queued = Link->GetQueuedEventCount();
+		Probe->NoteReceive(Value);
+	}
+#endif
 	// A connection that is closing (ours, or a protocol failure) delivers nothing more
 	if (State != EConnState::Open || bCloseQueued)
 	{
 		return 0;
 	}
+	NoteInboundData(FPlatformTime::Seconds());
 	if (!bAssembling)
 	{
 		bAssembling = true;
@@ -55,9 +67,17 @@ int32 VaRest::WebSocket::Lws::FConn::OnReceive(FService& Service, lws* InWsi, co
 	FVaRestSocketEvent Message;
 	Message.Type = EVaRestSocketEventType::Message;
 	Message.Kind = AssemblyKind;
+	if (AssemblyKind == EVaRestSocketFrameKind::Text)
+		for (int32 Index = 0; Index < Request.AutoReplies.Num(); ++Index) if (Assembly == Request.AutoReplies[Index].Match)
+		{
+			if (AutoReplyDebt.Num() >= MaxAutoReplyDebt)
+			{ Fail(Service, 1009, TEXT("automatic reply reserve exceeded"), EVaRestSocketFailure::MessageTooBig); return 0; }
+			AutoReplyDebt.Add({static_cast<uint8>(Index), FPlatformTime::Seconds()}); Message.bAutoReplied = true; lws_callback_on_writable(InWsi); break;
+		}
 	// The slack byte for FVaRestJson::ParseOwned: reserved above, and ensured by the link (Task 3)
 	Message.Bytes = MoveTemp(Assembly);
 	Link->Push(MoveTemp(Message));
+	RefreshReadFlow(Service, FPlatformTime::Seconds());
 	Assembly.Reset();
 	return 0;
 }

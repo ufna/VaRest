@@ -14,6 +14,7 @@ namespace VaRest::Http
 	struct FExchangeState;
 	struct FFinish;
 	class FClientState;
+	class IResultHandler;
 
 	/**
 	 * Inspector 9.1's trace points. Game thread. Each starts with the one relaxed load of the mask and builds nothing
@@ -37,6 +38,8 @@ namespace VaRest::Http
 		 * first (Excerpts::ResolveDiscarded, Task 21 review M-1).
 		 */
 		void Completed(FExchangeState& Ex, const FFinish& Finish);
+		/** Managed GTK frame keeps sole ownership of its handler; actual type selection stays under caller authority. */
+		void Completed(FExchangeState& Ex, const FFinish& Finish, const IResultHandler* ActualHandler);
 		/** IN-8. Any thread; the event is emitted on the game thread. */
 		void Client(uint64 ClientId, const FClientConfig& Config, bool bCreated);
 		/** IN-4, game thread: stamps the exchange's request id, attempt and clock */

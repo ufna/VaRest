@@ -8,6 +8,8 @@
 
 #include <atomic>
 
+struct FVaRestClientCredentialsConfig;
+
 /**
  * What an auth writes into (WebSocket spec 19 item 2): one HTTP attempt, or one WebSocket handshake. Game thread; valid
  * only during IVaRestAuth::Apply.
@@ -32,6 +34,8 @@ struct FVaRestAuthTarget
 	const FVaRestSessionData& Session;
 	/** The request (IN-10); 0 for a socket handshake */
 	uint64 RequestId = 0;
+	/** Checked adapters can refuse malformed edits without treating them as missing optional credentials. */
+	FString ConfigError;
 };
 
 /** How a refresh ended (plan decision 3, ruling I-7) */
@@ -114,15 +118,27 @@ public:
 	template <typename T = FVaRestJson>
 	TVaRestRequest<T> Request(FStringView Verb, FStringView Path) const
 	{
+		return RequestForEndpoint<T>(Verb, Path, NAME_None);
+	}
+
+	/** The same one-ID refresh bypass with an authored endpoint name for trace metadata only. */
+	template <typename T = FVaRestJson>
+	TVaRestRequest<T> RequestForEndpoint(FStringView Verb, FStringView Path, FName TraceEndpoint) const
+	{
 		// Re-review N-9: one flag for every copy of this context, so the id goes to one request, never to two
 		const uint64 Preset = IdTaken->exchange(true) ? 0 : RefreshId;
-		return GetClient().Request<T>(Verb, Path).MarkAuthRefresh(Preset);
+		return GetClient().Request<T>(Verb, Path).MarkAuthRefresh(Preset, TraceEndpoint);
 	}
+	/** GT dynamic sibling; shares the one-time preset ID with every Request<T>/context copy. */
+	TVaRestRequest<FVaRestDynamicResult> RequestDynamic(FStringView Verb,FStringView Path,FVaRestDynamicResultConfig&& Config,
+		FName TraceEndpoint=NAME_None) const;
 
 	/** The session the refresh started from (its refresh token) */
 	const FVaRestSessionData& GetSession() const { return Session; }
 	/** IN-2 AuthRefreshId: the refresh request's RequestId when the auth sends one through Request() (spec review I-2) */
 	uint64 GetRefreshId() const { return RefreshId; }
+	/** GT-only liveness of this exact native refresh epoch, without invoking provider code. */
+	bool IsCurrentOnGT() const;
 
 private:
 	/** Task 15 review M-1, by shape: FClientAccess::MakeRefreshContext (the coordinator, VaRestHttp's tests) is the one maker */
@@ -273,6 +289,8 @@ public:
 	 * segment becomes a redaction key (plan decision 22).
 	 * Ruling Q7: an empty AccessTokenPath or RefreshPath, or the Json style with an empty RefreshBodyField, cannot work --
 	 * an Error here, every request fails Kind=Config with nothing sent, nothing refreshes, and the session is kept.
+	 * Invalid AccessTokenPath/RefreshTokenPath/ExpiresInPath syntax has the same Config refusal. Optional empty paths
+	 * remain allowed; JSON response path syntax is checked with FVaRestJson::IsValidPath.
 	 * What bounds a refresh: its request is built on the client (FVaRestAuthRefreshContext::Request), so it has the client's
 	 * WithTimeout() like any request, and with none the engine's defaults (HttpModule.cpp:96-98: no total timeout, 30 s to
 	 * connect, 30 s of activity). BearerRefresh sets no total timeout of its own (the config has no field for one): a refresh
@@ -283,4 +301,13 @@ public:
 	 * that answers more than the default 32 MiB.
 	 */
 	static FRef BearerRefresh(const FVaRestBearerRefreshConfig& Config);
+
+	/**
+	 * RFC 6749 client_credentials, separate from BearerRefresh. The configured client ID/secret acquire an access token
+	 * without a refresh token, through the same single-flight gate and refresh-context request bypass. The default token
+	 * response paths are access_token and expires_in. Basic form-encodes both credential components before base64; Form
+	 * sends client_id/client_secret in the grant body. Credential replacement changes opaque identity; token rotation does
+	 * not. Relative TokenPath identities are conservative literal paths within the client's own base/URL domain.
+	 */
+	static FRef ClientCredentials(const FVaRestClientCredentialsConfig& Config);
 };

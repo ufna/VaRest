@@ -12,13 +12,43 @@
 #include "VaRestAuth.h"
 #include "VaRestAuthInternal.h"
 #include "VaRestClientState.h"
+#include "VaRestManagedCompletion.h"
 #include "VaRestHttpLog.h"
 #include "VaRestHttpSettings.h"
 #include "VaRestHttpStatsInternal.h"
 #include "VaRestHttpTesting.h"
+#include "VaRestMediaType.h"
 #include "VaRestRedactor.h"
 #include "VaRestRequestSpec.h"
 #include "VaRestTrace.h"
+
+FVaRestClientWeak FVaRestClient::AsWeak() const
+{
+	check(IsInGameThread());
+	return FVaRestClientWeak(State);
+}
+
+FVaRestClient FVaRestClientWeak::PinOnGT() const
+{
+	check(IsInGameThread());
+	if (VaRest::Http::FClientState::IsShuttingDown()) return {};
+	auto Pinned = State.Pin();
+	if (!Pinned || Pinned->ManagedAdmissionIsClosed()) return {};
+	return FVaRestClient(MoveTemp(Pinned));
+}
+
+FVaRestJsonConvertOptions FVaRestClient::GetJsonOptionsOnGT() const
+{
+	check(IsInGameThread());
+	FVaRestJsonConvertOptions Options;
+	if (State && !VaRest::Http::FClientState::IsShuttingDown() && !State->ManagedAdmissionIsClosed())
+	{
+		const auto Config = State->GetConfig();
+		Options.Naming = Config->Naming; Options.bStrict = Config->bStrictDecode; Options.Rules = Config->JsonRules;
+	}
+	if (!Options.Rules) Options.Rules = FVaRestJsonRules::DefaultSnapshot();
+	return Options;
+}
 
 namespace VaRest::Http::ClientPrivate
 {
@@ -92,6 +122,8 @@ VaRest::Http::FRequestSpec::FRequestSpec(TSharedPtr<FClientState, ESPMode::Threa
 		// Any thread: the configuration is an immutable snapshot behind a lock
 		ConfigAtBuild = State->GetConfig();
 		Naming = ConfigAtBuild->Naming;
+		JsonContentType = ConfigAtBuild->JsonContentType;
+		JsonRules = ConfigAtBuild->JsonRules;
 	}
 }
 
@@ -137,8 +169,10 @@ void VaRest::Http::FRequestSpecAccess::DeliverWithoutClient(FRequestSpec& Spec)
 	Failed.Error.Tag = Spec.Tag;
 	// Spec 3.3: "Url (redacted)". No client, so no client keys or secrets: the built-in rules and userinfo.
 	Failed.Error.Url = FVaRestRedactor().RedactUrl(Spec.Path);
+	const bool bOffGameThread=Spec.bOnHttpThread && !Spec.Handler->RequiresGameThreadDelivery();
 	UE::Tasks::Launch(TEXT("VaRest.DeliverWithoutClient"),
-		[Callbacks = MoveTemp(Spec.Handler), Pending = MoveTemp(Failed), WeakOwner = Spec.Owner, bOwned = Spec.bHasOwner, bOffGameThread = Spec.bOnHttpThread]() mutable
+		[Callbacks = MoveTemp(Spec.Handler), Pending = MoveTemp(Failed), WeakOwner = Spec.Owner, bOwned = Spec.bHasOwner,
+		 bOffGameThread]() mutable
 		{
 			if ((bOwned && !WeakOwner.IsValid()) || FClientState::IsShuttingDown())
 			{
@@ -166,9 +200,63 @@ void VaRest::Http::FRequestSpecAccess::DeliverWithoutClient(FRequestSpec& Spec)
 		}, UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
 }
 
+void VaRest::Http::FRequestSpecAccess::InitializeExchange(FRequestSpec& Spec, FExchangeState& Ex, const FLlmSenderTags& Sender,
+	const char* SourceFile, uint32 SourceLine)
+{
+	Ex.PersistenceGuard = Ex.Config->PersistenceGuard;
+    Ex.Queue = Ex.Config->RegisteredQueue;
+    Ex.bQueueWhenOffline = Spec.bQueueWhenOffline;
+    Ex.OnQueued = MoveTemp(Spec.OnQueued);
+    Ex.QueueReplayOf = MoveTemp(Spec.QueueReplayOf);
+    Ex.ReplayIdentityScope = MoveTemp(Spec.ReplayIdentityScope);
+    Ex.QueueTerminalDetail = Spec.QueueTerminalDetail;
+	Ex.QueueReplay = MoveTemp(Spec.QueueReplay);
+	Ex.ManagedTerminalObserver=MoveTemp(Spec.InternalTerminalObserver);
+    if (Ex.bQueueWhenOffline) Ex.QueueAdmission.store(EQueueAdmission::Open, std::memory_order_release);
+	// Moved, not copied (review I-1): the builder dies in the caller after this returns, on the sending thread, and its
+	// reference must not be the client state's last one there
+	Ex.State = MoveTemp(Spec.State);
+	Ex.Verb = MoveTemp(Spec.Verb);
+	Ex.RawPath = MoveTemp(Spec.Path);
+	Ex.PathParams = MoveTemp(Spec.PathParams);
+	Ex.Query = MoveTemp(Spec.Query);
+	Ex.OwnHeaders = MoveTemp(Spec.Headers);
+	Ex.bPreserveOwnHeaderLines = Spec.bPreserveOwnHeaderLines;
+	Ex.Body = MoveTemp(Spec.Body);
+	Ex.BuildError = MoveTemp(Spec.BuildError);
+	Ex.Tag = Spec.Tag;
+	Ex.Endpoint = Spec.Endpoint;
+	Ex.Priority = Spec.Priority;
+	Ex.bIdempotent = Spec.bIdempotent;
+	Ex.bKeepBody = Spec.bKeepBody;
+	Ex.bOnHttpThread = Spec.bOnHttpThread;
+	Ex.SaveTo = MoveTemp(Spec.SaveTo);
+	Ex.TimeoutOverride = Spec.Timeout;
+	Ex.ActivityTimeoutOverride = Spec.ActivityTimeout;
+	Ex.MaxJsonBytesOverride = Spec.MaxJsonBytes;
+	Ex.Naming = Spec.Naming;
+	Ex.bStrictDecode = Spec.bStrictDecode.Get(Ex.Config->bStrictDecode);
+	Ex.RetryOverride = MoveTemp(Spec.Retry);
+	Ex.CacheOverride = MoveTemp(Spec.Cache);
+	Ex.bCacheHadBody = !Ex.Body.IsEmpty();
+	Ex.EnvelopeOverride = MoveTemp(Spec.Envelope);
+	Ex.bNoEnvelope = Spec.bNoEnvelope;
+	Ex.AuthMode = Spec.AuthMode;
+	Ex.bIsAuthRefresh = Spec.bAuthRefresh;
+	Ex.bConnectivityProbe = Spec.bConnectivityProbe;
+	Ex.Owner = Spec.Owner;
+	Ex.bHasOwner = Spec.bHasOwner;
+	Ex.SourceFile = SourceFile;
+	Ex.SourceLine = SourceLine;
+	Ex.SenderTags = Sender;
+	Ex.Handler = MoveTemp(Spec.Handler);
+}
+
 FVaRestRequestHandle VaRest::Http::FRequestSpecAccess::Send(TUniquePtr<FRequestSpec>&& Spec, const char* SourceFile, uint32 SourceLine)
 {
 	check(Spec.IsValid());
+	if (Spec->State.IsValid() && Spec->State->GetManagedLifetime().IsValid())
+		return SendManaged(MoveTemp(Spec), SourceFile, SourceLine);
 	Spec->bSent = true;
 	if (!Spec->State.IsValid())
 	{
@@ -192,50 +280,8 @@ FVaRestRequestHandle VaRest::Http::FRequestSpecAccess::Send(TUniquePtr<FRequestS
 	Ex.ClientId = Spec->State->GetClientId();
 	// Spec 3.1, verbatim: "A request snapshots the configuration at Send()" -- here, on the sending thread, under the
 	// state's read lock (decision 27). A struct body was encoded in Body() with the naming of that moment.
-	Ex.Config = Spec->State->GetConfig();
-	Ex.PersistenceGuard = Ex.Config->PersistenceGuard;
-    Ex.Queue = Ex.Config->RegisteredQueue;
-    Ex.bQueueWhenOffline = Spec->bQueueWhenOffline;
-    Ex.OnQueued = MoveTemp(Spec->OnQueued);
-    Ex.QueueReplayOf = MoveTemp(Spec->QueueReplayOf);
-    Ex.ReplayIdentityScope = MoveTemp(Spec->ReplayIdentityScope);
-    Ex.QueueTerminalDetail = Spec->QueueTerminalDetail;
-    if (Ex.bQueueWhenOffline) Ex.QueueAdmission.store(EQueueAdmission::Open, std::memory_order_release);
-	// Moved, not copied (review I-1): the builder dies in the caller after this returns, on the sending thread, and its
-	// reference must not be the client state's last one there
-	Ex.State = MoveTemp(Spec->State);
-	Ex.Verb = MoveTemp(Spec->Verb);
-	Ex.RawPath = MoveTemp(Spec->Path);
-	Ex.PathParams = MoveTemp(Spec->PathParams);
-	Ex.Query = MoveTemp(Spec->Query);
-	Ex.OwnHeaders = MoveTemp(Spec->Headers);
-	Ex.Body = MoveTemp(Spec->Body);
-	Ex.BuildError = MoveTemp(Spec->BuildError);
-	Ex.Tag = Spec->Tag;
-	Ex.Priority = Spec->Priority;
-	Ex.bIdempotent = Spec->bIdempotent;
-	Ex.bKeepBody = Spec->bKeepBody;
-	Ex.bOnHttpThread = Spec->bOnHttpThread;
-	Ex.SaveTo = MoveTemp(Spec->SaveTo);
-	Ex.TimeoutOverride = Spec->Timeout;
-	Ex.ActivityTimeoutOverride = Spec->ActivityTimeout;
-	Ex.MaxJsonBytesOverride = Spec->MaxJsonBytes;
-	Ex.Naming = Spec->Naming;
-	Ex.bStrictDecode = Spec->bStrictDecode;
-	Ex.RetryOverride = MoveTemp(Spec->Retry);
-	Ex.CacheOverride = MoveTemp(Spec->Cache);
-	Ex.bCacheHadBody = !Ex.Body.IsEmpty();
-	Ex.EnvelopeOverride = MoveTemp(Spec->Envelope);
-	Ex.bNoEnvelope = Spec->bNoEnvelope;
-	Ex.AuthMode = Spec->AuthMode;
-	Ex.bIsAuthRefresh = Spec->bAuthRefresh;
-	Ex.bConnectivityProbe = Spec->bConnectivityProbe;
-	Ex.Owner = Spec->Owner;
-	Ex.bHasOwner = Spec->bHasOwner;
-	Ex.SourceFile = SourceFile;
-	Ex.SourceLine = SourceLine;
-	Ex.SenderTags = Sender;
-	Ex.Handler = MoveTemp(Spec->Handler);
+	Ex.Config = Spec->State->SnapshotForSend(Ex.QueueCapture, Spec->bQueueWhenOffline);
+	InitializeExchange(*Spec, Ex, Sender, SourceFile, SourceLine);
 
 	FVaRestRequestHandle Handle(Created.ToSharedRef());
 	if (IsInGameThread())
@@ -286,6 +332,22 @@ void FVaRestRequestHandle::Cancel() const
 		return;
 	}
     if (!VaRest::Http::AcceptUserCancel(VaRest::Http::Internals(*Pinned))) return;
+	if (VaRest::Http::Internals(*Pinned).Managed.IsValid())
+	{
+		auto& Ex = VaRest::Http::Internals(*Pinned);
+		Ex.bCancelRequested = true; // any-thread immediate effect, including a finalizer already selected elsewhere
+		Ex.PersistenceAbort->store(true, std::memory_order_relaxed);
+		if (Ex.Managed.Control->IsStopped())
+			return;
+		if (const auto Completion = Ex.NativeCompletion.Pin()) // immutable weak native field; never read/move affine State here
+		{
+			if (IsInGameThread())
+				Completion->CancelOnGT();
+			else
+				Completion->QueueCancel();
+		}
+		return; // expired selected access still leaves the actual decode/completion's atomic cancellation input set
+	}
 	if (IsInGameThread())
 	{
 		VaRest::Http::Internals(*Pinned).State->Cancel(Pinned.ToSharedRef(), EVaRestCancelReason::User);
@@ -295,11 +357,15 @@ void FVaRestRequestHandle::Cancel() const
 	// moved into the task, so this thread never drops the last reference (review I-1).
 	VaRest::Http::Internals(*Pinned).bCancelRequested = true;
 	VaRest::Http::Internals(*Pinned).PersistenceAbort->store(true, std::memory_order_relaxed);
-	UE::Tasks::Launch(TEXT("VaRest.Cancel"), [Target = MoveTemp(Pinned)] { VaRest::Http::Internals(*Target).State->Cancel(Target.ToSharedRef(), EVaRestCancelReason::User); },
+	UE::Tasks::Launch(TEXT("VaRest.Cancel"), [Target = MoveTemp(Pinned)] {
+		// Managed anchor reclamation detaches affine State on GTK. A previously posted GTK task sees the final atomic first.
+		if (!Target->IsDone())
+			VaRest::Http::Internals(*Target).State->Cancel(Target.ToSharedRef(), EVaRestCancelReason::User);
+	},
 		UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
 }
 
-FVaRestClient FVaRestClient::Make(FStringView BaseUrl)
+VaRest::Http::FClientConfig VaRest::Http::FClientAccess::InitialConfig(FStringView BaseUrl)
 {
 	checkf(IsInGameThread(), TEXT("FVaRestClient::Make runs on the game thread"));
 	const UVaRestHttpSettings* Settings = GetDefault<UVaRestHttpSettings>();
@@ -319,12 +385,37 @@ FVaRestClient FVaRestClient::Make(FStringView BaseUrl)
 	const bool bQueueRoot = VaRest::Http::ClientPrivate::NormalizeStorageRoot(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("VaRest/Queue")), Initial.QueueRoot);
 	if (!bCacheRoot || !bQueueRoot) Initial.StorageConfigError = TEXT("invalid persistence directory");
 	VaRest::Http::ClientPrivate::WarnIfFragment(Initial.BaseUrl);
-	return FVaRestClient(VaRest::Http::FClientState::Create(MoveTemp(Initial)));
+	return Initial;
+}
+
+FVaRestClient FVaRestClient::Make(FStringView BaseUrl)
+{
+	return VaRest::Http::FClientAccess::Create(VaRest::Http::FClientAccess::InitialConfig(BaseUrl));
+}
+
+bool VaRest::Http::FClientAccess::ConfigureStorageRoots(FClientConfig& Config,FStringView CacheRoot,FStringView QueueRoot)
+{
+	check(IsInGameThread());
+	if (CacheRoot.IsEmpty() || QueueRoot.IsEmpty()) { Config.StorageConfigError=TEXT("invalid persistence directory"); return false; }
+	const auto Resolve=[](FStringView Root) {
+		const FString Text(Root);
+		return FPaths::IsRelative(Text) ? FPaths::Combine(FPaths::ProjectSavedDir(),Text) : Text;
+	};
+	const bool bCache=ClientPrivate::NormalizeStorageRoot(Resolve(CacheRoot),Config.CacheRoot);
+	const bool bQueue=ClientPrivate::NormalizeStorageRoot(Resolve(QueueRoot),Config.QueueRoot);
+	if (!bCache || !bQueue) Config.StorageConfigError=TEXT("invalid persistence directory");
+	else Config.StorageConfigError.Reset();
+	return bCache && bQueue;
 }
 
 uint64 FVaRestClient::GetId() const
 {
 	return State.IsValid() ? State->GetClientId() : 0;
+}
+
+uint64 FVaRestClient::GetScopeId() const
+{
+	return State.IsValid() ? State->GetScopeId() : FVaRestTrace::ProcessScopeId;
 }
 
 FString FVaRestClient::GetBaseUrl() const
@@ -397,6 +488,35 @@ FVaRestClient& FVaRestClient::WithNaming(EVaRestJsonNaming Naming)
 	{
 		State->EditConfig([Naming](VaRest::Http::FClientConfig& Edited) { Edited.Naming = Naming; });
 	}
+	return *this;
+}
+
+FVaRestClient& FVaRestClient::WithStrictDecode(bool bStrict)
+{
+	if (State.IsValid())
+		State->EditConfig([bStrict](VaRest::Http::FClientConfig& Config) { Config.bStrictDecode = bStrict; });
+	return *this;
+}
+
+FVaRestClient& FVaRestClient::WithJsonContentType(FStringView ContentType)
+{
+	bool bControl = false;
+	for (const TCHAR Character : ContentType)
+		bControl |= Character < 0x20 || Character == 0x7f;
+	if (bControl || !VaRest::Http::IsValidMediaType(ContentType) || !VaRest::Http::IsJsonContentType(ContentType))
+	{
+		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: invalid JSON media type; the default was not changed"));
+		return *this;
+	}
+	if (State.IsValid())
+		State->EditConfig([ContentType](VaRest::Http::FClientConfig& Config) { Config.JsonContentType = FString(ContentType); });
+	return *this;
+}
+
+FVaRestClient& FVaRestClient::WithJsonRules(TSharedPtr<const FVaRestJsonRuleSnapshot, ESPMode::ThreadSafe> Rules)
+{
+	if (State.IsValid())
+		State->EditConfig([Rules = MoveTemp(Rules)](VaRest::Http::FClientConfig& Config) { Config.JsonRules = Rules; });
 	return *this;
 }
 
@@ -727,17 +847,21 @@ bool FVaRestClient::ApplyAuth(FVaRestHeaders& OutHeaders, TArray<TPair<FString, 
 		// Review M-5: a reused string never reads stale on the paths that leave it alone
 		OutConfigError->Reset();
 	}
-	if (!State.IsValid())
+	const auto HeldState=State;
+	if (!HeldState.IsValid())
 	{
 		return true;
 	}
 	// Held for the call: an auth's Apply is game code, and a WithAuth() it made would otherwise release the auth under it
-	const TSharedRef<const VaRest::Http::FClientConfig, ESPMode::ThreadSafe> Current = State->GetConfig();
+	const auto IsClosed=[&] { return HeldState->ManagedAdmissionIsClosed() || VaRest::Http::FClientState::IsShuttingDown(); };
+	if (IsClosed()) { if (OutConfigError) *OutConfigError=TEXT("LifecycleClosed"); return false; }
+	const TSharedRef<const VaRest::Http::FClientConfig, ESPMode::ThreadSafe> Current = HeldState->GetConfig();
 	const IVaRestAuth* Auth = Current->Auth.Get();
 	if (Auth)
 	{
 		// Ruling Q7 for sockets (spec review C-1): a typo is Kind=Config there too, not a login screen
 		const FString Invalid = Auth->GetConfigError();
+		if (IsClosed()) { if (OutConfigError) *OutConfigError=TEXT("LifecycleClosed"); return false; }
 		if (!Invalid.IsEmpty())
 		{
 			if (OutConfigError)
@@ -748,8 +872,16 @@ bool FVaRestClient::ApplyAuth(FVaRestHeaders& OutHeaders, TArray<TPair<FString, 
 			return false;
 		}
 	}
-	FVaRestAuthTarget Target(OutHeaders, OutQuery, State->GetSessionData());
-	return VaRest::Http::ApplyCredentials(Auth, Target);
+	const FVaRestSessionData Session=HeldState->GetSessionData();
+	FVaRestAuthTarget Target(OutHeaders, OutQuery, Session);
+	const bool bApplied=VaRest::Http::ApplyCredentials(Auth,Target);
+	if (IsClosed()) { if (OutConfigError) *OutConfigError=TEXT("LifecycleClosed"); return false; }
+	if (!Target.ConfigError.IsEmpty())
+	{
+		if (OutConfigError) *OutConfigError=Current->Redactor->ScrubText(Target.ConfigError);
+		return false;
+	}
+	return bApplied;
 }
 
 bool FVaRestClient::NeedsAuthRefresh() const
@@ -772,6 +904,8 @@ void FVaRestClient::RefreshAuth(TUniqueFunction<void(EVaRestAuthRefreshOutcome O
 	// Held for the call: the auth's Refresh runs code that is not VaRest's (concurrency review C-1's rule), and it may drop
 	// this client
 	const TSharedPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> Pinned = State;
+	if (Pinned && Pinned->GetManagedLifetime().IsValid() &&
+		(Pinned->GetManagedLifetime().Control->IsStopped() || Pinned->GetManagedLifetime().Gate->IsClosed())) return;
 	const TSharedPtr<IVaRestAuth, ESPMode::ThreadSafe> Auth = Pinned.IsValid() ? Pinned->GetConfig()->Auth : nullptr;
 	const auto Wait = [](TUniqueFunction<void(EVaRestAuthRefreshOutcome, EVaRestErrorKind)>&& Into) -> VaRest::Http::FRefreshWaiter
 	{
@@ -789,6 +923,9 @@ void FVaRestClient::RefreshAuth(TUniqueFunction<void(EVaRestAuthRefreshOutcome O
 			case VaRest::Http::ERefreshEnd::Failed:
 				Done(EVaRestAuthRefreshOutcome::Failed, End.Kind);
 				break;
+			case VaRest::Http::ERefreshEnd::Unavailable:
+				Done(EVaRestAuthRefreshOutcome::Unavailable,EVaRestErrorKind::None);
+				break;
 			default:
 				// Rejected, or the game cleared or expired the session meanwhile: it is gone either way
 				Done(EVaRestAuthRefreshOutcome::Rejected, EVaRestErrorKind::None);
@@ -796,16 +933,22 @@ void FVaRestClient::RefreshAuth(TUniqueFunction<void(EVaRestAuthRefreshOutcome O
 			}
 		};
 	};
+	if (Pinned && Pinned->GetManagedLifetime().IsValid())
+	{
+		Pinned->RefreshManagedExternal(Wait(MoveTemp(OnDone)));
+		return;
+	}
 	if (Pinned.IsValid() && Pinned->IsRefreshing())
 	{
 		// Task 17 review M-8 (ruled): a refresh in flight is waited for whatever the current auth is -- one replaced since by
 		// an auth that cannot refresh, or none (WithAuth does not end a refresh, Task 16 review M-5): the refresh exists and
 		// its end applies to the session, as the parked requests' does (the auth gate parks every request while one runs)
-		Pinned->JoinRefreshInFlight(Pinned->NewWaiterId(), Wait(MoveTemp(OnDone)));
+		Pinned->JoinRefreshInFlight(Pinned->NewWaiterId(), Wait(MoveTemp(OnDone)),VaRest::Http::ERefreshWaiterKind::External);
 		return;
 	}
 	if (!Auth.IsValid() || !VaRest::Http::CanRefreshNow(*Auth, Pinned->GetSessionData()))
 	{
+		if (Pinned && Pinned->ManagedAdmissionIsClosed()) return;
 		// No refresh to wait for and none can start, said from a later task (decision 3). M4a final review B-I-1 (ruling):
 		// two answers that ruling Q7 keeps apart. A misconfigured auth is the configuration's (Failed, Config). No auth, or one
 		// that cannot refresh this session (no refresh token, a Bearer), is Unavailable: the 401 that asked is the answer, as
@@ -819,8 +962,11 @@ void FVaRestClient::RefreshAuth(TUniqueFunction<void(EVaRestAuthRefreshOutcome O
 			return;
 		}
 		const bool bMisconfigured = Auth.IsValid() && !Auth->GetConfigError().IsEmpty();
-		UE::Tasks::Launch(TEXT("VaRest.RefreshAuth"), [Answer = MoveTemp(OnDone), bMisconfigured]() mutable
+		const auto Native=Pinned ? Pinned->GetManagedLifetime() : VaRest::Http::FNativeClientRegistration();
+		if (Native.IsValid() && (Native.Control->IsStopped() || Native.Gate->IsClosed())) return;
+		UE::Tasks::Launch(TEXT("VaRest.RefreshAuth"), [Answer = MoveTemp(OnDone), bMisconfigured, Native]() mutable
 		{
+			if (Native.IsValid() && (Native.Control->IsStopped() || Native.Gate->IsClosed())) return;
 			if (Answer)
 			{
 				Answer(bMisconfigured ? EVaRestAuthRefreshOutcome::Failed : EVaRestAuthRefreshOutcome::Unavailable,
@@ -831,7 +977,7 @@ void FVaRestClient::RefreshAuth(TUniqueFunction<void(EVaRestAuthRefreshOutcome O
 	}
 	// Not proactive (M4a final review B6): the core cannot tell a socket's 401 from its due expiry, so a request parked behind
 	// this refresh keeps spec 4.2's rule when it fails
-	Pinned->JoinRefresh(Pinned->NewWaiterId(), Auth.ToSharedRef(), 0, /*bProactive*/ false, Wait(MoveTemp(OnDone)));
+	Pinned->JoinRefresh(Pinned->NewWaiterId(), Auth.ToSharedRef(), 0, /*bProactive*/ false, Wait(MoveTemp(OnDone)),VaRest::Http::ERefreshWaiterKind::External);
 }
 
 FVaRestClient& FVaRestClient::Use(FVaRestStageRef Stage, EVaRestStageSlot Slot)
@@ -877,7 +1023,7 @@ FVaRestClient& FVaRestClient::WithStorageDirectories(FStringView CacheRoot, FStr
     return *this;
 }
 FVaRestRequestHandle VaRest::Http::FRequestSpecAccess::SendProbe(
-    const TSharedRef<FClientState, ESPMode::ThreadSafe>& State, FStringView Url, TUniqueFunction<void()>&& Done)
+    const TSharedRef<FClientState, ESPMode::ThreadSafe>& State, FStringView Url, TUniqueFunction<void()>&& Done,FVaRestProbeToken Token)
 {
     TUniquePtr<FRequestSpec> Spec(new FRequestSpec(State, TEXT("HEAD"), Url));
     Spec->AuthMode = EVaRestAuthMode::None;
@@ -885,6 +1031,12 @@ FVaRestRequestHandle VaRest::Http::FRequestSpecAccess::SendProbe(
     Spec->Retry = FVaRestRetryPolicy::Disabled().WithDeadline(10.f);
     Spec->Timeout = 10.f;
     Spec->bConnectivityProbe = true;
+	if (Token.IsValid() && State->GetManagedLifetime().IsValid())
+	{
+		const TWeakPtr<FVaRestConnectivity,ESPMode::ThreadSafe> Connectivity(State->GetConfig()->Connectivity);
+		Spec->InternalTerminalObserver=[Connectivity,Token](const FFinish&,const TArray<uint8>&)
+		{ if (const auto Scope=Connectivity.Pin()) Scope->CompleteOwnedProbe(Token); };
+	}
     auto Handler = MakeUnique<TResultHandler<void>>();
     Handler->OnComplete = [Callback = MoveTemp(Done)](const TVaRestResult<void>&) { Callback(); };
     Spec->Handler = MoveTemp(Handler);
@@ -903,34 +1055,51 @@ FVaRestClient& FVaRestClient::WithOfflineQueue(FStringView Name,const FVaRestOff
     return *this;
 }
 int32 FVaRestClient::GetQueuedCount() const
-{ check(IsInGameThread()); if (!State.IsValid()) return 0; const auto Current=State->GetConfig(); return Current->RegisteredQueue.IsValid() ? Current->RegisteredQueue->Count() : 0; }
+{
+	check(IsInGameThread());if (!State.IsValid()) return 0;
+	const auto& Native=State->GetManagedLifetime();
+	if (Native.IsValid() && (Native.Control->IsStopped() || Native.Gate->IsClosed())) return 0;
+	const auto Current=State->GetConfig();
+	if (Current->QueueBinding && !Current->QueueBinding->AllowsEnqueue()) return 0;
+	return Current->RegisteredQueue.IsValid() ? Current->RegisteredQueue->Count() : 0;
+}
 bool FVaRestClient::FlushQueue(TUniqueFunction<void(bool)>&& Done)
 {
     check(IsInGameThread());
     if (!State.IsValid()) return false;
+	const auto& Native=State->GetManagedLifetime();
+	if (Native.IsValid() && (Native.Control->IsStopped() || Native.Gate->IsClosed())) return false;
     const auto Current=State->GetConfig();
+	if (Current->QueueBinding && !Current->QueueBinding->AllowsEnqueue()) return false;
     if (!Current->QueueConfigError.IsEmpty() || !Current->RegisteredQueue.IsValid()) return false;
     const TWeakPtr<VaRest::Http::FClientState,ESPMode::ThreadSafe> Weak(State);
-    return Current->RegisteredQueue->Flush([Weak,Callback=MoveTemp(Done)](bool bOk) mutable
+	const auto Binding=Native.IsValid() ? Current->QueueBinding : nullptr;
+    return Current->RegisteredQueue->Flush([Weak,Binding,Callback=MoveTemp(Done)](bool bOk) mutable
     {
-        if (Weak.IsValid() && !VaRest::Http::FClientState::IsShuttingDown() && Callback) Callback(bOk);
-    });
+		const auto Owner=Weak.Pin();
+        if (Owner && !Owner->ManagedAdmissionIsClosed() && (!Binding || Binding->AllowsEnqueue()) &&
+			!VaRest::Http::FClientState::IsShuttingDown() && Callback) Callback(bOk);
+    },Binding);
 }
 FVaRestQueuedResultEvent& FVaRestClient::OnQueuedResult()
 { check(IsInGameThread()); check(State.IsValid()); return State->QueuedResult; }
 
 FVaRestRequestHandle VaRest::Http::FRequestSpecAccess::SendQueued(
     const TSharedRef<FClientState,ESPMode::ThreadSafe>& State, const FQueueItem& Item, bool bProbe,
-    TUniqueFunction<void(const TVaRestResult<TArray<uint8>>&)>&& Done,FName TerminalDetail)
+    TUniqueFunction<void(const TVaRestResult<TArray<uint8>>&)>&& Done,FName TerminalDetail,
+	TSharedPtr<FQueueReplayOperation,ESPMode::ThreadSafe> Replay)
 {
+    check(IsInGameThread());
     TUniquePtr<FRequestSpec> Spec(new FRequestSpec(State, Item.Verb, Item.Url));
     Spec->QueueTerminalDetail=TerminalDetail;
+	Spec->QueueReplay=MoveTemp(Replay);
     Spec->Headers = Item.Headers;
     Spec->Body = Item.Body;
     Spec->AuthMode = Item.AuthMode;
     Spec->bIdempotent = Item.bIdempotent;
     Spec->bKeepBody = true;
     Spec->Tag = Item.Tag.IsEmpty() ? NAME_None : FName(*Item.Tag);
+    Spec->Endpoint = Item.Endpoint.IsEmpty() ? NAME_None : FName(*Item.Endpoint);
     Spec->bQueueWhenOffline = false;
     Spec->Cache = FVaRestCachePolicy();
     Spec->bConnectivityProbe = bProbe;

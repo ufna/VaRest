@@ -4,6 +4,9 @@
 
 #include "HAL/PlatformTime.h"
 #include "VaRestWebSocketLog.h"
+#if WITH_DEV_AUTOMATION_TESTS
+#include "VaRestSocketPressureTesting.h"
+#endif
 
 VaRest::WebSocket::FSocketLink::FSocketLink(TFunction<void()> InOnEvents, FString InLabel)
 	: OnEvents(MoveTemp(InOnEvents))
@@ -60,9 +63,19 @@ void VaRest::WebSocket::FSocketLink::Push(FVaRestSocketEvent&& Event, bool bNoti
 		}
 		// Before the enqueue, so the consumer's Consumed for this message always comes after it (see the header); relaxed: a count
 		PendingInboundBytes.fetch_add(Event.Bytes.Num(), std::memory_order_relaxed);
+		PendingInboundMessages.fetch_add(1, std::memory_order_relaxed);
 	}
 	Event.Time = FPlatformTime::Seconds();
+#if WITH_DEV_AUTOMATION_TESTS
+	const int32 Queued = QueuedEvents.fetch_add(1, std::memory_order_release) + 1;
+	const EVaRestSocketEventType PublishedType = Event.Type;
+#else
+	QueuedEvents.fetch_add(1, std::memory_order_release);
+#endif
 	Queue.Enqueue(MoveTemp(Event));
+#if WITH_DEV_AUTOMATION_TESTS
+	if (PressureProbe) PressureProbe->NotePush(PublishedType, Queued);
+#endif
 	if (bTerminal)
 	{
 		// After the enqueue, with release: HasEnded() true (an acquire load) means the terminal event can be popped
@@ -89,9 +102,20 @@ void VaRest::WebSocket::FSocketLink::Notify() const
 int32 VaRest::WebSocket::FSocketLink::PopAll(TArray<FVaRestSocketEvent>& Out)
 {
 	int32 Popped = 0;
-	FVaRestSocketEvent Event;
-	while (Queue.Dequeue(Event))
+	int32 Budget = QueuedEvents.load(std::memory_order_acquire);
+#if WITH_DEV_AUTOMATION_TESTS
+	if (PressureProbe)
 	{
+		PressureProbe->PopCalls.fetch_add(1, std::memory_order_relaxed);
+		PressureProbe->LastPopBudget.store(Budget, std::memory_order_release);
+		Budget = FMath::Min(Budget, FMath::Max(0, PressureProbe->PopLimit.load(std::memory_order_acquire)));
+	}
+	if (PopSnapshotHookForTests) PopSnapshotHookForTests();
+#endif
+	FVaRestSocketEvent Event;
+	while (Popped < Budget && Queue.Dequeue(Event))
+	{
+		QueuedEvents.fetch_sub(1, std::memory_order_acq_rel);
 		Out.Add(MoveTemp(Event));
 		++Popped;
 	}

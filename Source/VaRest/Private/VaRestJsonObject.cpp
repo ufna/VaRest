@@ -3,14 +3,15 @@
 #include "VaRestJsonObject.h"
 
 #include "VaRestDefines.h"
-#include "VaRestJsonParser.h"
 #include "VaRestJsonValue.h"
 
 #include "HAL/FileManager.h"
 #include "Misc/Paths.h"
+#include "Misc/FileHelper.h"
 #include "Policies/CondensedJsonPrintPolicy.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
+#include <atomic>
 
 typedef TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>> FCondensedJsonStringWriterFactory;
 typedef TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>> FCondensedJsonStringWriter;
@@ -19,6 +20,21 @@ UVaRestJsonObject::UVaRestJsonObject(const FObjectInitializer& ObjectInitializer
 	: Super(ObjectInitializer)
 	, JsonObj(MakeShared<FJsonObject>())
 {
+}
+
+namespace
+{
+void WarnLegacyParserSelection()
+{
+	static std::atomic<bool> Warned{false};
+	if (!Warned.exchange(true,std::memory_order_relaxed)) UE_LOG(LogVaRest,Warning,TEXT("VaRest 2 uses one JSON parser for legacy objects. The incremental/chunked parser switches are retained for compatibility and are ignored."));
+}
+}
+FVaRestJson UVaRestJsonObject::ToVaRestJson() const { return FVaRestJson::FromJsonObject(JsonObj); }
+UVaRestJsonObject* UVaRestJsonObject::FromVaRestJson(const FVaRestJson& Json)
+{
+	if (!Json.IsObject()) return nullptr;auto Native=Json.ToJsonObject();if (!Native.IsValid()) return nullptr;
+	auto* Result=NewObject<UVaRestJsonObject>();Result->SetRootObject(Native);return Result;
 }
 
 void UVaRestJsonObject::Reset()
@@ -67,33 +83,8 @@ FString UVaRestJsonObject::EncodeJsonToSingleString() const
 
 bool UVaRestJsonObject::DecodeJson(const FString& JsonString, bool bUseIncrementalParser)
 {
-	if (bUseIncrementalParser)
-	{
-		const int32 BytesRead = DeserializeFromTCHARBytes(JsonString.GetCharArray().GetData(), JsonString.Len());
-
-		// JsonObj is always valid, but read bytes is zero when something went wrong
-		if (BytesRead > 0)
-		{
-			return true;
-		}
-	}
-	else
-	{
-		const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(*JsonString);
-		TSharedPtr<FJsonObject> OutJsonObj;
-		if (FJsonSerializer::Deserialize(Reader, OutJsonObj))
-		{
-			JsonObj = OutJsonObj.ToSharedRef();
-			return true;
-		}
-	}
-
-	// If we've failed to deserialize the string, we should clear our internal data
-	Reset();
-
-	UE_LOG(LogVaRest, Error, TEXT("Json decoding failed for: %s"), *JsonString);
-
-	return false;
+	if (bUseIncrementalParser) WarnLegacyParserSelection();
+	return DeserializeFromTCHARBytes(*JsonString,JsonString.Len())>0;
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -643,101 +634,45 @@ void UVaRestJsonObject::SetObjectArrayField(const FString& FieldName, const TArr
 
 int32 UVaRestJsonObject::DeserializeFromUTF8Bytes(const ANSICHAR* Bytes, int32 Size)
 {
-	FJSONReader Reader;
-
-	const ANSICHAR* EndByte = Bytes + Size;
-	while (Bytes < EndByte)
+	if (!Bytes || Size<=0) { Reset();return 0; }
+	auto Parsed=FVaRestJson::Parse(MakeArrayView(reinterpret_cast<const uint8*>(Bytes),Size));
+	if (Parsed.HasError())
 	{
-		TCHAR Char = FUtf8Helper::CodepointFromUtf8(Bytes, EndByte - Bytes);
-		if (Char > 0xFFFF)
-		{
-			Char = UNICODE_BOGUS_CHAR_CODEPOINT;
-		}
-
-		if (!Reader.Read(Char))
-		{
-			break;
-		}
+		const auto& Error=Parsed.GetError();Reset();
+		UE_LOG(LogVaRest,Warning,TEXT("Legacy JSON decoding failed at %d:%d: %s"),Error.Line,Error.Column,*Error.Message);return 0;
 	}
-
-	SetRootObject(Reader.State.Root);
-	return Reader.State.Size;
+	const auto Object=Parsed.GetValue().ToJsonObject();if (!Object.IsValid()) { Reset();return 0; }
+	SetRootObject(Object);return Size;
 }
 
 int32 UVaRestJsonObject::DeserializeFromTCHARBytes(const TCHAR* Bytes, int32 Size)
 {
-	FJSONReader Reader;
-
-	int32 i = 0;
-	while (i < Size)
+	if (!Bytes || Size<=0) { Reset();return 0; }
+	auto Parsed=FVaRestJson::Parse(FStringView(Bytes,Size));
+	if (Parsed.HasError())
 	{
-		if (!Reader.Read(Bytes[i++]))
-		{
-			break;
-		}
+		const auto& Error=Parsed.GetError();Reset();
+		UE_LOG(LogVaRest,Warning,TEXT("Legacy JSON decoding failed at %d:%d: %s"),Error.Line,Error.Column,*Error.Message);return 0;
 	}
-
-	SetRootObject(Reader.State.Root);
-	return Reader.State.Size;
+	const auto Object=Parsed.GetValue().ToJsonObject();if (!Object.IsValid()) { Reset();return 0; }
+	SetRootObject(Object);return Size;
 }
 
 void UVaRestJsonObject::DecodeFromArchive(TUniquePtr<FArchive>& Reader)
 {
-	FArchive& Ar = (*Reader.Get());
-	uint8 SymbolBytes[2];
-
-	// Read first two bytes
-	Ar << SymbolBytes[0];
-	Ar << SymbolBytes[1];
-
-	bool bIsIntelByteOrder = true;
-
-	if (SymbolBytes[0] == 0xff && SymbolBytes[1] == 0xfe)
+	Reset();if (!Reader) return;
+	FArchive& Ar=*Reader;const int64 Remaining=Ar.TotalSize()-Ar.Tell();
+	if (Remaining<0 || Remaining>MAX_int32) { Ar.Close();return; }
+	TArray<uint8> Bytes;Bytes.SetNumUninitialized(static_cast<int32>(Remaining));
+	if (!Bytes.IsEmpty()) Ar.Serialize(Bytes.GetData(),Bytes.Num());
+	const bool ReadOk=!Ar.IsError(),Closed=Ar.Close();if (!ReadOk || !Closed) return;
+	// WriteToFile's legacy UTF-16 BOM remains supported; byte sources without a BOM keep strict UTF-8 validation.
+	const bool Utf16=Bytes.Num()>=2 && ((Bytes[0]==0xff && Bytes[1]==0xfe) || (Bytes[0]==0xfe && Bytes[1]==0xff));
+	if (Utf16)
 	{
-		// Unicode Intel byte order. Less 1 for the FFFE header, additional 1 for null terminator.
-		bIsIntelByteOrder = true;
+		if (Bytes.Num()%2) return;FString Text;FFileHelper::BufferToString(Text,Bytes.GetData(),Bytes.Num());DecodeJson(Text,false);
 	}
-	else if (SymbolBytes[0] == 0xfe && SymbolBytes[1] == 0xff)
-	{
-		// Unicode non-Intel byte order. Less 1 for the FFFE header, additional 1 for null terminator.
-		bIsIntelByteOrder = false;
-	}
-
-	FJSONReader JsonReader;
-	TCHAR Char;
-
-	while (!Ar.AtEnd())
-	{
-		Ar << SymbolBytes[0];
-
-		if (Ar.AtEnd())
-		{
-			break;
-		}
-
-		Ar << SymbolBytes[1];
-
-		if (bIsIntelByteOrder)
-		{
-			Char = CharCast<TCHAR>(static_cast<UCS2CHAR>(static_cast<uint16>(SymbolBytes[0]) + static_cast<uint16>(SymbolBytes[1]) * 256));
-		}
-		else
-		{
-			Char = CharCast<TCHAR>(static_cast<UCS2CHAR>(static_cast<uint16>(SymbolBytes[1]) + static_cast<uint16>(SymbolBytes[0]) * 256));
-		}
-
-		if (!JsonReader.Read(Char))
-		{
-			break;
-		}
-	}
-
-	SetRootObject(JsonReader.State.Root);
-
-	if (!Ar.Close())
-	{
-		UE_LOG(LogVaRest, Error, TEXT("UVaRestJsonObject::DecodeFromArchive: Error! Can't close file!"));
-	}
+	else DeserializeFromUTF8Bytes(reinterpret_cast<const ANSICHAR*>(Bytes.GetData()),Bytes.Num());
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -745,51 +680,10 @@ void UVaRestJsonObject::DecodeFromArchive(TUniquePtr<FArchive>& Reader)
 
 bool UVaRestJsonObject::WriteToFile(const FString& Path) const
 {
-	TUniquePtr<FArchive> FileWriter(IFileManager::Get().CreateFileWriter(*Path));
-	if (!FileWriter)
-	{
-		return false;
-	}
-
-	FArchive& Ar = *FileWriter.Get();
-
-	UCS2CHAR BOM = UNICODE_BOM;
-	Ar.Serialize(&BOM, sizeof(UCS2CHAR));
-
-	FString Str = FString(TEXT("{"));
-	WriteStringToArchive(Ar, *Str, Str.Len());
-
-	int32 ElementCount = 0;
-	FJSONWriter JsonWriter;
-	for (auto JsonObjectValuePair : JsonObj->Values)
-	{
-		Str = FString(TEXT("\""));
-		WriteStringToArchive(Ar, *Str, Str.Len());
-
-		const TCHAR* BufferPtr = *JsonObjectValuePair.Key;
-		for (int i = 0; i < JsonObjectValuePair.Key.Len(); ++i)
-		{
-			Str = FString(1, &BufferPtr[i]);
-			WriteStringToArchive(Ar, *Str, Str.Len());
-		}
-
-		Str = FString(TEXT("\""));
-		WriteStringToArchive(Ar, *Str, Str.Len());
-
-		Str = FString(TEXT(":"));
-		WriteStringToArchive(Ar, *Str, Str.Len());
-
-		++ElementCount;
-
-		JsonWriter.Write(JsonObjectValuePair.Value, FileWriter.Get(), ElementCount >= JsonObj->Values.Num());
-	}
-
-	Str = FString(TEXT("}"));
-	WriteStringToArchive(Ar, *Str, Str.Len());
-
-	FileWriter->Close();
-
-	return true;
+	TUniquePtr<FArchive> FileWriter(IFileManager::Get().CreateFileWriter(*Path));if (!FileWriter) return false;
+	FArchive& Ar=*FileWriter;UCS2CHAR Bom=UNICODE_BOM;Ar.Serialize(&Bom,sizeof(Bom));
+	const FString Text=EncodeJsonToSingleString();const bool Written=WriteStringToArchive(Ar,*Text,Text.Len()) && !Ar.IsError();
+	const bool Closed=Ar.Close();return Written && Closed;
 }
 
 bool UVaRestJsonObject::WriteToFilePath(const FString& Path, const bool bIsRelativeToProjectDir)

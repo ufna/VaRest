@@ -7,8 +7,11 @@
 #include "VaRestCache.h"
 #include "VaRestEnvelope.h"
 #include "VaRestHttpStatsInternal.h"
+#include "VaRestNativeOperationStore.h"
+#include "VaRestQueueBinding.h"
 #include "VaRestRetry.h"
 #include "VaRestStage.h"
+#include "VaRestUrl.h"
 
 #include <atomic>
 
@@ -17,7 +20,9 @@ class FVaRestRedactor;
 namespace VaRest::Http
 {
 	struct FPersistenceGuard;
+	struct FFinish;
     class FOfflineQueue;
+	class FQueueReplayOperation;
     enum class EQueueAdmission : uint8 { Unused, Open, Aborted, Committing, Finished };
 	/**
 	 * M4a final review A1 (VaRest-tqt): one transport dispatch's identity, made by the transport stage at each start and
@@ -49,15 +54,21 @@ namespace VaRest::Http
 		// ---- Set by Send on the sending thread, read on the game thread after the hop:
 		uint64 RequestId = 0;
 		uint64 ClientId = 0;
+		/** Captured native identity only. Every payload access still needs an actual counted authority. */
+		FNativeOperationRef Managed;
+		/** Immutable before publication. Weak native route: no Ex/Completion self-cycle or mutable shared-pointer read race. */
+		TWeakPtr<FManagedCompletionAccess, ESPMode::ThreadSafe> NativeCompletion;
 		TSharedPtr<FClientState, ESPMode::ThreadSafe> State;
 		FString Verb;
 		FString RawPath;
-		TArray<TPair<FString, FString>> PathParams;
+		TArray<FPathParam> PathParams;
 		TArray<TPair<FString, FString>> Query;
 		FVaRestHeaders OwnHeaders;
+		bool bPreserveOwnHeaderLines = false;
 		FVaRestRequestBody Body;
 		FString BuildError;
 		FName Tag;
+		FName Endpoint;
 		EVaRestPriority Priority = EVaRestPriority::Normal;
 		bool bIdempotent = false;
         bool bQueueWhenOffline = false, bQueueCommitted = false;
@@ -66,7 +77,9 @@ namespace VaRest::Http
         FString ReplayIdentityScope, QueueIdentityScope, QueueAnchorOrigin;
         FVaRestHeaders QueueScopeHeaders;
         FName QueueTerminalDetail;
+		TSharedPtr<FQueueReplayOperation, ESPMode::ThreadSafe> QueueReplay;
         TSharedPtr<FOfflineQueue, ESPMode::ThreadSafe> Queue;
+		FQueueCaptureLease QueueCapture;
         std::atomic<EQueueAdmission> QueueAdmission{EQueueAdmission::Unused};
 		bool bKeepBody = false;
 		bool bOnHttpThread = false;
@@ -86,6 +99,8 @@ namespace VaRest::Http
 		/** Spec 4.8: the sender's LLM tags, under which the callbacks run (FLlmSenderTags) */
 		FLlmSenderTags SenderTags;
 		TUniquePtr<IResultHandler> Handler;
+		/** Internal acceptance of the ACTUAL final result, before Completed/user delivery. GTK-owned, managed path only. */
+		TUniqueFunction<void(const FFinish&, const TArray<uint8>&)> ManagedTerminalObserver;
 		/** Spec 3.1, decision 27: the configuration snapshot, taken by Send on the sending thread (Enter fills it only for an exchange made another way) */
 		TSharedPtr<const FClientConfig, ESPMode::ThreadSafe> Config;
 		/** Snapshot plus every applied configuration. Copy before worker scans. */
@@ -117,6 +132,7 @@ namespace VaRest::Http
 		float Timeout = 0.f;
 		float ActivityTimeout = 0.f;
 		int64 MaxJsonBytes = 0;
+		int64 MaxDynamicInputBytes = 0;
 		FVaRestJsonConvertOptions DecodeOptions;
 		EVaRestLogLevel LogLevel = EVaRestLogLevel::Basic;
 		double StartedAt = 0.0;
@@ -128,6 +144,8 @@ namespace VaRest::Http
 		double LimiterWait = 0.0;
 		FVaRestHeaders AttemptHeaders;
 		FString TempFile;
+		/** Managed current file's EXISTING finalization permission after its physical callback returns; GTK parked only. */
+		FNativeLogicalTailLease FileCleanup;
 		TSharedPtr<IVaRestTransportCall, ESPMode::ThreadSafe> TransportCall;
 		/** A1: transport starts so far; each FDispatchTag takes the next serial */
 		uint32 DispatchCount = 0;
@@ -233,6 +251,8 @@ namespace VaRest::Http
 		 * through this exchange.
 		 */
 		TUniqueFunction<bool()> Interrupt;
+		/** GT-only per-grant release claim, shared with that grant's callback so a late answer cannot free a later slot. */
+		TSharedPtr<bool, ESPMode::ThreadSafe> LimiterGrantReleased;
 
 		/**
 		 * IN-2: what the next AttemptDispatched reports; the transport stage resets both after the dispatch. For a Backoff
@@ -254,6 +274,7 @@ namespace VaRest::Http
 		 * (Task 8 review minor 1).
 		 */
 		bool bCompletionQueued = false;
+		bool bLaterFramePending = false, bLaterFrameReady = false, bDynamicFinalizing = false;
 		/**
 		 * Inside Enter or Cancel() on this exchange: Complete defers the callbacks (decision 3). The scope is taken in Enter, so
 		 * a game-thread Send() is covered, and so is the Enter task of a request sent from another thread (one extra hop).
@@ -268,6 +289,8 @@ namespace VaRest::Http
 		 * Complete -- whose body runs once, behind bFinished -- counts out only one that Enter counted.
 		 */
 		bool bCounted = false;
+		/** Managed discard can follow partial reentrant finalization; count out exactly once. */
+		bool bStatsFinished = false;
 		std::atomic<bool> bCancelRequested{ false };
 		std::atomic<bool> bDone{ false };
 	};

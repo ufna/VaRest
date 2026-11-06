@@ -11,11 +11,19 @@ public class VaRestWebSocket : ModuleRules
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 
+		if (Target.Platform == UnrealTargetPlatform.Linux)
+		{
+			PrivateIncludePathModuleNames.Add("VaRestNativeOwner");
+			DynamicallyLoadedModuleNames.Add("VaRestNativeOwner");
+		}
+
 		PublicDependencyModuleNames.AddRange(new string[]
 		{
 			"Core",
 			// PUBLIC: VaRestSocketTypes.h declares UENUMs (W3-W5 hand them to Blueprints)
 			"CoreUObject",
+			"Engine",
+			"DeveloperSettings",
 			// PUBLIC: W2-W5's socket API takes FVaRestJson and FVaRestError; W1 uses the UTF-8 validator (VaRestJsonUtf8.h)
 			"VaRestJson",
 			"VaRestHttp",
@@ -32,6 +40,28 @@ public class VaRestWebSocket : ModuleRules
 
 		// The engine's own link of libwebsockets (WebSockets.Build.cs:118; ModuleRules.cs:1601-1607 makes them private
 		// dependencies): static OpenSSL, libwebsockets and zlib, one copy per module in modular builds (spec 1.2)
-		AddEngineThirdPartyPrivateStaticDependencies(Target, "OpenSSL", "libWebSockets", "zlib");
+		// Only the separately reviewed Linux x64 Editor Development modular proof uses the private archive.
+		// Architecture is the public SingleArchitecture getter: a multi-architecture target fails closed.
+		bool bPrivateLwsProof = Target.Platform == UnrealTargetPlatform.Linux
+			&& Target.Architecture == UnrealArch.X64
+			&& Target.Type == TargetType.Editor
+			&& Target.Configuration == UnrealTargetConfiguration.Development
+			&& Target.LinkType == TargetLinkType.Modular
+			&& !Target.bMergeModules;
+		PrivateDefinitions.Add("VAREST_USE_PRIVATE_LWS3=" + (bPrivateLwsProof ? "1" : "0"));
+		if (bPrivateLwsProof)
+		{
+			if (bUsePrecompiled)
+			{
+				throw new BuildException("VaRest private LWS proof requires a fresh source-built WS module; precompiled WS is not qualified.");
+			}
+			PrivateDependencyModuleNames.Add("VaRestPrivateLws");
+			AddEngineThirdPartyPrivateStaticDependencies(Target, "OpenSSL", "zlib");
+		}
+		else
+		{
+			// Existing selection only; these targets have no private RxFlow repair claim.
+			AddEngineThirdPartyPrivateStaticDependencies(Target, "OpenSSL", "libWebSockets", "zlib");
+		}
 	}
 }

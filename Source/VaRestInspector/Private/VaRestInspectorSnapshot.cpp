@@ -113,7 +113,7 @@ int64 SnapshotTextBytes(const FVaRestInspectorPacketView& Source)
 	};
 	for (int32 Index = 0; Index < static_cast<int32>(EText::Count); ++Index)
 		AddSlice(Source.Fixed->Text[Index]);
-	for (const FArraySlice Array : {Source.Fixed->Headers, Source.Fixed->Warnings})
+	for (const FArraySlice Array : {Source.Fixed->Headers, Source.Fixed->Warnings, Source.Fixed->Protocols})
 		for (const FPairSlice& Pair : Source.Pairs(Array))
 		{
 			AddSlice(Pair.First);
@@ -130,7 +130,7 @@ FVaRestInspectorPacketView PacketView(const FSnapshotPacket& Packet)
 	Result.Fixed = &Packet.Fixed;
 	Result.Backing = {Packet.Backing, Packet.BackingBytes};
 	if (Packet.Excerpt)
-		Result.Excerpt = {Packet.Excerpt->GetData(), Packet.Excerpt->Num()};
+		Result.Excerpt = {Packet.Excerpt->GetData(), FMath::Clamp(Packet.ExcerptBytes, 0, Packet.Excerpt->Num())};
 	return Result;
 }
 
@@ -172,11 +172,39 @@ void DestroyRecord(const FAllocationRecord& Record)
 		break;
 	}
 	case ESnapshotAllocationKind::Links: DestroyElements<FVaRestInspectorLink>(Record.Address, Record.Constructed); break;
+	case ESnapshotAllocationKind::SocketAttempt: DestroyElements<FSnapshotSocketAttempt>(Record.Address, Record.Constructed); break;
+	case ESnapshotAllocationKind::SocketFrame: DestroyElements<FSnapshotSocketFrame>(Record.Address, Record.Constructed); break;
+	case ESnapshotAllocationKind::SocketStats: DestroyElements<FVaRestInspectorSocketStats>(Record.Address,Record.Constructed); break;
+	case ESnapshotAllocationKind::SocketChannel: DestroyElements<FSnapshotSocketChannel>(Record.Address, Record.Constructed); break;
 	case ESnapshotAllocationKind::Raw: break;
 	}
 }
 
-void VisitSnapshotCopy(const FSnapshotRowCopy& Copy, FStringView Label,
+void VisitSnapshotSocketAttempts(const void* Source,TFunctionRef<void(const FVaRestInspectorSocketAttemptView&)> Visitor)
+{
+ const auto& Copy=*static_cast<const FSnapshotRowCopy*>(Source);
+ for (auto* Node=Copy.SocketAttempts;Node;Node=Node->Next)
+ {
+  FVaRestInspectorSocketAttemptView V; V.AttemptId=Node->Id; V.bPartial=Node->Partial; V.bHasConnecting=Node->HasConnecting; V.bHasOpened=Node->HasOpened; V.bHasClosed=Node->HasClosed;
+  V.Connecting=PacketView(Node->Connecting); V.Opened=PacketView(Node->Opened); V.Closed=PacketView(Node->Closed); Visitor(V);
+ }
+}
+void VisitSnapshotSocketChannels(const void* Source,TFunctionRef<void(const FVaRestInspectorPacketView&)> Visitor)
+{
+ const auto& Copy=*static_cast<const FSnapshotRowCopy*>(Source);
+ for (auto* Node=Copy.SocketChannels;Node;Node=Node->Next) Visitor(PacketView(Node->Packet));
+}
+void VisitSnapshotSocketFrames(const void* Source,TFunctionRef<void(const FVaRestInspectorSocketFrameView&)> Visitor)
+{
+ const auto& Copy=*static_cast<const FSnapshotRowCopy*>(Source);
+ for (auto* Node=Copy.SocketFrames;Node;Node=Node->Next)
+ {
+  FVaRestInspectorSocketFrameView V; V.FrameId=Node->Id; V.AttemptId=Node->Attempt; V.ExcerptState=Node->State; V.Metadata=PacketView(Node->Metadata);
+  if (Node->Excerpt.bPresent) V.Excerpt=PacketView(Node->Excerpt); else if (Node->State!=EVaRestInspectorDetailState::Pending) V.Excerpt=V.Metadata;
+  Visitor(V);
+ }
+}
+void VisitSnapshotCopy(const FSnapshotRowCopy& Copy, FStringView Label, FStringView Scope,
 	TFunctionRef<void(const FVaRestInspectorRecordView&)> Visitor)
 {
 	FVaRestInspectorRecordView View = Copy.Value;
@@ -256,7 +284,11 @@ void VisitSnapshotCopy(const FSnapshotRowCopy& Copy, FStringView Label,
 	View.Dispatches = {DispatchViews, Copy.NumDispatches};
 	View.DispatchEvents = {DispatchEvents, NumEvents};
 	View.Excerpts = {Excerpts, NumExcerpts};
-	View.ScopeLabel = View.bContextKnown && View.ScopeId == 0 ? FStringView(TEXT("Process")) : FStringView();
+	if (View.Kind==EVaRestInspectorRecordKind::Socket)
+	{
+		View.SocketReaderSource=&Copy; View.SocketAttemptReader=&VisitSnapshotSocketAttempts; View.SocketFrameReader=&VisitSnapshotSocketFrames; View.SocketChannelReader=&VisitSnapshotSocketChannels;
+	}
+	View.ScopeLabel = View.bContextKnown ? (View.ScopeId==0 ? FStringView(TEXT("Process")) : Scope) : FStringView();
 	View.ClientLabel = View.bContextKnown && View.Kind == EVaRestInspectorRecordKind::Http ? Label : FStringView();
 	Visitor(View);
 }
@@ -276,6 +308,8 @@ struct FVaRestInspectorSnapshot::FData
 	VaRest::Inspector::Private::FStatsSegment* FirstStats = nullptr;
 	VaRest::Inspector::Private::FStatsSegment* LastStats = nullptr;
 	FVaRestInspectorLink* Links = nullptr;
+	FVaRestInspectorSocketStats* SocketStats = nullptr;
+	int32 NumSocketStats = 0;
 	int32 NumStats = 0, NumLinks = 0;
 	uint64 Revision = 0;
 	FVaRestInspectorDiagnostics Diagnostics;
@@ -305,6 +339,7 @@ void FSnapshotBuilder::DestroyDomain(FVaRestInspectorSnapshot::FData& Data, FAll
 	Data.FirstStats = Data.LastStats = nullptr;
 	Data.Links = nullptr;
 	Data.NumStats = Data.NumLinks = 0;
+	Data.SocketStats=nullptr; Data.NumSocketStats=0;
 }
 
 FSnapshotBuilder::FSnapshotBuilder() = default;
@@ -365,23 +400,20 @@ bool FSnapshotBuilder::Begin(const FStore& Store, int32 InRowCount)
 	return true;
 }
 
-bool FSnapshotBuilder::MeasureSealedRow(FStringView Label)
+bool FSnapshotBuilder::MeasureSealedRow(FStringView Label, FStringView Scope)
 {
-	SIZE_T Request = 0;
-	if (bMeasurementFinished || bReserved || !SnapshotLabelRequest(Label, Request))
-		return false;
-	return Label.IsEmpty() || MeasureAllocation(Request, alignof(TCHAR));
+ if (bMeasurementFinished || bReserved) return false;
+ for (FStringView Text : {Label,Scope})
+ {
+  SIZE_T Request=0;
+  if (!SnapshotLabelRequest(Text,Request) || (!Text.IsEmpty() && !MeasureAllocation(Request,alignof(TCHAR)))) return false;
+ }
+ return true;
 }
-bool FSnapshotBuilder::MeasureMutableRow(FStringView Label)
+bool FSnapshotBuilder::MeasureMutableRow(FStringView Label, FStringView Scope)
 {
-	SIZE_T Request = 0;
-	if (bMeasurementFinished || bReserved || !SnapshotLabelRequest(Label, Request) ||
-		!MeasureAllocation(sizeof(FSnapshotRowCopy), alignof(FSnapshotRowCopy)))
-		return false;
-	if (!Label.IsEmpty() && !MeasureAllocation(Request, alignof(TCHAR)))
-		return false;
-	++NumMutableRows;
-	return true;
+ if (!MeasureSealedRow(Label,Scope) || !MeasureAllocation(sizeof(FSnapshotRowCopy),alignof(FSnapshotRowCopy))) return false;
+ ++NumMutableRows; return true;
 }
 bool FSnapshotBuilder::MeasureDispatches(int32 Count)
 {
@@ -426,6 +458,40 @@ bool FSnapshotBuilder::MeasurePacket(const FVaRestInspectorPacketView& Source,
 		++NumExcerptReferences;
 	}
 	return true;
+}
+bool FSnapshotBuilder::MeasureSocketChannel(const FVaRestInspectorPacketView& P)
+{ return MeasureAllocation(sizeof(FSnapshotSocketChannel),alignof(FSnapshotSocketChannel)) && MeasurePacket(P,nullptr); }
+bool FSnapshotBuilder::ConstructSocketChannel(FSnapshotRowCopy& Copy,const FVaRestInspectorPacketView& P)
+{
+ void* Memory=AllocateChild(sizeof(FSnapshotSocketChannel),alignof(FSnapshotSocketChannel),ESnapshotAllocationKind::SocketChannel); if (!Memory) return false;
+ auto* Node=new(Memory) FSnapshotSocketChannel(); SetConstructed(Memory,1);
+ if (!ConstructPacket(P,nullptr,Node->Packet)) return false;
+ if (Copy.SocketChannelsTail) Copy.SocketChannelsTail->Next=Node; else Copy.SocketChannels=Node; Copy.SocketChannelsTail=Node; return true;
+}
+bool FSnapshotBuilder::MeasureSocketAttempt(const FVaRestInspectorSocketAttemptView& V)
+{
+ if (!MeasureAllocation(sizeof(FSnapshotSocketAttempt),alignof(FSnapshotSocketAttempt))) return false;
+ for (const auto* P:{&V.Connecting,&V.Opened,&V.Closed}) if (P->Fixed && !MeasurePacket(*P,nullptr)) return false;
+ return true;
+}
+bool FSnapshotBuilder::ConstructSocketAttempt(FSnapshotRowCopy& Copy,const FVaRestInspectorSocketAttemptView& V)
+{
+ void* Memory=AllocateChild(sizeof(FSnapshotSocketAttempt),alignof(FSnapshotSocketAttempt),ESnapshotAllocationKind::SocketAttempt); if (!Memory) return false;
+ auto* Node=new(Memory) FSnapshotSocketAttempt(); SetConstructed(Memory,1); Node->Id=V.AttemptId; Node->Partial=V.bPartial; Node->HasConnecting=V.bHasConnecting; Node->HasOpened=V.bHasOpened; Node->HasClosed=V.bHasClosed;
+ const FVaRestInspectorPacketView* Sources[]={&V.Connecting,&V.Opened,&V.Closed}; FSnapshotPacket* Targets[]={&Node->Connecting,&Node->Opened,&Node->Closed};
+ for (int32 I=0;I<3;++I) if (Sources[I]->Fixed && !ConstructPacket(*Sources[I],nullptr,*Targets[I])) return false;
+ if (Copy.SocketAttemptsTail) Copy.SocketAttemptsTail->Next=Node; else Copy.SocketAttempts=Node; Copy.SocketAttemptsTail=Node; return true;
+}
+bool FSnapshotBuilder::MeasureSocketFrame(const FVaRestInspectorSocketFrameView& V,const TSharedPtr<const TArray<uint8>,ESPMode::ThreadSafe>* Inline,const FVaRestInspectorPacketView& Late,const TSharedPtr<const TArray<uint8>,ESPMode::ThreadSafe>* LateOwner)
+{
+ return MeasureAllocation(sizeof(FSnapshotSocketFrame),alignof(FSnapshotSocketFrame)) && MeasurePacket(V.Metadata,Inline) && (!Late.Fixed || MeasurePacket(Late,LateOwner));
+}
+bool FSnapshotBuilder::ConstructSocketFrame(FSnapshotRowCopy& Copy,const FVaRestInspectorSocketFrameView& V,const TSharedPtr<const TArray<uint8>,ESPMode::ThreadSafe>* Inline,const FVaRestInspectorPacketView& Late,const TSharedPtr<const TArray<uint8>,ESPMode::ThreadSafe>* LateOwner)
+{
+ void* Memory=AllocateChild(sizeof(FSnapshotSocketFrame),alignof(FSnapshotSocketFrame),ESnapshotAllocationKind::SocketFrame); if (!Memory) return false;
+ auto* Node=new(Memory) FSnapshotSocketFrame(); SetConstructed(Memory,1); Node->Id=V.FrameId; Node->Attempt=V.AttemptId; Node->State=V.ExcerptState;
+ if (!ConstructPacket(V.Metadata,Inline,Node->Metadata) || (Late.Fixed && !ConstructPacket(Late,LateOwner,Node->Excerpt))) return false;
+ if (Copy.SocketFramesTail) Copy.SocketFramesTail->Next=Node; else Copy.SocketFrames=Node; Copy.SocketFramesTail=Node; return true;
 }
 bool FSnapshotBuilder::FinishMeasurement()
 {
@@ -564,7 +630,7 @@ FSnapshotRowEntry* FSnapshotBuilder::NextEntry()
 	++BuiltEntries;
 	return Data->LastEntries->Entries() + Data->LastEntries->Used++;
 }
-bool FSnapshotBuilder::CopyLabel(FStringView Label, FSnapshotRowEntry& Entry)
+bool FSnapshotBuilder::CopyLabel(FStringView Label, FSnapshotRowEntry& Entry, bool bScope)
 {
 	if (Label.IsEmpty())
 		return true;
@@ -577,8 +643,8 @@ bool FSnapshotBuilder::CopyLabel(FStringView Label, FSnapshotRowEntry& Entry)
 	FMemory::Memcpy(Memory, Label.GetData(), SIZE_T(Label.Len()) * sizeof(TCHAR));
 	static_cast<TCHAR*>(Memory)[Label.Len()] = TCHAR(0);
 	Allocator->Counters().TextBytesCopied.fetch_add(int64(Request));
-	Entry.ClientLabel = static_cast<const TCHAR*>(Memory);
-	Entry.ClientLabelChars = Label.Len();
+	if (bScope) { Entry.ScopeLabel = static_cast<const TCHAR*>(Memory); Entry.ScopeLabelChars = Label.Len(); }
+	else { Entry.ClientLabel = static_cast<const TCHAR*>(Memory); Entry.ClientLabelChars = Label.Len(); }
 	return true;
 }
 
@@ -683,6 +749,7 @@ bool FSnapshotBuilder::ConstructPacket(const FVaRestInspectorPacketView& Source,
 		if (Capacity > SIZE_T(MAX_int64))
 			return false;
 		Out.Excerpt = *Excerpt;
+		Out.ExcerptBytes = Source.Excerpt.Num();
 		Allocator->Counters().ExcerptRefsAcquired.fetch_add(1);
 		++BuiltExcerptReferences;
 		if (!AddBuiltBytes(Capacity))
@@ -695,22 +762,22 @@ void FSnapshotBuilder::ConstructScalarPacket(const FPacketFixed& Source, FSnapsh
 	Out.Fixed = Source;
 	Out.bPresent = true;
 }
-bool FSnapshotBuilder::ConstructSealedEntry(const TSharedPtr<const FRow, ESPMode::ThreadSafe>& Owner, FStringView Label)
+bool FSnapshotBuilder::ConstructSealedEntry(const TSharedPtr<const FRow, ESPMode::ThreadSafe>& Owner, FStringView Label, FStringView Scope)
 {
 	if (!Owner)
 		return false;
 	FSnapshotRowEntry* Entry = NextEntry();
-	if (!Entry || !CopyLabel(Label, *Entry))
+	if (!Entry || !CopyLabel(Label, *Entry) || !CopyLabel(Scope, *Entry, true))
 		return false;
 	Entry->Sealed = Owner;
 	return true;
 }
-bool FSnapshotBuilder::ConstructMutableEntry(FSnapshotRowCopy* Copy, FStringView Label)
+bool FSnapshotBuilder::ConstructMutableEntry(FSnapshotRowCopy* Copy, FStringView Label, FStringView Scope)
 {
 	if (!Copy)
 		return false;
 	FSnapshotRowEntry* Entry = NextEntry();
-	if (!Entry || !CopyLabel(Label, *Entry))
+	if (!Entry || !CopyLabel(Label, *Entry) || !CopyLabel(Scope, *Entry, true))
 		return false;
 	Entry->Mutable = Copy;
 	return true;
@@ -809,6 +876,26 @@ bool FSnapshotBuilder::ConstructPublicString(FStringView Source, FString& Out)
 	++BuiltPublicText;
 	return AddBuiltBytes(Bound.GetValue());
 #endif
+}
+bool FSnapshotBuilder::MeasureSocketStats(int32 Count)
+{
+ if (bMeasurementFinished || bReserved || Count<0 || Count>257) return false;
+ return !Count || MeasureAllocation(SIZE_T(Count)*sizeof(FVaRestInspectorSocketStats),alignof(FVaRestInspectorSocketStats));
+}
+bool FSnapshotBuilder::ConstructSocketStats(int32 Count)
+{
+ if (!bReserved || Count<0 || Count>257 || Data->SocketStats) return false;
+ if (!Count) return true;
+ auto* Memory=static_cast<FVaRestInspectorSocketStats*>(AllocateChild(SIZE_T(Count)*sizeof(FVaRestInspectorSocketStats),alignof(FVaRestInspectorSocketStats),ESnapshotAllocationKind::SocketStats));
+ if (!Memory) return false;
+ for (int32 I=0;I<Count;++I) new(Memory+I) FVaRestInspectorSocketStats();
+ SetConstructed(Memory,Count);
+ Data->SocketStats=Memory; Data->NumSocketStats=Count; return true;
+}
+bool FSnapshotBuilder::ConstructSocketStatsGroup(const FVaRestInspectorSocketStats& Value,int32 Destination)
+{
+ if (Destination<0 || Destination>=Data->NumSocketStats) return false;
+ Data->SocketStats[Destination]=Value; return true;
 }
 bool FSnapshotBuilder::MeasureStats(int32 Count)
 {
@@ -1027,10 +1114,11 @@ void FVaRestInspectorSnapshot::ForEachRecord(TFunctionRef<void(const FVaRestInsp
 		{
 			const auto& Entry = Segment->Entries()[Index];
 			const FStringView Label = Entry.ClientLabel ? FStringView(Entry.ClientLabel, Entry.ClientLabelChars) : FStringView();
+			const FStringView Scope = Entry.ScopeLabel ? FStringView(Entry.ScopeLabel, Entry.ScopeLabelChars) : FStringView();
 			if (Entry.Sealed)
-				VaRest::Inspector::Private::FStore::VisitImmutableRow(*Entry.Sealed, Label, Visitor);
+				VaRest::Inspector::Private::FStore::VisitImmutableRow(*Entry.Sealed, Label, Visitor, Scope);
 			else if (Entry.Mutable)
-				VaRest::Inspector::Private::VisitSnapshotCopy(*Entry.Mutable, Label, Visitor);
+				VaRest::Inspector::Private::VisitSnapshotCopy(*Entry.Mutable, Label, Scope, Visitor);
 		}
 #else
 	(void)Visitor;
@@ -1046,6 +1134,15 @@ void FVaRestInspectorSnapshot::ForEachStats(TFunctionRef<void(const FVaRestInspe
 				Visitor(Segment->Values()[Index].Value);
 #else
 	(void)Visitor;
+#endif
+}
+void FVaRestInspectorSnapshot::ForEachSocketStats(TFunctionRef<void(const FVaRestInspectorSocketStats&)> Visitor) const
+{
+ check(IsInGameThread());
+#if VAREST_WITH_INSPECTOR
+ if (Data) for (int32 I=0;I<Data->NumSocketStats;++I) Visitor(Data->SocketStats[I]);
+#else
+ (void)Visitor;
 #endif
 }
 TConstArrayView<FVaRestInspectorLink> FVaRestInspectorSnapshot::GetLinks() const

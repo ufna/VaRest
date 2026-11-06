@@ -7,6 +7,12 @@
 
 namespace VaRest::Http
 {
+	struct FExchangeState;
+	namespace PipelinePrivate
+	{
+		/** Shared real decoder/finalizer; null Handler still finalizes/cleans a SaveTo file, without typed decoding. */
+		void RunDecode(IResultHandler* Handler, FFinish& Finish, const FExchangeState& Exchange);
+	}
 	/**
 	 * Spec 3.4 on a parsed body (plan decision 9): InOut becomes the data, or the body stays in Finish.Error.Body and
 	 * Finish.Error is a Kind=Server failure (false; InOut is then invalid). A DataPath that names nothing leaves InOut

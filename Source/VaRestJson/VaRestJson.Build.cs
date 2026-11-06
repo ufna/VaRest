@@ -8,6 +8,16 @@ public class VaRestJson : ModuleRules
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 
+		// Direct OS entropy for the module-owned SipHash key; never use a GUID fallback.
+		if (Target.Platform == UnrealTargetPlatform.Win64)
+		{
+			PublicSystemLibraries.Add("bcrypt.lib");
+		}
+		else if (Target.Platform == UnrealTargetPlatform.Mac || Target.Platform == UnrealTargetPlatform.IOS)
+		{
+			PublicFrameworks.Add("Security");
+		}
+
 		PublicDependencyModuleNames.AddRange(new string[]
 		{
 			"Core",
@@ -24,13 +34,6 @@ public class VaRestJson : ModuleRules
 			// PUBLIC: VaRestJsonLibrary.h derives from UBlueprintFunctionLibrary (Engine/Classes/Kismet/
 			// BlueprintFunctionLibrary.h). Every game links Engine; v1's VaRest module needs it at PreDefault too.
 			"Engine",
-		});
-
-		PrivateDependencyModuleNames.AddRange(new string[]
-		{
-			// Bench.VaRest.Json.TypedConvert compares against FJsonObjectConverter. Engine already depends on
-			// JsonUtilities publicly (Engine.Build.cs:88), so every game links it anyway and gains no code from this.
-			"JsonUtilities",
 		});
 	}
 }

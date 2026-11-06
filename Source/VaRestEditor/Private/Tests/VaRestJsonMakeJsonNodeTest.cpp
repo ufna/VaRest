@@ -6,6 +6,7 @@
 #include "Kismet/KismetSystemLibrary.h"
 #include "Misc/AutomationTest.h"
 #include "Tests/VaRestJsonBlueprintTestUtils.h"
+#include "UObject/NoExportTypes.h"
 #include "VaRestJson.h"
 #include "VaRestJsonLibrary.h"
 
@@ -68,12 +69,15 @@ bool FVaRestJsonMakeJsonNodeTest::RunTest(const FString& Parameters)
 	UEdGraphPin* ObjectPin = Literal->CreatePin(EGPD_Output, FEdGraphPinType(UEdGraphSchema_K2::PC_Object, NAME_None, UObject::StaticClass(), EPinContainerType::None, false, FEdGraphTerminalType()), FName(TEXT("TestObject")));
 	UEdGraphPin* ObjectMapPin = Literal->CreatePin(EGPD_Output, FEdGraphPinType(UEdGraphSchema_K2::PC_String, NAME_None, nullptr, EPinContainerType::Map, false, ObjectValue), FName(TEXT("TestObjectMap")));
 	UEdGraphPin* IntMapPin = Literal->CreatePin(EGPD_Output, FEdGraphPinType(UEdGraphSchema_K2::PC_String, NAME_None, nullptr, EPinContainerType::Map, false, IntValue), FName(TEXT("TestIntMap")));
+	UEdGraphPin* BoolMapPin = Literal->CreatePin(EGPD_Output, FEdGraphPinType(UEdGraphSchema_K2::PC_Boolean, NAME_None, nullptr, EPinContainerType::Map, false, IntValue), FName(TEXT("TestBoolMap")));
 	TestTrue(TEXT("an object cannot be a value"), Node->IsConnectionDisallowed(IdPin, ObjectPin, Reason));
 	TestTrue(TEXT("nor a map of objects"), Node->IsConnectionDisallowed(IdPin, ObjectMapPin, Reason));
 	TestFalse(TEXT("a map of numbers can"), Node->IsConnectionDisallowed(IdPin, IntMapPin, Reason));
+	TestTrue(TEXT("boolean map keys cannot become JSON object keys"), Node->IsConnectionDisallowed(IdPin, BoolMapPin, Reason));
 	Literal->RemovePin(ObjectPin);
 	Literal->RemovePin(ObjectMapPin);
 	Literal->RemovePin(IntMapPin);
+	Literal->RemovePin(BoolMapPin);
 
 	FCompilerResultsLog Log;
 	Log.SetSilentMode(true);
@@ -149,6 +153,34 @@ bool FVaRestJsonMakeJsonNodeCompileTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("an unconnected value fails the compile"), bUnconnectedCompiled);
 	TestEqual(FString::Printf(TEXT("... with one error: %s"), *Messages(Unconnected)), Unconnected.NumErrors, 1);
 	TestTrue(TEXT("... naming the key"), Messages(Unconnected).Contains(TEXT("connect a value for the key \"id\""), ESearchCase::CaseSensitive));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonMakeJsonMapCompileTest, "VaRest.Json.Blueprint.MakeJsonUnsupportedMap",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestJsonMakeJsonMapCompileTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Json::BlueprintTest;
+	const FTestBlueprint Test = MakeBlueprint(TEXT("VaRestMakeJsonMapCompileTest"));
+	FEdGraphTerminalType Value; Value.TerminalCategory = UEdGraphSchema_K2::PC_Int;
+	const FEdGraphPinType Type(UEdGraphSchema_K2::PC_Struct, NAME_None, TBaseStructure<FGuid>::Get(), EPinContainerType::Map, false, Value);
+	if (!TestTrue(TEXT("real map and output properties"), AddVariable(Test.Blueprint, TEXT("Map"), Type)
+		&& AddVariable(Test.Blueprint, TEXT("Out"), UEdGraphSchema_K2::PC_String))) return false;
+	FGraphNodeCreator<UK2Node_VaRestMakeJson> Creator(*Test.Graph);
+	auto* Node = Creator.CreateNode(false); Creator.Finalize(); Node->AddInputPin();
+	Node->Entries[0].Key = TEXT("badMap"); Node->ReconstructNode();
+	auto* Map = AddVariableGet(Test.Graph, TEXT("Map"));
+	// A graph saved before this validation could already contain this link. Retain it to test compiler admission.
+	Map->FindPinChecked(TEXT("Map"))->MakeLinkTo(Node->GetValuePin(0)); Node->NotifyPinConnectionListChanged(Node->GetValuePin(0));
+	auto* ToText = AddCall(Test.Graph, UVaRestJsonLibrary::StaticClass(), GET_FUNCTION_NAME_CHECKED(UVaRestJsonLibrary, JsonToString));
+	auto* Out = AddVariableSet(Test.Graph, TEXT("Out"));
+	if (!TestTrue(TEXT("wire actual consumer"), Link(Node->GetJsonPin(), ToText->FindPinChecked(TEXT("Json")))
+		&& Link(ToText->GetReturnValuePin(), Out->FindPinChecked(TEXT("Out"))) && Link(Test.Entry->FindPinChecked(UEdGraphSchema_K2::PN_Then), Out->GetExecPin()))) return false;
+	FCompilerResultsLog Log;
+	TestFalse(TEXT("existing unsupported map link refuses compilation"), Compile(Test.Blueprint, Log));
+	TestTrue(TEXT("diagnostic names the entry and allowed key types"), Messages(Log).Contains(TEXT("badMap"))
+		&& Messages(Log).Contains(TEXT("Map keys must be strings, names, integers or enums")));
 	return true;
 }
 

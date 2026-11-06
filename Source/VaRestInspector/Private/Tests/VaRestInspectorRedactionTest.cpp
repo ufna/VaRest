@@ -257,6 +257,8 @@ bool BinaryDescriptors(FAutomationTestBase& T)
   auto P=Policy(); P.Limits.BinaryBytes=BinaryCap;
   FCaptureFixture F(T,false,true,true,&P); if(!F.Ready()) return false;
   const FString Raw=TEXT("Raw-Binary-Canary-13"); FTCHARToUTF8 U(*Raw);
+  // Explicit binary capture is now implemented; its known-value scrub applies before bytes reach either sink.
+  if(BinaryCap>0) F.Rig.Client.SetSecretValue(TEXT("binary-canary"),Raw);
   TArray<uint8> Small; Small.Add(0x89); Small.Append(reinterpret_cast<const uint8*>(U.Get()),U.Length());
   TArray<uint8> Large=Small; Large.SetNumZeroed(2048);
   int64 Copies[2]={-1,-1}; uint64 Ids[2]={0,0};
@@ -270,16 +272,20 @@ bool BinaryDescriptors(FAutomationTestBase& T)
    T.TestTrue(TEXT("Task13 actual decoder still owns raw binary"),O->Value.IsSet() && O->Value->Num()==Body.Num() && (*O->Value)[0]==0x89);
    const auto Excerpts=F.Recorder->ExcerptsOf(H.GetId()); int32 Responses=0;
    for(const auto& E:Excerpts) if(E.Owner==EVaRestTraceExcerptOwner::Response) {
-    ++Responses; T.TestTrue(TEXT("Task13 binary producer remains descriptor only"),E.Excerpt.Kind==EVaRestExcerptKind::Binary
-     && E.Excerpt.ToText().StartsWith(TEXT("<binary: ")) && E.Excerpt.TotalBytes==Body.Num() && !E.Excerpt.ToText().Contains(Raw));
+    ++Responses; T.TestTrue(TEXT("binary producer preserves default description or explicit capture"),E.Excerpt.Kind==EVaRestExcerptKind::Binary
+     && E.Excerpt.bBinaryCaptured==(BinaryCap>0) && E.Excerpt.TotalBytes==Body.Num() && !E.Excerpt.ToText().Contains(Raw));
+    if(BinaryCap==0) T.TestTrue(TEXT("default binary is still a descriptor"),E.Excerpt.ToText().StartsWith(TEXT("<binary: ")));
+    else T.TestTrue(TEXT("opted-in binary scrubs the known value before publication"),E.Excerpt.bRedacted && E.Excerpt.Bytes && E.Excerpt.Bytes->Num()<=BinaryCap
+     && E.Excerpt.Bytes->Num()>=4 && (*E.Excerpt.Bytes)[0]==0x89 && (*E.Excerpt.Bytes)[1]=='*' && (*E.Excerpt.Bytes)[2]=='*' && (*E.Excerpt.Bytes)[3]=='*');
     T.TestEqual(TEXT("Task13 hash only for complete within-cap body"),!E.Excerpt.Sha256Prefix.IsEmpty(),I==1);
    }
    T.TestEqual(TEXT("Task13 binary response has one descriptor"),Responses,1);
   }
-  T.TestEqual(TEXT("Task13 over BodyCap binary copies no raw bytes upstream"),Copies[0],int64(0));
+  T.TestEqual(TEXT("default oversized binary copies nothing; opt-in copies only its cap"),Copies[0],int64(BinaryCap));
   T.TestEqual(TEXT("Task13 within BodyCap binary permitted hash copy"),Copies[1],int64(Small.Num()));
   FRedactionScan S({Raw}); ScanRetained(F,S);
-  T.TestTrue(TEXT("Task13 BinaryCap retains descriptors and no raw Inspector body"),!S.Leaked() && S.Excerpts>0 && S.Contains(TEXT("application/octet-stream")) && S.Contains(TEXT("sha256")));
+  T.TestTrue(TEXT("binary policy retains no known secret in live or immutable capture"),!S.Leaked() && S.Excerpts>0
+   && (BinaryCap>0 ? S.Contains(TEXT("***")) : S.Contains(TEXT("application/octet-stream")) && S.Contains(TEXT("sha256"))));
  }
  return true;
 }

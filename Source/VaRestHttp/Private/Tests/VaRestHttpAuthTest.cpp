@@ -13,6 +13,7 @@
 #include "Misc/Paths.h"
 #include "Misc/ScopeExit.h"
 #include "UObject/Package.h"
+#include "UObject/StrongObjectPtr.h"
 #include "VaRestAuth.h"
 #include "VaRestClient.h"
 #include "VaRestClientState.h"
@@ -228,6 +229,7 @@ namespace VaRest::Http::AuthTestPrivate
 		}
 
 		bool IsPending() const { return static_cast<bool>(Pending); }
+		TUniqueFunction<void(FVaRestAuthRefreshResult&&)> TakePending() { return MoveTemp(Pending); }
 
 		void Answer(FVaRestAuthRefreshResult&& Result)
 		{
@@ -2044,6 +2046,163 @@ bool FVaRestHttpAuthStopTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthParkOwnerPollTest, "VaRest.Http.Auth.ParkedOwnerRetirement",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthParkOwnerPollTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	class FTrackingClock final : public IVaRestClock
+	{
+	public:
+		explicit FTrackingClock(TSharedRef<IVaRestClock, ESPMode::ThreadSafe> InClock) : Clock(MoveTemp(InClock)) {}
+		virtual double Now() const override { return Clock->Now(); }
+		virtual FVaRestTimerHandle SetTimer(double Delay, TUniqueFunction<void()>&& Callback) override
+		{
+			const auto Id = MakeShared<uint64, ESPMode::ThreadSafe>(0);
+			const auto Handle = Clock->SetTimer(Delay, [State = Pending, Id, Original = MoveTemp(Callback)]() mutable {
+				State->Remove(*Id);
+				Original();
+			});
+			if (Handle.IsValid())
+			{
+				*Id = Handle.Id;
+				Pending->Add(Handle.Id, Delay);
+			}
+			return Handle;
+		}
+		virtual void ClearTimer(FVaRestTimerHandle& Handle) override
+		{
+			Pending->Remove(Handle.Id);
+			Clock->ClearTimer(Handle);
+		}
+		int32 NumPendingAtMost(double Delay) const
+		{
+			int32 Count = 0;
+			for (const auto& Entry : *Pending)
+				Count += Entry.Value <= Delay;
+			return Count;
+		}
+	private:
+		TSharedRef<IVaRestClock, ESPMode::ThreadSafe> Clock;
+		TSharedRef<TMap<uint64, double>, ESPMode::ThreadSafe> Pending = MakeShared<TMap<uint64, double>, ESPMode::ThreadSafe>();
+	};
+	for (bool bReplay : { false, true })
+	{
+		for (bool bOtherWaiter : { false, true })
+		{
+			FTestRig Rig;
+			const auto Auth = HandRig(Rig);
+			if (!bReplay)
+				Rig.Client.SetSession(TEXT(""), TEXT("old-refresh-123456"));
+			const auto Clock = MakeShared<FTrackingClock, ESPMode::ThreadSafe>(Rig.Clock);
+			Rig.Client.WithClock(Clock);
+			ON_SCOPE_EXIT { Abandon(Rig); Auth->Drop(); };
+			const auto Probe = MakeShared<FOutcomeProbe, ESPMode::ThreadSafe>();
+			Rig.Client.Use(Probe, EVaRestStageSlot::Outer);
+			const auto State = VaRest::Http::FClientAccess::State(Rig.Client);
+			UObject* Owner = NewObject<UVaRestHttpSettings>(GetTransientPackage(), NAME_None, RF_Transient);
+			TStrongObjectPtr<UObject> KeepOwner(Owner);
+			auto Owned = MakeOutcome<FVaRestJson>();
+			auto Other = MakeOutcome<FVaRestJson>();
+			TSharedPtr<int32, ESPMode::ThreadSafe> Capture = MakeShared<int32, ESPMode::ThreadSafe>(7);
+			const TWeakPtr<int32, ESPMode::ThreadSafe> WeakCapture = Capture;
+			const auto OwnedHandle = Observe(Rig.Client.Get(TEXT("/owned")).Owner(Owner), Owned)
+				.OnError([Owned, Keep = Capture](const FVaRestError&) { (void)Keep; Owned->ErrorCalls.fetch_add(1); }).Send();
+			Capture.Reset();
+			if (bOtherWaiter)
+				Observe(Rig.Client.Get(TEXT("/other")), Other).Send();
+			const int32 Waiters = bOtherWaiter ? 2 : 1;
+			if (!TestTrue(TEXT("requests park behind a provider still holding Done"),
+				PumpUntil([&] { return Auth->IsPending() && State->NumRefreshWaitersInternal() == Waiters; })))
+				return false;
+			TestTrue(TEXT("the owned callback payload is retained while its owner lives"), WeakCapture.IsValid());
+			TestEqual(TEXT("the held owned park has one short owner timer"), Clock->NumPendingAtMost(0.1), 1);
+			const int32 InitialCalls = bReplay ? Waiters : 0;
+			TestEqual(TEXT("proactive or reactive physical attempts"), Rig.Fake->NumCalls(), InitialCalls);
+			KeepOwner.Reset();
+			Owner->MarkAsGarbage();
+			Rig.Clock->Advance(0.1);
+			const int32 Remaining = bOtherWaiter ? 1 : 0;
+			// Do not globally Drain while the other logical request is deliberately still parked.
+			if (!TestTrue(TEXT("owner retirement completes before the refresh provider answers"), PumpUntil([&] {
+				return State->NumRefreshWaitersInternal() == Remaining && Rig.Client.GetInFlightCount() == Remaining && !WeakCapture.IsValid();
+			})))
+				return false;
+			TestTrue(TEXT("the provider is still holding its Done"), Auth->IsPending());
+			TestEqual(TEXT("owner retirement clears the short timer before Done"), Clock->NumPendingAtMost(0.1), 0);
+			TestEqual(TEXT("the outer stage observes one cancellation"), Probe->Count(OwnedHandle.GetId(), EVaRestTransportFailure::Canceled), 1);
+			TestEqual(TEXT("the owned request has one stage outcome"), Probe->Total(OwnedHandle.GetId()), 1);
+			TestEqual(TEXT("owner retirement is silent"), Owned->SuccessCalls.load() + Owned->ErrorCalls.load() + Owned->CompleteCalls.load(), 0);
+			TestEqual(TEXT("no further dispatch during the held refresh"), Rig.Fake->NumCalls(), InitialCalls);
+			Auth->Answer(FVaRestAuthRefreshResult::Refreshed(TEXT("new-access-123456")));
+			if (bOtherWaiter && !TestTrue(TEXT("the unowned waiter survives and succeeds"), Rig.Wait(Other) && Other->SuccessCalls.load() == 1))
+				return false;
+			if (!TestTrue(TEXT("all requests have ended"), PumpUntil([&] { return Rig.Client.GetInFlightCount() == 0; })))
+				return false;
+			TestTrue(TEXT("terminal requests drain"), Rig.Drain());
+			TestEqual(TEXT("only the surviving waiter dispatches"), Rig.Fake->NumCalls(), InitialCalls + Remaining);
+			// Rotated token redaction legitimately keeps a ten-minute secret-expiry timer.
+			TestEqual(TEXT("the owner poll leaves no short timer behind"), Clock->NumPendingAtMost(0.1), 0);
+			TestEqual(TEXT("a late refresh does not answer the owned stage again"), Probe->Total(OwnedHandle.GetId()), 1);
+		}
+	}
+	for (bool bReplay : { false, true })
+	{
+		FTestRig Rig;
+		const auto Auth = HandRig(Rig);
+		if (!bReplay)
+			Rig.Client.SetSession(TEXT(""), TEXT("old-refresh-123456"));
+		const auto Clock = MakeShared<FTrackingClock, ESPMode::ThreadSafe>(Rig.Clock);
+		Rig.Client.WithClock(Clock);
+		ON_SCOPE_EXIT { Abandon(Rig); Auth->Drop(); };
+		TStrongObjectPtr<UObject> Owner(NewObject<UVaRestHttpSettings>(GetTransientPackage(), NAME_None, RF_Transient));
+		auto Outcome = MakeOutcome<FVaRestJson>();
+		Observe(Rig.Client.Get(TEXT("/alive")).Owner(Owner.Get()), Outcome).Send();
+		if (!TestTrue(TEXT("the living owner also parks"), PumpUntil([&] { return Auth->IsPending(); })))
+			return false;
+		Rig.Clock->Advance(0.1); // exercises rearming while the owner remains valid
+		TestEqual(TEXT("the living request remains in flight"), Rig.Client.GetInFlightCount(), 1);
+		TestEqual(TEXT("the living park rearms exactly one short timer"), Clock->NumPendingAtMost(0.1), 1);
+		Auth->Answer(FVaRestAuthRefreshResult::Refreshed(TEXT("new-access-123456")));
+		if (!TestTrue(TEXT("the living owner receives its result"), Rig.Wait(Outcome) && Outcome->SuccessCalls.load() == 1))
+			return false;
+		TestTrue(TEXT("the terminal living request drains"), Rig.Drain());
+		TestEqual(TEXT("normal refresh completion clears the short owner timer"), Clock->NumPendingAtMost(0.1), 0);
+	}
+	{
+		class FRefuseTimers final : public IVaRestClock
+		{
+		public:
+			explicit FRefuseTimers(TSharedRef<IVaRestClock, ESPMode::ThreadSafe> InClock) : Clock(MoveTemp(InClock)) {}
+			virtual double Now() const override { return Clock->Now(); }
+			virtual FVaRestTimerHandle SetTimer(double, TUniqueFunction<void()>&&) override { return {}; }
+			virtual void ClearTimer(FVaRestTimerHandle& Handle) override { Clock->ClearTimer(Handle); }
+		private:
+			TSharedRef<IVaRestClock, ESPMode::ThreadSafe> Clock;
+		};
+		FTestRig Rig;
+		const auto Auth = HandRig(Rig);
+		Rig.Client.SetSession(TEXT(""), TEXT("old-refresh-123456"));
+		Rig.Client.WithClock(MakeShared<FRefuseTimers, ESPMode::ThreadSafe>(Rig.Clock));
+		ON_SCOPE_EXIT { Abandon(Rig); Auth->Drop(); };
+		TStrongObjectPtr<UObject> Owner(NewObject<UVaRestHttpSettings>(GetTransientPackage(), NAME_None, RF_Transient));
+		auto Outcome = MakeOutcome<FVaRestJson>();
+		Observe(Rig.Client.Get(TEXT("/refused")).Owner(Owner.Get()), Outcome).Send();
+		if (!TestTrue(TEXT("a refused owner timer ends the request"), Rig.Wait(Outcome)))
+			return false;
+		TestTrue(TEXT("lifecycle admission refusal is Config and not retryable"),
+			Outcome->Error.Kind == EVaRestErrorKind::Config && !Outcome->Error.bRetryable && Outcome->Error.Message.Contains(TEXT("LifecycleCapacity")));
+		TestEqual(TEXT("no refresh starts after timer admission is refused"), Auth->Refreshes, 0);
+		TestEqual(TEXT("no transport starts after timer admission is refused"), Rig.Fake->NumCalls(), 0);
+		TestEqual(TEXT("no waiter is retained after refusal"), VaRest::Http::FClientAccess::State(Rig.Client)->NumRefreshWaitersInternal(), 0);
+		TestTrue(TEXT("the refusal preserves the refresh session"), Rig.Client.GetSession().HasRefreshToken());
+		TestTrue(TEXT("the terminal refusal drains"), Rig.Drain());
+	}
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthProactiveTest, "VaRest.Http.Auth.Proactive",
 	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
 
@@ -3085,6 +3244,126 @@ bool FVaRestHttpAuthRefreshTokenOnlyTest::RunTest(const FString& Parameters)
 	Hand->Answer(FVaRestAuthRefreshResult::Refreshed(TEXT("new-access-123456")));
 	TestTrue(TEXT("... C replays with its token and succeeds"), Kept.Wait(Waiting) && Waiting->SuccessCalls.load() == 1 && Hand->Refreshes == 1);
 	Kept.Drain();
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthRotatedRefreshTest, "VaRest.Http.Auth.RotatedRefreshTokenKeepsWaiters",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthRotatedRefreshTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	for (bool bStaleSuccess : {false, true})
+	{
+		FTestRig Rig;
+		const auto Auth = HandRig(Rig);
+		FScopedTraceRecorder Scoped(EVaRestTraceDetail::Metadata);
+		const auto Expiries = MakeShared<int32, ESPMode::ThreadSafe>(0);
+		Rig.Client.OnSessionExpired().AddLambda([Expiries] { ++*Expiries; });
+		auto Replay = MakeOutcome<FVaRestJson>();
+		const auto ReplayHandle = Observe(Rig.Client.Get(TEXT("/rotate-a")), Replay).Send();
+		if (!TestTrue(TEXT("401 starts the original refresh"), PumpUntil([Auth] { return Auth->IsPending(); }) && Rig.Fake->NumCalls() == 1))
+		{ Rig.Client.ClearSession(); Abandon(Rig); return false; }
+		const uint64 OldId = Auth->LastRefreshId;
+		auto OldAnswer = Auth->TakePending();
+		auto First = MakeOutcome<FVaRestJson>();
+		const auto FirstHandle = Observe(Rig.Client.Get(TEXT("/rotate-b")), First).Send();
+		const auto External = MakeAnswers();
+		Rig.Client.RefreshAuth(Record(External)); Rig.Client.RefreshAuth(Record(External));
+		const uint32 Credentials = Rig.Client.GetSession().CredentialGeneration;
+		Rig.Clock->Advance(.25);
+		Rig.Client.SetSession(TEXT("old-access-123456"), TEXT("game-refresh-123456"), 0, true);
+		Rig.Client.WithAuth(FVaRestAuth::Bearer()); // the replacement still belongs to the original, independently owned provider
+		Rig.Client.SetSession(TEXT("old-access-123456"), TEXT("latest-refresh-123456"), 0, true);
+		TestEqual(TEXT("rotation invokes no provider inside SetSession"), Auth->Refreshes, 1);
+		TestEqual(TEXT("rotation does not complete external waiters inline"), External->Num(), 0);
+		TestEqual(TEXT("same access token does not gain credential replay authority"), Rig.Client.GetSession().CredentialGeneration, Credentials);
+		// Both stale rejection and stale success must be ignored, including an answer posted before the new provider starts.
+		OldAnswer(bStaleSuccess ? FVaRestAuthRefreshResult::Refreshed(TEXT("late-access-123456"))
+			: FVaRestAuthRefreshResult::Rejected(TEXT("old refresh token rejected")));
+		if (!TestTrue(TEXT("one deferred replacement uses the latest token"), PumpUntil([Auth] { return Auth->Refreshes == 2 && Auth->IsPending(); })
+			&& Auth->LastRefreshId != OldId && Auth->LastRefreshToken.Equals(TEXT("latest-refresh-123456"), ESearchCase::CaseSensitive)))
+		{ Rig.Client.ClearSession(); Abandon(Rig); return false; }
+		const uint64 NewId = Auth->LastRefreshId;
+		TestTrue(TEXT("all waiters remain parked without replaying refused credentials"), !Replay->IsDone() && !First->IsDone()
+			&& External->IsEmpty() && Rig.Fake->NumCalls() == 1);
+		Rig.Clock->Advance(.25);
+		Auth->Answer(FVaRestAuthRefreshResult::Refreshed(TEXT("new-access-123456")));
+		const bool Completed = Rig.Wait(Replay) && Rig.Wait(First) && PumpUntil([External] { return External->Num() == 2; });
+		if (!TestTrue(TEXT("request and external waiters complete behind the replacement"), Completed))
+		{ Rig.Client.ClearSession(); Abandon(Rig); return false; }
+		TestTrue(TEXT("reactive replay and first attempt preserve their numbering"), Replay->SuccessCalls.load() == 1 && Replay->Response.Attempts == 2
+			&& First->SuccessCalls.load() == 1 && First->Response.Attempts == 1);
+		TestTrue(TEXT("external waiters each receive the real refresh success"), (*External)[0] == FRefreshAnswer(EVaRestAuthRefreshOutcome::Refreshed, EVaRestErrorKind::None)
+			&& (*External)[1] == (*External)[0]);
+		Rig.Drain();
+		TestEqual(TEXT("superseded replies never expire the replacement session"), *Expiries, 0);
+		TestTrue(TEXT("current tokens survive stale replies"), Rig.Client.GetSession().AccessToken.Equals(TEXT("new-access-123456"), ESearchCase::CaseSensitive)
+			&& Rig.Client.GetSession().RefreshToken.Equals(TEXT("latest-refresh-123456"), ESearchCase::CaseSensitive));
+		TestEqual(TEXT("coalesced writes start one replacement"), Auth->Refreshes, 2);
+		TestEqual(TEXT("one original attempt and two post-refresh sends"), Rig.Fake->NumCalls(), 3);
+		const auto Replayed = DispatchesOf(*Scoped.Recorder, ReplayHandle.GetId());
+		const auto Sent = DispatchesOf(*Scoped.Recorder, FirstHandle.GetId());
+		TestTrue(TEXT("both dispatches name the replacement refresh"), Replayed.Num() == 2 && Replayed[1].AuthRefreshId == NewId
+			&& Sent.Num() == 1 && Sent[0].AuthRefreshId == NewId);
+		for (uint64 RequestId : {ReplayHandle.GetId(), FirstHandle.GetId()})
+		{
+			const auto Events = Scoped.Recorder->For(RequestId);
+			const auto* Done = Events.FindByPredicate([](const FVaRestTraceEvent& Event) { return Event.Kind == EVaRestTraceKind::Completed; });
+			TestTrue(TEXT("Completed also names the replacement refresh"), Done && Done->Payload.Get<FVaRestTraceCompleted>().AuthRefreshId == NewId);
+		}
+		FString Why;
+		TestTrue(TEXT("phase accounting stays valid"), PhasesHold(*Scoped.Recorder, ReplayHandle.GetId(), Why) && PhasesHold(*Scoped.Recorder, FirstHandle.GetId(), Why));
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpAuthRotatedRetirementTest, "VaRest.Http.Auth.RotatedRefreshRetirement",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpAuthRotatedRetirementTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::AuthTestPrivate;
+	for (bool bLogout : {false, true})
+	{
+		FTestRig Rig;
+		const auto Auth = HandRig(Rig);
+		const auto Replies = MakeAnswers();
+		Rig.Client.RefreshAuth(Record(Replies));
+		Rig.Client.SetSession(TEXT("old-access-123456"), TEXT("replacement-refresh-123456"), 0, true);
+		if (bLogout) Rig.Client.ClearSession();
+		else Rig.Client.SetBearerToken(TEXT("game-access-123456"), true);
+		TestEqual(TEXT("retirement delivery stays asynchronous"), Replies->Num(), 0);
+		if (!TestTrue(TEXT("the original waiters still resolve"), PumpUntil([Replies] { return Replies->Num() == 1; })))
+		{ Rig.Client.ClearSession(); Abandon(Rig); return false; }
+		TestEqual(TEXT("logout or game credentials cancel the scheduled replacement"), Auth->Refreshes, 1);
+		TestEqual(TEXT("the waiter sees the superseding game operation"), (*Replies)[0].Key,
+			bLogout ? EVaRestAuthRefreshOutcome::Rejected : EVaRestAuthRefreshOutcome::Refreshed);
+		Auth->Answer(FVaRestAuthRefreshResult::Rejected(TEXT("stale answer after retirement")));
+		Rig.Drain();
+		TestEqual(TEXT("retired refresh does not deliver twice"), Replies->Num(), 1);
+		TestTrue(TEXT("stale answer preserves the game-selected session"), bLogout ? !Rig.Client.GetSession().HasAccessToken()
+			: Rig.Client.GetSession().AccessToken.Equals(TEXT("game-access-123456"), ESearchCase::CaseSensitive));
+		TestEqual(TEXT("no transport request"), Rig.Fake->NumCalls(), 0);
+	}
+	// A provider can own its pending Done. The coordinator must not keep that provider alive after configuration replaces it.
+	FTestRig Rig;
+	TSharedPtr<FHandAuth, ESPMode::ThreadSafe> Provider = HandRig(Rig);
+	const TWeakPtr<FHandAuth, ESPMode::ThreadSafe> Weak = Provider;
+	const auto Replies = MakeAnswers();
+	Rig.Client.RefreshAuth(Record(Replies));
+	Rig.Client.WithAuth(FVaRestAuth::Bearer()); Provider.Reset();
+	TestFalse(TEXT("an active refresh does not retain the removed provider"), Weak.IsValid());
+	Rig.Client.SetSession(TEXT("old-access-123456"), TEXT("replacement-refresh-123456"), 0, true);
+	if (!TestTrue(TEXT("missing original provider resolves its waiters"), PumpUntil([Replies] { return Replies->Num() == 1; })))
+	{ Rig.Client.ClearSession(); Abandon(Rig); return false; }
+	TestTrue(TEXT("missing provider is a transient failure, not a logout"), (*Replies)[0] == FRefreshAnswer(EVaRestAuthRefreshOutcome::Failed, EVaRestErrorKind::Connection)
+		&& Rig.Client.GetSession().RefreshToken.Equals(TEXT("replacement-refresh-123456"), ESearchCase::CaseSensitive));
+	Rig.Drain();
+	TestEqual(TEXT("old dropped Done and replacement failure complete once"), Replies->Num(), 1);
+	TestEqual(TEXT("missing provider sends nothing"), Rig.Fake->NumCalls(), 0);
 	return true;
 }
 
@@ -4165,6 +4444,25 @@ bool FVaRestHttpAuthBearerConfigErrorsTest::RunTest(const FString& Parameters)
 		Case.Logged = TEXT("FVaRestAuth::BearerRefresh: the Json style's RefreshBodyField is empty");
 		Case.Config.RefreshBodyField.Reset();
 	}
+	for (const TCHAR* Path : { TEXT("data..token"), TEXT("data[0"), TEXT("data[01]"), TEXT("/data/~2") })
+	{
+		FCase& Case = Cases.AddDefaulted_GetRef();
+		Case.Name = Path;
+		Case.Logged = TEXT("FVaRestAuth::BearerRefresh: AccessTokenPath has invalid syntax");
+		Case.Config.AccessTokenPath = Path;
+	}
+	{
+		FCase& Case = Cases.AddDefaulted_GetRef();
+		Case.Name = TEXT("an invalid optional refresh token path");
+		Case.Logged = TEXT("FVaRestAuth::BearerRefresh: RefreshTokenPath has invalid syntax");
+		Case.Config.RefreshTokenPath = TEXT("data..refresh");
+	}
+	{
+		FCase& Case = Cases.AddDefaulted_GetRef();
+		Case.Name = TEXT("an invalid optional expiry path");
+		Case.Logged = TEXT("FVaRestAuth::BearerRefresh: ExpiresInPath has invalid syntax");
+		Case.Config.ExpiresInPath = TEXT("/data/~2");
+	}
 	for (const FCase& Case : Cases)
 	{
 		AddExpectedErrorPlain(Case.Logged, EAutomationExpectedErrorFlags::Contains, 1);
@@ -4184,6 +4482,10 @@ bool FVaRestHttpAuthBearerConfigErrorsTest::RunTest(const FString& Parameters)
 		const FVaRestSessionData Data = Rig.Client.GetSession();
 		TestTrue(FString::Printf(TEXT("%s: the session kept"), Case.Name), Data.AccessToken == TEXT("old-access-123456") && Data.RefreshToken == TEXT("old-refresh-123456"));
 	}
+	FVaRestBearerRefreshConfig OptionalPaths;
+	OptionalPaths.RefreshTokenPath.Reset();
+	OptionalPaths.ExpiresInPath.Reset();
+	TestTrue(TEXT("optional empty response paths remain valid"), FVaRestAuth::BearerRefresh(OptionalPaths)->GetConfigError().IsEmpty());
 	// Not Q7: the OAuth2 form never reads RefreshBodyField, and an empty RefreshStatuses refreshes before a known expiry only
 	{
 		FVaRestBearerRefreshConfig Config;

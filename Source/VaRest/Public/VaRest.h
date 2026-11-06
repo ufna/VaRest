@@ -12,6 +12,7 @@ public:
 	/** IModuleInterface implementation */
 	virtual void StartupModule() override;
 	virtual void ShutdownModule() override;
+	virtual bool SupportsDynamicReloading() override { return false; }
 
 	/**
 	 * Singleton-like access to this module's interface.  This is just for convenience!

@@ -218,6 +218,13 @@ bool FVaRestRedactRules::IsAcceptableKey(FStringView Key)
 	return VaRest::Json::RedactPrivate::FindKeySeparator(Key) == 0;
 }
 
+void FVaRestRedactRules::Append(const FVaRestRedactRules& Other)
+{
+	if (this == &Other) return;
+	bAllJsonValues |= Other.bAllJsonValues;
+	for (const auto& Key : Other.AddedKeys) if (!AddedKeys.Contains(Key)) AddedKeys.Add(Key);
+}
+
 void FVaRestRedactRules::AddKey(FStringView Key)
 {
 	if (const TCHAR Separator = VaRest::Json::RedactPrivate::FindKeySeparator(Key))
@@ -258,6 +265,7 @@ bool FVaRestRedactRules::ShouldRedact(FStringView Key, EVaRestRedactKeyKind Kind
 
 bool FVaRestRedactRules::MatchesNormalized(FUtf8StringView Normalized, EVaRestRedactKeyKind Kind) const
 {
+	if (bAllJsonValues && Kind == EVaRestRedactKeyKind::Json) return true;
 	using namespace VaRest::Json::RedactPrivate;
 	if (Normalized.IsEmpty())
 	{

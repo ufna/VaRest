@@ -15,529 +15,702 @@
 
 namespace VaRest::Json::Convert
 {
-	namespace NamesPrivate
+namespace NamesPrivate
+{
+struct FMapKey
+{
+	FObjectKey Struct;
+	uint8 Naming;
+	uint64 Rules;
+	bool operator==(const FMapKey& Other) const { return Struct == Other.Struct && Naming == Other.Naming && Rules == Other.Rules; }
+	friend uint32 GetTypeHash(const FMapKey& Key)
 	{
-		/**
-		 * The process-wide field-map cache and rename registry. Keys are FObjectKey (index + serial number,
-		 * ObjectKey.h:29-38), so a struct that dies and a new one at the same address never share a map. Reads take the
-		 * read lock, so concurrent decodes on worker threads share maps; maps are immutable once inserted. Making the key
-		 * off the game thread is safe: a first serial number is claimed by compare-exchange (UObjectArray.cpp:549).
-		 */
-		struct FCache
-		{
-			FRWLock Lock;
-			/**
-			 * Bumped by ResetCache, Register and Unregister. Build runs outside the lock, so a map built from the
-			 * renames (or struct) of before a reset could otherwise be inserted after it and outlive it.
-			 */
-			uint64 Epoch = 0;
-			TMap<TPair<FObjectKey, uint8>, FFieldMapRef> Maps;
-			TMap<FObjectKey, TMap<FName, FString>> Renames;
-		};
+		return HashCombine(HashCombine(GetTypeHash(Key.Struct), GetTypeHash(Key.Naming)), GetTypeHash(Key.Rules));
+	}
+};
+/**
+ * The process-wide field-map cache and rename registry. Keys are FObjectKey (index + serial number,
+ * ObjectKey.h:29-38), so a struct that dies and a new one at the same address never share a map. Reads take the
+ * read lock, so concurrent decodes on worker threads share maps; maps are immutable once inserted. Making the key
+ * off the game thread is safe: a first serial number is claimed by compare-exchange (UObjectArray.cpp:549).
+ */
+struct FCache
+{
+	FRWLock Lock;
+	/**
+	 * Bumped by ResetCache, Register and Unregister. Build runs outside the lock, so a map built from the
+	 * renames (or struct) of before a reset could otherwise be inserted after it and outlive it.
+	 */
+	uint64 Epoch = 0;
+	uint64 DynamicGeneration = 1; // saturates; dynamic callers refuse exhausted identities instead of reusing a token
+	TMap<FMapKey, FFieldMapRef> Maps;
+	TMap<FObjectKey, TMap<FName, FString>> Renames;
+};
 
-		FCache& Cache()
+FCache& Cache()
+{
+	static FCache Instance; // a function-local static: its first use is thread-safe
+	return Instance;
+}
+
+bool IsSeparator(TCHAR C)
+{
+	return C == TEXT('_') || C == TEXT('-') || C == TEXT(' ');
+}
+
+bool IsAsciiUpper(TCHAR C)
+{
+	return C >= TEXT('A') && C <= TEXT('Z');
+}
+
+bool IsAsciiLower(TCHAR C)
+{
+	return C >= TEXT('a') && C <= TEXT('z');
+}
+
+FString AsciiLower(const FString& Word)
+{
+	FString Result = Word;
+	for (int32 Index = 0; Index < Result.Len(); ++Index)
+	{
+		if (IsAsciiUpper(Result[Index]))
 		{
-			static FCache Instance; // a function-local static: its first use is thread-safe
-			return Instance;
+			Result[Index] = static_cast<TCHAR>(Result[Index] + TEXT('a') - TEXT('A'));
 		}
+	}
+	return Result;
+}
 
-		bool IsSeparator(TCHAR C)
-		{
-			return C == TEXT('_') || C == TEXT('-') || C == TEXT(' ');
-		}
+/** UE names bools bSomething (coding standard); the b is a C++ convention, not part of the JSON name */
+bool HasBoolPrefix(FStringView Name)
+{
+	return Name.Len() >= 2 && Name[0] == TEXT('b') && IsAsciiUpper(Name[1]);
+}
 
-		/** UE names bools bSomething (coding standard); the b is a C++ convention, not part of the JSON name */
-		bool HasBoolPrefix(FStringView Name)
-		{
-			return Name.Len() >= 2 && Name[0] == TEXT('b') && FChar::IsUpper(Name[1]);
-		}
+/**
+ * An FName spelled from its comparison entry: the casing registered first process-wide, which is all a build
+ * without WITH_CASE_PRESERVING_NAME (no editor-only data, NameTypes.h:33) has, since there the display index is
+ * the comparison index (NameTypes.h:1286-1293). Spelled the way FName::AppendString spells the display entry
+ * (UnrealNames.cpp:3819-3826).
+ */
+void AppendComparisonSpelling(FName FieldName, FWideStringBuilderBase& Out)
+{
+	FieldName.GetComparisonNameEntry()->AppendNameToString(Out);
+	const int32 InternalNumber = FieldName.GetNumber();
+	if (InternalNumber != NAME_NO_NUMBER_INTERNAL)
+	{
+		Out << TEXT('_') << NAME_INTERNAL_TO_EXTERNAL(InternalNumber);
+	}
+}
 
-		/**
-		 * An FName spelled from its comparison entry: the casing registered first process-wide, which is all a build
-		 * without WITH_CASE_PRESERVING_NAME (no editor-only data, NameTypes.h:33) has, since there the display index is
-		 * the comparison index (NameTypes.h:1286-1293). Spelled the way FName::AppendString spells the display entry
-		 * (UnrealNames.cpp:3819-3826).
-		 */
-		void AppendComparisonSpelling(FName FieldName, FWideStringBuilderBase& Out)
-		{
-			FieldName.GetComparisonNameEntry()->AppendNameToString(Out);
-			const int32 InternalNumber = FieldName.GetNumber();
-			if (InternalNumber != NAME_NO_NUMBER_INTERNAL)
-			{
-				Out << TEXT('_') << NAME_INTERNAL_TO_EXTERNAL(InternalNumber);
-			}
-		}
+/**
+ * An engine hardcoded name (an EName: FName::ToEName, NameTypes.h:1228-1229), which the name pool registers before
+ * any module (UnrealNames.inl: ID at :206, Name at :71), so its casing is the same in every build
+ */
+bool IsEngineName(FName FieldName)
+{
+	return FieldName.ToEName() != nullptr;
+}
 
-		/**
-		 * An engine hardcoded name (an EName: FName::ToEName, NameTypes.h:1228-1229), which the name pool registers before
-		 * any module (UnrealNames.inl: ID at :206, Name at :71), so its casing is the same in every build
-		 */
-		bool IsEngineName(FName FieldName)
-		{
-			return FieldName.ToEName() != nullptr;
-		}
+/**
+ * A C++ field's name as encode spells it. An engine hardcoded name keeps the engine's casing (a field id is ID):
+ * a packaged game has no other, so PIE writes what it writes. Any other name keeps its declared casing (the
+ * display entry): the editor's authored spelling, and in a packaged game the casing the module's own generated
+ * code registers -- unless an earlier module registered the same letters first, which only the editor can see
+ * and warns about (Build).
+ */
+void AppendAuthoredSpelling(FName FieldName, FWideStringBuilderBase& Out)
+{
+	if (IsEngineName(FieldName))
+	{
+		AppendComparisonSpelling(FieldName, Out);
+	}
+	else
+	{
+		FieldName.AppendString(Out);
+	}
+}
 
-		/**
-		 * A C++ field's name as encode spells it. An engine hardcoded name keeps the engine's casing (a field id is ID):
-		 * a packaged game has no other, so PIE writes what it writes. Any other name keeps its declared casing (the
-		 * display entry): the editor's authored spelling, and in a packaged game the casing the module's own generated
-		 * code registers -- unless an earlier module registered the same letters first, which only the editor can see
-		 * and warns about (Build).
-		 */
-		void AppendAuthoredSpelling(FName FieldName, FWideStringBuilderBase& Out)
+/** "URLPath" -> URL|Path, "UserId" -> User|Id, "user_id" -> user|id, "HTTPStatus2" -> HTTP|Status2, "Vector3D" -> Vector3|D */
+TArray<FString> SplitWords(const FString& Name)
+{
+	TArray<FString> Words;
+	FString Current;
+	for (int32 i = 0; i < Name.Len(); ++i)
+	{
+		const TCHAR C = Name[i];
+		if (IsSeparator(C))
 		{
-			if (IsEngineName(FieldName))
-			{
-				AppendComparisonSpelling(FieldName, Out);
-			}
-			else
-			{
-				FieldName.AppendString(Out);
-			}
-		}
-
-		/** "URLPath" -> URL|Path, "UserId" -> User|Id, "user_id" -> user|id, "HTTPStatus2" -> HTTP|Status2, "Vector3D" -> Vector3|D */
-		TArray<FString> SplitWords(const FString& Name)
-		{
-			TArray<FString> Words;
-			FString Current;
-			for (int32 i = 0; i < Name.Len(); ++i)
-			{
-				const TCHAR C = Name[i];
-				if (IsSeparator(C))
-				{
-					if (!Current.IsEmpty())
-					{
-						Words.Add(Current);
-						Current.Reset();
-					}
-					continue;
-				}
-				if (!Current.IsEmpty())
-				{
-					const TCHAR Prev = Current[Current.Len() - 1];
-					const bool bLowerToUpper = (FChar::IsLower(Prev) || FChar::IsDigit(Prev)) && FChar::IsUpper(C);
-					const bool bAcronymEnds = FChar::IsUpper(Prev) && FChar::IsUpper(C) && i + 1 < Name.Len() && FChar::IsLower(Name[i + 1]);
-					if (bLowerToUpper || bAcronymEnds)
-					{
-						Words.Add(Current);
-						Current.Reset();
-					}
-				}
-				Current.AppendChar(C);
-			}
 			if (!Current.IsEmpty())
 			{
 				Words.Add(Current);
+				Current.Reset();
 			}
-			return Words;
+			continue;
 		}
-
-		FString Capitalized(const FString& Word)
+		if (!Current.IsEmpty())
 		{
-			FString Result = Word.ToLower();
-			if (Result.Len() > 0)
+			const TCHAR Prev = Current[Current.Len() - 1];
+			const bool bLowerToUpper = (IsAsciiLower(Prev) || (Prev >= TEXT('0') && Prev <= TEXT('9'))) && IsAsciiUpper(C);
+			const bool bAcronymEnds = IsAsciiUpper(Prev) && IsAsciiUpper(C) && i + 1 < Name.Len() && IsAsciiLower(Name[i + 1]);
+			if (bLowerToUpper || bAcronymEnds)
 			{
-				Result[0] = FChar::ToUpper(Result[0]);
-			}
-			return Result;
-		}
-
-		FUtf8StringView View(const TArray<UTF8CHAR>& Bytes)
-		{
-			return FUtf8StringView(Bytes.GetData(), Bytes.Num());
-		}
-
-		void AssignUtf8(TArray<UTF8CHAR>& Out, const FString& Text)
-		{
-			FUtf8Scratch Scratch;
-			const FUtf8StringView Utf8 = ConvertForDocument(Text, Scratch);
-			Out.Reset(Utf8.Len());
-			Out.Append(Utf8.GetData(), Utf8.Len());
-		}
-
-		int32 FindIn(const TMultiMap<uint32, int32>& Table, const TArray<FFieldInfo>& Fields, TArray<UTF8CHAR> FFieldInfo::* Spelling, FUtf8StringView Key, uint32 Hash)
-		{
-			for (auto It = Table.CreateConstKeyIterator(Hash); It; ++It)
-			{
-				const TArray<UTF8CHAR>& Candidate = Fields[It.Value()].*Spelling;
-				if (Candidate.Num() == Key.Len() && (Key.Len() == 0 || FMemory::Memcmp(Candidate.GetData(), Key.GetData(), Key.Len()) == 0))
-				{
-					return It.Value();
-				}
-			}
-			return INDEX_NONE;
-		}
-
-		/** A spelling two fields share stays out of the tolerant tables: only an exact key reaches either field */
-		void AddUnambiguous(TMultiMap<uint32, int32>& Table, const TArray<FFieldInfo>& Fields, TArray<UTF8CHAR> FFieldInfo::* Spelling)
-		{
-			for (int32 i = 0; i < Fields.Num(); ++i)
-			{
-				const FUtf8StringView Mine = View(Fields[i].*Spelling);
-				bool bShared = false;
-				for (int32 j = 0; j < Fields.Num() && !bShared; ++j)
-				{
-					bShared = j != i && View(Fields[j].*Spelling).Equals(Mine, ESearchCase::CaseSensitive);
-				}
-				if (!bShared)
-				{
-					Table.Add(HashKey(Mine), i);
-				}
+				Words.Add(Current);
+				Current.Reset();
 			}
 		}
+		Current.AppendChar(C);
+	}
+	if (!Current.IsEmpty())
+	{
+		Words.Add(Current);
+	}
+	return Words;
+}
 
-		/** OutEpoch: the cache epoch the renames were read at (read together, under one lock) */
-		FFieldMapRef Build(const UScriptStruct* Struct, EVaRestJsonNaming Naming, uint64& OutEpoch)
+FString Capitalized(const FString& Word)
+{
+	FString Result = AsciiLower(Word);
+	if (Result.Len() > 0 && IsAsciiLower(Result[0]))
+	{
+		Result[0] = static_cast<TCHAR>(Result[0] - TEXT('a') + TEXT('A'));
+	}
+	return Result;
+}
+
+FUtf8StringView View(const TArray<UTF8CHAR>& Bytes)
+{
+	return FUtf8StringView(Bytes.GetData(), Bytes.Num());
+}
+
+void AssignUtf8(TArray<UTF8CHAR>& Out, const FString& Text)
+{
+	FUtf8Scratch Scratch;
+	const FUtf8StringView Utf8 = ConvertForDocument(Text, Scratch);
+	Out.Reset(Utf8.Len());
+	Out.Append(Utf8.GetData(), Utf8.Len());
+}
+
+int32 FindIn(const TMultiMap<uint32, int32>& Table, const TArray<FFieldInfo>& Fields, TArray<UTF8CHAR> FFieldInfo::* Spelling, FUtf8StringView Key, uint32 Hash)
+{
+	for (auto It = Table.CreateConstKeyIterator(Hash); It; ++It)
+	{
+		const TArray<UTF8CHAR>& Candidate = Fields[It.Value()].*Spelling;
+		if (Candidate.Num() == Key.Len() && (Key.Len() == 0 || FMemory::Memcmp(Candidate.GetData(), Key.GetData(), Key.Len()) == 0))
 		{
-			TMap<FName, FString> StructRenames;
+			return It.Value();
+		}
+	}
+	return INDEX_NONE;
+}
+
+/** A spelling two fields share stays out of the tolerant tables: only an exact key reaches either field */
+void AddUnambiguous(TMultiMap<uint32, int32>& Table, const TArray<FFieldInfo>& Fields, TArray<UTF8CHAR> FFieldInfo::* Spelling)
+{
+	for (int32 i = 0; i < Fields.Num(); ++i)
+	{
+		const FUtf8StringView Mine = View(Fields[i].*Spelling);
+		bool bShared = false;
+		for (int32 j = 0; j < Fields.Num() && !bShared; ++j)
+		{
+			bShared = j != i && View(Fields[j].*Spelling).Equals(Mine, ESearchCase::CaseSensitive);
+		}
+		if (!bShared)
+		{
+			Table.Add(HashKey(Mine), i);
+		}
+	}
+}
+
+/** OutEpoch: the cache epoch the renames were read at (read together, under one lock) */
+FFieldMapRef Build(const UScriptStruct* Struct, EVaRestJsonNaming Naming, const FVaRestJsonRuleSnapshot& Rules, uint64& OutEpoch)
+{
+	TMap<FName, FString> StructRenames;
+	{
+		FReadScopeLock ReadLock(Cache().Lock);
+		OutEpoch = Cache().Epoch;
+		if (const TMap<FName, FString>* Found = Cache().Renames.Find(FObjectKey(Struct)))
+		{
+			StructRenames = *Found;
+		}
+	}
+
+	const TSharedRef<FFieldMap, ESPMode::ThreadSafe> Map = MakeShared<FFieldMap, ESPMode::ThreadSafe>();
+	Map->Struct = Struct;
+	const FVaRestJsonResolvedRules* TypeRules = Rules.Find(Struct);
+	if (TypeRules && !TypeRules->Error.IsEmpty())
+	{
+		Map->Error = FString::Printf(TEXT("%s: %s"), *Struct->GetPathName(), *TypeRules->Error);
+		return Map;
+	}
+	Rules.WarnIfMissing(Struct);
+	for (const TPair<FName, FString>& Rename : StructRenames)
+	{
+		if (!FindFProperty<FProperty>(Struct, Rename.Key))
+		{
+			UE_LOG(LogVaRestJson, Warning, TEXT("FVaRestJsonConvert: %s.%s: registered rename matches no property"),
+				*Struct->GetName(), *Rename.Key.ToString());
+		}
+	}
+	for (TFieldIterator<FProperty> It(Struct); It; ++It)
+	{
+		const FProperty* Property = *It;
+		// The flags FJsonObjectConverter skips by default (JsonObjectConverter.cpp:406-410), plus editor-only data:
+		// such a field exists in PIE and not in a cooked game, the divergence spec 2.4 rules out for BP struct names
+		if (Property->HasAnyPropertyFlags(CPF_Deprecated | CPF_Transient | CPF_EditorOnly))
+		{
+			continue;
+		}
+		FString Why;
+		if (!IsSupported(Property, Why))
+		{
+			UE_LOG(LogVaRestJson, Warning, TEXT("FVaRestJsonConvert: %s.%s is skipped: %s"), *Struct->GetName(), *Property->GetName(), *Why);
+			continue;
+		}
+		const bool bBool = Property->IsA<FBoolProperty>();
+		const FGuid Guid = TypeRules ? FieldGuid(Struct, Property) : FGuid();
+		const FVaRestJsonFieldRule* Rule = TypeRules && Guid.IsValid()
+											   ? TypeRules->Fields.FindByPredicate([&](const FVaRestJsonFieldRule& Candidate) { return Candidate.Field == Guid; })
+											   : nullptr;
+		if (Rule && Rule->Presence == EVaRestJsonPresence::Ignore)
+		{
+			continue;
+		}
+		const FString Authored = AuthoredFieldName(Struct, Property);
+		const FString* Renamed = Rule ? &Rule->Json : StructRenames.Find(Property->GetFName());
+		const FString JsonName = Renamed ? *Renamed : ApplyNaming(Authored, bBool, Naming);
+		// Normalised from the camelCase spelling, so a bool's 'b' prefix never takes part (bIsActive ~ is_active)
+		const FString Loose = Renamed ? *Renamed : ApplyNaming(Authored, bBool, EVaRestJsonNaming::CamelCase);
+
+		FFieldInfo Field;
+		Field.Property = Property;
+		if (Rule)
+		{
+			Field.Rule = *Rule;
+			Field.bHasRule = true;
+			Map->bNeedsDefaults |= Rule->Presence == EVaRestJsonPresence::OmitWhenDefault || Rule->Presence == EVaRestJsonPresence::NullWhenDefault;
+		}
+		AssignUtf8(Field.Name, JsonName);
+		if (FindIn(Map->ByName, Map->Fields, &FFieldInfo::Name, View(Field.Name), HashKey(View(Field.Name))) != INDEX_NONE)
+		{
+			if (TypeRules)
 			{
-				FReadScopeLock ReadLock(Cache().Lock);
-				OutEpoch = Cache().Epoch;
-				if (const TMap<FName, FString>* Found = Cache().Renames.Find(FObjectKey(Struct)))
-				{
-					StructRenames = *Found;
-				}
+				Map->Error = FString::Printf(TEXT("%s has conflicting JSON key %s"), *Struct->GetPathName(), *JsonName);
+				return Map;
 			}
-
-			const TSharedRef<FFieldMap, ESPMode::ThreadSafe> Map = MakeShared<FFieldMap, ESPMode::ThreadSafe>();
-			for (TFieldIterator<FProperty> It(Struct); It; ++It)
-			{
-				const FProperty* Property = *It;
-				// The flags FJsonObjectConverter skips by default (JsonObjectConverter.cpp:406-410), plus editor-only data:
-				// such a field exists in PIE and not in a cooked game, the divergence spec 2.4 rules out for BP struct names
-				if (Property->HasAnyPropertyFlags(CPF_Deprecated | CPF_Transient | CPF_EditorOnly))
-				{
-					continue;
-				}
-				FString Why;
-				if (!IsSupported(Property, Why))
-				{
-					UE_LOG(LogVaRestJson, Warning, TEXT("FVaRestJsonConvert: %s.%s is skipped: %s"), *Struct->GetName(), *Property->GetName(), *Why);
-					continue;
-				}
-				const bool bBool = Property->IsA<FBoolProperty>();
-				const FString Authored = AuthoredFieldName(Struct, Property);
-				const FString* Renamed = StructRenames.Find(Property->GetFName());
-				const FString JsonName = Renamed ? *Renamed : ApplyNaming(Authored, bBool, Naming);
-				// Normalised from the camelCase spelling, so a bool's 'b' prefix never takes part (bIsActive ~ is_active)
-				const FString Loose = Renamed ? *Renamed : ApplyNaming(Authored, bBool, EVaRestJsonNaming::CamelCase);
-
-				FFieldInfo Field;
-				Field.Property = Property;
-				AssignUtf8(Field.Name, JsonName);
-				if (FindIn(Map->ByName, Map->Fields, &FFieldInfo::Name, View(Field.Name), HashKey(View(Field.Name))) != INDEX_NONE)
-				{
-					// One key twice would write a duplicate and make decode depend on member order
-					UE_LOG(LogVaRestJson, Warning, TEXT("FVaRestJsonConvert: %s.%s is skipped: its JSON name \"%s\" is already used by another field"), *Struct->GetName(), *Property->GetName(), *JsonName);
-					continue;
-				}
+			// One key twice would write a duplicate and make decode depend on member order
+			UE_LOG(LogVaRestJson, Warning, TEXT("FVaRestJsonConvert: %s.%s is skipped: its JSON name \"%s\" is already used by another field"), *Struct->GetName(), *Property->GetName(), *JsonName);
+			continue;
+		}
 #if WITH_CASE_PRESERVING_NAME
-				// Only this editor sees both casings of a field's FName. Warned only where the casing changes the key: every
-				// policy but AsIs turns ID, Id and id into one spelling, so a field id is news only under AsIs.
-				if (!Renamed && !Struct->IsA<UUserDefinedStruct>())
+		// Only this editor sees both casings of a field's FName. Warned only where the casing changes the key: every
+		// policy but AsIs turns ID, Id and id into one spelling, so a field id is news only under AsIs.
+		if (!Renamed && !Struct->IsA<UUserDefinedStruct>())
+		{
+			const FString Declared = Property->GetName();
+			TStringBuilder<128> ComparisonSpelling;
+			NamesPrivate::AppendComparisonSpelling(Property->GetFName(), ComparisonSpelling);
+			const FString Comparison(ComparisonSpelling.ToView());
+			if (!Declared.Equals(Comparison, ESearchCase::CaseSensitive))
+			{
+				if (NamesPrivate::IsEngineName(Property->GetFName()))
 				{
-					const FString Declared = Property->GetName();
-					TStringBuilder<128> ComparisonSpelling;
-					NamesPrivate::AppendComparisonSpelling(Property->GetFName(), ComparisonSpelling);
-					const FString Comparison(ComparisonSpelling.ToView());
-					if (!Declared.Equals(Comparison, ESearchCase::CaseSensitive))
+					// Authored is the engine's spelling: what every build writes, so the editor already shows it
+					if (!ApplyNaming(Declared, bBool, Naming).Equals(JsonName, ESearchCase::CaseSensitive))
 					{
-						if (NamesPrivate::IsEngineName(Property->GetFName()))
-						{
-							// Authored is the engine's spelling: what every build writes, so the editor already shows it
-							if (!ApplyNaming(Declared, bBool, Naming).Equals(JsonName, ESearchCase::CaseSensitive))
-							{
-								UE_LOG(LogVaRestJson, Warning, TEXT("FVaRestJsonConvert: %s.%s is written as \"%s\" in the editor and in a packaged game: a packaged game keeps one casing per FName, and \"%s\" was registered first. For exact casing register a rename with FVaRestJsonNames::Register."),
-									*Struct->GetName(), *Declared, *JsonName, *Authored);
-							}
-						}
-						else
-						{
-							// Authored is the declared spelling; an editor module claimed the letters first (Blueprint's
-							// "softobject", EdGraphSchema_K2.cpp:616). A packaged game lacks that module but may have another.
-							const FString PackagedKey = ApplyNaming(Comparison, bBool, Naming);
-							if (!PackagedKey.Equals(JsonName, ESearchCase::CaseSensitive))
-							{
-								UE_LOG(LogVaRestJson, Warning, TEXT("FVaRestJsonConvert: %s.%s may be written as \"%s\" in a packaged game depending on name registration order (\"%s\" was registered first here); register a rename with FVaRestJsonNames::Register for exact casing."),
-									*Struct->GetName(), *Declared, *PackagedKey, *Comparison);
-							}
-						}
+						UE_LOG(LogVaRestJson, Warning, TEXT("FVaRestJsonConvert: %s.%s is written as \"%s\" in the editor and in a packaged game: a packaged game keeps one casing per FName, and \"%s\" was registered first. For exact casing register a rename with FVaRestJsonNames::Register."),
+							*Struct->GetName(), *Declared, *JsonName, *Authored);
 					}
 				}
+				else
+				{
+					// Authored is the declared spelling; an editor module claimed the letters first (Blueprint's
+					// "softobject", EdGraphSchema_K2.cpp:616). A packaged game lacks that module but may have another.
+					const FString PackagedKey = ApplyNaming(Comparison, bBool, Naming);
+					if (!PackagedKey.Equals(JsonName, ESearchCase::CaseSensitive))
+					{
+						UE_LOG(LogVaRestJson, Warning, TEXT("FVaRestJsonConvert: %s.%s may be written as \"%s\" in a packaged game depending on name registration order (\"%s\" was registered first here); register a rename with FVaRestJsonNames::Register for exact casing."),
+							*Struct->GetName(), *Declared, *PackagedKey, *Comparison);
+					}
+				}
+			}
+		}
 #endif
-				FUtf8Scratch Scratch;
-				FoldUtf8(View(Field.Name), Scratch);
-				Field.Folded.Append(Scratch.GetData(), Scratch.Num());
-				TArray<UTF8CHAR> LooseUtf8;
-				AssignUtf8(LooseUtf8, Loose);
-				NormalizeUtf8(View(LooseUtf8), Scratch);
-				Field.Normalized.Append(Scratch.GetData(), Scratch.Num());
+		FUtf8Scratch Scratch;
+		FoldUtf8(View(Field.Name), Scratch);
+		Field.Folded.Append(Scratch.GetData(), Scratch.Num());
+		TArray<UTF8CHAR> LooseUtf8;
+		AssignUtf8(LooseUtf8, Loose);
+		NormalizeUtf8(View(LooseUtf8), Scratch);
+		Field.Normalized.Append(Scratch.GetData(), Scratch.Num());
 
-				const uint32 NameHash = HashKey(View(Field.Name));
-				const int32 FieldIndex = Map->Fields.Add(MoveTemp(Field));
-				Map->ByName.Add(NameHash, FieldIndex);
-			}
-			AddUnambiguous(Map->ByFolded, Map->Fields, &FFieldInfo::Folded);
-			AddUnambiguous(Map->ByNormalized, Map->Fields, &FFieldInfo::Normalized);
-			return Map;
+		const uint32 NameHash = HashKey(View(Field.Name));
+		const int32 FieldIndex = Map->Fields.Add(MoveTemp(Field));
+		Map->ByName.Add(NameHash, FieldIndex);
+	}
+	AddUnambiguous(Map->ByFolded, Map->Fields, &FFieldInfo::Folded);
+	AddUnambiguous(Map->ByNormalized, Map->Fields, &FFieldInfo::Normalized);
+	return Map;
+}
+} // namespace NamesPrivate
+
+FFieldMapRef GetFieldMap(const UScriptStruct* Struct, EVaRestJsonNaming Naming,
+	const TSharedRef<const FVaRestJsonRuleSnapshot, ESPMode::ThreadSafe>& Rules)
+{
+	NamesPrivate::FCache& Shared = NamesPrivate::Cache();
+	const NamesPrivate::FMapKey Key{FObjectKey(Struct), static_cast<uint8>(Naming), Rules->GetId()};
+	{
+		FReadScopeLock ReadLock(Shared.Lock);
+		if (const FFieldMapRef* Found = Shared.Maps.Find(Key))
+		{
+			return *Found;
 		}
 	}
-
-	FFieldMapRef GetFieldMap(const UScriptStruct* Struct, EVaRestJsonNaming Naming)
+	// Built outside the lock: Build reads the rename registry under the same lock, and FRWLock is not recursive
+	uint64 BuiltEpoch = 0;
+	const FFieldMapRef Built = NamesPrivate::Build(Struct, Naming, *Rules, BuiltEpoch);
+	FWriteScopeLock WriteLock(Shared.Lock);
+	if (const FFieldMapRef* Raced = Shared.Maps.Find(Key))
 	{
-		NamesPrivate::FCache& Shared = NamesPrivate::Cache();
-		const TPair<FObjectKey, uint8> Key(FObjectKey(Struct), static_cast<uint8>(Naming));
-		{
-			FReadScopeLock ReadLock(Shared.Lock);
-			if (const FFieldMapRef* Found = Shared.Maps.Find(Key))
-			{
-				return *Found;
-			}
-		}
-		// Built outside the lock: Build reads the rename registry under the same lock, and FRWLock is not recursive
-		uint64 BuiltEpoch = 0;
-		const FFieldMapRef Built = NamesPrivate::Build(Struct, Naming, BuiltEpoch);
-		FWriteScopeLock WriteLock(Shared.Lock);
-		if (const FFieldMapRef* Raced = Shared.Maps.Find(Key))
-		{
-			return *Raced; // another thread built it first: every caller shares one map
-		}
-		if (Shared.Epoch != BuiltEpoch)
-		{
-			return Built; // reset or renamed while this map was built: used for this call, never cached
-		}
-		Shared.Maps.Add(Key, Built);
-		return Built;
+		return *Raced; // another thread built it first: every caller shares one map
 	}
-
-	int32 FFieldMap::Match(FUtf8StringView Key, uint32 KeyHash, FUtf8Scratch& Scratch, uint8& OutTier) const
+	if (Shared.Epoch != BuiltEpoch)
 	{
-		int32 Found = NamesPrivate::FindIn(ByName, Fields, &FFieldInfo::Name, Key, KeyHash);
-		if (Found != INDEX_NONE)
-		{
-			OutTier = 0;
-			return Found;
-		}
-		FoldUtf8(Key, Scratch);
-		const FUtf8StringView FoldedKey(Scratch.GetData(), Scratch.Num());
-		Found = NamesPrivate::FindIn(ByFolded, Fields, &FFieldInfo::Folded, FoldedKey, HashKey(FoldedKey));
-		if (Found != INDEX_NONE)
-		{
-			OutTier = 1;
-			return Found;
-		}
-		if (Key.Len() > LongKeyBytes)
-		{
-			return INDEX_NONE; // exact and case-insensitive matches only (see LongKeyBytes)
-		}
-		NormalizeUtf8(Key, Scratch);
-		const FUtf8StringView NormalizedKey(Scratch.GetData(), Scratch.Num());
-		Found = NamesPrivate::FindIn(ByNormalized, Fields, &FFieldInfo::Normalized, NormalizedKey, HashKey(NormalizedKey));
-		if (Found != INDEX_NONE)
-		{
-			OutTier = 2;
-			return Found;
-		}
-		// A bool's AsIs spelling under any other policy: bIsActive for the field the camelCase map calls isActive.
-		// FJsonObjectConverter writes that spelling: a field name only gets its first character lowered
-		// (JsonObjectConverter.cpp:449-453, :41).
-		if (NormalizedKey.Len() > 1 && static_cast<uint8>(NormalizedKey[0]) == 'b')
-		{
-			const FUtf8StringView WithoutPrefix = NormalizedKey.RightChop(1);
-			Found = NamesPrivate::FindIn(ByNormalized, Fields, &FFieldInfo::Normalized, WithoutPrefix, HashKey(WithoutPrefix));
-			if (Found != INDEX_NONE && Fields[Found].Property->IsA<FBoolProperty>())
-			{
-				// Only a field whose b the policy dropped: a bool named Old does not answer to "bold". The spelling is the
-				// one ApplyNaming saw (AuthoredFieldName; a Blueprint name's GUID suffix never touches its first characters).
-				TStringBuilder<128> PropertyName;
-				NamesPrivate::AppendAuthoredSpelling(Fields[Found].Property->GetFName(), PropertyName);
-				if (NamesPrivate::HasBoolPrefix(PropertyName.ToView()))
-				{
-					OutTier = 2;
-					return Found;
-				}
-			}
-		}
-		return INDEX_NONE;
+		return Built; // reset or renamed while this map was built: used for this call, never cached
 	}
+	Shared.Maps.Add(Key, Built);
+	return Built;
+}
 
-	FString StripGuidSuffix(const FString& PropertyName)
+FGuid FieldGuid(const UScriptStruct* Struct, const FProperty* Property)
+{
+	if (Struct->ArePropertyGuidsAvailable())
 	{
-		// UUserDefinedStruct::GetAuthoredNameForField, cooked branch (UserDefinedStruct.cpp:300-313), line for line
-		const int32 GuidStrLen = 32;
-		const int32 MinimalPostfixLen = GuidStrLen + 3;
-		if (PropertyName.Len() > MinimalPostfixLen)
-		{
-			const FString DisplayName = PropertyName.LeftChop(GuidStrLen + 1);
-			int32 FirstCharToRemove = -1;
-			if (DisplayName.FindLastChar(TCHAR('_'), FirstCharToRemove) && FirstCharToRemove > 0)
-			{
-				return DisplayName.Mid(0, FirstCharToRemove);
-			}
-		}
-		return PropertyName;
+		return Struct->FindPropertyGuidFromName(Property->GetFName());
 	}
-
-	FString AuthoredFieldName(const UScriptStruct* Owner, const FProperty* Property)
+	const FString Name = Property->GetName();
+	FGuid Guid;
+	if (Name.Len() > 33 && Name[Name.Len() - 33] == TEXT('_'))
 	{
-		// Never Property->GetAuthoredName(): for a Blueprint struct it is the editor-only friendly name in editor builds
-		// (UserDefinedStruct.cpp:289-298) and the stripped name in cooked ones, so PIE and a packaged game would write
-		// different JSON (spec 2.4). The cooked algorithm runs everywhere instead. Its names carry a GUID, so only one
-		// casing of them exists and GetName() is the packaged game's spelling.
-		if (Owner && Owner->IsA<UUserDefinedStruct>())
-		{
-			return StripGuidSuffix(Property->GetName());
-		}
-		// The engine's casing for an engine name (every build has it), else the declared casing
-		TStringBuilder<128> Spelling;
-		NamesPrivate::AppendAuthoredSpelling(Property->GetFName(), Spelling);
-		return FString(Spelling.ToView());
+		FGuid::ParseExact(Name.Right(32), EGuidFormats::Digits, Guid);
 	}
+	return Guid;
+}
 
-	FString ApplyNaming(const FString& AuthoredName, bool bBoolField, EVaRestJsonNaming Naming)
+const FVaRestJsonEnumRule* FindEnumRule(const UEnum* Enum, int64 Value, const FVaRestJsonRuleSnapshot& Rules)
+{
+	const FVaRestJsonResolvedRules* TypeRules = Rules.Find(Enum);
+	const int32 Index = Enum->GetIndexByValue(Value);
+	if (!TypeRules || Index == INDEX_NONE)
 	{
-		if (Naming == EVaRestJsonNaming::AsIs)
-		{
-			return AuthoredName;
-		}
-		const bool bBoolPrefix = bBoolField && NamesPrivate::HasBoolPrefix(AuthoredName);
-		const TArray<FString> Words = NamesPrivate::SplitWords(bBoolPrefix ? AuthoredName.RightChop(1) : AuthoredName);
-		if (Words.Num() == 0)
-		{
-			return AuthoredName;
-		}
-		FString Result;
-		for (int32 i = 0; i < Words.Num(); ++i)
-		{
-			switch (Naming)
-			{
-			case EVaRestJsonNaming::CamelCase:
-				Result += i == 0 ? Words[i].ToLower() : NamesPrivate::Capitalized(Words[i]);
-				break;
-			case EVaRestJsonNaming::SnakeCase:
-				if (i > 0)
-				{
-					Result.AppendChar(TEXT('_'));
-				}
-				Result += Words[i].ToLower();
-				break;
-			case EVaRestJsonNaming::PascalCase:
-				Result += NamesPrivate::Capitalized(Words[i]);
-				break;
-			case EVaRestJsonNaming::AsIs:
-				break;
-			}
-		}
-		return Result;
+		return nullptr;
 	}
+	const FName FullName = Enum->GetNameByIndex(Index);
+	const FString ShortName = Enum->GetNameStringByIndex(Index);
+	return TypeRules->Enums.FindByPredicate([&](const FVaRestJsonEnumRule& Rule) {
+		return Rule.Enumerator == FullName || Rule.Enumerator.ToString().Equals(ShortName, ESearchCase::IgnoreCase);
+	});
+}
 
-	void FoldUtf8(FUtf8StringView Text, FUtf8Scratch& Out)
+/** Rule keys must survive document encoding exactly; ordinary value strings retain their documented repair policy. */
+bool StableWireText(FStringView Text)
+{
+	for (int32 Index = 0; Index < Text.Len(); ++Index)
 	{
-		Out.Reset();
-		for (const UTF8CHAR C : Text)
+		const uint32 Char = static_cast<uint32>(Text[Index]);
+		if (Char >= 0xD800 && Char <= 0xDBFF)
 		{
-			const uint8 Byte = static_cast<uint8>(C);
-			Out.Add(static_cast<UTF8CHAR>(Byte >= 'A' && Byte <= 'Z' ? Byte + ('a' - 'A') : Byte));
+			if (++Index == Text.Len())
+				return false;
+			const uint32 Low = static_cast<uint32>(Text[Index]);
+			if (Low < 0xDC00 || Low > 0xDFFF)
+				return false;
 		}
+		else if (Char >= 0xDC00 && Char <= 0xDFFF)
+			return false;
 	}
+	return VaRest::Json::Utf8Length(Text) <= MAX_int32;
+}
 
-	void NormalizeUtf8(FUtf8StringView Text, FUtf8Scratch& Out)
+bool ValidateEnumRules(const UEnum* Enum, const FVaRestJsonResolvedRules* Rules, FString& OutError, bool bNumericKeys)
+{
+	if (!Rules)
 	{
-		Out.Reset();
-		for (const UTF8CHAR C : Text)
+		return true;
+	}
+	if (!Rules->Error.IsEmpty())
+	{
+		OutError = Rules->Error;
+		return false;
+	}
+	TArray<FString> Names;
+	TSet<int64> Values;
+	TSet<FName> UsedRules;
+	const int32 Count = Enum->NumEnums() - (Enum->ContainsExistingMax() ? 1 : 0);
+	for (int32 Index = 0; Index < Count; ++Index)
+	{
+		const int64 Value = Enum->GetValueByIndex(Index);
+		if (Values.Contains(Value))
 		{
-			const uint8 Byte = static_cast<uint8>(C);
-			if (Byte == '_' || Byte == '-' || Byte == ' ')
+			continue; // aliases have one runtime value and use its canonical native enumerator
+		}
+		Values.Add(Value);
+		const FName Enumerator = Enum->GetNameByIndex(Enum->GetIndexByValue(Value));
+		const FVaRestJsonEnumRule* Rule = Rules->Enums.FindByPredicate([&](const FVaRestJsonEnumRule& Entry) { return Entry.Enumerator == Enumerator; });
+		if (Rule)
+		{
+			UsedRules.Add(Enumerator);
+			if (Rule->bUnset)
 			{
 				continue;
 			}
-			Out.Add(static_cast<UTF8CHAR>(Byte >= 'A' && Byte <= 'Z' ? Byte + ('a' - 'A') : Byte));
 		}
-	}
-
-	bool IsSupported(const FProperty* Property, FString& OutWhy)
-	{
-		if (Property->IsA<FBoolProperty>() || Property->IsA<FNumericProperty>() || Property->IsA<FEnumProperty>()
-			|| Property->IsA<FStrProperty>() || Property->IsA<FNameProperty>() || Property->IsA<FTextProperty>()
-			|| Property->IsA<FStructProperty>() || Property->IsA<FSoftObjectProperty>()) // FSoftClassProperty is one (UnrealType.h:3550)
+		const FString Wire = Rule ? Rule->Json : bNumericKeys ? LexToString(Value)
+															  : Enum->GetAuthoredNameStringByIndex(Index);
+		if (!Rules->Enums.IsEmpty() && !StableWireText(Wire))
 		{
-			return true;
-		}
-		if (const FArrayProperty* ArrayProperty = CastField<FArrayProperty>(Property))
-		{
-			return IsSupported(ArrayProperty->Inner, OutWhy);
-		}
-		if (const FSetProperty* SetProperty = CastField<FSetProperty>(Property))
-		{
-			return IsSupported(SetProperty->ElementProp, OutWhy);
-		}
-		if (const FMapProperty* MapProperty = CastField<FMapProperty>(Property))
-		{
-			const FProperty* KeyProperty = MapProperty->KeyProp;
-			const FNumericProperty* NumericKey = CastField<FNumericProperty>(KeyProperty);
-			const bool bKeyFits = KeyProperty->IsA<FStrProperty>() || KeyProperty->IsA<FNameProperty>() || KeyProperty->IsA<FEnumProperty>()
-				|| (NumericKey && (NumericKey->IsInteger() || NumericKey->IsEnum()));
-			if (!bKeyFits)
-			{
-				OutWhy = TEXT("map keys must be strings, names, integers or enums (they become JSON object keys)");
-				return false;
-			}
-			return IsSupported(MapProperty->ValueProp, OutWhy);
-		}
-		if (const FOptionalProperty* OptionalProperty = CastField<FOptionalProperty>(Property))
-		{
-			return IsSupported(OptionalProperty->GetValueProperty(), OutWhy);
-		}
-		if (Property->IsA<FObjectPropertyBase>() || Property->IsA<FInterfaceProperty>())
-		{
-			OutWhy = TEXT("object references are not converted");
+			OutError = TEXT("effective enum wire names, including authored fallbacks, must be stable well-formed UTF-16");
 			return false;
 		}
-		OutWhy = FString::Printf(TEXT("%s properties are not converted"), *Property->GetClass()->GetName());
+		if (Names.ContainsByPredicate([&](const FString& Existing) { return VaRest::Json::EqualWireText(Existing, Wire); }))
+		{
+			OutError = TEXT("enum wire names are ambiguous across explicit mappings and authored-name fallbacks");
+			return false;
+		}
+		Names.Add(Wire);
+	}
+	if (UsedRules.Num() != Rules->Enums.Num())
+	{
+		OutError = TEXT("enum rules refer to an enumerator that no longer exists");
 		return false;
 	}
+	return true;
+}
 
-	ESpecialStruct ClassifyStruct(const UScriptStruct* Struct)
+int32 FFieldMap::Match(FUtf8StringView Key, uint32 KeyHash, FUtf8Scratch& Scratch, uint8& OutTier) const
+{
+	int32 Found = NamesPrivate::FindIn(ByName, Fields, &FFieldInfo::Name, Key, KeyHash);
+	if (Found != INDEX_NONE)
 	{
-		if (Struct == FVaRestJson::StaticStruct())
-		{
-			return ESpecialStruct::Json;
-		}
-		if (Struct == TBaseStructure<FDateTime>::Get())
-		{
-			return ESpecialStruct::DateTime;
-		}
-		if (Struct == TBaseStructure<FGuid>::Get())
-		{
-			return ESpecialStruct::Guid;
-		}
-		if (Struct == FSoftObjectPath::StaticStruct() || Struct == FSoftClassPath::StaticStruct())
-		{
-			return ESpecialStruct::SoftObjectPath;
-		}
-		// FTimespan has no TBaseStructure specialisation (UObject/Class.h declares FDateTime's at :5645, none for
-		// FTimespan); its reflection is the noexport struct /Script/CoreUObject.Timespan (NoExportTypes.h:2252-2253).
-		static const FName TimespanName(TEXT("Timespan"));
-		static const FName CoreUObjectPackage(TEXT("/Script/CoreUObject"));
-		if (Struct->GetFName() == TimespanName && Struct->GetPackage()->GetFName() == CoreUObjectPackage)
-		{
-			return ESpecialStruct::Timespan;
-		}
-		return ESpecialStruct::None;
+		OutTier = 0;
+		return Found;
 	}
-
-	bool IsUnsignedInteger(const FNumericProperty* Property)
+	FoldUtf8(Key, Scratch);
+	const FUtf8StringView FoldedKey(Scratch.GetData(), Scratch.Num());
+	Found = NamesPrivate::FindIn(ByFolded, Fields, &FFieldInfo::Folded, FoldedKey, HashKey(FoldedKey));
+	if (Found != INDEX_NONE)
 	{
-		return Property->IsA<FByteProperty>() || Property->IsA<FUInt16Property>() || Property->IsA<FUInt32Property>() || Property->IsA<FUInt64Property>();
+		OutTier = 1;
+		return Found;
 	}
-
-	bool IsPlainByteArray(const FArrayProperty* Property)
+	if (Key.Len() > LongKeyBytes)
 	{
-		const FByteProperty* Inner = CastField<FByteProperty>(Property->Inner);
-		return Inner && !Inner->Enum;
+		return INDEX_NONE; // exact and case-insensitive matches only (see LongKeyBytes)
+	}
+	NormalizeUtf8(Key, Scratch);
+	const FUtf8StringView NormalizedKey(Scratch.GetData(), Scratch.Num());
+	Found = NamesPrivate::FindIn(ByNormalized, Fields, &FFieldInfo::Normalized, NormalizedKey, HashKey(NormalizedKey));
+	if (Found != INDEX_NONE)
+	{
+		OutTier = 2;
+		return Found;
+	}
+	// A bool's AsIs spelling under any other policy: bIsActive for the field the camelCase map calls isActive.
+	// FJsonObjectConverter writes that spelling: a field name only gets its first character lowered
+	// (JsonObjectConverter.cpp:449-453, :41).
+	if (NormalizedKey.Len() > 1 && static_cast<uint8>(NormalizedKey[0]) == 'b')
+	{
+		const FUtf8StringView WithoutPrefix = NormalizedKey.RightChop(1);
+		Found = NamesPrivate::FindIn(ByNormalized, Fields, &FFieldInfo::Normalized, WithoutPrefix, HashKey(WithoutPrefix));
+		if (Found != INDEX_NONE && Fields[Found].Property->IsA<FBoolProperty>())
+		{
+			// Only a field whose b the policy dropped: a bool named Old does not answer to "bold". The spelling is the
+			// one ApplyNaming saw (AuthoredFieldName; a Blueprint name's GUID suffix never touches its first characters).
+			TStringBuilder<128> PropertyName;
+			NamesPrivate::AppendAuthoredSpelling(Fields[Found].Property->GetFName(), PropertyName);
+			if (NamesPrivate::HasBoolPrefix(PropertyName.ToView()))
+			{
+				OutTier = 2;
+				return Found;
+			}
+		}
+	}
+	return INDEX_NONE;
+}
+
+FString StripGuidSuffix(const FString& PropertyName)
+{
+	// UUserDefinedStruct::GetAuthoredNameForField, cooked branch (UserDefinedStruct.cpp:300-313), line for line
+	const int32 GuidStrLen = 32;
+	const int32 MinimalPostfixLen = GuidStrLen + 3;
+	if (PropertyName.Len() > MinimalPostfixLen)
+	{
+		const FString DisplayName = PropertyName.LeftChop(GuidStrLen + 1);
+		int32 FirstCharToRemove = -1;
+		if (DisplayName.FindLastChar(TCHAR('_'), FirstCharToRemove) && FirstCharToRemove > 0)
+		{
+			return DisplayName.Mid(0, FirstCharToRemove);
+		}
+	}
+	return PropertyName;
+}
+
+FString AuthoredFieldName(const UScriptStruct* Owner, const FProperty* Property)
+{
+	// Never Property->GetAuthoredName(): for a Blueprint struct it is the editor-only friendly name in editor builds
+	// (UserDefinedStruct.cpp:289-298) and the stripped name in cooked ones, so PIE and a packaged game would write
+	// different JSON (spec 2.4). The cooked algorithm runs everywhere instead. Its names carry a GUID, so only one
+	// casing of them exists and GetName() is the packaged game's spelling.
+	if (Owner && Owner->IsA<UUserDefinedStruct>())
+	{
+		return StripGuidSuffix(Property->GetName());
+	}
+	// The engine's casing for an engine name (every build has it), else the declared casing
+	TStringBuilder<128> Spelling;
+	NamesPrivate::AppendAuthoredSpelling(Property->GetFName(), Spelling);
+	return FString(Spelling.ToView());
+}
+
+FString ApplyNaming(const FString& AuthoredName, bool bBoolField, EVaRestJsonNaming Naming)
+{
+	if (Naming == EVaRestJsonNaming::AsIs)
+	{
+		return AuthoredName;
+	}
+	const bool bBoolPrefix = bBoolField && NamesPrivate::HasBoolPrefix(AuthoredName);
+	const TArray<FString> Words = NamesPrivate::SplitWords(bBoolPrefix ? AuthoredName.RightChop(1) : AuthoredName);
+	if (Words.Num() == 0)
+	{
+		return AuthoredName;
+	}
+	FString Result;
+	for (int32 i = 0; i < Words.Num(); ++i)
+	{
+		switch (Naming)
+		{
+		case EVaRestJsonNaming::CamelCase:
+			Result += i == 0 ? NamesPrivate::AsciiLower(Words[i]) : NamesPrivate::Capitalized(Words[i]);
+			break;
+		case EVaRestJsonNaming::SnakeCase:
+			if (i > 0)
+			{
+				Result.AppendChar(TEXT('_'));
+			}
+			Result += NamesPrivate::AsciiLower(Words[i]);
+			break;
+		case EVaRestJsonNaming::PascalCase:
+			Result += NamesPrivate::Capitalized(Words[i]);
+			break;
+		case EVaRestJsonNaming::AsIs:
+			break;
+		}
+	}
+	return Result;
+}
+
+void FoldUtf8(FUtf8StringView Text, FUtf8Scratch& Out)
+{
+	Out.Reset();
+	for (const UTF8CHAR C : Text)
+	{
+		const uint8 Byte = static_cast<uint8>(C);
+		Out.Add(static_cast<UTF8CHAR>(Byte >= 'A' && Byte <= 'Z' ? Byte + ('a' - 'A') : Byte));
 	}
 }
+
+void NormalizeUtf8(FUtf8StringView Text, FUtf8Scratch& Out)
+{
+	Out.Reset();
+	for (const UTF8CHAR C : Text)
+	{
+		const uint8 Byte = static_cast<uint8>(C);
+		if (Byte == '_' || Byte == '-' || Byte == ' ')
+		{
+			continue;
+		}
+		Out.Add(static_cast<UTF8CHAR>(Byte >= 'A' && Byte <= 'Z' ? Byte + ('a' - 'A') : Byte));
+	}
+}
+
+bool IsSupported(const FProperty* Property, FString& OutWhy)
+{
+	if (Property->IsA<FBoolProperty>() || Property->IsA<FNumericProperty>() || Property->IsA<FEnumProperty>() || Property->IsA<FStrProperty>() || Property->IsA<FNameProperty>() || Property->IsA<FTextProperty>() || Property->IsA<FStructProperty>() || Property->IsA<FSoftObjectProperty>()) // FSoftClassProperty is one (UnrealType.h:3550)
+	{
+		return true;
+	}
+	if (const FArrayProperty* ArrayProperty = CastField<FArrayProperty>(Property))
+	{
+		return IsSupported(ArrayProperty->Inner, OutWhy);
+	}
+	if (const FSetProperty* SetProperty = CastField<FSetProperty>(Property))
+	{
+		return IsSupported(SetProperty->ElementProp, OutWhy);
+	}
+	if (const FMapProperty* MapProperty = CastField<FMapProperty>(Property))
+	{
+		const FProperty* KeyProperty = MapProperty->KeyProp;
+		const FNumericProperty* NumericKey = CastField<FNumericProperty>(KeyProperty);
+		const bool bKeyFits = KeyProperty->IsA<FStrProperty>() || KeyProperty->IsA<FNameProperty>() || KeyProperty->IsA<FEnumProperty>() || (NumericKey && (NumericKey->IsInteger() || NumericKey->IsEnum()));
+		if (!bKeyFits)
+		{
+			OutWhy = TEXT("map keys must be strings, names, integers or enums (they become JSON object keys)");
+			return false;
+		}
+		return IsSupported(MapProperty->ValueProp, OutWhy);
+	}
+	if (const FOptionalProperty* OptionalProperty = CastField<FOptionalProperty>(Property))
+	{
+		return IsSupported(OptionalProperty->GetValueProperty(), OutWhy);
+	}
+	if (Property->IsA<FObjectPropertyBase>() || Property->IsA<FInterfaceProperty>())
+	{
+		OutWhy = TEXT("object references are not converted");
+		return false;
+	}
+	OutWhy = FString::Printf(TEXT("%s properties are not converted"), *Property->GetClass()->GetName());
+	return false;
+}
+
+ESpecialStruct ClassifyStruct(const UScriptStruct* Struct)
+{
+	if (Struct == FVaRestJson::StaticStruct())
+	{
+		return ESpecialStruct::Json;
+	}
+	if (Struct == TBaseStructure<FDateTime>::Get())
+	{
+		return ESpecialStruct::DateTime;
+	}
+	if (Struct == TBaseStructure<FGuid>::Get())
+	{
+		return ESpecialStruct::Guid;
+	}
+	if (Struct == FSoftObjectPath::StaticStruct() || Struct == FSoftClassPath::StaticStruct())
+	{
+		return ESpecialStruct::SoftObjectPath;
+	}
+	// FTimespan has no TBaseStructure specialisation (UObject/Class.h declares FDateTime's at :5645, none for
+	// FTimespan); its reflection is the noexport struct /Script/CoreUObject.Timespan (NoExportTypes.h:2252-2253).
+	static const FName TimespanName(TEXT("Timespan"));
+	static const FName CoreUObjectPackage(TEXT("/Script/CoreUObject"));
+	if (Struct->GetFName() == TimespanName && Struct->GetPackage()->GetFName() == CoreUObjectPackage)
+	{
+		return ESpecialStruct::Timespan;
+	}
+	return ESpecialStruct::None;
+}
+
+bool IsUnsignedInteger(const FNumericProperty* Property)
+{
+	return Property->IsA<FByteProperty>() || Property->IsA<FUInt16Property>() || Property->IsA<FUInt32Property>() || Property->IsA<FUInt64Property>();
+}
+
+bool IsPlainByteArray(const FArrayProperty* Property)
+{
+	const FByteProperty* Inner = CastField<FByteProperty>(Property->Inner);
+	return Inner && !Inner->Enum;
+}
+} // namespace VaRest::Json::Convert
 
 void FVaRestJsonNames::Register(const UScriptStruct* Struct, TConstArrayView<FVaRestJsonRename> Renames)
 {
@@ -556,6 +729,7 @@ void FVaRestJsonNames::Register(const UScriptStruct* Struct, TConstArrayView<FVa
 	Shared.Renames.Add(FObjectKey(Struct), MoveTemp(ByField));
 	Shared.Maps.Reset(); // maps built before the rename are stale
 	++Shared.Epoch;
+	if (Shared.DynamicGeneration!=MAX_uint64) ++Shared.DynamicGeneration;
 }
 
 void FVaRestJsonNames::Unregister(const UScriptStruct* Struct)
@@ -566,6 +740,7 @@ void FVaRestJsonNames::Unregister(const UScriptStruct* Struct)
 	Shared.Renames.Remove(FObjectKey(Struct));
 	Shared.Maps.Reset();
 	++Shared.Epoch;
+	if (Shared.DynamicGeneration!=MAX_uint64) ++Shared.DynamicGeneration;
 }
 
 void FVaRestJsonConvert::ResetCache()
@@ -575,6 +750,14 @@ void FVaRestJsonConvert::ResetCache()
 	FWriteScopeLock WriteLock(Shared.Lock);
 	Shared.Maps.Reset();
 	++Shared.Epoch;
+	if (Shared.DynamicGeneration!=MAX_uint64) ++Shared.DynamicGeneration;
+}
+
+uint64 FVaRestJsonNames::GetGeneration()
+{
+	auto& Shared=VaRest::Json::Convert::NamesPrivate::Cache();
+	FReadScopeLock ReadLock(Shared.Lock);
+	return Shared.DynamicGeneration;
 }
 
 int32 FVaRestJsonConvert::NumCachedFieldMapsInternal()

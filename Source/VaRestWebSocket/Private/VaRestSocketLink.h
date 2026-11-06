@@ -11,6 +11,9 @@
 
 namespace VaRest::WebSocket
 {
+#if WITH_DEV_AUTOMATION_TESTS
+	namespace PressureTesting { struct FProbe; }
+#endif
 	/**
 	 * What a connection's producer (the service thread; the fake on the game thread) and its consumer share: the one ordered
 	 * event queue (WebSocket spec 2.1, SPSC), the buffered amount (spec 2.4) and the undelivered inbound bytes (spec 2.3).
@@ -50,8 +53,18 @@ namespace VaRest::WebSocket
 		 */
 		void Notify() const;
 
-		/** Consumer: appends the queued events to Out; returns how many */
+		/** Consumer: appends at most the entry snapshot of queued events, in FIFO order; returns actual additions.
+		 * Count-before-publication may include an unpublished node, so an early empty queue is legal. Its later notification
+		 * causes another pull. Slot credit retires on dequeue, independently of payload Consumed. */
 		int32 PopAll(TArray<FVaRestSocketEvent>& Out);
+		int32 GetQueuedEventCount() const { return QueuedEvents.load(std::memory_order_acquire); }
+#if WITH_DEV_AUTOMATION_TESTS
+		/** Owned synchronous test interleaving after the actual entry snapshot, before any dequeue. */
+		void SetPopSnapshotHookForTests(TFunction<void()> Hook) { PopSnapshotHookForTests = MoveTemp(Hook); }
+		/** Installed before adoption; the private pressure fixture remains the sole consumer. */
+		void SetPressureProbeForTests(TSharedRef<PressureTesting::FProbe, ESPMode::ThreadSafe> Probe) { PressureProbe = MoveTemp(Probe); }
+		const TSharedPtr<PressureTesting::FProbe, ESPMode::ThreadSafe>& GetPressureProbeForTests() const { return PressureProbe; }
+#endif
 
 		/**
 		 * Producer, for one positive-length Send (empty frames must not call this): BufferedAfterSend is the count that Send's own add produced (the value fetch_add returned,
@@ -77,6 +90,9 @@ namespace VaRest::WebSocket
 		 * the pop, so before the consumer's subtraction in the count's modification order.
 		 */
 		std::atomic<int64> PendingInboundBytes{ 0 };
+		std::atomic<int32> PendingInboundMessages{ 0 };
+		std::atomic<bool> bReadPaused{ false };
+		std::atomic<bool> bFlowWakeQueued{ false };
 		/**
 		 * Set once the terminal event is in the queue (producer); read anywhere (HasEnded, Send's refusal). Release after the
 		 * enqueue, acquire at every read: a reader that sees true then pops the terminal event (the queue's link to its node
@@ -101,8 +117,15 @@ namespace VaRest::WebSocket
 		 * Dequeue reads that link (Queue.h:82)
 		 */
 		TQueue<FVaRestSocketEvent, EQueueMode::Spsc> Queue;
+		/** All event kinds, including empty messages. Incremented before publication, decremented only on actual dequeue.
+		 * The SPSC queue publishes the event; this counter supplies a finite pop budget and independent metadata pressure. */
+		std::atomic<int32> QueuedEvents{0};
 		const TFunction<void()> OnEvents;
 		const FString Label;
+#if WITH_DEV_AUTOMATION_TESTS
+		TFunction<void()> PopSnapshotHookForTests;
+		TSharedPtr<PressureTesting::FProbe, ESPMode::ThreadSafe> PressureProbe;
+#endif
 		/**
 		 * Producer only: plain, because producer functions run on one thread at a time. A producer that moves to another
 		 * thread hands over with a join (the real transport ends connections on the game thread only once its service thread

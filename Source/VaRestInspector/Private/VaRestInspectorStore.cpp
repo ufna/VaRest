@@ -234,6 +234,14 @@ struct FClientEntry
 	int32 Chars = 0;
 	bool bCreated = false;
 };
+// Fixed native scope metadata is included in the measured storage plan. No world/UObject survives capture.
+struct FScopeEntry
+{
+ uint64 Id = 0, Session = 0;
+ int32 PIEInstance = INDEX_NONE, Chars = 0;
+ bool bOpen = false, bEditor = false, bCleared = false;
+ TCHAR Label[129]{};
+};
 struct FNoteEntry
 {
 	FStorePacketPtr Owner;
@@ -311,7 +319,7 @@ FVaRestInspectorPacketView FStorePacketOwner::View() const
 	Result.Fixed = &Data.Fixed();
 	Result.Backing = {static_cast<const uint8*>(Data.Backing), int32(Data.BackingRequest)};
 	if (Data.ExcerptOwner)
-		Result.Excerpt = {Data.ExcerptOwner->GetData(), Data.ExcerptOwner->Num()};
+		Result.Excerpt = {Data.ExcerptOwner->GetData(), FMath::Clamp(Data.Fixed().Scalars.ExcerptLimit, 0, Data.ExcerptOwner->Num())};
 	return Result;
 }
 
@@ -401,6 +409,141 @@ struct FLinkForwardEntry
 	int32 LinkSlot = INDEX_NONE;
 };
 
+// Socket frames use lazily admitted 64-slot chunks. Empty chunks return their charge immediately.
+// The directory and every chunk are charged to the same store account as HTTP rows.
+struct FSocketFrameSlot
+{
+ uint64 Id=0,AttemptId=0,Seq=0;
+ double Time=0,Due=0;
+ int64 Bytes=0;
+ EVaRestTraceSocketDirection Direction=EVaRestTraceSocketDirection::In;
+ EVaRestTraceSocketFrameKind Kind=EVaRestTraceSocketFrameKind::Text;
+ EVaRestInspectorDetailState State=EVaRestInspectorDetailState::Absent;
+ FStorePacketPtr Metadata,Excerpt;
+};
+struct FSocketFrameChunk
+{
+ FStoreCredit Credit;
+ FSocketFrameSlot Slots[64];
+};
+class FSocketFrameStorage
+{
+public:
+ ~FSocketFrameStorage() { Reset(); }
+ int32 Num() const { return Count; }
+ int32 Max() const { return Capacity; }
+ FSocketFrameSlot& At(int32 Ordinal) const
+ {
+  check(Ordinal>=0 && Ordinal<Count); const int32 Index=(Head+Ordinal)%Capacity;
+  check(Directory && Directory[Index/64]); return Directory[Index/64]->Slots[Index%64];
+ }
+ TOptional<int64> NewSlotCharge(const FBudgetAccount& Account,int32 DesiredCapacity) const
+ {
+  if (!Account.Lifetime || DesiredCapacity<=0 || DesiredCapacity>65536) return {};
+  const int32 Cap=Capacity ? Capacity : DesiredCapacity;
+  if (Count>=Cap) return {};
+  const auto& Allocator=Account.Lifetime->Allocator; int64 Charge=0;
+  if (!Directory)
+  {
+   const auto Bound=Allocator.Bound(SIZE_T((Cap+63)/64)*sizeof(FSocketFrameChunk*),alignof(FSocketFrameChunk*));
+   if (!Bound.IsSet() || Bound.GetValue()>SIZE_T(MAX_int64)) return {}; Charge=int64(Bound.GetValue());
+  }
+  const int32 Next=(Head+Count)%Cap;
+  if (!Directory || !Directory[Next/64])
+  {
+   const auto Bound=Allocator.Bound(sizeof(FSocketFrameChunk),alignof(FSocketFrameChunk));
+   if (!Bound.IsSet() || Bound.GetValue()>SIZE_T(MAX_int64) || !AddChecked(Charge,int64(Bound.GetValue()),MAX_int64)) return {};
+  }
+  return Charge;
+ }
+ FSocketFrameSlot* Add(TRefCountPtr<FBudgetAccount> Account,int32 DesiredCapacity)
+ {
+  if (!Account || !Account->Lifetime) return nullptr;
+  auto& Allocator=Account->Lifetime->Allocator;
+  if (!Directory)
+  {
+   const int32 Cap=FMath::Clamp(DesiredCapacity,1,65536); const int32 N=(Cap+63)/64; const SIZE_T Request=SIZE_T(N)*sizeof(FSocketFrameChunk*);
+   const auto Bound=Allocator.Bound(Request,alignof(FSocketFrameChunk*)); if (!Bound.IsSet()) return nullptr;
+   auto Credit=FStoreCredit::Acquire(Account,int64(Bound.GetValue())); if (!Credit.IsSet()) return nullptr;
+   void* Memory=Allocator.AllocateReserved(Request,alignof(FSocketFrameChunk*),Bound.GetValue()); if (!Memory) return nullptr;
+   Directory=static_cast<FSocketFrameChunk**>(Memory); FMemory::Memzero(Directory,Request); DirectoryCredit=MoveTemp(Credit.GetValue()); Capacity=Cap; Chunks=N;
+  }
+  if (Count>=Capacity) return nullptr;
+  const int32 Next=(Head+Count)%Capacity;
+  auto*& Chunk=Directory[Next/64];
+  if (!Chunk)
+  {
+   const auto Bound=Allocator.Bound(sizeof(FSocketFrameChunk),alignof(FSocketFrameChunk)); if (!Bound.IsSet()) return nullptr;
+   auto Credit=FStoreCredit::Acquire(Account,int64(Bound.GetValue())); if (!Credit.IsSet()) return nullptr;
+   void* Memory=Allocator.AllocateReserved(sizeof(FSocketFrameChunk),alignof(FSocketFrameChunk),Bound.GetValue()); if (!Memory) return nullptr;
+   Chunk=new(Memory) FSocketFrameChunk(); Chunk->Credit=MoveTemp(Credit.GetValue());
+  }
+  auto& Slot=Chunk->Slots[Next%64]; check(Slot.Id==0 && !Slot.Metadata && !Slot.Excerpt); ++Count; return &Slot;
+ }
+ void Pop()
+ {
+  check(Count>0 && Directory); const int32 Index=Head; auto*& Chunk=Directory[Index/64];
+  Chunk->Slots[Index%64]=FSocketFrameSlot{}; Head=(Head+1)%Capacity; --Count;
+  bool Empty=true; for (const auto& Slot:Chunk->Slots) if (Slot.Id) { Empty=false; break; }
+  if (Empty)
+  {
+   auto Credit=MoveTemp(Chunk->Credit); auto& Allocator=Credit.GetAccount()->Lifetime->Allocator;
+   Chunk->~FSocketFrameChunk(); Allocator.Free(Chunk); Chunk=nullptr; Credit.Reset();
+  }
+ }
+ void Reset()
+ {
+  if (!Directory) return;
+  auto& Allocator=DirectoryCredit.GetAccount()->Lifetime->Allocator;
+  for (int32 I=0;I<Chunks;++I) if (auto* Chunk=Directory[I])
+  {
+   auto Credit=MoveTemp(Chunk->Credit); Chunk->~FSocketFrameChunk(); Allocator.Free(Chunk); Credit.Reset();
+  }
+  Allocator.Free(Directory); Directory=nullptr; Capacity=Chunks=Head=Count=0; DirectoryCredit.Reset();
+ }
+private:
+ FStoreCredit DirectoryCredit;
+ FSocketFrameChunk** Directory=nullptr;
+ int32 Capacity=0,Chunks=0,Head=0,Count=0;
+};
+struct FSocketAttemptSlot
+{
+ uint64 Id=0;
+ bool HasConnecting=false,HasOpened=false,HasClosed=false,Partial=false;
+ FStorePacketPtr Connecting,Opened,Closed;
+ // Optional strings may be lost; these closed-attempt scalars remain observable.
+ int32 CloseCode=0,HttpStatus=0;
+ double ConnectingAt=-1,OpenedAt=-1,ClosedAt=-1,ConnectMs=0,Delay=0;
+ FName Failure;
+ EVaRestTraceSocketCloseBy CloseBy=EVaRestTraceSocketCloseBy::Transport;
+ EVaRestErrorKind ErrorKind=EVaRestErrorKind::None;
+ bool Clean=false,Reconnect=false,GaveUp=false,ReadPaused=false;
+};
+struct FOwnedSocketAttempt
+{
+ FStoreCredit Credit;
+ FSocketAttemptSlot Value;
+};
+struct FOwnedSocketAttemptDeleter
+{
+ void operator()(FOwnedSocketAttempt* Value) const
+ {
+  if (!Value) return; auto Credit=MoveTemp(Value->Credit); auto& Allocator=Credit.GetAccount()->Lifetime->Allocator;
+  Value->~FOwnedSocketAttempt(); Allocator.Free(Value); Credit.Reset();
+ }
+};
+using FSocketAttemptPtr=TUniquePtr<FOwnedSocketAttempt,FOwnedSocketAttemptDeleter>;
+namespace
+{
+FVaRestInspectorSocketFrameView SocketFrameView(const FSocketFrameSlot&,uint64,FPacketFixed&);
+FVaRestInspectorSocketAttemptView SocketAttemptView(const FSocketAttemptSlot&,uint64,FPacketFixed (&)[3]);
+}
+
+struct FSocketChannelCell
+{
+ uint64 Serial=0;
+ FStorePacketPtr Archived;
+};
 struct FStore::FRow
 {
 	FVaRestInspectorRecordView Value;
@@ -420,6 +563,13 @@ struct FStore::FRow
 	int32 NumDispatches = 0, PreviousDispatchSlot = INDEX_NONE;
 	int32 IndexSlot = INDEX_NONE, DeadlineIndex = INDEX_NONE, ArrivalSlot = INDEX_NONE;
 	FStatsCaptureState Stats;
+	FSocketFrameStorage SocketFrames;
+	TStoreBlock<FSocketChannelCell> SocketChannels;
+	int32 NumSocketChannels = 0;
+	FSocketAttemptPtr SocketAttempts[16];
+	int32 NumSocketAttempts = 0, SocketPendingFrames = 0;
+	double SocketClosedSeconds = 0;
+	bool bSocketClosedSecondsKnown = false;
 	bool bStatsStartObserved = false;
 };
 struct FStore::FLinkTargetEntry
@@ -428,6 +578,16 @@ struct FStore::FLinkTargetEntry
 	uint64 ToRequestId = 0;
 	int32 HeadSlot = INDEX_NONE, TailSlot = INDEX_NONE;
 	int32 Count = 0, IndexSlot = INDEX_NONE;
+};
+// Native scalar census: at most 256 identities plus one unattributed overflow group.
+// Recent identity windows are bounded, as are the store's physical-attempt ledgers.
+struct FSocketStatsCell
+{
+ FVaRestInspectorSocketStats Value;
+ uint64 Sequences[64]{};
+ struct FFrame { uint64 SocketId=0,Id=0; } Frames[64];
+ struct FAttempt { uint64 SocketId=0,Id=0; uint8 Phases=0; } Attempts[16];
+ uint32 NextSeq=0,NextFrame=0,NextAttempt=0;
 };
 struct FStore::FStorage
 {
@@ -449,12 +609,16 @@ struct FStore::FStorage
 		uint64 RequestId = 0;
 		int32 LookupSlot = INDEX_NONE;
 		FStatsCaptureState Stats;
+		ERowKeyKind Kind = ERowKeyKind::Http;
+		uint64 ScopeId = 0;
+		bool ContextKnown = false, Cleared = false;
 	};
 	struct FRetainedLookupEntry
 	{
 		EIndexState State = EIndexState::Empty;
 		uint64 RequestId = 0;
 		int32 RingSlot = INDEX_NONE;
+		ERowKeyKind Kind = ERowKeyKind::Http;
 	};
 	explicit FStorage(FStoreCredit&& InCredit)
 		: SelfCredit(MoveTemp(InCredit))
@@ -464,11 +628,16 @@ struct FStore::FStorage
 	TStoreBlock<FIndexEntry> Index;
 	TStoreBlock<FArrivalEntry> Arrival;
 	TStoreBlock<FClientEntry> Clients;
+	TStoreBlock<FScopeEntry> Scopes;
+	int32 NumScopes = 0;
+	uint64 PIESession = 0;
 	TStoreBlock<FClientLookupEntry> ClientLookup;
 	TStoreBlock<FDeadlineEntry> DeadlineHeap;
 	TStoreBlock<FRetainedIdEntry> RetainedIds;
 	TStoreBlock<FRetainedLookupEntry> RetainedLookup;
 	TStoreBlock<FStatsIndexEntry> StatsIndex;
+	TStoreBlock<FSocketStatsCell> SocketStats;
+	int32 NumSocketStats=0,SocketStatsCapacity=0;
 	FStatsGroupSlotPtr OverflowStats;
 	FStatsGroupSlot FirstNamed;
 	bool bFirstNamedUsed = false;
@@ -585,7 +754,7 @@ int64 FStore::TimelineStorageBound() const
 bool FStore::CanReleaseWhole(const FRow& Row)
 {
 	return !Row.Value.bPinned &&
-		(Row.Value.Kind == EVaRestInspectorRecordKind::Marker || Row.Value.bTerminalKnown || Row.Value.bSealed ||
+		(Row.Value.Kind == EVaRestInspectorRecordKind::Socket || Row.Value.Kind == EVaRestInspectorRecordKind::Marker || Row.Value.bTerminalKnown || Row.Value.bSealed ||
 		 Row.Value.EndState == EVaRestInspectorEndState::CaptureInterrupted);
 }
 void FStore::FStorageDeleter::operator()(FStorage* Object) const
@@ -664,6 +833,7 @@ FStoreStoragePlan FStore::MeasureProductionStoragePlan(const FNormalizedLimits& 
 	};
 	Plan.MaxRows = InLimits.MaxRecords;
 	Plan.ClientCapacity = FNormalizedLimits::Clients;
+	Plan.ScopeCapacity = 256;
 	Plan.StatsGroupCapacity = FNormalizedLimits::StatsGroups;
 	Plan.LinkCapacity = FNormalizedLimits::Links;
 	while (true)
@@ -692,6 +862,7 @@ FStoreStoragePlan FStore::MeasureProductionStoragePlan(const FNormalizedLimits& 
 		bValid = bValid && AddMeasure(MeasureStoreBlock<FStorage::FIndexEntry>(Allocator, Plan.IndexCapacity)) &&
 			AddMeasure(MeasureStoreBlock<FArrivalEntry>(Allocator, Plan.ArrivalCapacity)) &&
 			AddMeasure(MeasureStoreBlock<FClientEntry>(Allocator, Plan.ClientCapacity)) &&
+			AddMeasure(MeasureStoreBlock<FScopeEntry>(Allocator, Plan.ScopeCapacity)) &&
 			AddMeasure(MeasureStoreBlock<FClientLookupEntry>(Allocator, Plan.ClientLookupCapacity)) &&
 			AddMeasure(MeasureStoreBlock<FStorage::FDeadlineEntry>(Allocator, Plan.DeadlineCapacity)) &&
 			AddMeasure(MeasureStoreBlock<FStorage::FRetainedIdEntry>(Allocator, Plan.RetainedCapacity)) &&
@@ -710,7 +881,9 @@ FStoreStoragePlan FStore::MeasureProductionStoragePlan(const FNormalizedLimits& 
 		Plan.bFits = Plan.FixedBytes <= InLimits.StoreBytes / 4 && Plan.FixedBytes + Plan.MinimumHttpBytes <= InLimits.StoreBytes;
 		if (Plan.bFits)
 			return Plan;
-		if (Plan.ClientCapacity > 1)
+		if (Plan.ScopeCapacity > 1)
+			Plan.ScopeCapacity /= 2;
+		else if (Plan.ClientCapacity > 1)
 			Plan.ClientCapacity /= 2;
 		else if (Plan.StatsGroupCapacity > 1)
 			Plan.StatsGroupCapacity /= 2;
@@ -790,7 +963,7 @@ bool FStore::BuildStorage(const FNormalizedLimits& ExplicitLimits,TRefCountPtr<F
 	}
 	TUniquePtr<FStorage, FStorageDeleter> Candidate(new (Memory) FStorage(MoveTemp(Credit.GetValue())));
 	if (!Candidate->Index.Allocate(InAccount, Plan.IndexCapacity) || !Candidate->Arrival.Allocate(InAccount, Plan.ArrivalCapacity) ||
-		!Candidate->Clients.Allocate(InAccount, Plan.ClientCapacity) || !Candidate->ClientLookup.Allocate(InAccount, Plan.ClientLookupCapacity) ||
+		!Candidate->Scopes.Allocate(InAccount, Plan.ScopeCapacity) || !Candidate->Clients.Allocate(InAccount, Plan.ClientCapacity) || !Candidate->ClientLookup.Allocate(InAccount, Plan.ClientLookupCapacity) ||
 		!Candidate->DeadlineHeap.Allocate(InAccount, Plan.DeadlineCapacity) || !Candidate->RetainedIds.Allocate(InAccount, Plan.RetainedCapacity) ||
 		!Candidate->RetainedLookup.Allocate(InAccount, Plan.RetainedLookupCapacity) || !Candidate->StatsIndex.Allocate(InAccount, Plan.StatsIndexCapacity) ||
 		!Candidate->Links.Allocate(InAccount, Plan.LinkCapacity) || !Candidate->LinkForward.Allocate(InAccount, Plan.LinkIndexCapacity) ||
@@ -925,7 +1098,9 @@ bool FStore::MakeAdmissionRoom(const FAdmissionRequest& Request)
 			continue;
 		}
 		FRow& Row = *Storage->Index[IndexSlot].Row;
-		if (CanReleaseWhole(Row))
+		if (Row.Value.Kind == EVaRestInspectorRecordKind::Socket)
+			while (!Available() && Row.SocketFrames.Num()) DropSocketFrame(Row);
+		if (!Available() && CanReleaseWhole(Row))
 			RemoveEligibleRowNow(IndexSlot);
 		++Scanned;
 	}
@@ -946,6 +1121,8 @@ bool FStore::MakeAdmissionRoom(const FAdmissionRequest& Request)
 				continue;
 			}
 			FRow& Row = *Storage->Index[IndexSlot].Row;
+			if (Row.Value.Kind == EVaRestInspectorRecordKind::Socket)
+				while (!Available() && Row.SocketFrames.Num()) DropSocketFrame(Row);
 			if (Row.Value.bPinned && !Row.Value.bSealed && Row.Value.DispatchHistory == EVaRestInspectorDispatchHistory::KnownNeverDispatched)
 				TrimPinnedDetails(Row);
 			++Scanned;
@@ -1042,8 +1219,8 @@ FStore::FRow* FStore::AdmitRow(const FRowKey& Key, bool bPartial, const FAdmissi
 		return nullptr;
 	}
 	Row->Key = Key;
-	Row->Value.Kind = Key.Kind == ERowKeyKind::Http ? EVaRestInspectorRecordKind::Http : EVaRestInspectorRecordKind::Marker;
-	Row->Value.RequestId = Key.Kind == ERowKeyKind::Http ? Key.Id : 0;
+	Row->Value.Kind = Key.Kind == ERowKeyKind::Http ? EVaRestInspectorRecordKind::Http : Key.Kind == ERowKeyKind::Socket ? EVaRestInspectorRecordKind::Socket : EVaRestInspectorRecordKind::Marker;
+	Row->Value.RequestId = Key.Kind == ERowKeyKind::Http || Key.Kind == ERowKeyKind::Socket ? Key.Id : 0;
 	Row->Value.bPartial = bPartial;
 	Row->Value.ArrivalOrdinal = ++NextArrival;
 	Row->Value.BirthMetadataOrdinal = LastConsumedMetadataOrdinal;
@@ -1064,7 +1241,7 @@ FStore::FRow* FStore::AdmitRow(const FRowKey& Key, bool bPartial, const FAdmissi
 }
 void FStore::Touch(FRow& Row) const
 {
-	DeriveCompletionPhases(Row.Value);
+	if (Row.Value.Kind != EVaRestInspectorRecordKind::Socket) DeriveCompletionPhases(Row.Value);
 	Increment(RevisionValue);
 	Row.Value.Revision = RevisionValue;
 }
@@ -1354,6 +1531,7 @@ void FStore::NoteAttachLoss(uint64 RequestId)
 bool FStore::ApplyAttachedStarted(const FVaRestTraceStarted& Borrowed, const FCapturePolicy& Policy,
 	TSharedRef<FPendingAccount, ESPMode::ThreadSafe> Pending, FAllocationAdapter& Allocator)
 {
+	if (IsClearedScope(Borrowed.ScopeId)) return false;
 	bool bNeedsStarted = false;
 	const EAttachedBase Base = PrepareAttachedBase(Borrowed.RequestId, bNeedsStarted);
 	if (Base == EAttachedBase::Refused)
@@ -1448,24 +1626,103 @@ bool FStore::ApplyAttachedStarted(const FVaRestTraceStarted& Borrowed, const FCa
 		NoteAttachLoss(Borrowed.RequestId);
 	return true;
 }
-void FStore::ApplyScope(uint64 ScopeId, bool bOpened, FStringView Label, bool bMetadataOmitted)
+FStringView FStore::ScopeLabel(uint64 Id) const
 {
-	if (!Storage)
-		return;
-	if (ScopeId != 0 || bMetadataOmitted || (!Label.IsEmpty() && Label != FStringView(TEXT("Process"))))
-	{
-		Increment(State.OmittedScopes);
-		AddObservation(State.MetadataOmitted, 1, State.bLossCountersSaturated);
-		Increment(RevisionValue);
-	}
-	if (ScopeId != 0)
-		return;
-	if (!Storage->bProcessObserved || Storage->bProcessOpen != bOpened)
-	{
-		Storage->bProcessObserved = true;
-		Storage->bProcessOpen = bOpened;
-		Increment(RevisionValue);
-	}
+ if (Id == 0) return TEXT("Process");
+ if (Storage) for (int32 I=0;I<Storage->NumScopes;++I)
+  if (Storage->Scopes[I].Id==Id) return FStringView(Storage->Scopes[I].Label,Storage->Scopes[I].Chars);
+ return {};
+}
+bool FStore::IsClearedScope(uint64 Id) const
+{
+ if (Id && Storage) for (int32 I=0;I<Storage->NumScopes;++I)
+  if (Storage->Scopes[I].Id==Id) return Storage->Scopes[I].bCleared;
+ return false;
+}
+void FStore::ApplyScope(uint64 Id,bool Open,FStringView Label,bool Omitted,int32 PIEInstance,bool Editor)
+{
+ if (!Storage) return;
+ if (!Id)
+ {
+  if (!Storage->bProcessObserved || Storage->bProcessOpen!=Open) { Storage->bProcessObserved=true; Storage->bProcessOpen=Open; Increment(RevisionValue); }
+  return;
+ }
+ FScopeEntry* Entry=nullptr;
+ for (int32 I=0;I<Storage->NumScopes;++I) if (Storage->Scopes[I].Id==Id) { Entry=&Storage->Scopes[I]; break; }
+ if (!Entry)
+ {
+  if (Storage->NumScopes>=Storage->Plan.ScopeCapacity) { Increment(State.OmittedScopes); Increment(RevisionValue); return; }
+  Entry=&Storage->Scopes[Storage->NumScopes++]; Entry->Id=Id; Entry->Session=Storage->PIESession;
+ }
+ // A closed label is frozen. Scope identities cannot reopen or be reused by the producer.
+ if (Entry->Chars && !Entry->bOpen) return;
+ Entry->bOpen=Open; Entry->bEditor=Editor; Entry->PIEInstance=PIEInstance;
+ if (!Label.IsEmpty() && Label.GetData() && Label.Len()>0)
+ {
+  TCHAR Prefix[64]{};
+  const int32 PrefixLen=PIEInstance==INDEX_NONE ? 0 : FCString::Snprintf(Prefix,UE_ARRAY_COUNT(Prefix),TEXT("PIE %llu · "),Entry->Session);
+  Entry->Chars=int32(FMath::Min<int64>(128,int64(PrefixLen)+Label.Len()));
+  const int32 P=FMath::Min(Entry->Chars,PrefixLen);
+  if (P) FMemory::Memcpy(Entry->Label,Prefix,P*sizeof(TCHAR));
+  if (Entry->Chars>P) FMemory::Memcpy(Entry->Label+P,Label.GetData(),(Entry->Chars-P)*sizeof(TCHAR));
+  Entry->Label[Entry->Chars]=0;
+  Omitted|=int64(PrefixLen)+Label.Len()>128;
+ }
+ if (Omitted) { Increment(State.OmittedScopes); AddObservation(State.MetadataOmitted,1,State.bLossCountersSaturated); }
+ Increment(RevisionValue);
+}
+void FStore::BeginPIESession(bool Preserve)
+{
+ check(IsInGameThread() && !bEnumerating);
+ if (!Storage) return;
+ if (Storage->PIESession!=MAX_uint64) ++Storage->PIESession;
+ if (Preserve) return;
+ for (int32 S=0;S<Storage->NumScopes;++S)
+ {
+  auto& Scope=Storage->Scopes[S];
+  if (Scope.bOpen || Scope.bEditor || Scope.PIEInstance==INDEX_NONE) continue;
+  Scope.bCleared=true;
+  ClearScope(Scope.Id);
+ }
+ Increment(RevisionValue);
+}
+void FStore::ClearScope(uint64 Id, TConstArrayView<FVaRestTraceStarted> LiveRequests, TConstArrayView<FVaRestTraceSocket> LiveSockets)
+{
+ check(IsInGameThread() && !bEnumerating); if (!Storage) return;
+  for (int32 I=0;I<Storage->IndexCapacity;++I)
+  {
+   auto& Entry=Storage->Index[I];
+   if (Entry.State!=FStorage::EIndexState::Occupied || !Entry.Row || !Entry.Row->Value.bContextKnown || Entry.Row->Value.ScopeId!=Id) continue;
+   auto& Row=*Entry.Row;
+   if (!CanReleaseWhole(Row))
+   {
+    Row.Value.bPinned=false; Row.Value.bPartial=true; Row.Value.EndState=EVaRestInspectorEndState::CaptureInterrupted;
+    Row.Evidence=ELivenessEvidence::None; CloseStats(Row,EStatsClosure::AttachedAbsent);
+   }
+   const bool Live = Row.Key.Kind == ERowKeyKind::Socket ? LiveSockets.FindByPredicate([&](const auto& Socket) { return Socket.SocketId == Row.Key.Id; }) != nullptr : LiveRequests.FindByPredicate([&](const auto& Request) { return Request.RequestId == Row.Value.RequestId; }) != nullptr;
+   RemoveEligibleRowNow(I, !Live, true);
+  }
+  for (int32 I=0;I<Storage->RetainedCapacity;++I)
+  {
+   auto& Entry=Storage->RetainedIds[I]; if (Entry.RequestId && Entry.ContextKnown && Entry.ScopeId==Id) { Entry.Cleared=true; Entry.Stats=FStatsCaptureState{}; }
+  }
+  for (const auto& Request:LiveRequests) if (Request.ScopeId==Id) ForgetRetainedKey(FRowKey(Request.RequestId));
+  for (const auto& Socket:LiveSockets) if (Socket.ScopeId==Id) ForgetRetainedKey(FRowKey(ERowKeyKind::Socket,Socket.SocketId));
+   for (int32 I=1;I<Storage->NumSocketStats;)
+  {
+   if (Storage->SocketStats[I].Value.bContextKnown && Storage->SocketStats[I].Value.ScopeId==Id)
+   { --Storage->NumSocketStats; Storage->SocketStats[I]=Storage->SocketStats[Storage->NumSocketStats]; Storage->SocketStats[Storage->NumSocketStats]=FSocketStatsCell{}; }
+   else ++I;
+  }
+ // Named groups have no remaining mutable row tokens in this scope. Overflow has unknown attribution and remains global.
+  for (int32 I=0;I<Storage->Plan.StatsIndexCapacity;++I)
+  {
+   auto& Entry=Storage->StatsIndex[I]; const auto* Slot=Entry.Slot();
+   if (Entry.State!=FStorage::EIndexState::Occupied || !Slot || Slot->Value.ScopeId!=Id) continue;
+   if (Entry.FixedGroup) { Storage->FirstNamed.Key.Reset(); Storage->FirstNamed.Value={}; Storage->FirstNamed.IndexSlot=INDEX_NONE; Storage->bFirstNamedUsed=false; }
+   Entry.Group.Reset(); Entry.FixedGroup=nullptr; Entry.State=FStorage::EIndexState::Deleted; --Storage->NumStatsGroups;
+  }
+ Increment(RevisionValue);
 }
 void FStore::ApplyClient(uint64 ClientId, uint64 ScopeId, bool bCreated, FStringView Label)
 {
@@ -1582,11 +1839,12 @@ bool FStore::ApplyAttachedAtWatermark(const FVaRestTraceSnapshot& Snapshot,const
 	}
 	++CurrentReconciliationStamp;
 	for (const FVaRestTraceScope& Scope : Snapshot.Scopes)
-		ApplyScope(Scope.ScopeId, Scope.bOpened, FStringView(Scope.Label));
+		ApplyScope(Scope.ScopeId, Scope.bOpened, FStringView(Scope.Label), false, Scope.PIEInstance, Scope.bEditorScope);
 	for (const FVaRestTraceClient& Client : Snapshot.Clients)
 		ApplyClient(Client.ClientId, Client.ScopeId, Client.bCreated, FStringView(Client.DisplayName));
 	for (const FVaRestTraceStarted& Borrowed : Snapshot.InFlight)
 		ApplyAttachedStarted(Borrowed, Policy, Pending, Allocator);
+	ApplySocketSnapshot(Snapshot, Policy, Pending, Allocator);
 	ForEachRow([&](FRow& Row) {
 		if (Row.Value.bTerminalKnown || Row.Value.bSealed || Row.Value.BirthMetadataOrdinal > BirthEligibilityWatermark || Row.PresenceStamp == CurrentReconciliationStamp)
 			return;
@@ -1806,6 +2064,7 @@ void FStore::ApplyCompletion(FRow& Row, FPacket& Packet)
 }
 bool FStore::HasPendingExcerpt(const FRow& Row)
 {
+	if (Row.Value.Kind == EVaRestInspectorRecordKind::Socket) return Row.SocketPendingFrames > 0;
 	if (Row.Value.RequestExcerptState == EVaRestInspectorDetailState::Pending)
 		return true;
 	for (int32 Index = 0; Index < Row.NumDispatches; ++Index)
@@ -1819,7 +2078,7 @@ bool FStore::CanSeal(const FRow& Row)
 }
 bool FStore::ShouldShareRow(const FRow& Row)
 {
-	return Row.Value.bSealed;
+	return Row.Value.bSealed && Row.Value.Kind != EVaRestInspectorRecordKind::Socket;
 }
 void FStore::CompleteMutation(FRow& Row)
 {
@@ -1844,7 +2103,12 @@ void FStore::AddDeadline(FRow& Row)
 	check(Storage && Row.IndexSlot >= 0 && Row.IndexSlot < Storage->IndexCapacity && Storage->NumDeadline < Storage->MaxRows);
 	check(Storage->Index[Row.IndexSlot].Row.Get() == &Row);
 	double Due = std::numeric_limits<double>::infinity();
-	if (FMath::IsFinite(Row.Value.CompletedObservedAt))
+	if (Row.Value.Kind == EVaRestInspectorRecordKind::Socket)
+	{
+		for (int32 I = 0; I < Row.SocketFrames.Num(); ++I) if (Row.SocketFrames.At(I).State == EVaRestInspectorDetailState::Pending)
+			Due = FMath::Min(Due, Row.SocketFrames.At(I).Due);
+	}
+	else if (FMath::IsFinite(Row.Value.CompletedObservedAt))
 	{
 		const double Candidate = Row.Value.CompletedObservedAt + 5.0;
 		if (FMath::IsFinite(Candidate))
@@ -1947,6 +2211,17 @@ int32 FStore::ExpirePendingExcerpts()
 		FRow* Row = Storage->Index[Next.IndexSlot].Row.Get();
 		check(Row && Row->DeadlineIndex == 0);
 		RemoveDeadline(*Row);
+		if (Row->Value.Kind == EVaRestInspectorRecordKind::Socket)
+		{
+			bool Changed = false;
+			for (int32 I=0;I<Row->SocketFrames.Num();++I)
+			{
+				auto& Frame=Row->SocketFrames.At(I);
+				if (Frame.State==EVaRestInspectorDetailState::Pending && Frame.Due<=Now) { Frame.State=EVaRestInspectorDetailState::TimedOut; check(Row->SocketPendingFrames>0); --Row->SocketPendingFrames; Changed=true; }
+			}
+			if (Changed) CompleteMutation(*Row);
+			UpdateSocketDeadline(*Row); ++Expired; continue;
+		}
 		bool bChanged = false;
 		if (Row->Value.RequestExcerptState == EVaRestInspectorDetailState::Pending)
 		{
@@ -1972,6 +2247,11 @@ void FStore::InterruptOpenRows()
  ForEachRow([&](FRow& Row) {
   if (Row.Value.bSealed || Row.Value.bTerminalKnown || (!Row.Value.bPinned && Row.Value.EndState==EVaRestInspectorEndState::CaptureInterrupted && !HasPendingExcerpt(Row))) return;
   if (Row.Value.bPinned) Increment(State.InterruptedRows);
+  if (Row.Value.Kind==EVaRestInspectorRecordKind::Socket)
+  {
+   for (int32 I=0;I<Row.SocketFrames.Num();++I) if (Row.SocketFrames.At(I).State==EVaRestInspectorDetailState::Pending) Row.SocketFrames.At(I).State=EVaRestInspectorDetailState::CaptureStopped;
+   Row.SocketPendingFrames=0; RemoveDeadline(Row);
+  }
   Row.Value.bPinned=false; Row.Value.bPartial=true; Row.Value.EndState=EVaRestInspectorEndState::CaptureInterrupted; Row.Evidence=ELivenessEvidence::None;
   if (Row.Value.RequestExcerptState==EVaRestInspectorDetailState::Pending) Row.Value.RequestExcerptState=EVaRestInspectorDetailState::CaptureStopped;
   for (int32 N=0;N<Row.NumDispatches;++N) if (Row.Dispatches[N]->ResponseExcerptState==EVaRestInspectorDetailState::Pending) Row.Dispatches[N]->ResponseExcerptState=EVaRestInspectorDetailState::CaptureStopped;
@@ -1990,6 +2270,12 @@ void FStore::StopPendingExcerpts()
 	if (!Storage)
 		return;
 	ForEachRow([this](FRow& Row) {
+		if (Row.Value.Kind==EVaRestInspectorRecordKind::Socket)
+		{
+			const bool Changed=Row.SocketPendingFrames>0;
+			for (int32 I=0;I<Row.SocketFrames.Num();++I) if (Row.SocketFrames.At(I).State==EVaRestInspectorDetailState::Pending) Row.SocketFrames.At(I).State=EVaRestInspectorDetailState::CaptureStopped;
+			Row.SocketPendingFrames=0; RemoveDeadline(Row); if (Changed) CompleteMutation(Row); return;
+		}
 		bool bChanged = false;
 		if (Row.Value.RequestExcerptState == EVaRestInspectorDetailState::Pending)
 		{
@@ -2070,6 +2356,7 @@ EVaRestInspectorDetailState FStore::ApplyNote(FRow& Row, FPacket& Packet, uint64
 		Destination = Row.NoteHead;
 		auto& Old = Row.Notes[Destination];
 		InvalidateNoteTimeline(Row, Old.Serial);
+		if (Row.Value.Kind == EVaRestInspectorRecordKind::Socket) ArchiveSocketChannel(Row,Old.Serial,Old.Owner);
 		Old.Owner.Reset(); // Packet/backing/wrapper free before their credit.
 		Old.Serial = 0;
 		Row.NoteHead = (Row.NoteHead + 1) % FNormalizedLimits::NoteSlots;
@@ -2156,6 +2443,7 @@ bool FStorePacketOwner::TryCompactStarted(const FStorePacketOwner& Source, uint6
 	auto& Fixed = *static_cast<FPacketFixed*>(BackingMemory);
 	Fixed.Headers = {};
 	Fixed.Warnings = {};
+	Fixed.Protocols = {};
 	for (FTextSlice& Slice : Fixed.Text)
 		Slice = {};
 	int64 WriteCursor = int64(Align(sizeof(FPacketFixed), alignof(TCHAR)));
@@ -2334,9 +2622,10 @@ bool FStore::Apply(FPacket&& Incoming)
 		return false;
 	if (Fixed.Header.Kind != EVaRestTraceKind::Excerpt && !Fixed.Header.bSnapshot)
 		LastConsumedMetadataOrdinal = FMath::Max(LastConsumedMetadataOrdinal, Fixed.Header.MetadataOrdinal);
-	if (Fixed.Header.Source != EVaRestTraceSource::Http)
-		return false;
 	RefreshLossWitness();
+	if (Fixed.Header.Source == EVaRestTraceSource::Socket) return ApplySocketPacket(Packet);
+	if (IsKeyCleared(FRowKey(Fixed.Scalars.RequestId))) return false;
+	if (IsClearedScope(Fixed.Scalars.ScopeId) && Fixed.Header.Kind != EVaRestTraceKind::Scope) return false;
 	if (Fixed.Header.Kind == EVaRestTraceKind::Marker)
 		return ApplyMarker(Packet);
 	if (Fixed.Header.Kind == EVaRestTraceKind::Client)
@@ -2347,7 +2636,7 @@ bool FStore::Apply(FPacket&& Incoming)
 	}
 	if (Fixed.Header.Kind == EVaRestTraceKind::Scope)
 	{
-		ApplyScope(Fixed.Scalars.ScopeId, Fixed.Scalars.bOpened, Packet.Text(EText::ScopeLabel), Fixed.Header.bMetadataOmitted);
+		ApplyScope(Fixed.Scalars.ScopeId, Fixed.Scalars.bOpened, Packet.Text(EText::ScopeLabel), Fixed.Header.bMetadataOmitted, Fixed.Scalars.PIEInstance, Fixed.Scalars.bEditorScope);
 		return true;
 	}
 	const bool bStarted = Fixed.Header.Kind == EVaRestTraceKind::Started;
@@ -2517,22 +2806,46 @@ bool FStore::Apply(FPacket&& Incoming)
 		TryAdmitQueueExpiredMarker(*Row, NoteSerial);
 	return true;
 }
-bool FStore::IsIdRetained(uint64 RequestId) const
+bool FStore::IsIdRetained(uint64 Id) const { return IsKeyRetained(FRowKey(Id)); }
+bool FStore::IsKeyRetained(const FRowKey& Key) const
 {
-	if (!Storage || !RequestId || Storage->RetainedLookupCapacity <= 0)
-		return false;
-	const uint32 Mask = uint32(Storage->RetainedLookupCapacity - 1);
-	const uint32 Start = uint32(RequestId ^ (RequestId >> 32)) * 0x9e3779b9u;
-	for (uint32 Offset = 0; Offset <= Mask; ++Offset)
-	{
-		const auto& Entry = Storage->RetainedLookup[int32((Start + Offset) & Mask)];
-		if (Entry.State == FStorage::EIndexState::Empty)
-			return false;
-		if (Entry.State == FStorage::EIndexState::Occupied && Entry.RequestId == RequestId)
-			return Entry.RingSlot >= 0 && Entry.RingSlot < Storage->RetainedCapacity &&
-				Storage->RetainedIds[Entry.RingSlot].RequestId == RequestId;
-	}
-	return false;
+ if (!Storage || !Key.Id || Storage->RetainedLookupCapacity<=0) return false;
+ const uint32 Mask=uint32(Storage->RetainedLookupCapacity-1),Start=HashRowKey(Key);
+ for (uint32 Offset=0;Offset<=Mask;++Offset)
+ {
+  const auto& Entry=Storage->RetainedLookup[int32((Start+Offset)&Mask)];
+  if (Entry.State==FStorage::EIndexState::Empty) return false;
+  if (Entry.State==FStorage::EIndexState::Occupied && Entry.RequestId==Key.Id && Entry.Kind==Key.Kind)
+   return Entry.RingSlot>=0 && Entry.RingSlot<Storage->RetainedCapacity && Storage->RetainedIds[Entry.RingSlot].RequestId==Key.Id && Storage->RetainedIds[Entry.RingSlot].Kind==Key.Kind;
+ }
+ return false;
+}
+bool FStore::IsKeyCleared(const FRowKey& Key) const
+{
+ if (!Storage || !Key.Id || Storage->RetainedLookupCapacity<=0) return false;
+ const uint32 Mask=uint32(Storage->RetainedLookupCapacity-1),Start=HashRowKey(Key);
+ for (uint32 Offset=0;Offset<=Mask;++Offset)
+ {
+  const auto& Entry=Storage->RetainedLookup[int32((Start+Offset)&Mask)];
+  if (Entry.State==FStorage::EIndexState::Empty) return false;
+  if (Entry.State==FStorage::EIndexState::Occupied && Entry.RequestId==Key.Id && Entry.Kind==Key.Kind && Entry.RingSlot>=0 && Entry.RingSlot<Storage->RetainedCapacity)
+   return Storage->RetainedIds[Entry.RingSlot].Cleared;
+ }
+ return false;
+}
+void FStore::ForgetRetainedKey(const FRowKey& Key)
+{
+ if (!Storage || !Key.Id || Storage->RetainedLookupCapacity<=0) return;
+ const uint32 Mask=uint32(Storage->RetainedLookupCapacity-1),Start=HashRowKey(Key);
+ for (uint32 Offset=0;Offset<=Mask;++Offset)
+ {
+  auto& Entry=Storage->RetainedLookup[int32((Start+Offset)&Mask)]; if (Entry.State==FStorage::EIndexState::Empty) return;
+  if (Entry.State==FStorage::EIndexState::Occupied && Entry.RequestId==Key.Id && Entry.Kind==Key.Kind)
+  {
+   if (Entry.RingSlot>=0 && Entry.RingSlot<Storage->RetainedCapacity) Storage->RetainedIds[Entry.RingSlot]={};
+   Entry={}; Entry.State=FStorage::EIndexState::Deleted; return;
+  }
+ }
 }
 const FStatsCaptureState* FStore::RetainedStats(uint64 RequestId) const
 {
@@ -2544,28 +2857,29 @@ const FStatsCaptureState* FStore::RetainedStats(uint64 RequestId) const
 	{
 		const auto& Entry = Storage->RetainedLookup[int32((Start + Offset) & Mask)];
 		if (Entry.State == EStoreIndexState::Empty) return nullptr;
-		if (Entry.State == EStoreIndexState::Occupied && Entry.RequestId == RequestId && Entry.RingSlot >= 0 && Entry.RingSlot < Storage->RetainedCapacity)
+		if (Entry.State == EStoreIndexState::Occupied && Entry.RequestId == RequestId && Entry.Kind == ERowKeyKind::Http && Entry.RingSlot >= 0 && Entry.RingSlot < Storage->RetainedCapacity)
 		{
 			const auto& Retained = Storage->RetainedIds[Entry.RingSlot];
-			return Retained.RequestId == RequestId ? &Retained.Stats : nullptr;
+			return Retained.RequestId == RequestId && Retained.Kind == ERowKeyKind::Http && !Retained.Cleared ? &Retained.Stats : nullptr;
 		}
 	}
 	return nullptr;
 }
-void FStore::RetainRemovedId(const FRow& Row)
+void FStore::RetainKey(const FRowKey& Key,const FStatsCaptureState* Stats,bool Cleared,uint64 Scope,bool ContextKnown)
 {
-	const uint64 RequestId = Row.Key.Id;
+	const uint64 RequestId = Key.Id;
 	check(Storage && RequestId && Storage->RetainedCapacity > 0 && Storage->RetainedLookupCapacity > 0);
-	if (IsIdRetained(RequestId))
+	if (IsKeyRetained(Key))
 	{
 		const uint32 Mask = uint32(Storage->RetainedLookupCapacity - 1);
-		const uint32 Start = HashRequestId(RequestId);
+		const uint32 Start = HashRowKey(Key);
 		for (uint32 Offset = 0; Offset <= Mask; ++Offset)
 		{
 			const auto& Existing = Storage->RetainedLookup[int32((Start + Offset) & Mask)];
-			if (Existing.State == EStoreIndexState::Occupied && Existing.RequestId == RequestId)
+			if (Existing.State == EStoreIndexState::Occupied && Existing.RequestId == RequestId && Existing.Kind == Key.Kind)
 			{
-				Storage->RetainedIds[Existing.RingSlot].Stats = Row.Stats;
+				auto& Retained = Storage->RetainedIds[Existing.RingSlot];
+				Retained.Stats = Stats && !Cleared ? *Stats : FStatsCaptureState{}; Retained.Cleared |= Cleared; Retained.ScopeId = Scope; Retained.ContextKnown = ContextKnown;
 				return;
 			}
 		}
@@ -2576,13 +2890,14 @@ void FStore::RetainRemovedId(const FRow& Row)
 	{
 		RingSlot = Storage->RetainedHead;
 		auto& Retained = Storage->RetainedIds[RingSlot];
-		const int32 OldLookup = Retained.LookupSlot;
-		check(OldLookup >= 0 && OldLookup < Storage->RetainedLookupCapacity);
-		auto& OldEntry = Storage->RetainedLookup[OldLookup];
-		check(OldEntry.State == FStorage::EIndexState::Occupied && OldEntry.RequestId == Retained.RequestId && OldEntry.RingSlot == RingSlot);
-		OldEntry.State = FStorage::EIndexState::Deleted;
-		OldEntry.RequestId = 0;
-		OldEntry.RingSlot = INDEX_NONE;
+		if (Retained.RequestId)
+		{
+			const int32 OldLookup = Retained.LookupSlot;
+			check(OldLookup >= 0 && OldLookup < Storage->RetainedLookupCapacity);
+			auto& OldEntry = Storage->RetainedLookup[OldLookup];
+			check(OldEntry.State == FStorage::EIndexState::Occupied && OldEntry.RequestId == Retained.RequestId && OldEntry.Kind == Retained.Kind && OldEntry.RingSlot == RingSlot);
+			OldEntry.State = FStorage::EIndexState::Deleted; OldEntry.RequestId = 0; OldEntry.RingSlot = INDEX_NONE;
+		}
 		Storage->RetainedHead = (Storage->RetainedHead + 1) % Storage->RetainedCapacity;
 	}
 	else
@@ -2591,7 +2906,7 @@ void FStore::RetainRemovedId(const FRow& Row)
 		++Storage->NumRetained;
 	}
 	const uint32 Mask = uint32(Storage->RetainedLookupCapacity - 1);
-	const uint32 Start = uint32(RequestId ^ (RequestId >> 32)) * 0x9e3779b9u;
+	const uint32 Start = HashRowKey(Key);
 	int32 LookupSlot = INDEX_NONE;
 	for (uint32 Offset = 0; Offset <= Mask; ++Offset)
 	{
@@ -2599,7 +2914,7 @@ void FStore::RetainRemovedId(const FRow& Row)
 		auto& Entry = Storage->RetainedLookup[Candidate];
 		if (Entry.State == FStorage::EIndexState::Occupied)
 		{
-			if (Entry.RequestId == RequestId)
+			if (Entry.RequestId == RequestId && Entry.Kind == Key.Kind)
 			{
 				LookupSlot = Candidate;
 				break;
@@ -2620,11 +2935,15 @@ void FStore::RetainRemovedId(const FRow& Row)
 	auto& Lookup = Storage->RetainedLookup[LookupSlot];
 	Lookup.State = FStorage::EIndexState::Occupied;
 	Lookup.RequestId = RequestId;
+	Lookup.Kind = Key.Kind;
 	Lookup.RingSlot = RingSlot;
 	Storage->RetainedIds[RingSlot].RequestId = RequestId;
 	Storage->RetainedIds[RingSlot].LookupSlot = LookupSlot;
-	Storage->RetainedIds[RingSlot].Stats = Row.Stats;
+	auto& Retained = Storage->RetainedIds[RingSlot]; Retained.Kind = Key.Kind; Retained.ScopeId = Scope; Retained.ContextKnown = ContextKnown; Retained.Cleared = Cleared;
+	Retained.Stats = Stats && !Cleared ? *Stats : FStatsCaptureState{};
 }
+void FStore::RetainRemovedId(const FRow& Row,bool Cleared)
+{ RetainKey(Row.Key,Row.Key.Kind==ERowKeyKind::Http ? &Row.Stats : nullptr,Cleared,Row.Value.ScopeId,Row.Value.bContextKnown); }
 void FStore::ResetRetainedIds()
 {
 	if (!Storage)
@@ -2662,7 +2981,7 @@ bool FStore::RemoveEligibleRow(uint64 RequestId)
 	}
 	return false;
 }
-bool FStore::RemoveEligibleRowNow(int32 IndexSlot)
+bool FStore::RemoveEligibleRowNow(int32 IndexSlot, bool RetainId, bool Cleared)
 {
 	check(Storage && IndexSlot >= 0 && IndexSlot < Storage->IndexCapacity && !bEnumerating);
 	auto& Entry = Storage->Index[IndexSlot];
@@ -2673,8 +2992,9 @@ bool FStore::RemoveEligibleRowNow(int32 IndexSlot)
 		CloseStats(Row, EStatsClosure::Removed);
 	RemoveDeadline(Row);
 	UnlinkArrival(Row);
-	if (Row.Key.Kind == ERowKeyKind::Http && Row.Key.Id != 0)
-		RetainRemovedId(Row);
+	if (Row.Key.Kind == ERowKeyKind::Socket) while (Row.SocketFrames.Num()) DropSocketFrame(Row);
+	if (RetainId && (Row.Key.Kind == ERowKeyKind::Http || Row.Key.Kind == ERowKeyKind::Socket) && Row.Key.Id != 0)
+		RetainRemovedId(Row, Cleared);
 	Entry.bRemovePending = false;
 	Entry.Row.Reset();
 	Entry.Key = FRowKey();
@@ -2918,7 +3238,10 @@ void FStore::Clear()
 	for (int32 Index = 0; Index < Storage->Plan.ClientLookupCapacity; ++Index)
 		Storage->ClientLookup[Index] = FClientLookupEntry{};
 	Storage->NumClients = 0;
+	for (int32 I=0;I<Storage->NumScopes;++I) Storage->Scopes[I]=FScopeEntry{};
+	Storage->NumScopes=0;
 	ClearStats();
+	Storage->SocketStats.Reset(); Storage->NumSocketStats=Storage->SocketStatsCapacity=0;
 	ClearLinks();
 	Storage->bProcessObserved = Storage->bProcessOpen = false;
 	State.DroppedEvents = State.DroppedBytes = State.MetadataOmitted = State.ExcerptsSkipped = 0;
@@ -3118,7 +3441,7 @@ bool FStore::ValidateBorrowedSource(FStringView Source, const FAdmissionAnchors&
 }
 const FStatsGroup* FStore::FindStatsGroup(const FStatsKeyView& Key) const
 {
-	if (!Storage || Key.ScopeId != 0 || Storage->Plan.StatsIndexCapacity <= 0 || Key.Key.Len() < 0 || Key.Key.Len() > FNormalizedLimits::MaxStringChars)
+	if (!Storage || Storage->Plan.StatsIndexCapacity <= 0 || Key.Key.Len() < 0 || Key.Key.Len() > FNormalizedLimits::MaxStringChars)
 		return nullptr;
 	const uint32 Mask = uint32(Storage->Plan.StatsIndexCapacity - 1);
 	const uint32 Start = HashStatsKey(Key);
@@ -3143,7 +3466,7 @@ FStatsGroup* FStore::FindOrAdmitOverflowStatsGroup()
 FStatsGroup* FStore::FindOrAdmitStatsGroup(const FStatsKeyView& Key, const FAdmissionAnchors& Anchors)
 {
 	FStatsGroup* Overflow = FindOrAdmitOverflowStatsGroup();
-	if (!Storage || Key.ScopeId != 0 || Key.Key.Len() < 0 || Key.Key.Len() > FNormalizedLimits::MaxStringChars ||
+	if (!Storage || Key.Key.Len() < 0 || Key.Key.Len() > FNormalizedLimits::MaxStringChars ||
 		(Key.Key.Len() > 0 && !Key.Key.GetData()) || !ValidateBorrowedSource(Key.Key, Anchors))
 	{
 		Increment(State.OmittedStatsGroups);
@@ -3519,6 +3842,17 @@ void FStore::ClearStats()
 }
 bool FStore::MeasureMutableSnapshot(FSnapshotBuilder& Builder, const FRow& Row) const
 {
+	bool ChannelsMeasured=true; VisitSocketChannels(&Row,[&](const FVaRestInspectorPacketView& P) { if (ChannelsMeasured) ChannelsMeasured=Builder.MeasureSocketChannel(P); });
+	if (!ChannelsMeasured) return false;
+	for (int32 I=0;I<Row.NumSocketAttempts;++I)
+	{
+		FPacketFixed Fallback[3]; const auto V=SocketAttemptView(Row.SocketAttempts[I]->Value,Row.Key.Id,Fallback); if (!Builder.MeasureSocketAttempt(V)) return false;
+	}
+	for (int32 I=0;I<Row.SocketFrames.Num();++I)
+	{
+		const auto& Slot=Row.SocketFrames.At(I); FPacketFixed Fallback; const auto V=SocketFrameView(Slot,Row.Key.Id,Fallback);
+		if (!Builder.MeasureSocketFrame(V,Slot.Metadata ? &Slot.Metadata->Get().Excerpt() : nullptr,Slot.Excerpt ? Slot.Excerpt->View() : FVaRestInspectorPacketView(),Slot.Excerpt ? &Slot.Excerpt->Get().Excerpt() : nullptr)) return false;
+	}
 	if (!Builder.MeasureDispatches(Row.NumDispatches) ||
 		!Builder.MeasureNotes(Row.Notes.IsAllocated() ? FNormalizedLimits::NoteSlots : 0) ||
 		!Builder.MeasureTimeline(Row.Timeline.IsAllocated() ? FNormalizedLimits::TimelineSlots : 0))
@@ -3563,6 +3897,7 @@ bool FStore::MeasureMutableSnapshot(FSnapshotBuilder& Builder, const FRow& Row) 
 bool FStore::ConstructMutableSnapshot(FSnapshotBuilder& Builder, const FRow& Row, FSnapshotRowCopy& Copy) const
 {
 	Copy.Value = Row.Value;
+	Copy.Value.SocketReaderSource = nullptr; Copy.Value.SocketAttemptReader = nullptr; Copy.Value.SocketFrameReader = nullptr; Copy.Value.SocketChannelReader = nullptr;
 	Copy.Value.Started = {};
 	Copy.Value.Completed = {};
 	Copy.Value.Marker = {};
@@ -3573,6 +3908,17 @@ bool FStore::ConstructMutableSnapshot(FSnapshotBuilder& Builder, const FRow& Row
 	Copy.Value.Timeline = {};
 	Copy.Value.ScopeLabel = {};
 	Copy.Value.ClientLabel = {};
+	bool ChannelsConstructed=true; VisitSocketChannels(&Row,[&](const FVaRestInspectorPacketView& P) { if (ChannelsConstructed) ChannelsConstructed=Builder.ConstructSocketChannel(Copy,P); });
+	if (!ChannelsConstructed) return false;
+	for (int32 I=0;I<Row.NumSocketAttempts;++I)
+	{
+		FPacketFixed Fallback[3]; const auto V=SocketAttemptView(Row.SocketAttempts[I]->Value,Row.Key.Id,Fallback); if (!Builder.ConstructSocketAttempt(Copy,V)) return false;
+	}
+	for (int32 I=0;I<Row.SocketFrames.Num();++I)
+	{
+		const auto& Slot=Row.SocketFrames.At(I); FPacketFixed Fallback; const auto V=SocketFrameView(Slot,Row.Key.Id,Fallback);
+		if (!Builder.ConstructSocketFrame(Copy,V,Slot.Metadata ? &Slot.Metadata->Get().Excerpt() : nullptr,Slot.Excerpt ? Slot.Excerpt->View() : FVaRestInspectorPacketView(),Slot.Excerpt ? &Slot.Excerpt->Get().Excerpt() : nullptr)) return false;
+	}
 	Copy.Evidence = Row.Evidence;
 	Copy.PresenceStamp = Row.PresenceStamp;
 	Copy.IndexSlot = Row.IndexSlot;
@@ -3687,10 +4033,11 @@ bool FStore::MeasureSnapshot(FSnapshotBuilder& Builder) const
 			return;
 		const FStringView Label = RowClientLabel(Row);
 		if (ShouldShareRow(Row))
-			bMeasured = Builder.MeasureSealedRow(Label);
+			bMeasured = Builder.MeasureSealedRow(Label, ScopeLabel(Row.Value.ScopeId));
 		else
-			bMeasured = Builder.MeasureMutableRow(Label) && MeasureMutableSnapshot(Builder, Row);
+			bMeasured = Builder.MeasureMutableRow(Label, ScopeLabel(Row.Value.ScopeId)) && MeasureMutableSnapshot(Builder, Row);
 	});
+	if (bMeasured) bMeasured=Builder.MeasureSocketStats(Storage->NumSocketStats);
 	if (bMeasured)
 		bMeasured = Builder.MeasureStats(Storage->NumStatsGroups);
 	int32 NumMeasuredStats = 0;
@@ -3770,14 +4117,16 @@ bool FStore::TrySnapshot(TSharedPtr<const FVaRestInspectorSnapshot, ESPMode::Thr
 		if (ShouldShareRow(Row))
 		{
 			TSharedPtr<const FRow, ESPMode::ThreadSafe> Owner = Entry.Row;
-			bConstructed = Builder.ConstructSealedEntry(Owner, Label);
+			bConstructed = Builder.ConstructSealedEntry(Owner, Label, ScopeLabel(Row.Value.ScopeId));
 		}
 		else
 		{
 			FSnapshotRowCopy* Copy = Builder.ConstructMutableRow();
-			bConstructed = Copy && ConstructMutableSnapshot(Builder, Row, *Copy) && Builder.ConstructMutableEntry(Copy, Label);
+			bConstructed = Copy && ConstructMutableSnapshot(Builder, Row, *Copy) && Builder.ConstructMutableEntry(Copy, Label, ScopeLabel(Row.Value.ScopeId));
 		}
 	});
+	if (bConstructed) bConstructed=Builder.ConstructSocketStats(Storage->NumSocketStats);
+	for (int32 I=0;bConstructed && I<Storage->NumSocketStats;++I) bConstructed=Builder.ConstructSocketStatsGroup(Storage->SocketStats[I].Value,I);
 	if (bConstructed)
 		bConstructed = Builder.ConstructStats(Storage->NumStatsGroups);
 	int32 NumConstructedStats = 0;
@@ -3813,7 +4162,7 @@ bool FStore::TrySnapshot(TSharedPtr<const FVaRestInspectorSnapshot, ESPMode::Thr
 	}
 	return true;
 }
-void FStore::VisitImmutableRow(const FRow& Row, FStringView Label, TFunctionRef<void(const FVaRestInspectorRecordView&)> Visitor)
+void FStore::VisitImmutableRow(const FRow& Row, FStringView Label, TFunctionRef<void(const FVaRestInspectorRecordView&)> Visitor, FStringView Scope)
 {
 	FVaRestInspectorRecordView View = Row.Value;
 	View.Started = {};
@@ -3891,7 +4240,12 @@ void FStore::VisitImmutableRow(const FRow& Row, FStringView Label, TFunctionRef<
 	View.Dispatches = {DispatchViews, Row.NumDispatches};
 	View.DispatchEvents = {DispatchEvents, NumEvents};
 	View.Excerpts = {Excerpts, NumExcerpts};
-	View.ScopeLabel = View.bContextKnown && View.ScopeId == 0 ? FStringView(TEXT("Process")) : FStringView();
+	if (View.Kind==EVaRestInspectorRecordKind::Socket)
+	{
+		View.SocketReaderSource=&Row; View.SocketAttemptReader=&FStore::VisitSocketAttempts; View.SocketFrameReader=&FStore::VisitSocketFrames; View.SocketChannelReader=&FStore::VisitSocketChannels;
+		View.SocketFramesRetained=Row.SocketFrames.Num();
+	}
+	View.ScopeLabel = View.bContextKnown ? (View.ScopeId==0 ? FStringView(TEXT("Process")) : Scope) : FStringView();
 	View.ClientLabel = View.bContextKnown && View.Kind == EVaRestInspectorRecordKind::Http ? Label : FStringView();
 	Visitor(View);
 }
@@ -3908,9 +4262,22 @@ bool FStore::ForEachRecord(TFunctionRef<void(const FVaRestInspectorRecordView&)>
 		const_cast<FStore*>(this)->FlushDeferred();
 	};
 	ForEachRow([&](FRow& Row) {
-		VisitImmutableRow(Row, RowClientLabel(Row), Visitor);
+		VisitImmutableRow(Row, RowClientLabel(Row), Visitor, ScopeLabel(Row.Value.ScopeId));
 	});
 	return true;
+}
+bool FStore::ForEachLink(TFunctionRef<void(const FVaRestInspectorLinkView&)> Visitor) const
+{
+ check(IsInGameThread()); if (!Storage || bEnumerating) return false;
+ bEnumerating=true;
+ ON_SCOPE_EXIT { bEnumerating=false; const_cast<FStore*>(this)->FlushDeferred(); };
+ for (int32 Slot=Storage->LinkHead;Slot!=INDEX_NONE;Slot=Storage->Links[Slot].NextFifo)
+ {
+  const auto& L=Storage->Links[Slot];
+  const FVaRestInspectorLinkView View{L.FromRequestId,L.ToRequestId,L.QueueId.View(),L.bAuth,L.ToRequestId!=0 && !Find(L.ToRequestId) && IsIdRetained(L.ToRequestId)};
+  Visitor(View);
+ }
+ return true;
 }
 FVaRestInspectorDiagnostics FStore::Diagnostics() const
 {
@@ -3925,6 +4292,19 @@ FVaRestInspectorDiagnostics FStore::Diagnostics() const
 	}
  if (ProductionDomain)
  { Result.StoreBytes=ProductionDomain->StoreTotal.load(); Result.StorePeakBytes=ProductionDomain->StorePeak.load(); Result.PendingBytes=ProductionDomain->PendingTotal.load(); Result.PendingPeakBytes=ProductionDomain->PendingPeak.load(); }
+ if (Storage)
+ {
+  const auto Add=[&](uint64& To,uint64 Value) { AddObservation(To,Value,Result.bObservedBytesPartial); };
+  const auto Http=[&](const FStatsGroupSlot* Slot)
+  {
+   if (!Slot) return; const auto& G=Slot->Value; Add(Result.ObservedBytesUp,G.WireBytesUp); Add(Result.ObservedBytesDown,G.WireBytesDown);
+   Result.bObservedBytesPartial|=G.bWireBytesUnknown || G.bSaturated || G.Partial>0 || G.Incomplete>0;
+  };
+  Http(Storage->OverflowStats.Get()); for (int32 I=0;I<Storage->Plan.StatsIndexCapacity;++I) Http(Storage->StatsIndex[I].Slot());
+  for (int32 I=0;I<Storage->NumSocketStats;++I)
+  { const auto& G=Storage->SocketStats[I].Value; Add(Result.ObservedBytesUp,G.BytesUp); Add(Result.ObservedBytesDown,G.BytesDown); Result.bObservedBytesPartial|=G.bPartial || G.bSaturated; }
+  Result.bObservedBytesPartial|=Result.DroppedEvents>0 || Result.OmittedStatsGroups>0;
+ }
 	return Result;
 }
 
@@ -3992,5 +4372,6 @@ void FStore::RecordCumulativeDiagnostics() const
  { const uint64 Current=State.ExcerptsSkipped; const uint64 Delta=Current>=CumulativeCheckpoint.ExcerptsSkipped?Current-CumulativeCheckpoint.ExcerptsSkipped:Current; Add(ProductionDomain->Identity.CumulativeRefusals.ExcerptsSkipped,Delta); CumulativeCheckpoint.ExcerptsSkipped=Current; }
  if (State.bLossCountersSaturated || ProductionDomain->Pending.LossEpoch.load()==MAX_uint64) ProductionDomain->LossSaturated.store(true,std::memory_order_release);
 }
+#include "VaRestInspectorSocketStore.inl"
 } // namespace VaRest::Inspector::Private
 #endif

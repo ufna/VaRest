@@ -1,6 +1,9 @@
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 
 #include "VaRestTrace.h"
+#include "VaRestNativeScope.h"
+#include "VaRestClientState.h"
+#include "VaRestTraceSnapshot.h"
 
 #include "Misc/ScopeRWLock.h"
 
@@ -8,6 +11,41 @@ std::atomic<uint32> FVaRestTrace::DetailMask{ 0 };
 
 namespace VaRest::Http::TracePrivate
 {
+	struct FAttachmentPins;
+	FAttachmentPins* ActiveAttachment = nullptr; // GT-only synchronous/reentrant stack, never a service or task owner
+	struct FAttachmentPins
+	{
+		FAttachmentPins* Previous = ActiveAttachment;
+		TArray<TSharedRef<FClientState, ESPMode::ThreadSafe>> Clients;
+		TArray<TSharedRef<FNativeScopeLifetime, ESPMode::ThreadSafe>> Scopes;
+		TArray<FVaRestTraceEvent> DeferredEvents;
+		FAttachmentPins() { ActiveAttachment = this; }
+		~FAttachmentPins()
+		{
+			check(IsInGameThread() && ActiveAttachment == this);
+			ActiveAttachment = Previous; // a destructor/Closed sink may attach another sink reentrantly
+			for (auto& Event : DeferredEvents)
+				FVaRestTrace::EmitAfterAttachmentOnGT(Event.Kind, Event.Time, MoveTemp(Event.Payload), Event.Source);
+			DeferredEvents.Empty();
+			Clients.Empty(); // Destroyed reaches the newly attached sink before a possible last Scope Closed
+			for (const auto& Scope : Scopes)
+				Scope->ReleaseSnapshotPinOnGT();
+		}
+	};
+	void HoldSnapshotScopeOnGT(TSharedRef<FNativeScopeLifetime, ESPMode::ThreadSafe> Scope)
+	{
+		check(IsInGameThread());
+		if (!ActiveAttachment || ActiveAttachment->Scopes.Contains(Scope))
+			return;
+		Scope->AddSnapshotPinOnGT();
+		ActiveAttachment->Scopes.Add(MoveTemp(Scope));
+	}
+	void HoldManagedSnapshotClientOnGT(TSharedRef<FClientState, ESPMode::ThreadSafe> Client)
+	{
+		check(IsInGameThread() && Client->GetManagedLifetime().IsValid());
+		if (ActiveAttachment)
+			ActiveAttachment->Clients.Add(MoveTemp(Client));
+	}
 	/**
 	 * The sink list, the merged caps and the isolation stack. The list itself is immutable once published (IN-12). Leaked
 	 * on purpose (review I-4): nothing in VaRestHttp may run at static destruction, where a client state dying late (a
@@ -34,8 +72,10 @@ namespace VaRest::Http::TracePrivate
 	// Counters start at 0 and ids are fetch_add + 1, so 0 can never be handed out (IN-10)
 	std::atomic<uint64> NextRequest{ 0 };
 	std::atomic<uint64> NextClient{ 0 };
+	std::atomic<uint64> NextScope{ 0 };
+	std::atomic<uint64> NextSocket{ 0 }, NextSocketFrame{ 0 };
 
-	/** Only the socket kinds (W5) have no payload type yet and are not checked */
+	/** Keep every public kind paired with its concrete native payload. */
 	bool PayloadMatchesKind(EVaRestTraceKind Kind, const FVaRestTracePayload& Payload)
 	{
 		switch (Kind)
@@ -49,6 +89,10 @@ namespace VaRest::Http::TracePrivate
 		case EVaRestTraceKind::Scope: return Payload.IsType<FVaRestTraceScope>();
 		case EVaRestTraceKind::Client: return Payload.IsType<FVaRestTraceClient>();
 		case EVaRestTraceKind::Marker: return Payload.IsType<FVaRestTraceMarker>();
+		case EVaRestTraceKind::Socket: return Payload.IsType<FVaRestTraceSocket>();
+		case EVaRestTraceKind::SocketAttempt: return Payload.IsType<FVaRestTraceSocketAttempt>();
+		case EVaRestTraceKind::SocketFrame: return Payload.IsType<FVaRestTraceSocketFrame>();
+		case EVaRestTraceKind::SocketNote: return Payload.IsType<FVaRestTraceSocketNote>();
 		default: return true;
 		}
 	}
@@ -83,6 +127,12 @@ namespace VaRest::Http::TracePrivate
 
 FString FVaRestTraceExcerpt::ToText() const
 {
+	if (Kind == EVaRestExcerptKind::Binary && bBinaryCaptured)
+	{
+		FString Hex;
+		if (Bytes) for (uint8 Byte : *Bytes) Hex.Appendf(TEXT("%02x"), Byte);
+		return Hex;
+	}
 	return Bytes.IsValid() ? FString::ConstructFromPtrSize(reinterpret_cast<const UTF8CHAR*>(Bytes->GetData()), Bytes->Num()) : FString();
 }
 
@@ -121,8 +171,9 @@ void FVaRestTrace::AddSink(const FSinkRef& Sink)
 		}
 	}
 	// IN-12: a late sink (Record after Pause, a module loading after the PreDefault core) learns what already exists.
-	// A client the snapshot pinned can die only after this function returns: FClientState::ForEachLive releases its pins
-	// from a later game-thread task, so that client's Client{Destroyed} reaches this sink after OnAttached (review M-9).
+	// Managed pins span snapshot construction, OnAttached and registry publication synchronously. Their actual GT
+	// destruction then reaches this sink; no uncounted named-GT cleanup task can survive managed retirement/Stop.
+	VaRest::Http::TracePrivate::FAttachmentPins ManagedPins;
 	Sink->OnAttached(BuildSnapshot());
 	TSharedPtr<const FSinkList, ESPMode::ThreadSafe> Current = GetSinks();
 	TSharedRef<FSinkList, ESPMode::ThreadSafe> Next = MakeShared<FSinkList, ESPMode::ThreadSafe>(Current.IsValid() ? *Current : FSinkList());
@@ -191,12 +242,23 @@ TSharedPtr<const FVaRestTrace::FSinkList, ESPMode::ThreadSafe> FVaRestTrace::Get
 	return Registry().Sinks;
 }
 
+bool FVaRestTrace::IsAttachingOnGT() { check(IsInGameThread()); return VaRest::Http::TracePrivate::ActiveAttachment != nullptr; }
+void FVaRestTrace::EmitAfterAttachmentOnGT(EVaRestTraceKind Kind, double Time, FVaRestTracePayload&& Payload, EVaRestTraceSource Source)
+{
+	check(IsInGameThread());
+	if (auto* Attachment = VaRest::Http::TracePrivate::ActiveAttachment)
+	{
+		FVaRestTraceEvent Event; Event.Kind = Kind; Event.Time = Time; Event.Source = Source; Event.Payload = MoveTemp(Payload);
+		Attachment->DeferredEvents.Add(MoveTemp(Event)); return;
+	}
+	if (Detail() != EVaRestTraceDetail::None) Emit(Kind, Time, MoveTemp(Payload), Source);
+}
+
 void FVaRestTrace::Emit(EVaRestTraceKind Kind, double Time, FVaRestTracePayload&& Payload, EVaRestTraceSource Source)
 {
 	// Spec 9: nothing is emitted from the HTTP thread; every kind but Excerpt (a background task) is game-thread only.
 	checkSlow(IsInGameThread() || Kind == EVaRestTraceKind::Excerpt);
-	// A mismatch would otherwise surface as a TVariant::Get failure inside some sink. Kinds without a payload type yet
-	// (the socket kinds) are not checked.
+	// A mismatch would otherwise surface as a TVariant::Get failure inside some sink.
 	checkSlow(VaRest::Http::TracePrivate::PayloadMatchesKind(Kind, Payload));
 	const TSharedPtr<const FSinkList, ESPMode::ThreadSafe> List = GetSinks();
 	if (!List.IsValid() || List->Num() == 0)
@@ -230,6 +292,7 @@ FVaRestTraceSnapshot FVaRestTrace::BuildSnapshot()
 	FVaRestTraceScope& Process = Snapshot.Scopes.AddDefaulted_GetRef();
 	Process.ScopeId = ProcessScopeId;
 	Process.Label = TEXT("Process");
+	VaRest::Http::FNativeScopeLifetime::ContributeSnapshot(Snapshot);
 	OnBuildSnapshot().Broadcast(Snapshot);
 	return Snapshot;
 }
@@ -246,6 +309,33 @@ uint64 FVaRestTrace::NewClientId()
 	const uint64 Id = VaRest::Http::TracePrivate::NextClient.fetch_add(1, std::memory_order_relaxed) + 1;
 	check(Id != 0);
 	return Id;
+}
+
+uint64 FVaRestTrace::NewScopeId()
+{
+	auto& Counter = VaRest::Http::TracePrivate::NextScope;
+	uint64 Previous = Counter.load(std::memory_order_relaxed);
+	while (Previous != MAX_uint64)
+		if (Counter.compare_exchange_weak(Previous, Previous + 1, std::memory_order_relaxed))
+			return Previous + 1;
+	return 0;
+}
+
+uint64 FVaRestTrace::NewSocketId()
+{
+	auto& Counter = VaRest::Http::TracePrivate::NextSocket;
+	uint64 Previous = Counter.load(std::memory_order_relaxed);
+	while (Previous != MAX_uint64)
+		if (Counter.compare_exchange_weak(Previous, Previous + 1, std::memory_order_relaxed)) return Previous + 1;
+	return 0;
+}
+uint64 FVaRestTrace::NewSocketFrameId()
+{
+	auto& Counter = VaRest::Http::TracePrivate::NextSocketFrame;
+	uint64 Previous = Counter.load(std::memory_order_relaxed);
+	while (Previous != MAX_uint64)
+		if (Counter.compare_exchange_weak(Previous, Previous + 1, std::memory_order_relaxed)) return Previous + 1;
+	return 0;
 }
 
 FVaRestTraceCounters& FVaRestTrace::Counters()

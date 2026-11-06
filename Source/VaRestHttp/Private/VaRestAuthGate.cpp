@@ -6,6 +6,7 @@
 #include "VaRestConnectivity.h"
 #include "VaRestExchangeState.h"
 #include "VaRestHttpLog.h"
+#include "VaRestManagedCallbacks.h"
 #include "VaRestRetryInternal.h"
 
 namespace VaRest::Http::AuthGatePrivate
@@ -44,6 +45,9 @@ namespace VaRest::Http::AuthGatePrivate
 		bool bReplayed = false;
 		/** Concurrency review M-1: the retry deadline while parked */
 		FVaRestTimerHandle DeadlineTimer;
+		/** Only owned requests poll while no physical dispatch can check their owner. */
+		FVaRestTimerHandle OwnerPollTimer;
+		uint64 ParkWaiterId = 0;
 	};
 
 	using FRunRef = TSharedRef<FRun, ESPMode::ThreadSafe>;
@@ -117,6 +121,86 @@ namespace VaRest::Http::AuthGatePrivate
 		}
 	}
 
+	void StopParkOwnerPoll(FRun& Run)
+	{
+		Run.ParkWaiterId = 0; // a callback already queued for an earlier park must not touch a new one
+		if (Run.OwnerPollTimer.IsValid() && !IsManagedStopped(Run.Exchange))
+		{
+			Internals(*Run.Exchange).Config->Clock->ClearTimer(Run.OwnerPollTimer);
+		}
+	}
+
+	/** Required polling cannot be silently abandoned on native callback/timer admission refusal. */
+	void RefuseParkOwnerPoll(FRun& Run, uint64 WaiterId)
+	{
+		if (IsManagedStopped(Run.Exchange) || Run.IsAnswered() || Run.ParkWaiterId != WaiterId)
+			return;
+		StopParkOwnerPoll(Run);
+		if (IsManagedStopped(Run.Exchange)) return;
+		FExchangeState& Ex = Internals(*Run.Exchange);
+		Ex.Config->Clock->ClearTimer(Run.DeadlineTimer);
+		if (IsManagedStopped(Run.Exchange)) return;
+		Ex.Interrupt.Reset();
+		Ex.State->LeaveRefresh(WaiterId);
+		FVaRestAttemptOutcome Ended = MakeManagedCapacityOutcome(TEXT("LifecycleCapacity"));
+		LogParkEnd(Ex, Ended);
+		Ex.PendingAttemptStart = -1.0;
+		Run.Answer(MoveTemp(Ended));
+	}
+
+	void ArmParkOwnerPoll(FRun& Run, uint64 WaiterId)
+	{
+		if (IsManagedStopped(Run.Exchange) || IsManagedClosed(Run.Exchange) || Run.IsAnswered() || Run.ParkWaiterId != WaiterId)
+			return;
+		FExchangeState& Ex = Internals(*Run.Exchange);
+		if (!Ex.bHasOwner)
+			return;
+		const auto Native = Ex.Managed;
+		FNativeLogicalTailLease Active;
+		if (Native.IsValid())
+		{
+			Active = Native.Store->TryAddLogicalTailOnGT(Native);
+			if (!Active.IsHeld()) { RefuseParkOwnerPoll(Run, WaiterId); return; }
+		}
+		TUniqueFunction<void()> Poll = [Weak = TWeakPtr<FRun, ESPMode::ThreadSafe>(Run.AsShared()), WaiterId] {
+			LLM_SCOPE_BYTAG(VaRest);
+			const auto Pinned = Weak.Pin();
+			if (!Pinned.IsValid() || IsManagedStopped(Pinned->Exchange) || Pinned->ParkWaiterId != WaiterId)
+				return;
+			Pinned->OwnerPollTimer.Invalidate();
+			if (Pinned->IsAnswered() || IsManagedClosed(Pinned->Exchange))
+				return;
+			FExchangeState& Late = Internals(*Pinned->Exchange);
+			if (Late.bFinished || Late.bCompletionQueued || Late.Phase != EVaRestExchangePhase::InChain)
+				return;
+			if (IsOwnerGone(Late))
+			{
+				// The existing cancel/interrupt path leaves the refresh and retires callbacks silently.
+				Late.State->Cancel(Pinned->Exchange, EVaRestCancelReason::OwnerGone);
+				return;
+			}
+			ArmParkOwnerPoll(*Pinned, WaiterId);
+		};
+		if (!PrepareManagedGTCallback(Run.Exchange, Poll))
+		{
+			RefuseParkOwnerPoll(Run, WaiterId);
+			return;
+		}
+		FVaRestTimerHandle Created = Ex.Config->Clock->SetTimer(0.1, MoveTemp(Poll));
+		if (IsManagedStopped(Run.Exchange)) return;
+		if (Run.IsAnswered() || Run.ParkWaiterId != WaiterId)
+		{
+			Ex.Config->Clock->ClearTimer(Created);
+			return;
+		}
+		if (!Created.IsValid())
+		{
+			RefuseParkOwnerPoll(Run, WaiterId);
+			return;
+		}
+		Run.OwnerPollTimer = Created;
+	}
+
 	/**
 	 * Concurrency review M-1: the retry deadline is armed in a park too. Behind a slow refresh, or one an auth holds open (a
 	 * re-login screen, ruling I-4), the request ends at its deadline: Timeout (Deadline), not retryable. A fire before
@@ -125,7 +209,15 @@ namespace VaRest::Http::AuthGatePrivate
 	 */
 	void ArmParkDeadline(FRun& Run, uint64 WaiterId, double Delay)
 	{
-		Run.DeadlineTimer = Internals(*Run.Exchange).Config->Clock->SetTimer(Delay, [Weak = TWeakPtr<FRun, ESPMode::ThreadSafe>(Run.AsShared()), WaiterId]
+		if (IsManagedStopped(Run.Exchange) || IsManagedClosed(Run.Exchange)) return;
+		const auto Native=Internals(*Run.Exchange).Managed;
+		FNativeLogicalTailLease Active;
+		if (Native.IsValid())
+		{
+			Active=Native.Store->TryAddLogicalTailOnGT(Native);
+			if (!Active.IsHeld()) { Run.Answer(MakeManagedCapacityOutcome(TEXT("LifecycleCapacity")));return; }
+		}
+		TUniqueFunction<void()> Timer=[Weak = TWeakPtr<FRun, ESPMode::ThreadSafe>(Run.AsShared()), WaiterId]
 		{
 			// M4a final review A5 (review A M-4, spec 4.8): a game-thread re-entry from the clock's ticker
 			LLM_SCOPE_BYTAG(VaRest);
@@ -134,6 +226,8 @@ namespace VaRest::Http::AuthGatePrivate
 			{
 				return;
 			}
+			if (IsManagedStopped(Pinned->Exchange)) return;
+			if (Pinned->ParkWaiterId != WaiterId) return;
 			Pinned->DeadlineTimer.Invalidate();
 			if (Pinned->IsAnswered())
 			{
@@ -142,12 +236,15 @@ namespace VaRest::Http::AuthGatePrivate
 			}
 			FExchangeState& Late = Internals(*Pinned->Exchange);
 			const double Rest = Late.DeadlineAt - Late.Config->Clock->Now();
+			if (IsManagedStopped(Pinned->Exchange)) return;
 			if (Rest > DeadlineTimerSlack)
 			{
 				ArmParkDeadline(*Pinned, WaiterId, Rest);
 				return;
 			}
 			// Unconditionally: one stage waits at a time, so the hook is still this park's own (as Retry's backoff timer)
+			StopParkOwnerPoll(*Pinned);
+			if (IsManagedStopped(Pinned->Exchange)) return;
 			Late.Interrupt.Reset();
 			Late.State->LeaveRefresh(WaiterId);
 			FVaRestAttemptOutcome Ended = MakeDeadlineOutcome();
@@ -155,7 +252,14 @@ namespace VaRest::Http::AuthGatePrivate
 			// M4 plan re-review N-11: no attempt follows this park; a stage that re-issues after it starts a fresh one
 			Late.PendingAttemptStart = -1.0;
 			Pinned->Answer(MoveTemp(Ended));
-		});
+		};
+		if (!PrepareManagedGTCallback(Run.Exchange,Timer))
+		{
+			if (!IsManagedStopped(Run.Exchange)) Run.Answer(MakeManagedCapacityOutcome(TEXT("LifecycleCapacity")));
+			return;
+		}
+		// Active protects this actual SetTimer callout; the separate adapter protects later invocation/discard.
+		Run.DeadlineTimer=Internals(*Run.Exchange).Config->Clock->SetTimer(Delay,MoveTemp(Timer));
 	}
 
 	void Dispatch(const FRunRef& Run);
@@ -170,7 +274,10 @@ namespace VaRest::Http::AuthGatePrivate
 		FExchangeState& Ex = Internals(*Run->Exchange);
 		FClientState& Client = *Ex.State;
 		const uint64 WaiterId = Client.NewWaiterId();
+		if (WaiterId==0 && Ex.Managed.IsValid()) { Run->Answer(MakeManagedCapacityOutcome(TEXT("LifecycleGeneration")));return; }
 		const double Now = Ex.Config->Clock->Now();
+		if (IsManagedStopped(Run->Exchange)) return;
+		if (IsManagedClosed(Run->Exchange)) { Run->Answer(FVaRestAttemptOutcome::Canceled());return; }
 		const bool bContinued = FirstParkedAt >= 0.0;
 		const double ParkedAt = bContinued ? FirstParkedAt : Now;
 		if (!bReplay && !bContinued)
@@ -184,6 +291,7 @@ namespace VaRest::Http::AuthGatePrivate
 			Ex.PendingAttemptStart = ParkedAt;
 		}
 		const TWeakPtr<FRun, ESPMode::ThreadSafe> Weak = Run;
+		Run->ParkWaiterId = WaiterId;
 		// Set before JoinRefresh, as a backoff's is (decision 7): Cancel, owner-gone and shutdown reach the park through it,
 		// and so does a Cancel() from inside the auth's Refresh, which JoinRefresh may call
 		Ex.Interrupt = [Weak, WaiterId]() -> bool
@@ -194,7 +302,10 @@ namespace VaRest::Http::AuthGatePrivate
 				return false;
 			}
 			FExchangeState& Stopped = Internals(*Pinned->Exchange);
+			StopParkOwnerPoll(*Pinned);
+			if (IsManagedStopped(Pinned->Exchange)) return true;
 			Stopped.Config->Clock->ClearTimer(Pinned->DeadlineTimer);
+			if (IsManagedStopped(Pinned->Exchange)) return true;
 			// Concurrency review I-5: the waiter goes uncalled, the refresh goes on for the others
 			Stopped.State->LeaveRefresh(WaiterId);
 			FVaRestAttemptOutcome Ended = FVaRestAttemptOutcome::Canceled();
@@ -209,6 +320,10 @@ namespace VaRest::Http::AuthGatePrivate
 		{
 			ArmParkDeadline(*Run, WaiterId, FMath::Max(0.0, Ex.DeadlineAt - Now));
 		}
+		if (Run->IsAnswered() || IsManagedStopped(Run->Exchange)) return;
+		ArmParkOwnerPoll(*Run, WaiterId);
+		if (Run->IsAnswered() || IsManagedStopped(Run->Exchange)) return;
+		if (IsManagedClosed(Run->Exchange)) { Run->Answer(FVaRestAttemptOutcome::Canceled());return; }
 		// The waiter runs from the refresh's one game-thread task (concurrency review I-1), never inside this call. It holds
 		// the run, so the exchange (and through it the client, as any request in flight does, spec 3.2) until the refresh
 		// ends; a request that finishes first leaves the list through the hook above (LeaveRefresh), so no waiter outlives it.
@@ -216,7 +331,7 @@ namespace VaRest::Http::AuthGatePrivate
 		// completed from a later task (FClientState::Complete defers inside Cancel, decision 3)
 		// M4a final review B6: a park before an attempt starts a proactive refresh (BeforeAttempt parks for a due expiry or a
 		// missing access token when none runs); a replay's park starts a reactive one (its 401)
-		Ex.ParkRefreshId = Client.JoinRefresh(WaiterId, Run->Auth, Ex.RequestId, /*bProactive*/ !bReplay, [Run, ParkedAt, bReplay](const FRefreshEnded& End)
+		FRefreshWaiter Waiter=[Run, ParkedAt, bReplay](const FRefreshEnded& End)
 		{
 			// M4a final review A5 (review A M-4, spec 4.8): the refresh's end runs this from a game-thread task that took the
 			// tags of whoever answered the refresh (an auth's Done, the game's SetSession; TaskPrivate.h:192), and the attempt
@@ -228,8 +343,13 @@ namespace VaRest::Http::AuthGatePrivate
 				return;
 			}
 			FExchangeState& Back = Internals(*Run->Exchange);
+			Back.ParkRefreshId = End.RefreshId; // a token rotation may have replaced the flight while this waiter stayed parked
 			Back.Interrupt.Reset();
+			StopParkOwnerPoll(*Run);
+			if (IsManagedStopped(Run->Exchange)) return;
 			Back.Config->Clock->ClearTimer(Run->DeadlineTimer);
+			if (IsManagedStopped(Run->Exchange)) return;
+			if (IsManagedClosed(Run->Exchange)) { Run->Answer(FVaRestAttemptOutcome::Canceled());return; }
 			// M4a final review B6 (ruling): a proactive refresh is an optimization. When one fails (not Rejected, not Cleared),
 			// a request parked before its attempt whose access token is still unexpired is sent with that token instead of
 			// failing, provided connectivity now permits another request; if the token is refused
@@ -237,6 +357,8 @@ namespace VaRest::Http::AuthGatePrivate
 			// or RefreshAuth's refresh keep spec 4.2's rule: they fail with the refresh's kind.
 			const bool bFallbackCandidate = End.End == ERefreshEnd::Failed && End.bProactive && !bReplay
 				&& IsAccessTokenUnexpired(Back.State->GetSessionData(), Back.Config->Clock->Now());
+			if (IsManagedStopped(Run->Exchange)) return;
+			if (IsManagedClosed(Run->Exchange)) { Run->Answer(FVaRestAttemptOutcome::Canceled());return; }
 			const bool bSendAnyway = bFallbackCandidate && Back.Config->Connectivity->IsOnline();
 			if ((End.End != ERefreshEnd::Ready && !bSendAnyway) || IsOwnerGone(Back))
 			{
@@ -258,7 +380,10 @@ namespace VaRest::Http::AuthGatePrivate
 				return;
 			}
 			const FVaRestSessionData& Live = Back.State->GetSessionData();
-			if (!Live.HasAccessToken() && CanRefreshNow(*Run->Auth, Live))
+			const bool bRefreshAgain=!Live.HasAccessToken() && CanRefreshNow(*Run->Auth, Live);
+			if (IsManagedStopped(Run->Exchange)) return;
+			if (IsManagedClosed(Run->Exchange)) { Run->Answer(FVaRestAttemptOutcome::Canceled());return; }
+			if (bRefreshAgain)
 			{
 				// M4a final review B4 (review B m-2): the game left a refresh token only while this waited (SetSession("", R),
 				// an import of one), which ended the refresh (VaRestSession.cpp SetTokensByGame). Going on now would send no
@@ -268,6 +393,8 @@ namespace VaRest::Http::AuthGatePrivate
 				return;
 			}
 			const double Seconds = Back.Config->Clock->Now() - ParkedAt;
+			if (IsManagedStopped(Run->Exchange)) return;
+			if (IsManagedClosed(Run->Exchange)) { Run->Answer(FVaRestAttemptOutcome::Canceled());return; }
 			Back.AuthRefreshId = End.RefreshId;
 			if (bReplay)
 			{
@@ -284,7 +411,16 @@ namespace VaRest::Http::AuthGatePrivate
 			// A request canceled or answered meanwhile without this run hearing of it (a worker's Cancel() still on its way)
 			// is refused by Proceed, which answers Canceled: its Phase and bCompletionQueued checks are the pipeline's own
 			Dispatch(Run);
-		});
+		};
+		if (!PrepareManagedRefreshWaiter(Run->Exchange,Waiter))
+		{
+			Ex.Interrupt.Reset();
+			StopParkOwnerPoll(*Run);
+			if (!IsManagedStopped(Run->Exchange)) Ex.Config->Clock->ClearTimer(Run->DeadlineTimer);
+			if (!IsManagedStopped(Run->Exchange)) Run->Answer(MakeManagedCapacityOutcome(TEXT("LifecycleCapacity")));
+			return;
+		}
+		Ex.ParkRefreshId=Client.JoinRefresh(WaiterId,Run->Auth,Ex.RequestId,/*bProactive*/ !bReplay,MoveTemp(Waiter));
 	}
 
 	void AfterAttempt(const FRunRef& Run, FVaRestAttemptOutcome&& Outcome)

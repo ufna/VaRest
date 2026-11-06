@@ -31,6 +31,24 @@ namespace VaRest::WebSocket::VaRestSocketFakeTestPrivate
 	}
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestSocketFakeIdleDeadlineTest, "VaRest.WebSocket.Fake.IdleDeadline",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+bool FVaRestSocketFakeIdleDeadlineTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::WebSocket::VaRestSocketFakeTestPrivate;
+	FVaRestFakeSocketTransport Fake;
+	const auto Connection = Fake.Connect(Request(TEXT("ws://fake.test/idle")));
+	Fake.GetLast().Open();
+	TestTrue(TEXT("service watchdog command admitted"), Connection->SetIdleDeadline(12.5));
+	TestEqual(TEXT("accepted command recorded, expiration remains scripted"), Fake.GetLast().GetIdleDeadlineSeconds(), 12.5);
+	TestFalse(TEXT("negative command refused"), Connection->SetIdleDeadline(-1));
+	TestEqual(TEXT("refusal preserves previous command"), Fake.GetLast().GetIdleDeadlineSeconds(), 12.5);
+	TestTrue(TEXT("zero disables service deadline"), Connection->SetIdleDeadline(0));
+	Fake.GetLast().ServerClose(1000);
+	TestFalse(TEXT("ended connection refuses commands"), Connection->SetIdleDeadline(5));
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestSocketFakeScriptTest, "VaRest.WebSocket.Fake.Script",
 	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
 

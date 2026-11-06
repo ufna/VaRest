@@ -1,6 +1,7 @@
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 
 using UnrealBuildTool;
+using System.IO;
 
 // Tests that need reflected test types, the integration suite and the benchmarks. UncookedOnly: built for the editor
 // and uncooked runs only, so its USTRUCTs never reach a game's reflection data (VaRest-rfd, decision 15).
@@ -10,12 +11,23 @@ public class VaRestTests : ModuleRules
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 
+		if (Target.Platform == UnrealTargetPlatform.Linux)
+		{
+			PrivateIncludePathModuleNames.Add("VaRestNativeOwner");
+			DynamicallyLoadedModuleNames.Add("VaRestNativeOwner");
+		}
+
+		// Own reflected JSON fixtures here; private codec assertions keep a one-way dependency on VaRestJson.
+		PrivateIncludePaths.Add(Path.Combine(ModuleDirectory, "..", "VaRestJson", "Private"));
+
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
 			"Core",
 			"CoreUObject",
 			"Engine",
 			"VaRestJson",
+			"Json", // The typed benchmark directly uses the engine JSON DOM/serializer.
+			"JsonUtilities", // Bench.VaRest.Json.TypedConvert's engine converter comparand.
 			"VaRestHttp",
 			"VaRestInspector",
 			// WebSocket W1: the transport's integration suite (VaRest.Integration.WebSocket.Transport.*) and its test hooks

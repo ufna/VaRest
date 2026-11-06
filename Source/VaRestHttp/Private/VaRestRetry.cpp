@@ -7,6 +7,7 @@
 #include "VaRestExchangeState.h"
 #include "VaRestHttpLog.h"
 #include "VaRestHttpStatsInternal.h"
+#include "VaRestManagedCallbacks.h"
 #include "VaRestRetryInternal.h"
 #include "VaRestTracePoints.h"
 
@@ -170,6 +171,13 @@ namespace VaRest::Http::RetryPrivate
 		FExchangeState& Ex = Internals(*Run->Exchange);
 		// The attempt's end for the next gap (spec review M-10): its outcome reaches this stage in the call that ended it
 		Ex.LastAttemptEndedAt = Ex.Config->Clock->Now();
+		if (IsManagedStopped(Run->Exchange))
+			return;
+		if (IsManagedClosed(Run->Exchange))
+		{
+			Run->Answer(FVaRestAttemptOutcome::Canceled());
+			return;
+		}
 		// Spec 3.2: "owner gone -> no callbacks, no further retries"; a canceled or finished request is not retried either,
 		// nor one whose answer is already accepted -- being decoded, or its delivery queued (a custom Outer stage in front
 		// answered while this attempt ran): a backoff armed now would fire inside the window that re-review N-6 closes for
@@ -181,6 +189,8 @@ namespace VaRest::Http::RetryPrivate
 		}
 		const FRetryDecision Decision = DecideRetry(Ex.RetryPolicy, Outcome, Ex.RetriesDone, Ex.Config->Clock->Now(), Ex.DeadlineAt, FDateTime::UtcNow(),
 			Ex.State->GetRandom());
+		if (IsManagedStopped(Run->Exchange))
+			return;
 		if (!Decision.bRetry)
 		{
 			Run->Answer(MoveTemp(Outcome));
@@ -202,10 +212,11 @@ namespace VaRest::Http::RetryPrivate
 				return false;
 			}
 			Internals(*Pinned->Exchange).Config->Clock->ClearTimer(Pinned->Timer);
+			if (IsManagedStopped(Pinned->Exchange)) return true;
 			Pinned->Answer(FVaRestAttemptOutcome::Canceled());
 			return true;
 		};
-		Run->Timer = Ex.Config->Clock->SetTimer(Decision.Delay, [Run]
+		TUniqueFunction<void()> Resume = [Run]
 		{
 			// M4a final review A5 (review A M-4, spec 4.8): a game-thread re-entry from the clock's ticker (or a test's
 			// Advance), so the re-issued attempt -- its header copy, AuthApply's writes, its log lines -- is VaRest's, not
@@ -222,7 +233,7 @@ namespace VaRest::Http::RetryPrivate
 				Run->Answer(FVaRestAttemptOutcome::Canceled());
 				return;
 			}
-			if (Waited.IsCancelRequested())
+			if (Waited.IsCancelRequested() || IsManagedClosed(Run->Exchange))
 			{
 				// Task 20 review M-1: a Cancel() from another thread sets the flag at once and reaches this wait's hook only
 				// from a later game-thread task (FVaRestRequestHandle::Cancel, VaRestClient.cpp:260-264); a backoff that
@@ -235,8 +246,29 @@ namespace VaRest::Http::RetryPrivate
 			// The auth gate's replay is not one (plan decision 2): it never comes through here.
 			FHttpStats::Retried(Waited.State->GetCounters());
 			StartAttempt(Run);
-		});
+		};
+		if (!PrepareManagedGTCallback(Run->Exchange, Resume))
+		{
+			if (!IsManagedStopped(Run->Exchange))
+				Run->Answer(IsManagedClosed(Run->Exchange) ? FVaRestAttemptOutcome::Canceled() : MakeManagedCapacityOutcome(TEXT("LogicalCapacity")));
+			return;
+		}
+		FNativeLogicalTailLease Active;
+		if (Ex.Managed.IsValid())
+		{
+			Active=Ex.Managed.Store->TryAddLogicalTailOnGT(Ex.Managed);
+			if (!Active.IsHeld())
+			{
+				Run->Answer(MakeManagedCapacityOutcome(TEXT("LogicalCapacity")));
+				return;
+			}
+		}
+		Run->Timer = Ex.Config->Clock->SetTimer(Decision.Delay, MoveTemp(Resume));
+		if (IsManagedStopped(Run->Exchange))
+			return;
 		LogRetry(Ex, Decision);
+		if (IsManagedStopped(Run->Exchange))
+			return;
 		FVaRestTraceNote Note;
 		Note.Kind = EVaRestTraceNoteKind::RetryScheduled;
 		Note.Reason = Decision.Reason;

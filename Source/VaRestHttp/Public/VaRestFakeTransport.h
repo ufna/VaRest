@@ -88,6 +88,8 @@ public:
 	void ReportProgress(int32 Index, int64 BytesSent, int64 BytesReceived, int64 DownloadTotal = -1);
 	/** Destroys the call's completion without calling it, as the engine does at HTTP module shutdown and with NullHttp (review I-3) */
 	void Drop(int32 Index);
+	/** GT: release a completed record's retained request clock after inspection, including a managed dispatch view. */
+	bool ReleaseCompletedClock(int32 Index);
 
 	/**
 	 * Completions queued on the worker pipe (bCompleteOnWorker; game thread), and those whose callback has returned there

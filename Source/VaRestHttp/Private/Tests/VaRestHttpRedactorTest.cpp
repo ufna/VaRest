@@ -707,4 +707,32 @@ bool FVaRestHttpRedactorGateWhileHoldingTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpRedactBinaryCaptureTest, "VaRest.Http.Redactor.BinaryCapture",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+bool FVaRestHttpRedactBinaryCaptureTest::RunTest(const FString& Parameters)
+{
+	const FVaRestRedactor Redactor(FVaRestRedactRules(), {TEXT("Binary-Known-Secret")});
+	const TArray<uint8> Raw{0, 0xff, 0x89, 'x'};
+	const auto Default = Redactor.RedactBody(TEXT("application/octet-stream"), Raw, Raw.Num(), 4096);
+	TestTrue(TEXT("existing overload retains a descriptor"), !Default.bBinaryCaptured && Default.ToText().StartsWith(TEXT("<binary: ")));
+	const auto Captured = Redactor.RedactBody(TEXT("application/octet-stream"), Raw, Raw.Num(), 0, 3);
+	TestTrue(TEXT("independent binary cap preserves NUL and invalid UTF-8"), Captured.bBinaryCaptured && Captured.Bytes && *Captured.Bytes == TArray<uint8>{0, 0xff, 0x89});
+	TestTrue(TEXT("binary cap is explicit and truncated"), Captured.bTruncated && Captured.StopReason == TEXT("cap") && Captured.TotalBytes == 4);
+	TestEqual(TEXT("text projection is hex, never a binary UTF-8 decode"), Captured.ToText(), FString(TEXT("00ff89")));
+	TestFalse(TEXT("negative binary cap keeps descriptor mode"), Redactor.RedactBody(TEXT("image/png"), Raw, Raw.Num(), 4096, -1).bBinaryCaptured);
+	const FTCHARToUTF8 Secret(TEXT("Binary-Known-Secret"));
+	TArray<uint8> Payload{0, 0xff}; Payload.Append(reinterpret_cast<const uint8*>(Secret.Get()), Secret.Length()); Payload.Add(0x80);
+	const auto Whole = Redactor.RedactBody(TEXT("application/x-protobuf"), Payload, Payload.Num(), 1, 256);
+	TestTrue(TEXT("known value scrub changes only its byte span"), Whole.bRedacted && !Whole.bTruncated && Whole.Bytes && *Whole.Bytes == TArray<uint8>{0, 0xff, '*', '*', '*', 0x80});
+	const auto Cut = Redactor.RedactBody(TEXT("application/x-protobuf"), Payload, Payload.Num(), 1, 8);
+	TestTrue(TEXT("a cap through a known secret removes its entire partial tail"), Cut.bRedacted && Cut.bTruncated && Cut.Bytes && *Cut.Bytes == TArray<uint8>{0, 0xff});
+	const char Json[] = "{\"password\":\"canary\",\"ok\":7}";
+	const auto JsonBytes = TConstArrayView<uint8>(reinterpret_cast<const uint8*>(Json), sizeof(Json)-1);
+	const auto Text = Redactor.RedactBody(TEXT("application/json"), JsonBytes, JsonBytes.Num(), 4096, 1);
+	TestTrue(TEXT("binary cap does not change JSON cap or key redaction"), !Text.bBinaryCaptured && Text.Kind == EVaRestExcerptKind::Json && !Text.ToText().Contains(TEXT("canary")) && Text.ToText().Contains(TEXT("\"ok\":7")));
+	const auto Empty = Redactor.RedactBody(TEXT("image/png"), {}, 0, 0, 4);
+	TestTrue(TEXT("empty binary capture has an explicit marker and no descriptor bytes"), Empty.bBinaryCaptured && !Empty.bTruncated && Empty.Bytes && Empty.Bytes->IsEmpty());
+	return true;
+}
+
 #endif

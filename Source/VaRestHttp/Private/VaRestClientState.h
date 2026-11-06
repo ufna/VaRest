@@ -13,11 +13,13 @@
 #include "VaRestHttpStatsInternal.h"
 #include "VaRestLimiter.h"
 #include "VaRestMemoryCache.h"
+#include "VaRestNativeClientSlots.h"
 #include "VaRestDiskCache.h"
 #include "VaRestRedactor.h"
 #include "VaRestRetry.h"
 #include "VaRestSession.h"
 #include "VaRestStage.h"
+#include "VaRestTrace.h"
 
 namespace VaRest::Http
 {
@@ -32,18 +34,27 @@ namespace VaRest::Http
     }
 	struct FPersistenceGuard;
     class FOfflineQueue;
+	class FNativeScopeLifetime;
+	class FManagedCompletionAccess;
+	enum class EManagedQueueStatus : uint8 { Ordinary,AccountRequired,Paused,PendingBusy,Active,Unavailable };
 
 	/** One immutable configuration snapshot; FClientState swaps a new one in on every edit (spec 3.1) */
 	struct FClientConfig
 	{
+		/** Initial identity only; Publish preserves the state's immutable scope. No post-Create move setter. */
+		uint64 ScopeId = FVaRestTrace::ProcessScopeId;
+		TSharedPtr<FNativeScopeLifetime, ESPMode::ThreadSafe> ScopeLifetime;
 		FString BaseUrl;
 		TSharedPtr<FVaRestConnectivity, ESPMode::ThreadSafe> Connectivity;
 		FString HealthUrl;
 		FString CacheRoot;
 		FString QueueRoot;
         FString QueueName, QueueConfigError;
+		EManagedQueueStatus ManagedQueueStatus=EManagedQueueStatus::Ordinary;
+		bool bQueueActivationRequested=false;
         FVaRestOfflinePolicy OfflinePolicy;
         TSharedPtr<FOfflineQueue, ESPMode::ThreadSafe> RegisteredQueue;
+		TSharedPtr<FQueueBinding, ESPMode::ThreadSafe> QueueBinding;
 		FString StorageConfigError;
 		FVaRestCachePolicy Cache;
 		FString CacheConfigError;
@@ -51,6 +62,9 @@ namespace VaRest::Http
 		FString DisplayName;
 		FVaRestHeaders DefaultHeaders;
 		EVaRestJsonNaming Naming = EVaRestJsonNaming::CamelCase;
+		bool bStrictDecode = false;
+		FString JsonContentType = TEXT("application/json");
+		TSharedPtr<const FVaRestJsonRuleSnapshot, ESPMode::ThreadSafe> JsonRules;
 		EVaRestLogLevel LogLevel = EVaRestLogLevel::Basic;
 		int32 MaxConcurrent = 16;
 		float Timeout = 0.f;
@@ -79,11 +93,12 @@ namespace VaRest::Http
 	class FClientState : public TSharedFromThis<FClientState, ESPMode::ThreadSafe>
 	{
 	public:
-		FClientState(uint64 InClientId, FClientConfig&& InConfig);
+		FClientState(uint64 InClientId, FClientConfig&& InConfig, FNativeClientRegistration InManaged = {});
 		~FClientState();
 
 		/** Builds the derived configuration and registers the client. Game thread. */
-		static TSharedRef<FClientState, ESPMode::ThreadSafe> Create(FClientConfig&& InConfig);
+		static TSharedRef<FClientState, ESPMode::ThreadSafe> Create(FClientConfig&& InConfig, FNativeClientRegistration InManaged = {},bool bPublishClient=true);
+		bool PublishCreatedOnGT();
 
         FMemoryCache& GetMemoryCache() { check(IsInGameThread()); return MemoryCache; }
         uint64 GetCacheEpoch() const { check(IsInGameThread()); return CacheEpoch; }
@@ -92,11 +107,22 @@ namespace VaRest::Http
 		void AttachConnectivity();
         void RefreshQueueRegistration();
         TSharedPtr<FOfflineQueue, ESPMode::ThreadSafe> Queue;
+		TSharedPtr<FQueueBinding, ESPMode::ThreadSafe> QueueBinding;
+		/** GT explicit managed detach. The returned native identity belongs in the caller's pre-reserved drain row. */
+		TSharedPtr<FQueueBinding, ESPMode::ThreadSafe> DetachQueueBindingOnGT();
         FVaRestQueuedResultEvent QueuedResult;
+		/** GTK terminal observer for wrapper forwarding. Carries the accepted primary error, never typed availability. */
+		TMulticastDelegate<void(const FVaRestError&)> PrimaryError;
         FLlmSenderTags EventSenderTags;
 		uint64 GetClientId() const { return ClientId; }
+		uint64 GetScopeId() const { return ScopeId; }
+		/** Immutable native admission identity; reading it does not acquire a current configuration snapshot. */
+		const FNativeClientRegistration& GetManagedLifetime() const { return ManagedLifetime; }
+		bool ManagedAdmissionIsClosed() const { return ManagedLifetime.IsValid() && (ManagedLifetime.Control->IsStopped() || ManagedLifetime.Gate->IsClosed()); }
 		/** Any thread */
 		TSharedRef<const FClientConfig, ESPMode::ThreadSafe> GetConfig() const;
+		/** Snapshot plus actual queue capture under one read lock; never obtain a work lease from ConfigAtBuild. */
+		TSharedRef<const FClientConfig, ESPMode::ThreadSafe> SnapshotForSend(FQueueCaptureLease& QueueCapture, bool bMayEnqueue) const;
 		/**
 		 * Any thread: the redactor of the configuration published now. It forgets values (ClearSecretValues, a rotated
 		 * value's 10 minutes, the cap of FVaRestSecretSet::MaxPrevious), so an exchange's lines use RedactorFor (review I-1).
@@ -104,6 +130,19 @@ namespace VaRest::Http
 		TSharedRef<const FVaRestRedactor, ESPMode::ThreadSafe> GetRedactor() const { return GetConfig()->Redactor.ToSharedRef(); }
 		/** Game thread: copy, edit, rebuild the chain and the redactor, swap */
 		void EditConfig(TFunctionRef<void(FClientConfig&)> Edit);
+		/**
+		 * Private managed environment/queue switch. Failure leaves A untouched; success publishes the complete B once,
+		 * initially paused unless explicit activation was requested. No permanent-gate reset or implicit replay activation.
+		 */
+		bool TrySwitchQueue(FClientConfig&& CompleteTarget,FString& OutError,bool bActivate=false);
+		bool ActivateManagedQueue(FString& OutError);
+		bool PauseManagedQueue(FString& OutError);
+		int64 ManagedQueuedCount(bool& bLoaded) const;
+		/** Private managed close, after the Hub has closed ALL gates and before it releases its wrappers. */
+		void BeginPermanentRetirement();
+		/** GT owner records its completed non-operation barrier; cells/input/auth/drains retain their own real fences. */
+		void TryFinishPermanentRetirementOnGT();
+		void RefreshManagedExternal(FRefreshWaiter&& OnDone);
 
 		/**
 		 * Game thread: the stream retry jitter draws from (plan decision 26). Seeded from the client id and the CPU cycle
@@ -123,6 +162,8 @@ namespace VaRest::Http
 		 * that produced it (M4a final review A1)
 		 */
 		void OnAttemptDone(const FVaRestExchangeRef& Exchange, FDispatchTag&& Tag, FVaRestTransportResult&& Result, FVaRestOutcomeCallback&& OnOutcome);
+		void OnAttemptDone(const FVaRestExchangeRef& Exchange, FDispatchTag&& Tag, FVaRestTransportResult&& Result,
+			FVaRestOutcomeCallback&& OnOutcome, FNativeLogicalTailLease&& FileCleanup);
 		/** Game thread */
 		int32 NumInFlight() const { return InFlight.Num(); }
 		/** GT: ordinary global completion wrappers; accepted persistence uses its own reserved slot. */
@@ -204,7 +245,8 @@ namespace VaRest::Http
 
 		// ---- Single-flight refresh (spec 4.2; Task 16; VaRestSession.cpp). Game thread.
 		bool IsRefreshing() const { return Session.Refresh.IsValid(); }
-		uint64 NewWaiterId() { return ++Session.NextWaiterId; }
+		bool IsCurrentRefreshOnGT(uint64 Id) const;
+		uint64 NewWaiterId() { return ManagedLifetime.IsValid() && Session.NextWaiterId==MAX_uint64 ? 0 : ++Session.NextWaiterId; }
 		/**
 		 * Waits for the refresh in flight, or starts one with Auth. Not a session change (it queues no event), so callable
 		 * outside RunSessionChange; the caller keeps this state alive (an exchange, RefreshAuth's pin). OnDone runs once,
@@ -212,12 +254,12 @@ namespace VaRest::Http
 		 * joined (M4a final review C-I-1: a parked request's Completed names it). bProactive: a refresh this starts is
 		 * FRefreshInFlight::bProactive (a park before an attempt; M4a final review B6); a refresh joined keeps its own.
 		 */
-		uint64 JoinRefresh(uint64 WaiterId, const TSharedRef<IVaRestAuth, ESPMode::ThreadSafe>& Auth, uint64 CauseRequestId, bool bProactive, FRefreshWaiter&& OnDone);
+		uint64 JoinRefresh(uint64 WaiterId, const TSharedRef<IVaRestAuth, ESPMode::ThreadSafe>& Auth, uint64 CauseRequestId, bool bProactive, FRefreshWaiter&& OnDone,ERefreshWaiterKind Kind=ERefreshWaiterKind::RequestGate);
 		/**
 		 * Task 17 review M-8 (ruled): waits for the refresh in flight -- whatever auth started it, and whether or not the
 		 * current one could refresh. Only while one runs (IsRefreshing); OnDone as JoinRefresh's.
 		 */
-		void JoinRefreshInFlight(uint64 WaiterId, FRefreshWaiter&& OnDone);
+		void JoinRefreshInFlight(uint64 WaiterId, FRefreshWaiter&& OnDone,ERefreshWaiterKind Kind=ERefreshWaiterKind::RequestGate);
 		/** A parked request was canceled: its waiter goes uncalled; the refresh goes on */
 		void LeaveRefresh(uint64 WaiterId);
 		/** Inside a change only: the auth's answer for RefreshId (a stale one is ignored); plan decision 3, ruling I-7 */
@@ -250,6 +292,8 @@ namespace VaRest::Http
 		void CancelAll(FName InTag, EVaRestCancelReason Reason);
 		/** FCoreDelegates::OnEnginePreExit: every live client's requests, without callbacks; later sends complete silently (review M-14) */
 		static void CancelForShutdown();
+		/** GT fallback shutdown: suppress delivery only, without assuming the engine HTTP module still exists. */
+		static void SuppressForShutdown();
 		/** Any thread */
 		static bool IsShuttingDown();
 #if WITH_DEV_AUTOMATION_TESTS
@@ -258,9 +302,19 @@ namespace VaRest::Http
 #endif
 
 	private:
+		friend class FManagedOperationPayload; // final GTK anchor disposal removes only this actual exchange's bookkeeping
+		friend struct FDynamicRequestAccess; // original ordinary dynamic handler/finish stay in the reserved GTK frame
+#if WITH_DEV_AUTOMATION_TESTS
+		friend struct FManagedCompletionTestAccess; // direct actual completion kernel, no copied implementation or public opt-in
+#endif
 		bool Resolve(FExchangeState& Exchange, FString& OutError) const;
 		void OnChainDone(const FVaRestExchangeRef& Exchange, FVaRestAttemptOutcome&& Outcome);
 		void Complete(const FVaRestExchangeRef& Exchange, FFinish&& Finish);
+		void BeginManagedCompletion(const FVaRestExchangeRef& Exchange, FFinish&& Finish, bool bConsiderDecode);
+		void FinishManagedCompletion(TSharedRef<FManagedCompletionAccess, ESPMode::ThreadSafe> Access);
+		void DropManagedCompletion(const FVaRestExchangeRef& Exchange);
+		void DropDeferredDynamicCompletion(const FVaRestExchangeRef& Exchange);
+		void FinishRequestBookkeeping(const FVaRestExchangeRef& Exchange);
 		/**
 		 * Game thread: Ex's answer was accepted (Complete, a deferred Complete, OnChainDone's decode), so nothing more may
 		 * start for it. A stage's wait ends through its interrupt hook (plan decision 7; concurrency review M-3, re-review
@@ -270,7 +324,9 @@ namespace VaRest::Http
 		 */
 		void EndWaits(FExchangeState& Ex);
 		FFinish MakeFinish(const FExchangeState& Exchange) const;
-		void Publish(const TSharedRef<FClientConfig, ESPMode::ThreadSafe>& Next);
+		bool Publish(const TSharedRef<FClientConfig, ESPMode::ThreadSafe>& Next,
+			const TSharedRef<const FClientConfig, ESPMode::ThreadSafe>& Expected,bool bRevokeOldQueue=false,
+			FVaRestSecretSet* PreparedSecrets=nullptr,TArray<FName>* PreparedAuthSlots=nullptr);
 		/** Publishes again when the next rotated-out value expires */
 		void ScheduleSecretExpiry();
 		/** IN-13 layer 3: the session's tokens and header values as its secret slots, one republish (VaRestSession.cpp) */
@@ -281,6 +337,8 @@ namespace VaRest::Http
 		void CheckInSessionChange() const;
 		/** JoinRefresh's first waiter: hands the auth its context and a guarded Done (VaRestSession.cpp) */
 		void StartRefresh(const TSharedRef<IVaRestAuth, ESPMode::ThreadSafe>& Auth);
+		/** Invalidates the old answer synchronously; starts its replacement from a later GT task, retaining waiters. */
+		void RestartRefreshAfterTokenChange();
 		/** Inside a change only: ends the refresh in flight without its result -- the game changed the session (Ready, Cleared) or it expired (Rejected) */
 		void EndRefresh(ERefreshEnd EndKind, const TCHAR* Message);
 		/**
@@ -290,7 +348,15 @@ namespace VaRest::Http
 		void ExpireSessionNow(uint64 CauseRequestId, FStringView Why);
 
 		const uint64 ClientId;
+		const uint64 ScopeId;
+		const TSharedPtr<FNativeScopeLifetime, ESPMode::ThreadSafe> ScopeLifetime;
+		const FNativeClientRegistration ManagedLifetime;
 		mutable FRWLock ConfigLock;
+		uint64 QueueRefreshRevision=0; // GT only, guards reentrant registration publication; never wraps
+		bool bQueueRegistrationActive=false; // GT: a committed Join can still be inside its load/clock callouts
+		bool bPermanentRetirementStarted=false;
+		bool bPermanentRetirementActionsComplete=false;
+		bool bClientPublished=false;
 		/**
 		 * Never null between the constructor and the destructor. A TSharedPtr, not a TSharedRef, so that ~FClientState can
 		 * move it into a game-thread task: a TSharedRef "move" copies (SharedPointer.h:354-361), which would leave the
@@ -325,7 +391,29 @@ namespace VaRest::Http
 	 */
 	struct FClientAccess
 	{
+		/** Complete ordinary defaults before publication; managed ownership is added at this seam by Task 5. */
+		static FClientConfig InitialConfig(FStringView BaseUrl);
+		static FVaRestClient Create(FClientConfig&& Initial) { return Wrap(FClientState::Create(MoveTemp(Initial))); }
+		/** Private managed path: reserves Control-owned storage before creating/publishing a native client. */
+		static FVaRestClient CreateManaged(FClientConfig&& Initial, TSharedRef<FNativeScopeLifetime, ESPMode::ThreadSafe> Scope, FName& Error,
+			TFunction<void(const FVaRestClient&)> BeforeCreated = {});
+		/** Same real factory body with an explicitly owned native Control, used by isolated native fixtures. */
+		static FVaRestClient CreateManagedInControl(FClientConfig&& Initial, TSharedRef<FNativeScopeLifetime, ESPMode::ThreadSafe> Scope,
+			TSharedRef<FNativeLifetimeControl, ESPMode::ThreadSafe> Control, FName& Error,
+			TFunction<void(const FVaRestClient&)> BeforeCreated = {});
+		static bool ConfigureStorageRoots(FClientConfig& Config,FStringView CacheRoot,FStringView QueueRoot);
 		static TSharedPtr<FClientState, ESPMode::ThreadSafe> State(const FVaRestClient& Client) { return Client.GetStateInternal(); }
+		/** Hub's first loop, before any user delegate; the later close-action pass cannot reopen admission. */
+		static void CloseManagedAdmission(const FVaRestClient& Client)
+		{
+			const auto Pinned=State(Client);
+			if (Pinned && Pinned->GetManagedLifetime().IsValid())
+				Pinned->GetManagedLifetime().Control->ClientSlotsOnGT().BeginRetirement(Pinned->GetManagedLifetime());
+		}
+		static void RetireManaged(const FVaRestClient& Client)
+		{
+			if (const auto Pinned=State(Client)) Pinned->BeginPermanentRetirement();
+		}
 		/** A handle on a state, for the refresh context and the coordinator (Tasks 15-16) */
 		static FVaRestClient Wrap(TSharedPtr<FClientState, ESPMode::ThreadSafe> InState) { return FVaRestClient(MoveTemp(InState)); }
 		/**

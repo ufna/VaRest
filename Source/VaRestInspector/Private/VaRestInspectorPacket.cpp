@@ -15,16 +15,17 @@ namespace
 class FLayoutBuilder
 {
 public:
-	FLayoutBuilder(FPacketLayout& InLayout, int32 HeaderCount, int32 WarningCount = 0)
+	FLayoutBuilder(FPacketLayout& InLayout, int32 HeaderCount, int32 WarningCount = 0, int32 ProtocolCount = 0)
 		: Layout(InLayout)
 	{
 		bFits = HeaderCount >= 0 && HeaderCount <= FNormalizedLimits::MaxHeaders &&
-				WarningCount >= 0 && WarningCount <= FNormalizedLimits::MaxWarnings;
+				WarningCount >= 0 && WarningCount <= FNormalizedLimits::MaxWarnings && ProtocolCount >= 0 && ProtocolCount <= 32;
 		if (!bFits)
 			return;
 		Cursor = Align(int64(sizeof(FPacketFixed)), int64(alignof(FPairSlice)));
 		AddArray(Layout.Fixed.Headers, HeaderCount);
 		AddArray(Layout.Fixed.Warnings, WarningCount);
+		AddArray(Layout.Fixed.Protocols, ProtocolCount);
 		Cursor = Align(Cursor, int64(alignof(TCHAR)));
 	}
 	void Text(FStringView Borrowed, FTextSlice& Destination)
@@ -62,6 +63,10 @@ public:
 			Text(FStringView(Pair.Value), Layout.Headers[Index].Second);
 			++Index;
 		}
+	}
+	void Protocols(const TArray<FString>& Borrowed)
+	{
+		for (int32 Index = 0; Index < Borrowed.Num() && bFits; ++Index) Text(FStringView(Borrowed[Index]), Layout.Protocols[Index].First);
 	}
 	void Warnings(const TArray<FVaRestTraceDecodeWarning>& Borrowed)
 	{
@@ -165,16 +170,17 @@ EMeasure FPacketCodec::MeasureStarted(const FVaRestTraceStarted& Borrowed, FPack
 	return Builder.Finish(Allocator);
 }
 EMeasure FPacketCodec::Measure(const FVaRestTraceEvent& Borrowed, const FCapturePolicy& Policy,
-	const FAllocationAdapter& Allocator, FPacketLayout& Out)
+	const FAllocationAdapter& Allocator, FPacketLayout& Out, bool bSnapshot)
 {
 	Out = FPacketLayout{};
-	if (Borrowed.Source != EVaRestTraceSource::Http)
+	if (Borrowed.Source == EVaRestTraceSource::Socket && Borrowed.Kind != EVaRestTraceKind::Socket && Borrowed.Kind != EVaRestTraceKind::SocketAttempt && Borrowed.Kind != EVaRestTraceKind::SocketFrame && Borrowed.Kind != EVaRestTraceKind::SocketNote && Borrowed.Kind != EVaRestTraceKind::Excerpt)
 		return EMeasure::Unsupported;
 	FPacketHeader Header;
 	Header.Kind = Borrowed.Kind;
 	Header.Source = Borrowed.Source;
 	Header.Seq = Borrowed.Seq;
 	Header.Time = Borrowed.Time;
+	Header.bSnapshot = bSnapshot;
 	Out.Fixed.Header = Header;
 	auto& S = Out.Fixed.Scalars;
 	switch (Borrowed.Kind)
@@ -285,8 +291,8 @@ EMeasure FPacketCodec::Measure(const FVaRestTraceEvent& Borrowed, const FCapture
 		if (!Policy.bBodies || !Borrowed.Payload.IsType<FVaRestTraceExcerptEvent>())
 			return EMeasure::Unsupported;
 		const auto& B = Borrowed.Payload.Get<FVaRestTraceExcerptEvent>();
-		if (B.Owner == EVaRestTraceExcerptOwner::Frame)
-			return EMeasure::Unsupported;
+		if (B.Excerpt.bBinaryCaptured && B.Excerpt.Kind != EVaRestExcerptKind::Binary) return EMeasure::Unsupported;
+		if ((B.Owner == EVaRestTraceExcerptOwner::Frame) != (Borrowed.Source == EVaRestTraceSource::Socket)) return EMeasure::Unsupported;
 		S.RequestId = B.RequestId;
 		S.DispatchId = B.DispatchId;
 		S.Attempt = B.Attempt;
@@ -301,7 +307,15 @@ EMeasure FPacketCodec::Measure(const FVaRestTraceEvent& Borrowed, const FCapture
 		FLayoutBuilder Builder(Out, 0);
 		Builder.Field(EText::StopReason, B.Excerpt.StopReason);
 		Builder.Field(EText::Sha256Prefix, B.Excerpt.Sha256Prefix);
-		if (B.Excerpt.Bytes.IsValid())
+		if (B.Excerpt.bBinaryCaptured || B.Owner == EVaRestTraceExcerptOwner::Frame)
+		{
+			S.ExcerptLimit = B.Excerpt.Kind == EVaRestExcerptKind::Binary
+				? (B.Owner == EVaRestTraceExcerptOwner::Frame ? FMath::Min(Policy.Limits.BinaryBytes, Policy.Limits.FrameBytes) : Policy.Limits.BinaryBytes)
+				: Policy.Limits.FrameBytes;
+			if (B.Excerpt.Bytes && B.Excerpt.Bytes->Num() > S.ExcerptLimit) S.bTruncated = true;
+		}
+		S.bBinaryCaptured = B.Excerpt.bBinaryCaptured && S.ExcerptLimit > 0 && Policy.Limits.BinaryBytes > 0;
+		if (B.Excerpt.Bytes.IsValid() && ((!B.Excerpt.bBinaryCaptured && B.Owner != EVaRestTraceExcerptOwner::Frame) || S.ExcerptLimit > 0))
 		{
 			const SIZE_T Capacity = B.Excerpt.Bytes->GetAllocatedSize();
 			if (Capacity > SIZE_T(MAX_int64))
@@ -310,6 +324,62 @@ EMeasure FPacketCodec::Measure(const FVaRestTraceEvent& Borrowed, const FCapture
 			Out.ExcerptCapacity = int64(Capacity);
 		}
 		return Builder.Finish(Allocator);
+	}
+	case EVaRestTraceKind::Socket:
+	{
+		if (Borrowed.Source != EVaRestTraceSource::Socket || !Borrowed.Payload.IsType<FVaRestTraceSocket>()) return EMeasure::Unsupported;
+		const auto& B = Borrowed.Payload.Get<FVaRestTraceSocket>();
+		S.SocketId = B.SocketId; S.ScopeId = B.ScopeId; S.SocketAttemptId = B.CurrentAttemptId; S.SocketLifecycle = B.Phase;
+		S.SocketName = B.Name; S.SocketProtocolName = B.Protocol; S.SocketEntry = B.Entry; S.SocketState = B.State; S.bSocketReady = B.bReady; S.bSocketPartial = B.bPartial;
+		S.ScriptCodeOffset = B.Initiator.ScriptCodeOffset; S.SourceLine = B.Initiator.SourceLine;
+		if (!bSnapshot && !B.bPartial && B.Phase == EVaRestTraceSocketLifecycle::Created) { S.StartUtc = FDateTime::UtcNow(); S.StartedAt = Borrowed.Time; }
+		FLayoutBuilder Builder(Out, 0); Builder.Field(EText::Url, B.Url); Builder.Field(EText::OwnerPath, B.Initiator.OwnerPath); Builder.Field(EText::ScriptObject, B.Initiator.ScriptObject);
+		Builder.Field(EText::ScriptFunction, B.Initiator.ScriptFunction); Builder.Field(EText::SourceFile, B.Initiator.SourceFile); return Builder.Finish(Allocator);
+	}
+	case EVaRestTraceKind::SocketAttempt:
+	{
+		if (Borrowed.Source != EVaRestTraceSource::Socket || !Borrowed.Payload.IsType<FVaRestTraceSocketAttempt>()) return EMeasure::Unsupported;
+		const auto& B = Borrowed.Payload.Get<FVaRestTraceSocketAttempt>();
+		S.SocketId = B.SocketId; S.SocketAttemptId = B.AttemptId; S.SocketAttemptPhase = B.Phase; S.SocketGap = B.GapBefore; S.GapSeconds = B.GapSeconds;
+		S.SocketConnectMs = B.ConnectMs; S.bSocketPartial = B.bPartial; S.SocketCloseCode = B.Close.Code; S.SocketCloseBy = B.Close.By;
+		S.bSocketClean = B.Close.bClean; S.bSocketReconnect = B.Close.bWillReconnect; S.Delay = B.Close.Delay; S.bSocketReadPaused = B.Close.bWhileReadPaused;
+		S.FailureDetail = B.Close.Failure; S.Status = B.Close.HttpStatus; S.bSocketGaveUp = B.Close.bGaveUp; S.ErrorKind = B.Close.ErrorKind;
+		FLayoutBuilder Builder(Out, Policy.bHeaders ? B.HandshakeHeaders.Num() : 0, 0, B.Protocols.Num());
+		Builder.Field(EText::Url, B.Url); Builder.Field(EText::SocketProtocol, B.Protocol); Builder.Field(EText::SocketCloseReason, B.Close.Reason);
+		if (Policy.bHeaders) Builder.Headers(B.HandshakeHeaders); Builder.Protocols(B.Protocols); return Builder.Finish(Allocator);
+	}
+	case EVaRestTraceKind::SocketFrame:
+	{
+		if (Borrowed.Source != EVaRestTraceSource::Socket || !Borrowed.Payload.IsType<FVaRestTraceSocketFrame>()) return EMeasure::Unsupported;
+		const auto& B = Borrowed.Payload.Get<FVaRestTraceSocketFrame>();
+		if (B.Excerpt.bBinaryCaptured && B.Excerpt.Kind != EVaRestExcerptKind::Binary) return EMeasure::Unsupported;
+		S.SocketId = B.SocketId; S.SocketAttemptId = B.AttemptId; S.FrameId = B.FrameId; S.SocketDirection = B.Dir; S.SocketFrameKind = B.Kind; S.SocketBytes = B.Bytes;
+		S.SocketMessageKind = B.MsgKind; S.SocketProtocolTag = B.ProtocolTag; S.bSocketAutoReplied = B.bAutoReplied; S.SocketReceivedAt = B.ReceivedAt; S.SocketCalledAt = B.CalledAt; S.SocketLane = B.Lane;
+		S.AttachmentCount = FMath::Min(10, B.AttachmentSizes.Num()); for (int32 I = 0; I < S.AttachmentCount; ++I) S.AttachmentSizes[I] = B.AttachmentSizes[I];
+		S.Owner = EVaRestTraceExcerptOwner::Frame; S.bExcerptPending = Policy.bBodies && B.bExcerptPending;
+		S.ExcerptKind = Policy.bBodies ? B.Excerpt.Kind : EVaRestExcerptKind::Skipped; S.TotalBytes = B.Excerpt.TotalBytes; S.bTruncated = B.Excerpt.bTruncated; S.bRedacted = B.Excerpt.bRedacted; S.Skip = Policy.bBodies ? B.Excerpt.SkipReason : EVaRestExcerptSkip::Disabled;
+		S.bBinaryCaptured = Policy.bBodies && B.Excerpt.Kind == EVaRestExcerptKind::Binary && B.Excerpt.bBinaryCaptured && Policy.Limits.BinaryBytes > 0 && Policy.Limits.FrameBytes > 0;
+		S.ExcerptLimit = Policy.bBodies ? (B.Excerpt.Kind == EVaRestExcerptKind::Binary ? FMath::Min(Policy.Limits.BinaryBytes, Policy.Limits.FrameBytes) : Policy.Limits.FrameBytes) : 0;
+		if (B.Excerpt.Bytes && B.Excerpt.Bytes->Num() > S.ExcerptLimit) S.bTruncated = true;
+		if (B.AttachmentSizes.Num() > 10) Out.Fixed.Header.bMetadataOmitted = true;
+		FLayoutBuilder Builder(Out, 0); Builder.Field(EText::SocketChannel, B.Channel); Builder.Field(EText::SocketRoute, B.Route); Builder.Field(EText::SocketMsgId, B.MsgId);
+		Builder.Field(EText::StopReason, B.Excerpt.StopReason); Builder.Field(EText::Sha256Prefix, B.Excerpt.Sha256Prefix);
+		if (S.ExcerptLimit > 0 && B.Excerpt.Bytes.IsValid())
+		{
+			const SIZE_T Capacity = B.Excerpt.Bytes->GetAllocatedSize(); if (Capacity > SIZE_T(MAX_int64)) return EMeasure::Unsupported;
+			Out.bKeepExcerpt = true; Out.ExcerptCapacity = int64(Capacity);
+		}
+		return Builder.Finish(Allocator);
+	}
+	case EVaRestTraceKind::SocketNote:
+	{
+		if (Borrowed.Source != EVaRestTraceSource::Socket || !Borrowed.Payload.IsType<FVaRestTraceSocketNote>()) return EMeasure::Unsupported;
+		const auto& B = Borrowed.Payload.Get<FVaRestTraceSocketNote>();
+		S.SocketId = B.SocketId; S.SocketAttemptId = B.AttemptId; S.SocketNoteKind = B.Kind; S.SocketCount = B.Count; S.SocketDropReason = B.DropReason; S.SocketOutcome = B.Outcome;
+		S.ErrorKind = B.ErrorKind; S.SocketLatency = B.Latency; S.bSocketPaused = B.bPaused; S.bSocketHigh = B.bHigh; S.SocketPendingBytes = B.PendingBytes;
+		S.SocketChannelState = B.ChannelState; S.bSocketRecovered = B.bRecovered; S.Reason = B.Reason; S.SocketRtt = B.Rtt;
+		FLayoutBuilder Builder(Out, 0); Builder.Field(EText::SocketMsgId, B.MsgId); Builder.Field(EText::SocketChannel, B.Channel); Builder.Field(EText::SocketRoute, B.Route);
+		Builder.Field(EText::SocketPublicId, B.PublicId); Builder.Field(EText::SocketMessage, B.Message); return Builder.Finish(Allocator);
 	}
 	case EVaRestTraceKind::Scope:
 	{
@@ -469,6 +539,8 @@ FPacket FPacketCodec::WriteLayout(const FPacketLayout& Layout, FPendingTicket&& 
 		FMemory::Memcpy(Bytes + Layout.Fixed.Headers.Offset, Layout.Headers, SIZE_T(Layout.Fixed.Headers.Count) * sizeof(FPairSlice));
 	if (Layout.Fixed.Warnings.Count)
 		FMemory::Memcpy(Bytes + Layout.Fixed.Warnings.Offset, Layout.Warnings, SIZE_T(Layout.Fixed.Warnings.Count) * sizeof(FPairSlice));
+	if (Layout.Fixed.Protocols.Count)
+		FMemory::Memcpy(Bytes + Layout.Fixed.Protocols.Offset, Layout.Protocols, SIZE_T(Layout.Fixed.Protocols.Count) * sizeof(FPairSlice));
 	for (int32 Index = 0; Index < Layout.TextCount; ++Index)
 	{
 		const FTextSlice Dest = Layout.TextDestination[Index];
@@ -498,8 +570,8 @@ FPacket FPacketCodec::Write(const FVaRestTraceEvent& Borrowed, const FPacketLayo
 	const TSharedPtr<const TArray<uint8>, ESPMode::ThreadSafe>* Excerpt = nullptr;
 	if (Layout.bKeepExcerpt)
 	{
-		check(Borrowed.Source == EVaRestTraceSource::Http && Borrowed.Kind == EVaRestTraceKind::Excerpt && Borrowed.Payload.IsType<FVaRestTraceExcerptEvent>());
-		Excerpt = &Borrowed.Payload.Get<FVaRestTraceExcerptEvent>().Excerpt.Bytes;
+		if (Borrowed.Kind == EVaRestTraceKind::SocketFrame && Borrowed.Payload.IsType<FVaRestTraceSocketFrame>()) Excerpt = &Borrowed.Payload.Get<FVaRestTraceSocketFrame>().Excerpt.Bytes;
+		else { check(Borrowed.Kind == EVaRestTraceKind::Excerpt && Borrowed.Payload.IsType<FVaRestTraceExcerptEvent>()); Excerpt = &Borrowed.Payload.Get<FVaRestTraceExcerptEvent>().Excerpt.Bytes; }
 	}
 	return WriteLayout(Layout, MoveTemp(Reservation), Allocator, Excerpt);
 }

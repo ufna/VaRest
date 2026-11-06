@@ -8,6 +8,18 @@
 
 enum class EVaRestErrorKind : uint8;
 
+/** Capture observations, retained independently of socket/frame row eviction. */
+struct FVaRestInspectorSocketStats
+{
+	uint64 SocketId = 0, ScopeId = 0;
+	FName Name, Protocol, Entry;
+	uint64 Attempts = 0, Reconnects = 0, Opened = 0, Closed = 0, Failures = 0;
+	uint64 FramesIn = 0, FramesOut = 0, BytesUp = 0, BytesDown = 0, Drops = 0;
+	uint64 RttCount = 0;
+	double RttSum = 0;
+	bool bContextKnown = false, bPartial = false, bSaturated = false, bReleased = false, bOverflow = false;
+};
+
 struct FVaRestInspectorErrorCounts
 {
 	uint64 Canceled = 0, Connection = 0, Timeout = 0, Http = 0, Server = 0;

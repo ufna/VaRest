@@ -26,6 +26,8 @@ namespace UnrealBuildTool.Rules
 					"Engine",
 					"HTTP",
 					"Json",
+					"VaRestJson",
+					"VaRestHttp",
 					"Projects" // Required by IPluginManager etc (used to get plugin information)
 					// ... add other public dependencies that you statically link with here ...
 				});

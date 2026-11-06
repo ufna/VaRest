@@ -5,9 +5,23 @@
 #include "HAL/PlatformTime.h"
 #include "VaRestLwsErrors.h"
 #include "VaRestWebSocketLog.h"
+#include "VaRestJsonUtf8.h"
+#include "VaRestSocketQueryWarning.h"
+#if !PLATFORM_WINDOWS
+#include <sys/socket.h>
+#include <errno.h>
+#endif
 
 namespace VaRest::WebSocket::Lws::VaRestLwsConnPrivate
 {
+#if defined(__linux__) && defined(__x86_64__) && !defined(__ANDROID__) && defined(VAREST_USE_PRIVATE_LWS3) && VAREST_USE_PRIVATE_LWS3
+    enum : uint32 {
+        NativeSubmitAttempted1=1, NativeTicketOwned1=2, NativeDiscardAttempted1=4,
+        NativeInterestRetained1=8, NativeAuthorized1=16, NativePendingOpen1=32,
+        NativeOptionAttempted1=64, NativeEpisodeFailed1=128, NativeRetiredBinding1=256,
+        NativeCancelAttempted1=512
+    };
+#endif
 	FString Utf8ToString(const TArray<uint8>& Bytes)
 	{
 		return Bytes.Num() > 0 ? FString::ConstructFromPtrSize(reinterpret_cast<const UTF8CHAR*>(Bytes.GetData()), Bytes.Num()) : FString();
@@ -67,7 +81,28 @@ VaRest::WebSocket::Lws::FConn::FConn(uint64 InId, TSharedRef<FSocketLink, ESPMod
 VaRest::WebSocket::Lws::FConn::~FConn()
 {
 	UncountTls();
+#if WITH_DEV_AUTOMATION_TESTS
+	if (const auto& Probe = Link->GetPressureProbeForTests()) Probe->bRetired.store(true, std::memory_order_release);
+#endif
 }
+
+#if WITH_DEV_AUTOMATION_TESTS
+bool VaRest::WebSocket::Lws::FConn::MatchesPressureProbeForTests(const PressureTesting::FProbe& Probe) const
+{
+	return Link->GetPressureProbeForTests().Get() == &Probe && Id == Probe.Connection.load(std::memory_order_acquire);
+}
+
+VaRest::WebSocket::PressureTesting::FSnapshot VaRest::WebSocket::Lws::FConn::PressureSnapshotForTests(uint64 RequestId, uint64 Pass) const
+{
+	PressureTesting::FSnapshot Out;
+	if (const auto& Probe = Link->GetPressureProbeForTests()) Out.Owner = Probe->Owner;
+	Out.Connection = Id; Out.Request = RequestId; Out.Pass = Pass;
+	Out.Queued = Link->GetQueuedEventCount(); Out.Bytes = Link->PendingInboundBytes.load(std::memory_order_acquire);
+	Out.Messages = Link->PendingInboundMessages.load(std::memory_order_acquire);
+	Out.ReplyDebt = AutoReplyDebt.Num(); Out.bPaused = bReadPaused;
+	return Out;
+}
+#endif
 
 FString VaRest::WebSocket::Lws::FConn::MakeLabel(uint64 InId, const FVaRestSocketConnectRequest& InRequest)
 {
@@ -91,6 +126,21 @@ VaRest::WebSocket::Lws::FConn* VaRest::WebSocket::Lws::FConn::Find(FService& Ser
 
 void VaRest::WebSocket::Lws::FConn::Prepare(const FServiceOptions& Options)
 {
+	if (!Options.QueuedEvents.IsValid() || Request.MaxPendingInboundBytes < 0 || !FMath::IsFinite(Request.PingInterval) || Request.PingInterval < 0.0
+		|| !FMath::IsFinite(Request.PingTimeout) || Request.PingTimeout < 0.05 || Request.AutoReplies.Num() > 16)
+	{
+		PendingFailure = EVaRestSocketFailure::BadHandshake; PendingDetail = TEXT("invalid service heartbeat, pressure or reply configuration"); return;
+	}
+	for (int32 Index = 0; Index < Request.AutoReplies.Num(); ++Index)
+	{
+		const auto& Rule = Request.AutoReplies[Index];
+		if (Rule.Match.Num() > 4096 || Rule.Reply.Num() > 4096
+			|| !VaRest::Json::IsValidUtf8(FUtf8StringView(reinterpret_cast<const UTF8CHAR*>(Rule.Match.GetData()), Rule.Match.Num()))
+			|| !VaRest::Json::IsValidUtf8(FUtf8StringView(reinterpret_cast<const UTF8CHAR*>(Rule.Reply.GetData()), Rule.Reply.Num())))
+		{ PendingFailure = EVaRestSocketFailure::BadHandshake; PendingDetail = TEXT("automatic text reply rules require UTF-8 values of at most 4096 bytes"); return; }
+		for (int32 Previous = 0; Previous < Index; ++Previous) if (Request.AutoReplies[Previous].Match == Rule.Match)
+		{ PendingFailure = EVaRestSocketFailure::BadHandshake; PendingDetail = TEXT("automatic text reply rules have duplicate matches"); return; }
+	}
 	check(IsInGameThread());
 	// CloseTimeout (spec 2.5, 15): a value that is not a positive number is LWS's own close-ack wait (plan decision 17)
 	if (!FMath::IsFinite(Request.CloseTimeout) || Request.CloseTimeout <= 0.0)
@@ -119,6 +169,7 @@ void VaRest::WebSocket::Lws::FConn::Prepare(const FServiceOptions& Options)
 		return;
 	}
 	Target = Made.StealValue();
+	WarnForSharedQueryLogging(Target.PathAndQuery);
 	// Spec 2.2 (LwsWebSocket.cpp:112-122): the engine's URL filter, read here on the game thread; its refusal is a queued Error (E7)
 	if (!IsAllowedByFilter(Target.FilterUrl, Options.bOverrideAllowlist ? &Options.Allowlist : nullptr))
 	{
@@ -158,6 +209,9 @@ void VaRest::WebSocket::Lws::FConn::Start(FService& Service)
 		bDestroyed = true;
 		return;
 	}
+#if defined(__linux__) && defined(__x86_64__) && !defined(__ANDROID__) && defined(VAREST_USE_PRIVATE_LWS3) && VAREST_USE_PRIVATE_LWS3
+    if (Service.NativeMode()) { StartNative(Service); return; }
+#endif
 	lws_client_connect_info Info = {};
 	Info.context = Service.GetContext();
 	Info.address = AddressUtf8.GetData();
@@ -202,6 +256,236 @@ void VaRest::WebSocket::Lws::FConn::Start(FService& Service)
 	}
 }
 
+#if defined(__linux__) && defined(__x86_64__) && !defined(__ANDROID__) && defined(VAREST_USE_PRIVATE_LWS3) && VAREST_USE_PRIVATE_LWS3
+namespace VaRest::WebSocket::Lws
+{
+void FConn::StartNative(FService& Service)
+{
+    using namespace VaRestLwsConnPrivate;
+    Native.Stage = 1; State = EConnState::Connecting;
+    uint64_t Started = 0;
+    const auto Stamp = NumericConnectorC1::BorrowedTurnTimestamp1(Service.NativeBorrow(), Service.NativeBinding(), &Started);
+    const uint64 Interval = static_cast<uint64>(Request.ConnectTimeout * 1000000000.0);
+    if (Stamp != NumericConnectorC1::EStatus1::OK || !Interval || Started > UINT64_MAX - Interval) {
+        EndPreOpen(EVaRestSocketFailure::BadHandshake, EVaRestSocketCloseBy::Transport, 0, TEXT("native original deadline unavailable"));
+        Native.Stage = 9; bDestroyed = true; return;
+    }
+    Native.DeadlineNs = Started + Interval; // ONCE. UE time is only public elapsed/close telemetry.
+    Native.Flags |= NativeSubmitAttempted1;
+    const VrStatus Raw = Service.SubmitNativeResolve(Target.Host, static_cast<uint16>(Target.Port), Native.DeadlineNs, Native.Ticket);
+    if (Raw == VR_STATUS_OK && Service.NativeTicketMatches(Native.Ticket)) { Native.Flags |= NativeTicketOwned1; return; }
+    if (Native.Ticket.owner_epoch || Native.Ticket.service_epoch || Native.Ticket.slot_generation || Native.Ticket.slot || Native.Ticket.reserved)
+        Native.Flags |= NativeInterestRetained1; // Preserve malformed/uncertain actual output, never resubmit.
+    EndPreOpen(EVaRestSocketFailure::ConnectFailed, EVaRestSocketCloseBy::Transport, 0, TEXT("native resolver submission did not issue a valid ticket"));
+    bDestroyed = true;
+    if (!(Native.Flags & NativeInterestRetained1)) Native.Stage = 9;
+}
+bool FConn::NativeInterestUncertain() const
+{ return (Native.Flags & VaRestLwsConnPrivate::NativeInterestRetained1) != 0; }
+void FConn::RetireNativeInterest(FService& Service)
+{
+    using namespace VaRestLwsConnPrivate;
+    if (!(Native.Flags & NativeTicketOwned1) || (Native.Flags & NativeDiscardAttempted1)) return;
+    Native.Flags |= NativeDiscardAttempted1; // Actual once-only callsite, NO BUSY retry.
+    const VrStatus Raw = Service.DiscardNativeResolve(Native.Ticket);
+    if (Raw == VR_STATUS_OK) Native.Flags &= ~NativeTicketOwned1;
+    else Native.Flags |= NativeInterestRetained1;
+}
+void FConn::AdvanceNative(FService& Service)
+{
+    using namespace VaRestLwsConnPrivate;
+    namespace N = NumericConnectorC1;
+    if (!Native.Stage || Native.Stage == 9 || Owner != &Service || FConn::Find(Service, Id) != this || !Service.NativeBorrow()) return;
+    uint64_t Captured = 0;
+    if (N::BorrowedTurnTimestamp1(Service.NativeBorrow(), Service.NativeBinding(), &Captured) != N::EStatus1::OK) return;
+    if (State == EConnState::Connecting && (Captured >= Native.DeadlineNs || Service.IsShuttingDown())) {
+        EndPreOpen(Service.IsShuttingDown() ? EVaRestSocketFailure::Shutdown : EVaRestSocketFailure::ConnectTimeout,
+            Service.IsShuttingDown() ? EVaRestSocketCloseBy::Transport : EVaRestSocketCloseBy::Timeout, 0, TEXT("the original native connect interval ended"));
+    }
+    if (State == EConnState::Ended) {
+        RetireNativeInterest(Service);
+        if (Native.Reservation.Generation && !(Native.Flags & NativeCancelAttempted1)) {
+            // No tracked client was ever obtained in stages2/3. That actual
+            // source boundary supplies all-associated-WSI retirement, not NULL.
+            if (!Wsi && Native.Stage == 2) {
+                if (N::ReleaseUnbound1(Service.NativeObject(), Service.NativeBinding(), &Native.Reservation) != N::EStatus1::OK) return;
+                Native.Flags |= NativeRetiredBinding1;
+            } else if (!Wsi && Native.Stage == 3) {
+                if (N::RetireBound1(Service.NativeObject(), Service.NativeBinding(), &Native.Binding) != N::EStatus1::OK) return;
+                Native.Flags |= NativeRetiredBinding1;
+            }
+            Native.Flags |= NativeCancelAttempted1;
+            (void)N::Cancel1(Service.NativeObject(), Service.NativeBinding(), &Native.Reservation);
+        }
+        if (Wsi && !bDestroyed) Kill(Service);
+        if (!Wsi && !NativeInterestUncertain() && (!Native.Reservation.Generation
+            || ((Native.Flags & NativeRetiredBinding1) && N::NativeHalfReusable1(Service.NativeObject(), Service.NativeBinding(), &Native.Reservation) == N::EStatus1::OK))) {
+            Native.Stage = 9; bDestroyed = true;
+        }
+    }
+    if (Native.Stage == 1 && State == EConnState::Connecting) {
+        N::FAttempt1 Attempt {}; Attempt.Size = sizeof(Attempt); Attempt.Version = 1;
+        Attempt.OriginalDeadlineNs = Native.DeadlineNs; Attempt.Mode = 0;
+        const FString Authority = FString::Printf(TEXT("%s:%d"),
+            *(Target.Host.Contains(TEXT(":")) ? FString::Printf(TEXT("[%s]"), *Target.Host) : Target.Host), Target.Port);
+        FTCHARToUTF8 Encoded(*Authority);
+        if (Encoded.Length() < 1 || Encoded.Length() > 512) { EndPreOpen(EVaRestSocketFailure::BadHandshake, EVaRestSocketCloseBy::Transport, 0, TEXT("native authority exceeds the fixed bound")); return; }
+        Attempt.AuthorityBytes = Encoded.Length(); FMemory::Memcpy(Attempt.Authority, Encoded.Get(), Attempt.AuthorityBytes);
+        uint32_t Slot = 2;
+        if (N::PrepareResolveCopySlot1(Service.NativeBorrow(), Service.NativeBinding(), Native.Ticket.slot, &Slot) != N::EStatus1::OK) return;
+        // NativeCopyResult2 consumes a completed slot. There is NO successful
+        // re-copy/discard-after-copy and no result/candidate array retained here.
+        VrResult Result {}; Result.size = sizeof(Result); Result.version = VR_OWNER_VERSION;
+        const VrStatus Raw = Service.CopyNativeResolve(Native.Ticket, Result);
+        if (Raw == VR_STATUS_PENDING || Raw == VR_STATUS_BUSY) return;
+        const bool Consumed = Result.size == sizeof(Result) && Result.version == VR_OWNER_VERSION
+            && FMemory::Memcmp(&Result.ticket, &Native.Ticket, sizeof(VrTicket)) == 0
+            && (Raw == VR_STATUS_OK || Raw == VR_STATUS_NATIVE_ERROR);
+        if (Consumed || Raw == VR_STATUS_EXPIRED) Native.Flags &= ~NativeTicketOwned1;
+        if (Raw != VR_STATUS_OK || Result.size != sizeof(Result) || Result.version != VR_OWNER_VERSION
+            || Result.count == 0 || Result.count > 8 || Result.resolver_error
+            || FMemory::Memcmp(&Result.ticket, &Native.Ticket, sizeof(VrTicket)) != 0) {
+            EndPreOpen(EVaRestSocketFailure::ConnectFailed, EVaRestSocketCloseBy::Transport, 0, TEXT("native resolution failed or returned an incoherent result"));
+            RetireNativeInterest(Service); if (!NativeInterestUncertain()) { bDestroyed = true; Native.Stage = 9; } return;
+        }
+        for (uint32 I = 0; I < Result.count; ++I) {
+            const VrAddress& A = Result.address[I];
+            if (A.size != sizeof(A) || A.version != VR_OWNER_VERSION || (A.family != 4 && A.family != 6)
+                || A.reserved16 || A.port_be == 0 || A.port_be != static_cast<uint16>((Target.Port << 8) | (Target.Port >> 8))
+                || A.reserved8[0] || A.reserved8[1] || A.reserved8[2] || A.reserved8[3]) {
+                EndPreOpen(EVaRestSocketFailure::ConnectFailed, EVaRestSocketCloseBy::Transport, 0, TEXT("native address result is malformed")); return;
+            }
+            auto& E = Attempt.Candidates[I]; E.Family = A.family; E.Scope = A.scope; E.PortBe = A.port_be;
+            FMemory::Memcpy(E.Address, A.address, sizeof(E.Address));
+        }
+        Attempt.CandidateCount = Result.count; Attempt.Route = Slot + 1;
+        N::FReservation1 Issued {}; Issued.Size = sizeof(Issued); Issued.Version = 1;
+        const auto Reserved = N::ReserveFirst1(Service.NativeObject(), Service.NativeBinding(), Slot, &Attempt, &Issued);
+        if (Reserved == N::EStatus1::OK) { Native.Reservation = Issued; Native.Stage = 2; }
+        else {
+            // Preflight+same actor make local room stable. Actual Stop/clock or
+            // protocol failure ENDS this attempt, never re-copies a consumed result.
+            EndPreOpen(Reserved == N::EStatus1::STOPPING ? EVaRestSocketFailure::Shutdown : EVaRestSocketFailure::ConnectFailed,
+                EVaRestSocketCloseBy::Transport, 0, TEXT("native post-copy reservation could not complete"));
+            RetireNativeInterest(Service);
+            if (!NativeInterestUncertain()) { Native.Stage = 9; bDestroyed = true; }
+        }
+        return; // Both transient records retire; successful copy already consumed its interest.
+    }
+    if (Native.Stage == 2 && State == EConnState::Connecting) {
+        Native.Binding = {sizeof(N::FBinding1),1,Native.Reservation.Slot,0,Native.Reservation.Generation,Native.Reservation.Route,Id};
+        const auto Bound = N::Bind1(Service.NativeObject(), Service.NativeBinding(), &Native.Binding);
+        if (Bound == N::EStatus1::OK) Native.Stage = 3;
+        else if (Bound != N::EStatus1::PENDING) EndPreOpen(EVaRestSocketFailure::ConnectFailed, EVaRestSocketCloseBy::Transport, 0, TEXT("native binding refused"));
+        return;
+    }
+    if (Native.Stage == 3 && State == EConnState::Connecting) {
+        lws_client_connect_info Info {}; Info.context = Service.GetContext(); Info.vhost = Service.NativeVhost(Native.Binding.Slot);
+        FTCHARToUTF8 OriginalAddress(*Target.Host);
+        Info.address = OriginalAddress.Get(); Info.port = Target.Port; // ORIGINAL target; C's owned internal route only changes TCP.
+        Info.path = PathUtf8.GetData(); Info.host = HostUtf8.GetData();
+        Info.origin = OriginUtf8.Num() ? OriginUtf8.GetData() : nullptr;
+        Info.protocol = ProtocolsUtf8.Num() ? ProtocolsUtf8.GetData() : nullptr;
+        Info.local_protocol_name = "varest"; Info.ietf_version_or_minus_one = -1;
+        Info.userdata = static_cast<IServiceConnection*>(this); Info.pwsi = &Wsi;
+        Info.ssl_connection = Target.bTls ? LCCSCF_USE_SSL : 0;
+        if (Target.bTls && Target.bInsecure) Info.ssl_connection |= LCCSCF_ALLOW_SELFSIGNED | LCCSCF_SKIP_SERVER_CERT_HOSTNAME_CHECK;
+        VrLwsResult1 Actual {};
+        const int32 Raw = varest_lws_connect_client_tracked1(&Info, Service.NativeView(), Service.NativeBorrow(), &Actual);
+        // Source-owned partial logical generation stays associated even on denial.
+        if (Actual.RawObject) { Wsi = static_cast<lws*>(Actual.RawObject); Native.Stage = 4; }
+        else if (Raw != VR_LWS_DEFERRED_BEFORE_ACQUIRE1) EndPreOpen(EVaRestSocketFailure::ConnectFailed, EVaRestSocketCloseBy::Transport, 0, TEXT("tracked native client creation refused"));
+        if (Raw == VR_LWS_RELEASE_UNCERTAIN1 || Raw == VR_LWS_PROTOCOL_FAULT1 || Actual.Size != sizeof(Actual)
+            || Actual.Version != 1 || Actual.Disposition != static_cast<uint32>(Raw)) Native.Flags |= NativeInterestRetained1;
+        return;
+    }
+    if (Native.Stage == 4 && Wsi && !bDestroyed && !(Native.Flags & NativeAuthorized1)) {
+        N::FClaim1 Claims[4] {}; uint32 Count = 0;
+        const auto Copied = N::CopyClaims1(Service.NativeObject(), Claims, 4, &Count);
+        if (Copied != N::EStatus1::OK || Count > 4) return;
+        for (uint32 I = 0; I < Count; ++I) {
+            const auto& C = Claims[I];
+            if (C.Conn != Id || C.Slot != Native.Binding.Slot || C.Generation != Native.Binding.Generation || C.Route != Native.Binding.Route) continue;
+            // Genuine owner-map/Conn/WSI/binding membership precedes fd getter.
+            if (FConn::Find(Service, Id) != this || Owner != &Service || !Wsi || bDestroyed) return;
+            const int32 Fd = lws_get_socket_fd(Wsi);
+            const auto Authorized = N::AuthorizeCurrent1(Service.NativeObject(), Service.NativeBinding(), &C, &Native.Binding,
+                reinterpret_cast<uint64>(Wsi), Fd);
+            if (Authorized == N::EStatus1::OK) Native.Flags |= NativeAuthorized1;
+            else if (Authorized != N::EStatus1::PENDING && Authorized != N::EStatus1::BUSY) EndPreOpen(EVaRestSocketFailure::ConnectFailed, EVaRestSocketCloseBy::Transport, 0, TEXT("actual native ingress association refused"));
+            break;
+        }
+    }
+    if ((Native.Flags & NativePendingOpen1) && !bDestroyed) (void)CompleteNativeOpen(Service);
+    if (bDestroyed && Wsi && Native.DestroyedInTurn && Native.DestroyedInTurn < Service.NativeBorrow()->Generation) {
+        // This NEXT Between follows WHOLE C service return. Selected Step4/5
+        // guarantees fd/poll/AH/cache/callback consumers retired BEFORE reset.
+        const auto Physical = N::ObserveRetiredClientEpisode1(Service.NativeBorrow(), Service.NativeBinding(), &Native.Binding, reinterpret_cast<uint64>(Wsi));
+        if (Physical != N::EStatus1::OK || N::NativeHalfReusable1(Service.NativeObject(), Service.NativeBinding(), &Native.Reservation) != N::EStatus1::OK) return;
+        if (!(Native.Flags & NativeRetiredBinding1)) {
+            const auto Retired = N::RetireBound1(Service.NativeObject(), Service.NativeBinding(), &Native.Binding);
+            if (Retired != N::EStatus1::OK) return;
+            Native.Flags |= NativeRetiredBinding1;
+        }
+        if (State == EConnState::Connecting && (Native.Flags & NativeEpisodeFailed1)) {
+            N::FReservation1 Next {}; Next.Size = sizeof(Next); Next.Version = 1;
+            const auto Reused = N::ReserveNext1(Service.NativeObject(), Service.NativeBinding(), &Native.Reservation, &Next);
+            if (Reused == N::EStatus1::PENDING || Reused == N::EStatus1::BUSY) return;
+            if (Reused == N::EStatus1::OK) {
+                Native.Reservation = Next; Native.Binding = {}; Native.Stage = 2;
+                Native.Flags &= ~(NativeAuthorized1 | NativePendingOpen1 | NativeOptionAttempted1 | NativeEpisodeFailed1 | NativeRetiredBinding1);
+                Native.DestroyedInTurn = 0; Native.OptionResult = 0; Native.OptionError = 0;
+                Wsi = nullptr; bDestroyed = false; bLeftPollSet = false; bKillIssued = false; AppendCalls = 0;
+                PendingDetail.Reset(); return;
+            }
+            const FConnectionErrorEnd Described = DescribeConnectionError(PendingDetail, FPlatformTime::Seconds() - StartedAt);
+            EndPreOpen(Described.Failure, Described.By, Described.HttpStatus, Described.Detail);
+        }
+        RetireNativeInterest(Service);
+        if (!NativeInterestUncertain()) { Wsi = nullptr; Native.Stage = 9; }
+    }
+}
+bool FConn::CompleteNativeOpen(FService& Service)
+{
+    using namespace VaRestLwsConnPrivate;
+    namespace N = NumericConnectorC1;
+    if (!(Native.Flags & NativePendingOpen1) || State != EConnState::Connecting || Service.IsShuttingDown()
+        || bDestroyed || !Wsi || Owner != &Service || FConn::Find(Service, Id) != this || !Service.NativeBorrow()) return false;
+    if (N::ValidateCurrentWsi1(Service.NativeBorrow(), Service.NativeBinding(), &Native.Binding, reinterpret_cast<uint64>(Wsi)) != N::EStatus1::OK) return false;
+    const int32 Fd = lws_get_socket_fd(Wsi); // AFTER actual current membership.
+    if (!(Native.Flags & NativeOptionAttempted1)) {
+        if (!Request.AutoReplies.IsEmpty()) {
+            const auto Debit = N::DebitCurrentSocketControl1(Service.NativeBorrow(), Service.NativeBinding(), &Native.Binding, reinterpret_cast<uint64>(Wsi), Fd);
+            if (Debit.Disposition == N::ResourceQuotaDeferred1) return false;
+            if (Debit.Disposition != N::ResourceCompleted1) { Native.Flags |= NativeInterestRetained1; return false; }
+            Native.Flags |= NativeOptionAttempted1;
+            const int BufferBytes = 256 * 1024;
+            Native.OptionResult = ::setsockopt(Fd, SOL_SOCKET, SO_SNDBUF, &BufferBytes, sizeof(BufferBytes));
+            Native.OptionError = Native.OptionResult == 0 ? 0 : errno;
+            if (Native.OptionResult != 0) {
+                EndPreOpen(EVaRestSocketFailure::BadHandshake, EVaRestSocketCloseBy::Transport, 0, TEXT("the automatic-reply socket send-buffer bound could not be installed")); Kill(Service); return false;
+            }
+        } else Native.Flags |= NativeOptionAttempted1; // Source skip, not a fabricated syscall result.
+    }
+    // Successful option remains captured while actual Fresh clock quota may
+    // defer. Never repeat it, renew the deadline or fabricate another callback.
+    const auto Established = N::ObserveActualWebSocketEstablished1(Service.NativeBorrow(), Service.NativeBinding(), &Native.Binding, reinterpret_cast<uint64>(Wsi), Fd);
+    if (Established == N::EStatus1::PENDING) return false;
+    if (Established != N::EStatus1::OK) {
+        EndPreOpen(EVaRestSocketFailure::ConnectTimeout, EVaRestSocketCloseBy::Timeout, 0, TEXT("the original native deadline ended before Open")); Kill(Service); return false;
+    }
+    Native.Flags &= ~NativePendingOpen1;
+    State = EConnState::Open; NextPingAt = FPlatformTime::Seconds() + Request.PingInterval;
+    FVaRestSocketEvent Opened; Opened.Type = EVaRestSocketEventType::Open; Opened.Protocol = SelectedProtocol;
+    Opened.Seconds = FPlatformTime::Seconds() - StartedAt; Link->Push(MoveTemp(Opened));
+    lws_rx_flow_control(Wsi, 1); // Public Open already precedes every newly admitted Message.
+    RefreshReadFlow(Service, FPlatformTime::Seconds());
+    if (Outbox.Num() || bCloseQueued) lws_callback_on_writable(Wsi);
+    return true;
+}
+}
+#endif
+
 int32 VaRest::WebSocket::Lws::FConn::OnCallback(FService& Service, lws* InWsi, int32 Reason, void* User, void* In, size_t Len)
 {
 	switch (Reason)
@@ -215,9 +499,14 @@ int32 VaRest::WebSocket::Lws::FConn::OnCallback(FService& Service, lws* InWsi, i
 	case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
 		OnConnectionError(In, Len);
 		return 0;
-	case LWS_CALLBACK_CLIENT_RECEIVE:
+    case LWS_CALLBACK_CLIENT_RECEIVE:
+#if defined(__linux__) && defined(__x86_64__) && !defined(__ANDROID__) && defined(VAREST_USE_PRIVATE_LWS3) && VAREST_USE_PRIVATE_LWS3
+        if (Native.Stage && State != EConnState::Open) return -1;
+#endif
 		// in: a chunk of a data frame, len its size: every frame end and every rx_buffer_size (T8, libwebsockets.h:1345)
 		return OnReceive(Service, InWsi, In, Len);
+	case LWS_CALLBACK_CLIENT_RECEIVE_PONG:
+		OnPong(In, Len); return 0;
 	case LWS_CALLBACK_CLIENT_WRITEABLE:
 		return OnWriteable(InWsi);
 	case LWS_CALLBACK_WS_PEER_INITIATED_CLOSE:
@@ -325,7 +614,21 @@ int32 VaRest::WebSocket::Lws::FConn::OnEstablished(lws* InWsi)
 		// Ended meanwhile (a deadline, a release): the open is refused, and nothing more is reported
 		return -1;
 	}
-	State = EConnState::Open;
+#if defined(__linux__) && defined(__x86_64__) && !defined(__ANDROID__) && defined(VAREST_USE_PRIVATE_LWS3) && VAREST_USE_PRIVATE_LWS3
+    if (Native.Stage) {
+        Native.Flags |= VaRestLwsConnPrivate::NativePendingOpen1;
+        lws_rx_flow_control(InWsi, 0);
+        (void)CompleteNativeOpen(*Owner);
+        return State == EConnState::Ended ? -1 : 0;
+    }
+#endif
+    if (!Request.AutoReplies.IsEmpty())
+    {
+        const int BufferBytes = 256 * 1024;
+		if (::setsockopt(lws_get_socket_fd(InWsi), SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&BufferBytes), sizeof(BufferBytes)) != 0)
+		{ EndPreOpen(EVaRestSocketFailure::BadHandshake, EVaRestSocketCloseBy::Transport, 0, TEXT("the automatic-reply socket send-buffer bound could not be installed")); return -1; }
+	}
+	State = EConnState::Open; NextPingAt = FPlatformTime::Seconds() + Request.PingInterval;
 	FVaRestSocketEvent Opened;
 	Opened.Type = EVaRestSocketEventType::Open;
 	Opened.Protocol = SelectedProtocol;
@@ -371,7 +674,15 @@ void VaRest::WebSocket::Lws::FConn::OnConnectionError(const void* In, size_t Len
 	{
 		return;
 	}
-	// in: libwebsockets' error string, len its length; either may be empty (libwebsockets.h:1255-1299)
+#if defined(__linux__) && defined(__x86_64__) && !defined(__ANDROID__) && defined(VAREST_USE_PRIVATE_LWS3) && VAREST_USE_PRIVATE_LWS3
+    if (Native.Stage && Native.Reservation.Generation && State == EConnState::Connecting && PendingFailure == EVaRestSocketFailure::None) {
+        Native.Flags |= VaRestLwsConnPrivate::NativeEpisodeFailed1;
+        const FString Text = In && Len ? FString::ConstructFromPtrSize(static_cast<const UTF8CHAR*>(In), static_cast<int32>(Len)) : FString();
+        PendingDetail = CleanConnectionErrorText(Text); // Owned bounded text; no callback arguments escape.
+        return; // Real C1 candidate sequence/physical retirement decides retry.
+    }
+#endif
+    // in: libwebsockets' error string, len its length; either may be empty (libwebsockets.h:1255-1299)
 	const FString Text = In && Len > 0 ? FString::ConstructFromPtrSize(static_cast<const UTF8CHAR*>(In), static_cast<int32>(Len)) : FString();
 	if (PendingFailure != EVaRestSocketFailure::None)
 	{
@@ -408,9 +719,12 @@ void VaRest::WebSocket::Lws::FConn::OnEnded()
 	{
 		return;
 	}
-	if (State != EConnState::Open)
-	{
-		// No CONNECTION_ERROR came: VaRest refused the handshake itself (a non-zero return, hs.redirect_veto), or LWS gave up silently
+#if defined(__linux__) && defined(__x86_64__) && !defined(__ANDROID__) && defined(VAREST_USE_PRIVATE_LWS3) && VAREST_USE_PRIVATE_LWS3
+    if (Native.Stage && State == EConnState::Connecting && (Native.Flags & VaRestLwsConnPrivate::NativeEpisodeFailed1)) return;
+#endif
+    if (State != EConnState::Open)
+    {
+        // No CONNECTION_ERROR came: VaRest refused the handshake itself (a non-zero return, hs.redirect_veto), or LWS gave up silently
 		const bool bOwn = PendingFailure != EVaRestSocketFailure::None;
 		EndPreOpen(bOwn ? PendingFailure : EVaRestSocketFailure::Unknown, EVaRestSocketCloseBy::Transport, 0,
 			bOwn ? PendingDetail : FString(TEXT("the connection ended before the open without an error string")));
@@ -459,12 +773,27 @@ void VaRest::WebSocket::Lws::FConn::OnDestroyed(FService& Service)
 			Counters.MaxKillToDestroySeconds = Took;
 		}
 	}
-	Wsi = nullptr;
-	bDestroyed = true;
+#if defined(__linux__) && defined(__x86_64__) && !defined(__ANDROID__) && defined(VAREST_USE_PRIVATE_LWS3) && VAREST_USE_PRIVATE_LWS3
+    if (Native.Stage) {
+        // Physical WSI persists. Only the callback fact is recorded here; no
+        // RetireBound/reuse/erasure until WHOLE service return +NEXT Between.
+        Native.DestroyedInTurn = Service.NativeBorrow() ? Service.NativeBorrow()->Generation : 0;
+        bDestroyed = true;
+        return;
+    }
+#endif
+    Wsi = nullptr;
+    bDestroyed = true;
+#if WITH_DEV_AUTOMATION_TESTS
+	if (const auto& Probe = Link->GetPressureProbeForTests()) Probe->bWsiDestroyed.store(true, std::memory_order_release);
+#endif
 }
 
 bool VaRest::WebSocket::Lws::FConn::ReapIfDropped()
 {
+#if defined(__linux__) && defined(__x86_64__) && !defined(__ANDROID__) && defined(VAREST_USE_PRIVATE_LWS3) && VAREST_USE_PRIVATE_LWS3
+    if (Native.Stage) return false; // Prepared tracked WSI has a positive full-return retirement path.
+#endif
 	if (!bLeftPollSet || bDestroyed || !Wsi)
 	{
 		return false;
@@ -507,7 +836,7 @@ bool VaRest::WebSocket::Lws::FConn::ReapIfDropped()
 
 void VaRest::WebSocket::Lws::FConn::Kill(FService& Service)
 {
-	if (!Wsi || bKillIssued || ReapIfDropped())
+	if (!Wsi || bDestroyed || bKillIssued || ReapIfDropped())
 	{
 		return;
 	}
@@ -525,7 +854,11 @@ void VaRest::WebSocket::Lws::FConn::CheckDeadlines(FService& Service, double Now
 	using namespace VaRest::WebSocket::Lws::VaRestLwsConnPrivate;
 	// First: everything below may touch the wsi. A test can leave the reap to Kill alone (bOnlyKillReapsForTest), so Kill's
 	// own guard has a row of its own (Redirect.UnresolvableKillGuard)
-	if (!Service.GetOptions().bOnlyKillReapsForTest)
+    if (!Service.GetOptions().bOnlyKillReapsForTest
+#if defined(__linux__) && defined(__x86_64__) && !defined(__ANDROID__) && defined(VAREST_USE_PRIVATE_LWS3) && VAREST_USE_PRIVATE_LWS3
+        && !Native.Stage
+#endif
+        )
 	{
 		ReapIfDropped();
 	}
@@ -545,7 +878,11 @@ void VaRest::WebSocket::Lws::FConn::CheckDeadlines(FService& Service, double Now
 	{
 		return;
 	}
-	if (State == EConnState::Connecting && Now >= ConnectDeadline)
+    if (State == EConnState::Connecting && Now >= ConnectDeadline
+#if defined(__linux__) && defined(__x86_64__) && !defined(__ANDROID__) && defined(VAREST_USE_PRIVATE_LWS3) && VAREST_USE_PRIVATE_LWS3
+        && !Native.Stage
+#endif
+        )
 	{
 		// Spec 2.2, D32: measured here, so a hitching game thread cannot delay it -- exact unless the service thread is itself
 		// blocked in LWS's synchronous DNS (review conc I-4; W1b B9, VaRest-gi0); reported at the deadline and killed (plan
@@ -579,12 +916,13 @@ void VaRest::WebSocket::Lws::FConn::CheckDeadlines(FService& Service, double Now
 	{
 		// LWS calls WRITEABLE only once a held write drained; this sweep releases it even when no WRITEABLE was asked for (plan decision 7)
 		ReleaseHeld();
+		CheckOpenDeadlines(Service, Now);
 	}
 }
 
 double VaRest::WebSocket::Lws::FConn::NextDeadline() const
 {
-	double Next = TNumericLimits<double>::Max();
+	double Next = NextOpenDeadline();
 	if (State == EConnState::Open && bCloseQueued)
 	{
 		Next = CloseDeadline;
@@ -598,7 +936,7 @@ double VaRest::WebSocket::Lws::FConn::NextDeadline() const
 
 bool VaRest::WebSocket::Lws::FConn::WantsShortWait() const
 {
-	return (bKillIssued && !bDestroyed) || HeldBytes > 0;
+	return (bKillIssued && !bDestroyed) || HeldBytes > 0 || bControlHeld;
 }
 
 void VaRest::WebSocket::Lws::FConn::EndForShutdown()
@@ -680,6 +1018,7 @@ void VaRest::WebSocket::Lws::FConn::EndOpen(int32 Code, FString Reason, bool bCl
 	Event.End.Code = Code;
 	Event.End.Reason = MoveTemp(Reason);
 	Event.End.bWasClean = bClean;
+	Event.End.bWhileReadPaused = bReadPaused;
 	Event.End.By = By;
 	Event.End.Failure = Failure;
 	Event.End.Detail = MoveTemp(Detail);

@@ -40,7 +40,7 @@ struct FCapturePolicy
 			Out.Flags |= EVaRestTraceDetail::Bodies;
 		Out.BodyCap = Limits.BodyBytes;
 		Out.BinaryCap = Limits.BinaryBytes;
-		Out.FrameCap = 0;
+		Out.FrameCap = bBodies ? Limits.FrameBytes : 0;
 		Out.MaxPendingExcerptBytes = Limits.PendingBytes;
 		return Out;
 	}

@@ -129,8 +129,12 @@ namespace VaRest::Http::HttpTransportPrivate
 	class FHttpModuleTransport final : public IVaRestTransport
 	{
 	public:
+		FHttpModuleTransport()=default;
+		explicit FHttpModuleTransport(TSharedRef<IHttpRequest,ESPMode::ThreadSafe> Request):Provided(MoveTemp(Request)) {}
 		virtual TSharedRef<IVaRestTransportCall, ESPMode::ThreadSafe> Start(FVaRestTransportRequest&& Request, FVaRestTransportComplete&& OnComplete) override;
 		virtual bool SendsBodyFor(FStringView Verb) const override { return IsBodyVerb(Verb); }
+	private:
+		TSharedPtr<IHttpRequest,ESPMode::ThreadSafe> Provided;
 	};
 
 	TSharedRef<IVaRestTransportCall, ESPMode::ThreadSafe> FHttpModuleTransport::Start(FVaRestTransportRequest&& Request, FVaRestTransportComplete&& OnComplete)
@@ -138,13 +142,15 @@ namespace VaRest::Http::HttpTransportPrivate
 		check(IsInGameThread());
 		// Spec 4.8: the engine request VaRest makes and what it copies into it are VaRest's
 		LLM_SCOPE_BYTAG(VaRest);
-		const TSharedRef<IHttpRequest, ESPMode::ThreadSafe> Http = FHttpModule::Get().CreateRequest();
+		const bool bProvided=Provided.IsValid();
+		const TSharedRef<IHttpRequest, ESPMode::ThreadSafe> Http = bProvided ? Provided.ToSharedRef() : FHttpModule::Get().CreateRequest();Provided.Reset();
 		Http->SetVerb(Request.Verb);
 		Http->SetURL(Request.Url);
+		TSet<FString> ReplacedHeaders;
 		for (const FVaRestHeaders::FPair& Pair : Request.Headers)
 		{
 			// SetHeader replaces; a repeated name is joined with ", " by AppendToHeader (IHttpRequest.h:299-310)
-			if (Http->GetHeader(Pair.Key).IsEmpty())
+			if (Http->GetHeader(Pair.Key).IsEmpty() || (bProvided && !ReplacedHeaders.Contains(Pair.Key)))
 			{
 				Http->SetHeader(Pair.Key, Pair.Value);
 			}
@@ -152,6 +158,7 @@ namespace VaRest::Http::HttpTransportPrivate
 			{
 				Http->AppendToHeader(Pair.Key, Pair.Value);
 			}
+			if (bProvided) ReplacedHeaders.Add(Pair.Key);
 		}
 
 		const TSharedRef<FBodySink, ESPMode::ThreadSafe> Sink = Request.ResponseFile.IsEmpty()
@@ -608,4 +615,8 @@ TSharedRef<IVaRestTransport, ESPMode::ThreadSafe> VaRest::Http::GetDefaultTransp
 	static TSharedRef<IVaRestTransport, ESPMode::ThreadSafe>* const Instance =
 		new TSharedRef<IVaRestTransport, ESPMode::ThreadSafe>(MakeShared<HttpTransportPrivate::FHttpModuleTransport, ESPMode::ThreadSafe>());
 	return *Instance;
+}
+TSharedRef<IVaRestTransport, ESPMode::ThreadSafe> VaRest::Http::TransportForRequest(TSharedRef<IHttpRequest,ESPMode::ThreadSafe> Request)
+{
+	check(IsInGameThread());return MakeShared<HttpTransportPrivate::FHttpModuleTransport,ESPMode::ThreadSafe>(MoveTemp(Request));
 }

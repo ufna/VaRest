@@ -66,6 +66,8 @@ USTRUCT(BlueprintType)
 struct VARESTJSON_API FVaRestJsonError
 {
 	GENERATED_BODY()
+	/** Native discriminator: callers need not infer a logical refusal from the message text. */
+	bool bBudgetExceeded = false;
 
 	UPROPERTY(BlueprintReadOnly, Category = "VaRest|Json")
 	FString Message;
@@ -99,6 +101,12 @@ struct FVaRestJsonParseOptions
 
 	/** Larger inputs are rejected up front, before anything is allocated. 0 = unlimited */
 	int64 MaxInputBytes = 0;
+
+	/** Root, container and scalar nodes plus object keys, checked before adding each item. 0 = unlimited. */
+	int64 MaxValues = 0;
+
+	/** UTF-8 input bytes once plus SAX callbacks. Logical work, not a CPU/allocator/hash bound. 0 = unlimited. */
+	int64 MaxWorkUnits = 0;
 };
 
 /**
@@ -107,6 +115,9 @@ struct FVaRestJsonParseOptions
  * REFERENCE semantics: copying a handle aliases the same node, and mutating through any handle is
  * visible through all of them (like VaRest 1 objects and FJsonObjectWrapper). Set/Add COPY their
  * value into this document. Clone() makes an independent tree.
+ * Removing or replacing a member/element detaches its old node. A handle already captured from it
+ * stays valid and keeps the document alive, but changing that handle does not change the replacement
+ * or put the old node back into the parent. Look up the member/element again to reach the new value.
  *
  * A lookup that misses (Get, operator[], At) returns a handle that keeps the document but has no node:
  * IsValid() is false and GetType() is None. Writing through it (Set/Add) logs an error and does nothing,
@@ -412,6 +423,11 @@ struct VARESTJSON_API FVaRestJson
 
 	/** "a.b[2].c", or an RFC 6901 pointer when it starts with '/'. Invalid syntax or a miss -> invalid handle. (Task 7) */
 	FVaRestJson Path(FStringView Expression) const;
+	/**
+	 * Checks Path's syntax without a document or allocation. Empty means the root. A valid expression may still miss:
+	 * pointer tokens such as /01 or /- are valid object keys, although they cannot address a readable array element.
+	 */
+	static bool IsValidPath(FStringView Expression);
 
 	// ---- text (Tasks 5-6)
 
@@ -455,6 +471,10 @@ struct VARESTJSON_API FVaRestJson
 	TSharedPtr<FJsonObject> ToJsonObject() const;
 	/** Past VaRest::Json::MaxDepth: an invalid handle (nullptr / false) and an error log, never a truncated copy */
 	static FVaRestJson FromJsonValue(const TSharedPtr<FJsonValue>& Value);
+	/**
+	 * Copies the engine map's current iteration order. Removals/reinsertions can change that order;
+	 * the original JSON order cannot be recovered from FJsonObject. Keep FVaRestJson to preserve it.
+	 */
 	static FVaRestJson FromJsonObject(const TSharedPtr<FJsonObject>& InObject);
 
 	// ---- struct ops (TStructOpsTypeTraits below): pin defaults, copy/paste, SaveGame, CDO diffs

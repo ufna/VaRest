@@ -109,9 +109,15 @@ public:
 	 * and invalid UTF-8 is repaired with U+FFFD (3 bytes each).
 	 */
 	FVaRestTraceExcerpt RedactBody(FStringView ContentType, TConstArrayView<uint8> Prefix, int64 TotalBytes, int32 Cap) const;
+	/**
+	 * Explicit binary capture: BinaryCap > 0 captures at most that many binary bytes, independently of the text Cap.
+	 * Known secret values and a cut secret tail are scrubbed as bytes before publication, without UTF-8 conversion.
+	 * Unknown binary secrets cannot be identified. BinaryCap <= 0 preserves descriptor-only behavior.
+	 */
+	FVaRestTraceExcerpt RedactBody(FStringView ContentType, TConstArrayView<uint8> Prefix, int64 TotalBytes, int32 Cap, int32 BinaryCap) const;
 
 	/**
-	 * True when RedactBody describes a body of this Content-Type, whose first bytes (up to the cap) are Head, as binary: no
+	 * True when the default four-argument RedactBody describes this Content-Type and Head as binary: no
 	 * byte of it reaches the excerpt, only its size, its type and -- when the whole body is passed -- its SHA-256 prefix.
 	 * Any thread. The trace uses it to describe a binary body over the cap without copying any of it (M4a final review A7).
 	 */

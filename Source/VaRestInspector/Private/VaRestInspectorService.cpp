@@ -819,6 +819,32 @@ void FService::PauseNow()
 }
 void FService::Pause() { RequestControl(EControl::Pause); }
 void FService::Clear() { RequestControl(EControl::Clear); }
+void FService::BeginPIESession(bool Preserve)
+{
+ check(IsInGameThread()); if (bShutdown) return;
+ // Drain the previous session's already-published scope closures before selecting rows.
+ if (!DispatchDepth && !bTicking) Tick();
+ bDeferredPIE=true; bPIEPreserve=Preserve; FlushDeferredControl();
+}
+bool FService::ClearScope(uint64 Id)
+{
+ check(IsInGameThread()); if (bShutdown || bDeferredShutdown || !EnsureFrameOrShutdown()) return false;
+ if (!ScopedClear.Contains(Id)) { if (ScopedClear.Num()>=16) return false; ScopedClear.Add(Id); }
+ FlushDeferredControl(); return true;
+}
+void FService::ClearScopeNow(uint64 Id)
+{
+ if (bShutdown || !Store.Storage) return;
+ ++DispatchDepth;
+ const auto Snapshot=FVaRestTrace::BuildSnapshot();
+ if (!bDeferredShutdown)
+ {
+  Store.ClearScope(Id, Snapshot.InFlight, Snapshot.Sockets);
+  if (bCapturing) ApplyAttached(Snapshot);
+  MarkChanged();
+ }
+ --DispatchDepth;
+}
 void FService::ClearNow()
 {
  if (bShutdown) return;
@@ -843,7 +869,7 @@ void FService::ShutdownNow()
  bShutdown=true; Domain->Identity.Closed=true; DetachFacade();
  CloseGeneration(); RemoveCallbacks(); Store.InterruptOpenRows(); Store.StopPendingExcerpts(); Store.Clear(); Store.ReleaseFixedStorage(); Store.OriginatingPending.Reset();
  Control.Reset(); Pending.Reset(); Budget.SafeRelease(); Lifetime.SafeRelease();
- bDeferredShutdown=bDeferredClear=bHasCaptureRequest=bHasPolicyRequest=false; bDirty=false;
+ ScopedClear.Reset(); bDeferredPIE=false; bDeferredShutdown=bDeferredClear=bHasCaptureRequest=bHasPolicyRequest=false; bDirty=false;
 }
 void FService::RequestControl(EControl C)
 {
@@ -859,11 +885,14 @@ void FService::FlushDeferredControl()
 {
  if (DispatchDepth || bTicking || bShutdown) return;
  if (bDeferredShutdown) { bDeferredShutdown=false; ShutdownNow(); return; }
- if ((bHasPolicyRequest || bDeferredClear || bHasCaptureRequest) && !EnsureFrameOrShutdown()) return;
+ if ((bHasPolicyRequest || bDeferredClear || bHasCaptureRequest || bDeferredPIE || !ScopedClear.IsEmpty()) && !EnsureFrameOrShutdown()) return;
  if (bHasPolicyRequest) ApplyRequestedPolicy();
  const bool ClearRequest=bDeferredClear,HasCapture=bHasCaptureRequest,Capture=bRequestedCapture;
  bDeferredClear=bHasCaptureRequest=false;
+ TArray<uint64,TInlineAllocator<16>> Scopes=MoveTemp(ScopedClear); ScopedClear.Reset();
  if (ClearRequest) ClearNow();
+ else for (uint64 Id:Scopes) if (!bShutdown) ClearScopeNow(Id);
+ if (!bShutdown && bDeferredPIE) { bDeferredPIE=false; Store.BeginPIESession(bPIEPreserve); MarkChanged(); }
  if (!bShutdown && HasCapture) { if (Capture) StartNow(RequestedPolicy); else PauseNow(); }
 }
 void FService::ApplyAttached(const FVaRestTraceSnapshot& S)
@@ -930,6 +959,14 @@ bool FService::ForEachRecord(TFunctionRef<void(const FVaRestInspectorRecordView&
  check(IsInGameThread()); if (bShutdown) return false;
  ++DispatchDepth; Domain->AddRole(-1,uint8(ERootRole::StoreVisitor),true,1);
  const bool Result=Store.ForEachRecord(Visitor);
+ Domain->AddRole(-1,uint8(ERootRole::StoreVisitor),true,-1); --DispatchDepth; FlushDeferredControl(); return Result;
+}
+
+bool FService::ForEachLink(TFunctionRef<void(const FVaRestInspectorLinkView&)> Visitor)
+{
+ check(IsInGameThread()); if (bShutdown) return false;
+ ++DispatchDepth; Domain->AddRole(-1,uint8(ERootRole::StoreVisitor),true,1);
+ const bool Result=Store.ForEachLink(Visitor);
  Domain->AddRole(-1,uint8(ERootRole::StoreVisitor),true,-1); --DispatchDepth; FlushDeferredControl(); return Result;
 }
 

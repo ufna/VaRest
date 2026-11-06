@@ -35,6 +35,7 @@ enum class EText : uint8
 	ScopeLabel,
 	ClientLabel,
 	MarkerText,
+	SocketChannel, SocketRoute, SocketMsgId, SocketProtocol, SocketCloseReason, SocketPublicId, SocketMessage,
 	Count
 };
 struct FTextSlice
@@ -93,12 +94,33 @@ struct FPacketScalars
 	bool bCacheLookupPending = false, bExcerptPending = false, bConditional = false;
 	bool bFromCache = false, bEnvelopeApplied = false, bTruncated = false;
 	bool bRedacted = false, bOpened = false, bEditorScope = false, bCreated = false;
+	bool bBinaryCaptured = false;
+	// Core trace enums only: the runtime capture module never depends on WS/Socket.IO modules.
+	uint64 SocketAttemptId = 0;
+	FName SocketName, SocketProtocolName, SocketEntry, SocketState, SocketProtocolTag;
+	int64 SocketBytes = 0, SocketCount = 0, SocketPendingBytes = 0, AttachmentSizes[10]{};
+	int32 SocketCloseCode = 0, AttachmentCount = 0, ExcerptLimit = MAX_int32;
+	double SocketConnectMs = 0, SocketReceivedAt = 0, SocketCalledAt = 0, SocketLatency = 0, SocketRtt = 0;
+	EVaRestTraceSocketLifecycle SocketLifecycle = EVaRestTraceSocketLifecycle::Created;
+	EVaRestTraceSocketAttemptPhase SocketAttemptPhase = EVaRestTraceSocketAttemptPhase::Connecting;
+	EVaRestTraceSocketGap SocketGap = EVaRestTraceSocketGap::None;
+	EVaRestTraceSocketCloseBy SocketCloseBy = EVaRestTraceSocketCloseBy::Transport;
+	EVaRestTraceSocketDirection SocketDirection = EVaRestTraceSocketDirection::In;
+	EVaRestTraceSocketFrameKind SocketFrameKind = EVaRestTraceSocketFrameKind::Text;
+	EVaRestTraceSocketMessageKind SocketMessageKind = EVaRestTraceSocketMessageKind::Message;
+	EVaRestTraceSocketLane SocketLane = EVaRestTraceSocketLane::Backlog;
+	EVaRestTraceSocketNoteKind SocketNoteKind = EVaRestTraceSocketNoteKind::SendDropped;
+	EVaRestTraceSocketDropReason SocketDropReason = EVaRestTraceSocketDropReason::Rejected;
+	EVaRestTraceSocketRequestOutcome SocketOutcome = EVaRestTraceSocketRequestOutcome::Canceled;
+	EVaRestTraceSocketChannelState SocketChannelState = EVaRestTraceSocketChannelState::Down;
+	bool bSocketReady = false, bSocketPartial = false, bSocketClean = false, bSocketReconnect = false;
+	bool bSocketReadPaused = false, bSocketGaveUp = false, bSocketAutoReplied = false, bSocketPaused = false, bSocketHigh = false, bSocketRecovered = false;
 };
 struct FPacketFixed
 {
 	FPacketHeader Header;
 	FPacketScalars Scalars;
 	FTextSlice Text[static_cast<int32>(EText::Count)];
-	FArraySlice Headers, Warnings;
+	FArraySlice Headers, Warnings, Protocols;
 };
 } // namespace VaRest::Inspector::View

@@ -117,6 +117,7 @@ bool VaRest::Http::DecodeJson(FFinish& Finish, FVaRestJson& Out)
 	{
 		const FVaRestJsonError& JsonError = Parsed.GetError();
 		Finish.Error.Kind = EVaRestErrorKind::Decode;
+		Finish.bLogicalDecodeBudgetRefused |= JsonError.bBudgetExceeded;
 		Finish.Error.Message = JsonError.Offset >= 0
 			? FString::Printf(TEXT("the response is not valid JSON: %s (byte %lld)"), *JsonError.Message, JsonError.Offset)
 			: FString::Printf(TEXT("the response is not valid JSON: %s"), *JsonError.Message);
@@ -216,6 +217,7 @@ void VaRest::Http::CheckEnvelopePredicate(FFinish& Finish)
 		Unchecked = JsonError.Offset >= 0
 			? FString::Printf(TEXT("the body is not valid JSON: %s (byte %lld)"), *JsonError.Message, JsonError.Offset)
 			: FString::Printf(TEXT("the body is not valid JSON: %s"), *JsonError.Message);
+		Finish.bLogicalDecodeBudgetRefused |= JsonError.bBudgetExceeded;
 	}
 	if (Finish.LogLevel != EVaRestLogLevel::None && UE_LOG_ACTIVE(LogVaRestHttp, Warning))
 	{
@@ -280,6 +282,7 @@ void VaRest::Http::ProcessErrorBody(FFinish& Finish)
 		{
 			Finish.Error.Body = Parsed.StealValue();
 		}
+		else Finish.bLogicalDecodeBudgetRefused |= Parsed.GetError().bBudgetExceeded;
 	}
 	if (Finish.Envelope.IsValid() && Finish.Envelope->bParseErrorBodies && Finish.Error.Body.IsValid())
 	{

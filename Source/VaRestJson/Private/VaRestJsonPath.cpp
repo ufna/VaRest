@@ -28,22 +28,28 @@ namespace VaRest::Json::PathPrivate
 	 * RFC 6901 §4 unescaping in one left-to-right pass: "~1" -> '/', "~0" -> '~'. One pass is what makes
 	 * "~01" decode to "~1" (the RFC's "first ~1, then ~0" order). Any other '~' makes the pointer invalid.
 	 */
-	bool UnescapePointerToken(FStringView Token, FString& OutKey)
+	bool UnescapePointerToken(FStringView Token, FString* OutKey = nullptr)
 	{
-		OutKey.Reset(Token.Len());
+		if (OutKey)
+		{
+			OutKey->Reset(Token.Len());
+		}
 		for (int32 i = 0; i < Token.Len(); ++i)
 		{
-			if (Token[i] != TEXT('~'))
+			TCHAR Char = Token[i];
+			if (Char == TEXT('~'))
 			{
-				OutKey.AppendChar(Token[i]);
-				continue;
+				if (i + 1 >= Token.Len() || (Token[i + 1] != TEXT('0') && Token[i + 1] != TEXT('1')))
+				{
+					return false;
+				}
+				Char = Token[++i] == TEXT('0') ? TEXT('~') : TEXT('/');
 			}
-			if (i + 1 >= Token.Len() || (Token[i + 1] != TEXT('0') && Token[i + 1] != TEXT('1')))
+			if (OutKey)
 			{
-				return false;
+				// AppendChar(0) is ignored by FString; JSON member names keep counted U+0000.
+				OutKey->AppendChars(&Char, 1);
 			}
-			OutKey.AppendChar(Token[i + 1] == TEXT('0') ? TEXT('~') : TEXT('/'));
-			++i;
 		}
 		return true;
 	}
@@ -59,35 +65,37 @@ namespace VaRest::Json::PathPrivate
 		if (Current.IsObject())
 		{
 			FString Key;
-			return UnescapePointerToken(Token, Key) ? Current.Get(FStringView(Key)) : Miss;
+			return UnescapePointerToken(Token, &Key) ? Current.Get(FStringView(Key)) : Miss;
 		}
 		return Miss;
 	}
 
-	FVaRestJson WalkPointer(const FVaRestJson& Root, FStringView Expression, const FVaRestJson& Miss)
+	template <typename FStep>
+	bool VisitPointer(FStringView Expression, FStep&& Step)
 	{
-		FVaRestJson Current = Root;
 		int32 Start = 1; // skip the leading '/'
-		while (Current.IsValid())
+		while (true)
 		{
 			int32 End = Start;
 			while (End < Expression.Len() && Expression[End] != TEXT('/'))
 			{
 				++End;
 			}
-			Current = PointerStep(Current, Expression.Mid(Start, End - Start), Miss);
+			if (!Step(Expression.Mid(Start, End - Start)))
+			{
+				return false;
+			}
 			if (End >= Expression.Len())
 			{
-				break;
+				return true;
 			}
 			Start = End + 1;
 		}
-		return Current.IsValid() ? Current : Miss;
 	}
 
-	FVaRestJson WalkDotted(const FVaRestJson& Root, FStringView Expression, const FVaRestJson& Miss)
+	template <typename FNameStep, typename FIndexStep>
+	bool VisitDotted(FStringView Expression, FNameStep&& NameStep, FIndexStep&& IndexStep)
 	{
-		FVaRestJson Current = Root;
 		int32 i = 0;
 		bool bFirst = true;
 		while (i < Expression.Len())
@@ -102,15 +110,14 @@ namespace VaRest::Json::PathPrivate
 			const bool bHasBracket = i < Expression.Len() && Expression[i] == TEXT('[');
 			if (Name.IsEmpty() && !(bFirst && bHasBracket))
 			{
-				return Miss;
+				return false;
 			}
 			if (!Name.IsEmpty())
 			{
-				if (!Current.IsObject())
+				if (!NameStep(Name))
 				{
-					return Miss;
+					return false;
 				}
-				Current = Current.Get(Name);
 			}
 			// [index]*
 			while (i < Expression.Len() && Expression[i] == TEXT('['))
@@ -121,29 +128,65 @@ namespace VaRest::Json::PathPrivate
 					++i;
 				}
 				int32 Index = 0;
-				if (i >= Expression.Len() || !ParseIndex(Expression.Mid(DigitsStart, i - DigitsStart), Index) || !Current.IsArray())
+				if (i >= Expression.Len() || !ParseIndex(Expression.Mid(DigitsStart, i - DigitsStart), Index) || !IndexStep(Index))
 				{
-					return Miss;
+					return false;
 				}
-				Current = Current.At(Index);
 				++i; // ']'
 			}
 			if (i < Expression.Len())
 			{
 				if (Expression[i] != TEXT('.') || i + 1 == Expression.Len())
 				{
-					return Miss; // stray ']' or trailing '.'
+					return false; // stray ']' or trailing '.'
 				}
 				++i;
 			}
 			bFirst = false;
-			if (!Current.IsValid())
-			{
-				return Miss;
-			}
 		}
-		return Current;
+		return true;
 	}
+
+	FVaRestJson WalkPointer(const FVaRestJson& Root, FStringView Expression, const FVaRestJson& Miss)
+	{
+		FVaRestJson Current = Root;
+		const bool bFound = VisitPointer(Expression, [&](FStringView Token) {
+			Current = PointerStep(Current, Token, Miss);
+			return Current.IsValid();
+		});
+		return bFound ? Current : Miss;
+	}
+
+	FVaRestJson WalkDotted(const FVaRestJson& Root, FStringView Expression, const FVaRestJson& Miss)
+	{
+		FVaRestJson Current = Root;
+		const bool bFound = VisitDotted(Expression,
+			[&](FStringView Name) {
+				if (!Current.IsObject())
+					return false;
+				Current = Current.Get(Name);
+				return Current.IsValid();
+			},
+			[&](int32 Index) {
+				if (!Current.IsArray())
+					return false;
+				Current = Current.At(Index);
+				return Current.IsValid();
+			});
+		return bFound ? Current : Miss;
+	}
+}
+
+bool FVaRestJson::IsValidPath(FStringView Expression)
+{
+	if (Expression.IsEmpty())
+	{
+		return true; // the root, as Path("")
+	}
+	using namespace VaRest::Json::PathPrivate;
+	return Expression[0] == TEXT('/')
+		? VisitPointer(Expression, [](FStringView Token) { return UnescapePointerToken(Token); })
+		: VisitDotted(Expression, [](FStringView) { return true; }, [](int32) { return true; });
 }
 
 FVaRestJson FVaRestJson::Path(FStringView Expression) const

@@ -44,6 +44,7 @@ void VaRest::WebSocket::Lws::FConn::Close(FService& Service, int32 Code, TArray<
 		return;
 	}
 	bCloseQueued = true;
+	RefreshReadFlow(Service, FPlatformTime::Seconds()); // closing must read the peer's close echo even under pressure
 	CloseCode = Code;
 	CloseReason = MoveTemp(Reason);
 	CloseBy = By;
@@ -71,6 +72,7 @@ int32 VaRest::WebSocket::Lws::FConn::OnWriteable(lws* InWsi)
 	}
 	// LWS calls WRITEABLE only after a truncated write drained (libwebsockets.h:4914-4930)
 	ReleaseHeld();
+	if (auto Control = WriteServiceControl(InWsi); Control.IsSet()) return Control.GetValue();
 	if (Outbox.Num() > 0)
 	{
 		FVaRestSocketFrame& Head = Outbox[0];
@@ -118,7 +120,7 @@ int32 VaRest::WebSocket::Lws::FConn::OnWriteable(lws* InWsi)
 		{
 			Link->ReleaseBuffered(FragmentSize);
 		}
-		if (Outbox.Num() > 0 || bCloseQueued || HeldBytes > 0)
+		if (Outbox.Num() > 0 || bCloseQueued || HeldBytes > 0 || AutoReplyDebt.Num() > 0 || bPingQueued)
 		{
 			lws_callback_on_writable(InWsi);
 		}
@@ -140,6 +142,7 @@ int32 VaRest::WebSocket::Lws::FConn::OnWriteable(lws* InWsi)
 
 void VaRest::WebSocket::Lws::FConn::ReleaseHeld()
 {
+	if (bControlHeld && Wsi && !lws_partial_buffered(Wsi)) bControlHeld = false;
 	// lws_partial_buffered (libwebsockets.h:6020-6037): set while LWS still holds part of the last write
 	if (HeldBytes > 0 && Wsi && !lws_partial_buffered(Wsi))
 	{
@@ -158,6 +161,7 @@ void VaRest::WebSocket::Lws::FConn::DropOutbox()
 		Bytes += Outbox[Index].Length - (Index == 0 ? static_cast<int64>(NextFragment) * FragmentBytes : 0);
 	}
 	Outbox.Empty();
+	AutoReplyDebt.Reset(); bControlHeld = false; bPingQueued = false; bAwaitingPong = false;
 	NextFragment = 0;
 	HeldBytes = 0;
 	if (Bytes > 0)

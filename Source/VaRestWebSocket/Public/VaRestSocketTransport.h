@@ -5,12 +5,33 @@
 #include "CoreMinimal.h"
 #include "Templates/Function.h"
 #include "VaRestSocketTypes.h"
+#include <atomic>
+
+/** Native service counters shared across attempts; no UObject, client or callback crosses the service boundary. */
+struct FVaRestSocketServiceStats
+{
+	std::atomic<int64> AutoRepliesSent{0};
+	std::atomic<double> LongestAutoReplyDelay{0.0};
+	void RecordAutoReply(double Delay)
+	{
+		AutoRepliesSent.fetch_add(1, std::memory_order_relaxed);
+		if (!FMath::IsFinite(Delay) || Delay < 0.0) return;
+		double Previous = LongestAutoReplyDelay.load(std::memory_order_relaxed);
+		while (Delay > Previous && !LongestAutoReplyDelay.compare_exchange_weak(Previous, Delay, std::memory_order_relaxed)) {}
+	}
+};
 
 namespace VaRest::WebSocket
 {
 	/** The largest ConnectTimeout VaRest accepts: the LWS context's timeout_secs, the backstop of every handshake stage (spec 2.2) */
 	inline constexpr double MaxConnectTimeoutSeconds = 60.0;
 }
+
+/** Native immutable exact-text rule. Reply data is written only at a data-message boundary. */
+struct FVaRestSocketAutoReply
+{
+	TArray<uint8> Match, Reply;
+};
 
 /**
  * One connection attempt (WebSocket spec 2.2; D3: one LWS connection per attempt, its headers fresh each time). The socket
@@ -34,6 +55,12 @@ struct FVaRestSocketConnectRequest
 	double CloseTimeout = 5.0;
 	/** An inbound message over this closes the connection with 1009 (spec 2.3, 15) */
 	int64 MaxMessageBytes = 1024 * 1024;
+	int64 MaxPendingInboundBytes = 16 * 1024 * 1024;
+	/** Compatibility field for consumers reporting logical frames. Private queue-slot pressure is independent of ACKs. */
+	bool bExplicitMessageConsumption = false;
+	double PingInterval = 20.0, PingTimeout = 10.0;
+	TArray<FVaRestSocketAutoReply> AutoReplies;
+	TSharedPtr<FVaRestSocketServiceStats, ESPMode::ThreadSafe> ServiceStats;
 	/** Once the buffered amount has reached this, its next return to zero is reported as Drained (spec 2.4, 6.3) */
 	int64 SendHighWater = 256 * 1024;
 	/** Log lines name the connection by this (W2: the socket's name and attempt); empty: "ws#<id>" */
@@ -53,7 +80,9 @@ class IVaRestSocketConnection
 public:
 	virtual ~IVaRestSocketConnection() = default;
 
-	/** The consumer's thread (one at a time): appends the queued events to Out, in order; returns how many */
+	/** The consumer's thread (one at a time): appends at most the entry snapshot of queued events in FIFO order.
+	 * Concurrently published events can remain for another pull; returns actual additions. Dequeue releases private
+	 * queue-slot credit even for empty messages; payload bytes stay charged until Consumed. */
 	virtual int32 PopEvents(TArray<FVaRestSocketEvent>& Out) = 0;
 
 	/**
@@ -70,6 +99,14 @@ public:
 
 	/** The consumer's thread: Bytes of Message events it has delivered (spec 2.3: flow control counts what it has not) */
 	virtual void Consumed(int64 Bytes) = 0;
+	/** Exact logical-frame retirement for consumers holding fragmented packets, including empty messages.
+	 * This is independent of transport queue-slot credit, which retires on PopEvents. */
+	virtual void ConsumedMessages(int64 Bytes, int32 Messages) { Consumed(Bytes); }
+	/** Service-thread controls. False means unsupported or refused; callers must handle admission explicitly. */
+	virtual bool SetIdleDeadline(double Seconds) { return false; }
+	virtual bool Abort(FStringView Reason, EVaRestSocketCloseBy By = EVaRestSocketCloseBy::Transport,
+		EVaRestSocketFailure Failure = EVaRestSocketFailure::None) { return false; }
+	virtual bool IsReadPaused() const { return false; }
 
 	/** Any thread: bytes Send accepted that the socket has not taken yet, exact to within one 64 KiB fragment (spec 2.4, 6.3; plan decision 7) */
 	virtual int64 GetBufferedAmount() const = 0;

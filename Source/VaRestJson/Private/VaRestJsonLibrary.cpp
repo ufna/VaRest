@@ -163,6 +163,15 @@ bool UVaRestJsonLibrary::HasField(const FVaRestJson& Json, const FString& Key)
 {
 	return Json.Has(Key);
 }
+bool UVaRestJsonLibrary::JsonAsBool(const FVaRestJson& Json,bool Default) { return Json.AsBool(Default); }
+int32 UVaRestJsonLibrary::JsonAsInt(const FVaRestJson& Json,int32 Default) { return Json.AsInt(Default); }
+int64 UVaRestJsonLibrary::JsonAsInt64(const FVaRestJson& Json,int64 Default) { return Json.AsInt64(Default); }
+double UVaRestJsonLibrary::JsonAsNumber(const FVaRestJson& Json,double Default) { return Json.AsDouble(Default); }
+FString UVaRestJsonLibrary::JsonAsString(const FVaRestJson& Json,const FString& Default) { return Json.AsString(Default); }
+TArray<FVaRestJson> UVaRestJsonLibrary::JsonArrayElements(const FVaRestJson& Json)
+{
+	TArray<FVaRestJson> Result;if (Json.IsArray()) { Result.Reserve(Json.Num());for (const auto& Element:Json.Elements()) Result.Add(Element); }return Result;
+}
 
 bool UVaRestJsonLibrary::RemoveField(const FVaRestJson& Json, const FString& Key)
 {

@@ -3,7 +3,6 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Hash/CityHash.h"
 #include "VaRestJson.h"
 
 namespace VaRest::Json
@@ -15,7 +14,7 @@ namespace VaRest::Json
 	{
 		const UTF8CHAR* Data;
 		uint32 Len;
-		/** HashKey of the bytes (per-process seeded; not collision-proof, see HashKey); set for object keys, 0 otherwise */
+		/** HashKey of the bytes (per-process keyed; not collision-proof); set for object keys, 0 otherwise */
 		uint32 Hash;
 
 		FUtf8StringView View() const { return FUtf8StringView(Data, Len); }
@@ -33,6 +32,13 @@ namespace VaRest::Json
 		uint32 Capacity; // power of two, at least twice the member count
 		uint32* Slots;
 	};
+
+	/** Explicit prefix of each nonempty arena-owned member buffer; never allocated by a reader. */
+	struct alignas(FMember) FMemberStorage
+	{
+		FIndex* Index = nullptr;
+	};
+	static_assert(sizeof(FMemberStorage) == 8 && sizeof(FMemberStorage) % alignof(FMember) == 0);
 
 	enum class ENumKind : uint8
 	{
@@ -55,7 +61,18 @@ namespace VaRest::Json
 			FMember* Members; // insertion order; duplicates allowed (parser)
 			uint32 Num;
 			uint32 Max;
-			FIndex* Index;    // non-null above IndexThreshold members
+
+			FIndex* GetIndex() const
+			{
+				return Members ? (reinterpret_cast<const FMemberStorage*>(Members) - 1)->Index : nullptr;
+			}
+			void SetIndex(FIndex* Index)
+			{
+				if (Members)
+					(reinterpret_cast<FMemberStorage*>(Members) - 1)->Index = Index;
+				else
+					check(!Index);
+			}
 		};
 
 		EVaRestJsonType Type = EVaRestJsonType::Null;
@@ -74,30 +91,23 @@ namespace VaRest::Json
 		};
 
 		FNode()
-			: Obj{ nullptr, 0, 0, nullptr }
+			: Obj{ nullptr, 0, 0 }
 		{
 		}
 	};
 
-	// Type, NumKind and bDuplicateKeys share the padding before the 8-byte-aligned union: the node stays 32 bytes
-	static_assert(sizeof(FNode) == 32, "FNode is 32 bytes");
+	// Only object member buffers retain an index pointer; all scalar/array nodes keep a 16-byte payload.
+	static_assert(sizeof(FNode) == 24, "FNode is 24 bytes");
+	/** Keep conservative logical admission stable; the object unit also covers its member-buffer prefix. */
+	inline constexpr SIZE_T JsonNodeBudgetBytes = 32;
+	static_assert(sizeof(FNode) + sizeof(FMemberStorage) <= JsonNodeBudgetBytes);
 
 	/** Objects with more members than this carry an FIndex, built at parse time or on mutation -- never on read */
 	inline constexpr uint32 IndexThreshold = 8;
 
-	/** This process's hash seed (VaRestJsonDocument.cpp) */
-	uint64 GetHashSeed();
-
-	/**
-	 * Seeded per process (VaRest-sj2). The seed stops an attacker predicting which slot a key takes under a known, unseeded
-	 * hash. It does NOT stop seed-independent multicollisions: CityHash64WithSeed is HashLen16(CityHash64(s, len) - k2, seed)
-	 * (Runtime/Core/Private/Hash/CityHash.cpp:430-440), so the seed is applied after the unseeded 64-bit hash of the whole key,
-	 * and keys with equal CityHash64 collide in every process. A keyed hash is bead VaRest-sj2 (M7).
-	 */
-	inline uint32 HashKey(FUtf8StringView Key)
-	{
-		return static_cast<uint32>(CityHash64WithSeed(reinterpret_cast<const char*>(Key.GetData()), static_cast<uint32>(Key.Len()), GetHashSeed()));
-	}
+	/** SipHash-2-4 with one module-owned process key, mixed into every block before compression.
+	 * Truncated to the index's existing uint32 format. Hashes are never serialized; byte-exact equality remains authoritative. */
+	VARESTJSON_API uint32 HashKey(FUtf8StringView Key);
 
 	/** Byte-exact comparison. TStringView::operator== is case-insensitive in UE, so it must not be used for keys. */
 	inline bool KeyEquals(const FStr& A, FUtf8StringView B)

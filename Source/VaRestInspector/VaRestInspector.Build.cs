@@ -8,11 +8,11 @@ public class VaRestInspector : ModuleRules
         PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
         PublicDependencyModuleNames.AddRange(new string[]
         {
-            "Core", "CoreUObject", "DeveloperSettings", "VaRestHttp"
+            "Core", "CoreUObject", "Engine", "DeveloperSettings", "VaRestHttp"
         });
         PrivateDependencyModuleNames.AddRange(new string[]
         {
-            "Engine", "VaRestJson"
+            "VaRestJson"
         });
     }
 }

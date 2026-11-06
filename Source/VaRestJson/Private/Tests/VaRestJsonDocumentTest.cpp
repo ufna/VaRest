@@ -95,12 +95,12 @@ bool FVaRestJsonDocIndexTest::RunTest(const FString& Parameters)
 	{
 		Doc.Set(*Obj, StringCast<UTF8CHAR>(*FString::Printf(TEXT("k%d"), i)).Get(), Doc.NewInt(i));
 	}
-	TestNull(TEXT("no index at the threshold"), Obj->Obj.Index);
+	TestNull(TEXT("no index at the threshold"), Obj->Obj.GetIndex());
 	for (int32 i = (int32)IndexThreshold; i < 1000; ++i)
 	{
 		Doc.Set(*Obj, StringCast<UTF8CHAR>(*FString::Printf(TEXT("k%d"), i)).Get(), Doc.NewInt(i));
 	}
-	TestNotNull(TEXT("index above the threshold"), Obj->Obj.Index);
+	TestNotNull(TEXT("index above the threshold"), Obj->Obj.GetIndex());
 
 	int32 Wrong = 0;
 	for (int32 i = 0; i < 1000; ++i)
@@ -182,7 +182,7 @@ bool FVaRestJsonDocCopyTest::RunTest(const FString& Parameters)
 	const bool bArrOk = CopiedArr.Type == EVaRestJsonType::Array && CopiedArr.Arr.Num == 1;
 	TestTrue(TEXT("array copied has one element"), bArrOk);
 	TestEqual(TEXT("array copied"), bArrOk ? Need(*this, CopiedArr.Arr.Items[0], TEXT("a[0]")).Double : 0.0, 2.5);
-	TestNotNull(TEXT("copied big object is indexed"), Copy->Obj.Index);
+	TestNotNull(TEXT("copied big object is indexed"), Copy->Obj.GetIndex());
 	TestEqual(TEXT("indexed lookup in copy"), Need(*this, FDocument::Find(*Copy, K("n19")), TEXT("n19")).Int, (int64)19);
 
 	// Copying an ancestor under one of its own descendants terminates and does not alias
@@ -273,7 +273,7 @@ bool FVaRestJsonDocRemoveArenaTest::RunTest(const FString& Parameters)
 		Doc.Remove(*Obj, StringCast<UTF8CHAR>(*Key(i)).Get());
 	}
 	TestEqual(TEXT("threshold member count"), (int32)Obj->Obj.Num, (int32)IndexThreshold);
-	TestNull(TEXT("no index at the threshold"), Obj->Obj.Index);
+	TestNull(TEXT("no index at the threshold"), Obj->Obj.GetIndex());
 	Wrong = 0;
 	for (int32 i = 200 - (int32)IndexThreshold; i < 200; ++i)
 	{
@@ -292,16 +292,16 @@ bool FVaRestJsonDocLastWinsAfterRemoveTest::RunTest(const FString& Parameters)
 	// 11 members, "k" twice: indexed (more than IndexThreshold = 8), lookup gives the last "k"
 	FVaRestJson J = FVaRestJson::Parse(FUtf8StringView(UTF8TEXT(
 		"{\"k\":1,\"a\":0,\"b\":0,\"c\":0,\"d\":0,\"e\":0,\"f\":0,\"g\":0,\"h\":0,\"k\":2,\"z\":0}"))).StealValue();
-	TestTrue(TEXT("indexed"), J.GetNodeInternal()->Obj.Index != nullptr);
+	TestTrue(TEXT("indexed"), J.GetNodeInternal()->Obj.GetIndex() != nullptr);
 	TestEqual(TEXT("last occurrence wins"), J[TEXT("k")].AsInt(), 2);
 
 	J.Remove(TEXT("a")); // 10 members: the index is cleared and refilled in place
-	TestTrue(TEXT("still indexed"), J.GetNodeInternal()->Obj.Index != nullptr);
+	TestTrue(TEXT("still indexed"), J.GetNodeInternal()->Obj.GetIndex() != nullptr);
 	TestEqual(TEXT("last occurrence still wins after Remove reindexes"), J[TEXT("k")].AsInt(), 2);
 
 	J.Remove(TEXT("b"));
 	J.Remove(TEXT("c")); // 8 members: the index is dropped, lookups scan from the end
-	TestTrue(TEXT("index released at 8 members"), J.GetNodeInternal()->Obj.Index == nullptr);
+	TestTrue(TEXT("index released at 8 members"), J.GetNodeInternal()->Obj.GetIndex() == nullptr);
 	TestEqual(TEXT("last occurrence still wins on the linear scan"), J[TEXT("k")].AsInt(), 2);
 	return true;
 }
@@ -326,13 +326,64 @@ bool FVaRestJsonDocHashSeededTest::RunTest(const FString& Parameters)
 	}
 	Text += TEXT("}");
 	FVaRestJson J = FVaRestJson::Parse(FStringView(Text)).StealValue();
-	TestTrue(TEXT("indexed"), J.GetNodeInternal()->Obj.Index != nullptr);
+	TestTrue(TEXT("indexed"), J.GetNodeInternal()->Obj.GetIndex() != nullptr);
 	bool bAllFound = true;
 	for (int32 i = 0; i < 40; ++i)
 	{
 		bAllFound &= J[*FString::Printf(TEXT("k%d"), i)].AsInt(-1) == i;
 	}
 	TestTrue(TEXT("every key is found through the seeded index"), bAllFound);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonDocMemberStorageTest, "VaRest.Json.Document.MemberStorage",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestJsonDocMemberStorageTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Json;
+	using namespace VaRestJsonDocumentTest;
+	FDocument Doc;
+	FNode* Empty = Doc.NewObject();
+	const SIZE_T BeforeEmptyIndex = Doc.Arena.GetUsedBytes();
+	TestFalse(TEXT("empty index has no duplicates"), Doc.BuildIndex(*Empty));
+	TestNull(TEXT("empty object has no index"), Empty->Obj.GetIndex());
+	TestEqual(TEXT("empty index operation retains no member buffer"), Doc.Arena.GetUsedBytes(), BeforeEmptyIndex);
+
+	FNode* A = Doc.NewObject(1);
+	Doc.CopyStr(K("odd"), false); // Force alignment padding between separately owned buffers.
+	FNode* B = Doc.NewObject(1);
+	const FNode* Captured = nullptr;
+	for (int32 I = 0; I < 128; ++I)
+	{
+		const FString Key = FString::Printf(TEXT("k%d"), I);
+		const auto Utf8 = StringCast<UTF8CHAR>(*Key);
+		Doc.Set(*A, Utf8.Get(), Doc.NewInt(1000 + I));
+		Doc.Set(*B, Utf8.Get(), Doc.NewInt(2000 + I));
+		if (I == 0) Captured = FDocument::Find(*A, K("k0"));
+	}
+	TestTrue(TEXT("interleaved objects retain distinct indexes"), A->Obj.GetIndex() && B->Obj.GetIndex()
+		&& A->Obj.GetIndex() != B->Obj.GetIndex());
+	for (int32 I = 0; I < 128; ++I)
+	{
+		const FString Key = FString::Printf(TEXT("k%d"), I);
+		const auto Utf8 = StringCast<UTF8CHAR>(*Key);
+		TestEqual(TEXT("first index survives each member-buffer growth"), Need(*this, FDocument::Find(*A, Utf8.Get()), TEXT("A key")).Int, int64(1000 + I));
+		if (I % 3 == 0) Doc.Remove(*A, Utf8.Get());
+		TestEqual(TEXT("removing from the first object leaves the second index intact"), Need(*this, FDocument::Find(*B, Utf8.Get()), TEXT("B key")).Int, int64(2000 + I));
+	}
+	FDocument Target;
+	FNode* Copy = Target.DeepCopy(*B);
+	if (!TestTrue(TEXT("copy owns a separate complete index"), Copy && Copy->Obj.GetIndex() && Copy->Obj.GetIndex() != B->Obj.GetIndex()))
+		return false;
+	Target.Remove(*Copy, K("k1"));
+	TestEqual(TEXT("copy index removal cannot change its source"), Need(*this, FDocument::Find(*B, K("k1")), TEXT("source k1")).Int, int64(2001));
+
+	Doc.AssignObject(*A, TConstArrayView<FMember>());
+	TestNull(TEXT("empty replacement clears the former index"), A->Obj.GetIndex());
+	Doc.Set(*A, K("new"), Doc.NewInt(7));
+	TestEqual(TEXT("a fresh buffer after empty replacement is usable"), Need(*this, FDocument::Find(*A, K("new")), TEXT("new key")).Int, int64(7));
+	TestEqual(TEXT("old child handles outlive growth, removal and parent replacement"), Need(*this, Captured, TEXT("captured child")).Int, int64(1000));
 	return true;
 }
 

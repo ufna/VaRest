@@ -5,6 +5,7 @@
 #include "VaRestDefines.h"
 #include "VaRestLibrary.h"
 #include "VaRestSettings.h"
+#include "VaRestRequestJSON.h"
 
 #include "Developer/Settings/Public/ISettingsModule.h"
 #include "UObject/Package.h"
@@ -30,6 +31,7 @@ void FVaRestModule::StartupModule()
 
 void FVaRestModule::ShutdownModule()
 {
+	UVaRestRequestJSON::ShutdownRequestsOnGT();
 	if (ISettingsModule* SettingsModule = FModuleManager::GetModulePtr<ISettingsModule>("Settings"))
 	{
 		SettingsModule->UnregisterSettings("Project", "Plugins", "VaRest");

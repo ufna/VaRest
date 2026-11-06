@@ -2,11 +2,12 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
 #include "Containers/ArrayView.h"
+#include "CoreMinimal.h"
 #include "Templates/Function.h"
 #include "UObject/Class.h"
 #include "VaRestJson.h"
+#include "VaRestJsonRules.h"
 
 #include <initializer_list>
 
@@ -14,7 +15,10 @@
 
 class FProperty;
 
-/** How struct field names become JSON keys (spec 2.4). Decode accepts every policy's spelling regardless. */
+/**
+ * How struct field names become JSON keys (spec 2.4). Decode accepts every policy's spelling regardless.
+ * Word boundaries and case conversion use ASCII letters/digits; other characters stay unchanged on every platform.
+ */
 UENUM(BlueprintType)
 enum class EVaRestJsonNaming : uint8
 {
@@ -75,6 +79,22 @@ struct FVaRestJsonConvertOptions
 
 	/** Decode: per-value source of TArray<uint8> fields (see FVaRestJsonBytesResolver); unset: the built-in forms only */
 	FVaRestJsonBytesResolver BytesResolver;
+
+	/** Null captures the registered default once per conversion; an explicit snapshot applies throughout the walk. */
+	TSharedPtr<const FVaRestJsonRuleSnapshot, ESPMode::ThreadSafe> Rules;
+
+	/**
+	 * Cumulative logical output/storage and controlled temporary byte charge, not heap/RSS or a peak cap.
+	 * Includes conservative string sizing, DOM slots and typed element storage; excludes allocator slack,
+	 * metadata caches and arbitrary native defaults/constructors/user callbacks. 0 preserves unlimited calls.
+	 */
+	int64 MaxOutputBytes = 0;
+
+	/** Semantic conversion/default visits and emitted nodes/keys. 0 = unlimited. */
+	int64 MaxValues = 0;
+
+	/** Declared walk/match/copy units, not a bound on native/hash/callback CPU. 0 = unlimited. */
+	int64 MaxWorkUnits = 0;
 };
 
 /** What a decode found, each entry with the JSON path of the value ("items[3].name"). Strict mode reports Errors. */
@@ -82,6 +102,8 @@ struct FVaRestJsonDecodeReport
 {
 	TArray<FVaRestJsonError> Warnings;
 	TArray<FVaRestJsonError> Errors;
+	/** Logical byte/value/work refusal, distinct from JSON type mismatch; sticky when this report is reused. */
+	bool bBudgetExceeded = false;
 };
 
 /** A C++ field rename: Field is the property name, Json the key it is written as (no naming policy applies to it) */
@@ -98,6 +120,7 @@ struct FVaRestJsonRename
  * wins -- an engine hardcoded name (id is written ID, name is written Name, in every build), or letters some module
  * registered earlier (in a packaged game it depends on registration order; the editor warns). FName values and FName
  * map keys are written with their FName text and share that hazard; a rename covers field names only.
+ * A registered property name that does not exist warns when a field map is built; cached lookups do not repeat it.
  */
 struct VARESTJSON_API FVaRestJsonNames
 {
@@ -110,6 +133,8 @@ struct VARESTJSON_API FVaRestJsonNames
 	}
 
 	static void Unregister(const UScriptStruct* Struct);
+	/** Native rename/cache publication epoch; dynamic callers capture/recheck it. */
+	static uint64 GetGeneration();
 };
 
 /**
@@ -117,6 +142,9 @@ struct VARESTJSON_API FVaRestJsonNames
  * a Blueprint struct recompiled in the editor while a worker thread decodes into it frees the FProperty objects that
  * decode is reading (UserDefinedStructureCompilerUtils.cpp:221-225), and dropping the cache cannot help a decode
  * already in flight. Any reflection user shares that hazard; it exists only in the editor.
+ * Native FString map keys of the same counted length compare without case and stop at U+0000;
+ * distinct JSON keys can therefore merge (last wins).
+ * A key containing U+0000 warns in lenient mode and is refused in strict mode; keep FVaRestJson for exact keys.
  */
 struct VARESTJSON_API FVaRestJsonConvert
 {
@@ -178,10 +206,20 @@ struct VARESTJSON_API FVaRestJsonConvert
 	/** Parse, then JsonToStruct; a syntax error is reported as an Error (with its line and column) */
 	static bool Utf8ToStruct(TConstArrayView<uint8> Utf8, const UScriptStruct* Struct, void* Data,
 		const FVaRestJsonConvertOptions& Options = FVaRestJsonConvertOptions(), FVaRestJsonDecodeReport* OutReport = nullptr);
+	/** Explicit M7 candidate. Supported native struct/array layouts use a validated SAX walk without a response DOM.
+	 * Other layouts, raw JSON/byte callbacks, duplicate or reordered bound fields use the existing DOM semantics.
+	 * This does not change the default decoder or qualify reflected worker/cooked conversion. */
+	static bool Utf8ToStructStreaming(TConstArrayView<uint8> Utf8, const UScriptStruct* Struct, void* Data,
+		const FVaRestJsonConvertOptions& Options = FVaRestJsonConvertOptions(), FVaRestJsonDecodeReport* OutReport = nullptr,
+		bool* OutUsedStreaming = nullptr);
 
 	/** One property's value (Value points at the value): the BP wildcard nodes' decode. True when the value was stored. */
 	static bool JsonToProperty(const FVaRestJson& Json, const FProperty* Property, void* Value,
 		const FVaRestJsonConvertOptions& Options = FVaRestJsonConvertOptions(), FVaRestJsonDecodeReport* OutReport = nullptr);
+	/** Internal protocol adapter: array element i feeds converted struct field i, with one aggregate conversion budget.
+	 * Missing arguments keep authored defaults and warn (strict: error); extras are ignored. No intermediate DOM. */
+	static bool JsonArrayToStructInternal(const FVaRestJson& Json, const UScriptStruct* Struct, void* Data,
+		const FVaRestJsonConvertOptions& Options, FVaRestJsonDecodeReport* OutReport);
 
 	/**
 	 * JsonToStruct into a new T (USTRUCT, TBaseStructure type or FTimespan); the error is the first error (or warning) reported; warnings of a successful decode are dropped.
@@ -203,7 +241,8 @@ struct VARESTJSON_API FVaRestJsonConvert
 			return MakeValue(MoveTemp(Value));
 		}
 		Struct->DestroyStruct(Storage);
-		FVaRestJsonError Error = Report.Errors.Num() > 0 ? Report.Errors[0] : Report.Warnings.Num() > 0 ? Report.Warnings[0] : FVaRestJsonError();
+		FVaRestJsonError Error = Report.Errors.Num() > 0 ? Report.Errors[0] : Report.Warnings.Num() > 0 ? Report.Warnings[0]
+																										: FVaRestJsonError();
 		if (Error.Message.IsEmpty())
 		{
 			Error.Message = TEXT("the value is not an object");

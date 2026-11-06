@@ -27,10 +27,11 @@ enum class EMeasure : uint8
 };
 struct FPacketLayout
 {
-	static constexpr int32 MaxTexts = static_cast<int32>(EText::Count) + 2 * 256 + 2 * 32;
+	static constexpr int32 MaxTexts = static_cast<int32>(EText::Count) + 2 * 256 + 2 * 32 + 32;
 	FPacketFixed Fixed;
 	FPairSlice Headers[256];
 	FPairSlice Warnings[32];
+	FPairSlice Protocols[32];
 	FStringView BorrowedText[MaxTexts];
 	FTextSlice TextDestination[MaxTexts];
 	int32 TextCount = 0;
@@ -72,7 +73,7 @@ class FPacketCodec
 public:
 	static EMeasure Measure(const FVaRestTraceEvent& Borrowed,
 		const FCapturePolicy& Policy, const FAllocationAdapter& Allocator,
-		FPacketLayout& Out);
+		FPacketLayout& Out, bool bSnapshot = false);
 	static EMeasure MeasureStarted(const FVaRestTraceStarted& Borrowed,
 		FPacketHeader Header, const FCapturePolicy& Policy,
 		const FAllocationAdapter& Allocator, FPacketLayout& Out);

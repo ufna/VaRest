@@ -51,6 +51,8 @@ namespace VaRest::Http::Testing
 #if WITH_DEV_AUTOMATION_TESTS
 namespace VaRest::Http::Testing
 {
+    /** Actual initialized dynamic carrier inventory; GTK-only observation for G-BP-TRANSFER. */
+    VARESTHTTP_API int32& LiveDynamicCarriersOnGT();
     enum class EQueueCodecAccount : uint8 { Encoded, Body, Additional };
     struct FQueueCodecBuffers
     {

@@ -729,6 +729,7 @@ bool FVaRestHttpLimiterDoubleReleaseTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("... and the count never goes negative"), Limiter.NumActive(), 0);
 #else
 	AddInfo(TEXT("ensures are compiled out (DO_ENSURE 0): nothing to check"));
+
 #endif
 	return true;
 }
@@ -946,5 +947,62 @@ bool FVaRestHttpLimiterHoldsSlotTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("every slot came back"), Slots.NumActive() == 0 && Slots.NumQueued() == 0);
 	return true;
 }
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpLimiterCancelHeldTest, "VaRest.Http.Limiter.CancelHeldStageReturnsGrant",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpLimiterCancelHeldTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::LimiterTestPrivate;
+	for (bool bStartedTransport : {false, true})
+	{
+		FTestRig Rig;
+		Rig.Client.WithMaxConcurrent(1);
+		const auto Stage = MakeShared<FHoldingStage, ESPMode::ThreadSafe>();
+		Rig.Client.Use(Stage, EVaRestStageSlot::PerAttempt);
+		Rig.Fake->SetResponder([](const FVaRestTransportRequest&) { return FVaRestFakeResponse::Manual(); });
+		const auto& Slots = VaRest::Http::FClientAccess::State(Rig.Client)->GetLimiter();
+		const auto Bail = [&]
+		{
+			Rig.Client.CancelAll(); Stage->AnswerHeld();
+			PumpUntil([&Rig] { return Rig.Client.GetInFlightCount() == 0; }); Rig.Drain();
+			return false;
+		};
+		auto A = MakeOutcome<FVaRestJson>(); auto B = MakeOutcome<FVaRestJson>(); auto C = MakeOutcome<FVaRestJson>();
+		const auto Handle = Observe(Rig.Client.Get(TEXT("/held")), A).Send();
+		Observe(Rig.Client.Get(TEXT("/b")), B).Send(); Observe(Rig.Client.Get(TEXT("/c")), C).Send();
+		if (!TestTrue(TEXT("one held grant and two queued requests"), PumpUntil([&] { return Stage->IsHolding() && Slots.NumQueued() == 2; }))) return Bail();
+		if (bStartedTransport)
+		{
+			Stage->ProceedHeld();
+			if (!TestTrue(TEXT("held stage starts the physical call"), PumpUntil([&] { return Rig.Fake->NumCalls() == 1; }))) return Bail();
+		}
+		const int32 BeforeCancel = bStartedTransport ? 1 : 0;
+		Handle.Cancel(); Handle.Cancel();
+		TestEqual(TEXT("Cancel does not grant or dispatch another request inline"), Rig.Fake->NumCalls(), BeforeCancel);
+		TestEqual(TEXT("Cancel does not deliver inline"), A->CompleteCalls.load(), 0);
+		if (!TestTrue(TEXT("cancel resolves A and grants B while the stage still holds A"), PumpUntil([&] { return A->IsDone() && Rig.Fake->NumCalls() == BeforeCancel + 1; })
+			&& Stage->IsHolding() && Slots.NumActive() == 1 && Slots.NumQueued() == 1)) return Bail();
+		TestTrue(TEXT("A ends once as Canceled"), A->Error.Kind == EVaRestErrorKind::Canceled && A->ErrorCalls.load() == 1 && A->CompleteCalls.load() == 1);
+		if (bStartedTransport)
+			TestTrue(TEXT("physical cancellation is observed by the stage before logical retirement"), Stage->LateAnswers->load() == 1 && Rig.Fake->GetCall(0).bCanceled);
+		const int32 LateBefore = Stage->LateAnswers->load();
+		Stage->ProceedHeld();
+		if (!TestTrue(TEXT("late Proceed is refused before transport"), PumpUntil([&] { return Stage->LateAnswers->load() == LateBefore + 1; }))) return Bail();
+		Stage->AnswerHeld();
+		TestTrue(TEXT("late outcome does not free B's slot or admit C"), Slots.NumActive() == 1 && Slots.NumQueued() == 1 && Rig.Fake->NumCalls() == BeforeCancel + 1);
+		Rig.Fake->Complete(BeforeCancel, Ok());
+		if (!TestTrue(TEXT("only B's completion grants C"), Rig.Wait(B) && PumpUntil([&] { return Rig.Fake->NumCalls() == BeforeCancel + 2; }))) return Bail();
+		Rig.Fake->Complete(BeforeCancel + 1, Ok());
+		if (!TestTrue(TEXT("C completes"), Rig.Wait(C))) return Bail();
+		TestTrue(TEXT("owned operations retire"), Rig.Drain());
+		TestTrue(TEXT("all grants return exactly once"), Slots.NumActive() == 0 && Slots.NumQueued() == 0);
+		TestTrue(TEXT("both queued requests succeed"), B->SuccessCalls.load() == 1 && C->SuccessCalls.load() == 1);
+		TestEqual(TEXT("late outcome cannot deliver A again"), A->CompleteCalls.load(), 1);
+	}
+	return true;
+}
+
 
 #endif

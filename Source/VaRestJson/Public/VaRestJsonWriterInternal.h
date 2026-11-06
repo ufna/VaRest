@@ -14,6 +14,8 @@
  */
 namespace VaRest::Json
 {
+	/** Core float spelling shared with native sibling-protocol arguments. */
+	VARESTJSON_API double FloatToJsonDoubleInternal(float Value);
 	/** RapidJSON output stream over a TArray. Put/PutReserve/PutUnsafe are found by ADL from writer.h. */
 	struct FUtf8Sink
 	{
@@ -70,6 +72,12 @@ namespace VaRest::Json
 	VARESTJSON_API bool WriteStructMembersInternal(FPrettyWriter& Writer, const UScriptStruct* Struct, const void* Data,
 		const FVaRestJsonConvertOptions& Options = FVaRestJsonConvertOptions(), int32 OpenContainers = 1, FVaRestJsonError* OutError = nullptr);
 
+	/** Same field map and one-pass writer, excluding only exact root keys (including embedded NULs).
+	 * Excluded fields are not evaluated; nested members retain their ordinary names/presence rules. */
+	VARESTJSON_API bool WriteStructMembersFilteredInternal(FCondensedWriter& Writer, const UScriptStruct* Struct, const void* Data,
+		TConstArrayView<FString> ExcludedKeys, bool& bSkipped, const FVaRestJsonConvertOptions& Options = FVaRestJsonConvertOptions(),
+		int32 OpenContainers = 1, FVaRestJsonError* OutError = nullptr);
+
 	// The entries below share WriteStructMembersInternal's contract: OpenContainers counts the containers the caller has
 	// open (the shared MaxDepth includes them); false past VaRest::Json::MaxDepth or for a value they refuse, after which
 	// the writer is unusable (closing the envelope asserts; only Reset starts over) and its output must be discarded;
@@ -101,7 +109,9 @@ namespace VaRest::Json
 	 * Writes one property's value (Value points at the value, not at its container) as one JSON value: what
 	 * PropertyToJson builds, without the DOM. False, writing nothing, for a property the converter does not support
 	 * (an object reference...). Socket.IO's positional encode (§18.2 J-2), inside the packet's open array:
-	 * `for (const FProperty* Field : GetConvertedFieldsInternal(Struct, Options)) WritePropertyInternal(Writer, Field, Field->ContainerPtrToValuePtr<void>(Data), Options, 1)`.
+	 * First call TryGetConvertedFieldsInternal and abort on false, before opening the packet. Then write each field
+	 * with WritePropertyInternal, checking every result. Capture Options.Rules once for the complete positional operation
+	 * when registrations may change between calls; individual property writes do not form a snapshot transaction.
 	 */
 	VARESTJSON_API bool WritePropertyInternal(FCondensedWriter& Writer, const FProperty* Property, const void* Value,
 		const FVaRestJsonConvertOptions& Options = FVaRestJsonConvertOptions(), int32 OpenContainers = 0, FVaRestJsonError* OutError = nullptr);
@@ -122,4 +132,13 @@ namespace VaRest::Json
 	 */
 	VARESTJSON_API TArray<const FProperty*> GetConvertedFieldsInternal(const UScriptStruct* Struct,
 		const FVaRestJsonConvertOptions& Options = FVaRestJsonConvertOptions());
+
+	/**
+	 * Status-bearing positional discovery. A conflict or key collision returns false with no fields; callers must abort
+	 * before emitting a payload. The older array-returning getter logs on failure and is retained for compatibility;
+	 * new positional code must use this checked form. Ignore/DecodeOnly fields are excluded; value-dependent omissions
+	 * still occupy their positional slot. Property writes use their explicit conversion options, not field-presence rules.
+	 */
+	VARESTJSON_API bool TryGetConvertedFieldsInternal(const UScriptStruct* Struct, TArray<const FProperty*>& OutFields,
+		const FVaRestJsonConvertOptions& Options = FVaRestJsonConvertOptions(), FVaRestJsonError* OutError = nullptr);
 }

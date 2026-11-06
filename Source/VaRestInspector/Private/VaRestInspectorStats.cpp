@@ -264,7 +264,7 @@ namespace VaRest::Inspector::Private
 bool BuildStatsKey(const FStatsKeyParts& Parts, TArrayView<TCHAR> Scratch, FStatsKeyView& Out)
 {
 	Out = {};
-	if (!Parts.bContextKnown || Parts.ScopeId != 0)
+	if (!Parts.bContextKnown)
 		return false;
 	Out.ScopeId = Parts.ScopeId;
 	Out.ClientId = Parts.ClientId;

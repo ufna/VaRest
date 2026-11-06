@@ -9,12 +9,14 @@
 #include "LatentActions.h"
 
 #include "VaRestTypes.h"
+#include "VaRestClient.h"
 
 #include "VaRestRequestJSON.generated.h"
 
 class UVaRestJsonValue;
 class UVaRestJsonObject;
 class UVaRestSettings;
+class UVaRestHub;
 
 /**
  * @author Original latent action class by https://github.com/unktomi
@@ -25,6 +27,7 @@ class FVaRestLatentAction : public FPendingLatentAction
 public:
 	virtual void Call(const T& Value)
 	{
+		if (bCancelled) return;
 		Result = Value;
 		Called = true;
 	}
@@ -35,6 +38,7 @@ public:
 	}
 
 	void Cancel();
+	void Abort() { bCancelled=true; }
 
 	FVaRestLatentAction(FWeakObjectPtr RequestObj, T& ResultParam, const FLatentActionInfo& LatentInfo)
 		: Called(false)
@@ -48,7 +52,7 @@ public:
 
 	virtual void UpdateOperation(FLatentResponse& Response) override
 	{
-		Response.FinishAndTriggerIf(Called, ExecutionFunction, OutputLink, CallbackTarget);
+		if (bCancelled) Response.DoneIf(true);else Response.FinishAndTriggerIf(Called, ExecutionFunction, OutputLink, CallbackTarget);
 	}
 
 	virtual void NotifyObjectDestroyed()
@@ -63,6 +67,7 @@ public:
 
 private:
 	bool Called;
+	bool bCancelled=false;
 	FWeakObjectPtr Request;
 
 public:
@@ -92,101 +97,101 @@ public:
 	// Construction
 
 	/** Set verb to the request */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Request", meta=(DeprecatedFunction, DeprecationMessage="Use v2 Send Request Verb input, or an API endpoint Verb.", BlueprintInternalUseOnly="true"))
 	void SetVerb(EVaRestRequestVerb Verb);
 
 	/** Set custom verb to the request */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Request", meta=(DeprecatedFunction, DeprecationMessage="Use v2 Send Request Verb input.", BlueprintInternalUseOnly="true"))
 	void SetCustomVerb(FString Verb);
 
 	/** Set content type to the request. If you're using the x-www-form-urlencoded,
 	 * params/constaints should be defined as key=ValueString pairs from Json data */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Request", meta=(DeprecatedFunction, DeprecationMessage="Use v2 Send Request Body Kind input.", BlueprintInternalUseOnly="true"))
 	void SetContentType(EVaRestRequestContentType ContentType);
 
 	/** Set content type of the request for binary post data */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Request", meta=(DeprecatedFunction, DeprecationMessage="Use v2 Send Request Content Type input.", BlueprintInternalUseOnly="true"))
 	void SetBinaryContentType(const FString& ContentType);
 
 	/** Set content of the request for binary post data */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Request", meta=(DeprecatedFunction, DeprecationMessage="Use v2 Send Request with Binary body.", BlueprintInternalUseOnly="true"))
 	void SetBinaryRequestContent(const TArray<uint8>& Content);
 
 	/** Set content of the request as a plain string */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Request", meta=(DeprecatedFunction, DeprecationMessage="Use v2 Send Request with Text or Form body.", BlueprintInternalUseOnly="true"))
 	void SetStringRequestContent(const FString& Content);
 
 	/** Sets optional header info */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Request", meta=(DeprecatedFunction, DeprecationMessage="Use v2 Send Request Headers input, or client session headers.", BlueprintInternalUseOnly="true"))
 	void SetHeader(const FString& HeaderName, const FString& HeaderValue);
 
 	//////////////////////////////////////////////////////////////////////////
 	// Destruction and reset
 
 	/** Reset all internal saved data */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility")
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility", meta=(DeprecatedFunction, DeprecationMessage="Use v2 start a new Send Request invocation.", BlueprintInternalUseOnly="true"))
 	void ResetData();
 
 	/** Reset saved request data */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Request", meta=(DeprecatedFunction, DeprecationMessage="Use v2 build a new Send Request body and headers.", BlueprintInternalUseOnly="true"))
 	void ResetRequestData();
 
 	/** Reset saved response data */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Response", meta=(DeprecatedFunction, DeprecationMessage="Use v2 replace the stored response/result variable.", BlueprintInternalUseOnly="true"))
 	void ResetResponseData();
 
 	/** Cancel latent response waiting  */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Response", meta=(DeprecatedFunction, DeprecationMessage="Use v2 Cancel on VaRest Request Handle.", BlueprintInternalUseOnly="true"))
 	void Cancel();
 
 	//////////////////////////////////////////////////////////////////////////
 	// JSON data accessors
 
 	/** Get the Request Json object */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Request", meta=(DeprecatedFunction, DeprecationMessage="Use v2 keep the VaRest Json body passed to Send Request.", BlueprintInternalUseOnly="true"))
 	UVaRestJsonObject* GetRequestObject() const;
 
 	/** Set the Request Json object */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Request", meta=(DeprecatedFunction, DeprecationMessage="Use v2 Send Request Body input.", BlueprintInternalUseOnly="true"))
 	void SetRequestObject(UVaRestJsonObject* JsonObject);
 
 	/** Get the Response Json object */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Response", meta=(DeprecatedFunction, DeprecationMessage="Use v2 Send Request JSON output.", BlueprintInternalUseOnly="true"))
 	UVaRestJsonObject* GetResponseObject() const;
 
 	/** Set the Response Json object */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Response", meta=(DeprecatedFunction, DeprecationMessage="Use v2 assign a VaRest Json variable.", BlueprintInternalUseOnly="true"))
 	void SetResponseObject(UVaRestJsonObject* JsonObject);
 
 	/** Get the Response Json value */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Response", meta=(DeprecatedFunction, DeprecationMessage="Use v2 Send Request JSON output.", BlueprintInternalUseOnly="true"))
 	UVaRestJsonValue* GetResponseValue() const;
 
 	///////////////////////////////////////////////////////////////////////////
 	// Request/response data access
 
 	/** Get url of http request */
-	UFUNCTION(BlueprintPure, Category = "VaRest|Request")
+	UFUNCTION(BlueprintPure, Category = "VaRest|Request", meta=(DeprecatedFunction, DeprecationMessage="Use v2 response metadata and the configured client/endpoint URL.", BlueprintInternalUseOnly="true"))
 	FString GetURL() const;
 
 	/** Get verb to the request */
-	UFUNCTION(BlueprintPure, Category = "VaRest|Request")
+	UFUNCTION(BlueprintPure, Category = "VaRest|Request", meta=(DeprecatedFunction, DeprecationMessage="Use v2 Send Request Verb input or API endpoint Verb.", BlueprintInternalUseOnly="true"))
 	EVaRestRequestVerb GetVerb() const;
 
 	/** Get status of http request */
-	UFUNCTION(BlueprintPure, Category = "VaRest|Request")
+	UFUNCTION(BlueprintPure, Category = "VaRest|Request", meta=(DeprecatedFunction, DeprecationMessage="Use v2 On Success / On Error and response metadata.", BlueprintInternalUseOnly="true"))
 	EVaRestRequestStatus GetStatus() const;
 
 	/** Get the response code of the last query */
-	UFUNCTION(BlueprintPure, Category = "VaRest|Response")
+	UFUNCTION(BlueprintPure, Category = "VaRest|Response", meta=(DeprecatedFunction, DeprecationMessage="Use v2 response Status.", BlueprintInternalUseOnly="true"))
 	int32 GetResponseCode() const;
 
 	/** Get value of desired response header */
-	UFUNCTION(BlueprintPure, Category = "VaRest|Response")
+	UFUNCTION(BlueprintPure, Category = "VaRest|Response", meta=(DeprecatedFunction, DeprecationMessage="Use v2 response Headers.", BlueprintInternalUseOnly="true"))
 	FString GetResponseHeader(const FString& HeaderName);
 
 	/** Get list of all response headers */
-	UFUNCTION(BlueprintPure, Category = "VaRest|Response")
+	UFUNCTION(BlueprintPure, Category = "VaRest|Response", meta=(DeprecatedFunction, DeprecationMessage="Use v2 response Headers.", BlueprintInternalUseOnly="true"))
 	TArray<FString> GetAllResponseHeaders() const;
 
 	/**
@@ -195,7 +200,7 @@ public:
 	 *
 	 * @return the content length (if available)
 	 */
-	UFUNCTION(BlueprintPure, Category = "VaRest|Response")
+	UFUNCTION(BlueprintPure, Category = "VaRest|Response", meta=(DeprecatedFunction, DeprecationMessage="Use v2 response Headers or response BytesDown.", BlueprintInternalUseOnly="true"))
 	int32 GetResponseContentLength() const;
 
 	/**
@@ -203,7 +208,7 @@ public:
 	 *
 	 * @param Content - array that will be filled with the content.
 	 */
-	UFUNCTION(BlueprintPure, Category = "VaRest|Response")
+	UFUNCTION(BlueprintPure, Category = "VaRest|Response", meta=(DeprecatedFunction, DeprecationMessage="Use v2 Send Request Bytes output.", BlueprintInternalUseOnly="true"))
 	const TArray<uint8>& GetResponseContent() const;
 
 	//////////////////////////////////////////////////////////////////////////
@@ -211,19 +216,19 @@ public:
 
 public:
 	/** Setting request URL */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Request", meta=(DeprecatedFunction, DeprecationMessage="Use v2 Send Request Path input, or an API environment BaseUrl.", BlueprintInternalUseOnly="true"))
 	void SetURL(const FString& Url = TEXT("http://alyamkin.com"));
 
 	/** Open URL with current setup */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Request", meta=(DeprecatedFunction, DeprecationMessage="Use v2 Send Request.", BlueprintInternalUseOnly="true"))
 	virtual void ProcessURL(const FString& Url = TEXT("http://alyamkin.com"));
 
 	/** Open URL in latent mode */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Request", meta = (Latent, LatentInfo = "LatentInfo", HidePin = "WorldContextObject", DefaultToSelf = "WorldContextObject"))
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Request", meta = (Latent, LatentInfo = "LatentInfo", HidePin = "WorldContextObject", DefaultToSelf = "WorldContextObject", DeprecatedFunction, DeprecationMessage="Use v2 Send Request async completion pins.", BlueprintInternalUseOnly="true"))
 	virtual void ApplyURL(const FString& Url, UVaRestJsonObject*& Result, UObject* WorldContextObject, struct FLatentActionInfo LatentInfo);
 
 	/** Check URL and execute process request */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Request")
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Request", meta=(DeprecatedFunction, DeprecationMessage="Use v2 Send Request.", BlueprintInternalUseOnly="true"))
 	virtual void ExecuteProcessRequest();
 
 protected:
@@ -234,8 +239,14 @@ protected:
 	// Request callbacks
 
 private:
+	template <class T> friend class FVaRestLatentAction;
+	friend class FVaRestModule;
+	static void ShutdownRequestsOnGT();
 	/** Internal bind function for the IHTTPRequest::OnProcessRequestCompleted() event */
 	void OnProcessRequestComplete(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bWasSuccessful);
+	void FinishCoreOnGT(uint64 Epoch,FVaRestResponse Response,EVaRestErrorKind Kind);
+	void RetireCoreOnGT(bool bClearContinuation);
+	void FreshEngineRequestOnGT();
 
 public:
 	/** Event occured when the request has been completed */
@@ -257,7 +268,7 @@ public:
 
 public:
 	/** Add tag to this request */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility")
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility", meta=(DeprecatedFunction, DeprecationMessage="Use v2 Send Request Tag input.", BlueprintInternalUseOnly="true"))
 	void AddTag(FName Tag);
 
 	/**
@@ -265,11 +276,11 @@ public:
 	 *
 	 * @return Number of removed elements
 	 */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility")
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility", meta=(DeprecatedFunction, DeprecationMessage="Use v2 set Tag on the next Send Request invocation.", BlueprintInternalUseOnly="true"))
 	int32 RemoveTag(FName Tag);
 
 	/** See if this request contains the supplied tag */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility")
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Utility", meta=(DeprecatedFunction, DeprecationMessage="Use v2 keep application tag state; use request Tag in metadata.", BlueprintInternalUseOnly="true"))
 	bool HasTag(FName Tag) const;
 
 protected:
@@ -284,7 +295,7 @@ public:
 	 * Get request response stored as a string
 	 * @param bCacheResponseContent - Set true if you plan to use it few times to prevent deserialization each time
 	 */
-	UFUNCTION(BlueprintCallable, Category = "VaRest|Response")
+	UFUNCTION(BlueprintCallable, Category = "VaRest|Response", meta=(DeprecatedFunction, DeprecationMessage="Use v2 Send Request String output, or To String (Json).", BlueprintInternalUseOnly="true"))
 	FString GetResponseContentAsString(bool bCacheResponseContent = true);
 
 public:
@@ -351,8 +362,16 @@ protected:
 
 	/** Request we're currently processing */
 	TSharedRef<IHttpRequest, ESPMode::ThreadSafe> HttpRequest = FHttpModule::Get().CreateRequest();
+	FVaRestRequestHandle CoreHandle;
+	TWeakPtr<IHttpRequest,ESPMode::ThreadSafe> ActiveEngineRequest;
+	TWeakObjectPtr<UVaRestHub> CoreHub;
+	TWeakObjectPtr<UObject> LegacyWorldContext;
+	uint64 CoreRegistration=0,CoreEpoch=0,ContinueEpoch=0;
+	EVaRestRequestStatus CoreStatus=EVaRestRequestStatus::NotStarted;
+	FString InputUrl,PreparedUrl;
 
 public:
+	virtual void BeginDestroy() override;
 	/** Returns reference to internal request object */
 	TSharedRef<IHttpRequest, ESPMode::ThreadSafe> GetHttpRequest() const { return HttpRequest; };
 };

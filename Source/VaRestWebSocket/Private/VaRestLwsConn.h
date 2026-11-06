@@ -94,7 +94,13 @@ namespace VaRest::WebSocket::Lws
 		virtual void CheckDeadlines(FService& Service, double Now) override;
 		virtual double NextDeadline() const override;
 		virtual bool WantsShortWait() const override;
-		virtual bool IsDestroyed() const override { return bDestroyed; }
+		virtual bool IsDestroyed() const override
+        {
+#if defined(__linux__) && defined(__x86_64__) && !defined(__ANDROID__)
+            if (Native.Stage) return bDestroyed && Native.Stage == 9;
+#endif
+            return bDestroyed;
+        }
 		virtual void EndForShutdown() override;
 
 		// ---- commands from the handle (the service's thread)
@@ -106,14 +112,46 @@ namespace VaRest::WebSocket::Lws
 		/** Never gated on FService::IsShuttingDown: Shutdown's flush waits for the closes asked for before it (Task 6 review M-7) */
 		void Close(FService& Service, int32 Code, TArray<uint8>&& Reason, EVaRestSocketCloseBy By, EVaRestSocketFailure Failure);
 		void Release(FService& Service);
+		void RefreshReadFlow(FService& Service, double Now);
+		void SetIdleDeadline(FService& Service, double Seconds);
+		void Abort(FService& Service, FString Reason, EVaRestSocketCloseBy By, EVaRestSocketFailure Failure);
 
 		/** The service's thread: the connection with InId, or null; every connection a transport adopts is an FConn */
 		static FConn* Find(FService& Service, uint64 InId);
+#if WITH_DEV_AUTOMATION_TESTS
+		bool MatchesPressureProbeForTests(const PressureTesting::FProbe& Probe) const;
+		PressureTesting::FSnapshot PressureSnapshotForTests(uint64 RequestId, uint64 Pass) const;
+#endif
 
 	private:
+#if defined(__linux__) && defined(__x86_64__) && !defined(__ANDROID__)
+        friend class FService;
+        void StartNative(FService&);
+        void AdvanceNative(FService&);
+        bool CompleteNativeOpen(FService&);
+        bool NativeInterestUncertain() const;
+        void RetireNativeInterest(FService&);
+        struct FNativeConn1
+        {
+            VrTicket Ticket {};
+            NumericConnectorC1::FReservation1 Reservation {};
+            NumericConnectorC1::FBinding1 Binding {};
+            uint64 DeadlineNs = 0;
+            uint64 DestroyedInTurn = 0;
+            uint32 Stage = 0, Flags = 0;
+            int32 OptionResult = 0, OptionError = 0;
+        };
+        static_assert(sizeof(FNativeConn1) == 136);
+        FNativeConn1 Native;
+#endif
 		int32 OnAppendHeaders(void* In, size_t Len);
 		int32 OnFilterPreEstablish(lws* InWsi);
 		int32 OnEstablished(lws* InWsi);
+		void OnPong(const void* In, size_t Len);
+		void NoteInboundData(double Now);
+		void CheckOpenDeadlines(FService& Service, double Now);
+		double NextOpenDeadline() const;
+		TOptional<int32> WriteServiceControl(lws* InWsi);
 		int32 OnWriteable(lws* InWsi);
 		/** PEER_INITIATED_CLOSE: the peer's close read by spec 2.5's rules (ParsePeerClose); 0, so LWS echoes it */
 		int32 OnPeerClose(const void* In, size_t Len);
@@ -230,5 +268,14 @@ namespace VaRest::WebSocket::Lws
 		TArray<uint8> Assembly;
 		EVaRestSocketFrameKind AssemblyKind = EVaRestSocketFrameKind::Text;
 		bool bAssembling = false;
+		// Service-only heartbeat, exact-text replies and read-pressure state.
+		static constexpr int32 MaxAutoReplyDebt = 4096;
+		struct FAutoReplyDebt { uint8 Rule; double ReceivedAt; };
+		TArray<FAutoReplyDebt> AutoReplyDebt; // bounded native metadata, never one payload allocation per pending reply
+		bool bReadPaused = false, bPingQueued = false, bAwaitingPong = false, bControlHeld = false;
+		double ReadPausedAt = 0.0, NextPingAt = 0.0, PingSentAt = 0.0, PingCheckAt = 0.0;
+		double IdleSeconds = 0.0, IdleAt = 0.0;
+		uint32 PingSequence = 0;
+		uint8 PingPayload[8] = {};
 	};
 }

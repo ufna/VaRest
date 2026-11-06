@@ -139,7 +139,9 @@ void FVaRestConnectivity::SetProbeInterval(double Seconds)
 void FVaRestConnectivity::RegisterProbe(uint64 ClientId, TFunction<bool()>&& TryStart, TFunction<bool()>&& TryFallback)
 {
     check(IsInGameThread());
-    Probes.Add(ClientId, FProbeCandidates{MoveTemp(TryStart),MoveTemp(TryFallback)});
+	FProbeCandidates Candidates;
+	Candidates.Preferred=MoveTemp(TryStart); Candidates.Fallback=MoveTemp(TryFallback);
+	Probes.Add(ClientId,MoveTemp(Candidates));
     ArmProbe();
 }
 void FVaRestConnectivity::UnregisterProbe(uint64 ClientId)
@@ -148,16 +150,27 @@ void FVaRestConnectivity::UnregisterProbe(uint64 ClientId)
     Probes.Remove(ClientId);
     ArmProbe();
 }
+void FVaRestConnectivity::RegisterOwnedProbe(uint64 ClientId,TFunction<bool(FVaRestProbeToken)>&& TryStart,
+	TFunction<bool(FVaRestProbeToken)>&& TryFallback)
+{
+	check(IsInGameThread());
+	const auto Keep=AsShared();
+	FProbeCandidates Candidates;
+	Candidates.OwnedPreferred=MoveTemp(TryStart); Candidates.OwnedFallback=MoveTemp(TryFallback);
+	Probes.Add(ClientId,MoveTemp(Candidates));
+	ArmProbe();
+}
 void FVaRestConnectivity::ArmProbe()
 {
     TimerClock->ClearTimer(ProbeTimer);
-    if (IsOnline() || VaRest::Http::ConnectivityPrivate::Forced() || bProbeRunning || Probes.IsEmpty()) return;
+    if (VaRest::Http::FClientState::IsShuttingDown() || NextProbeGeneration==0 || IsOnline() || VaRest::Http::ConnectivityPrivate::Forced() || bProbeRunning || Probes.IsEmpty()) return;
     const TWeakPtr<FVaRestConnectivity, ESPMode::ThreadSafe> Weak(AsShared());
     ProbeTimer = TimerClock->SetTimer(IntervalSeconds, [Weak]
     { if (const auto Pinned = Weak.Pin()) Pinned->RunProbe(); });
 }
 void FVaRestConnectivity::RunProbe()
 {
+	const auto Keep=AsShared();
     ProbeTimer.Invalidate();
     if (IsOnline() || bProbeRunning) return;
     if (VaRest::Http::ConnectivityPrivate::Forced()) return;
@@ -172,11 +185,21 @@ void FVaRestConnectivity::RunProbe()
             const FProbeCandidates* Candidates = Probes.Find(OwnerId);
             if (!Candidates) continue;
             const TFunction<bool()>& Probe = bFallback ? Candidates->Fallback : Candidates->Preferred;
-            if (!Probe) continue;
+			const TFunction<bool(FVaRestProbeToken)>& Owned=bFallback ? Candidates->OwnedFallback : Candidates->OwnedPreferred;
+			if (!Probe && !Owned) continue;
+			if (NextProbeGeneration==0 || VaRest::Http::FClientState::IsShuttingDown()) return;
             TFunction<bool()> TryStart = Probe; // owns captures across unregister/reconfigure during Send/trace/events
+			TFunction<bool(FVaRestProbeToken)> TryOwned=Owned;
+			const FVaRestProbeToken Token{NextProbeGeneration};
+			NextProbeGeneration=NextProbeGeneration==MAX_uint64 ? 0 : NextProbeGeneration+1;
+			ActiveProbeGeneration=Token.Generation;
+			bActiveProbeOwned=static_cast<bool>(TryOwned);
             bProbeRunning = true;
-            if (TryStart()) return;
-            bProbeRunning = false;
+			if (TryOwned ? TryOwned(Token) : TryStart()) return;
+			// A synchronous completion/reconfiguration may already have started another candidate. Never clear its token.
+			if (ActiveProbeGeneration==Token.Generation)
+			{ bProbeRunning=false; bActiveProbeOwned=false; ActiveProbeGeneration=0; }
+			else if (bProbeRunning) return;
             if (IsOnline() || VaRest::Http::ConnectivityPrivate::Forced()) { ArmProbe(); return; }
         }
     }
@@ -185,8 +208,19 @@ void FVaRestConnectivity::RunProbe()
 void FVaRestConnectivity::ProbeFinished()
 {
     check(IsInGameThread());
+	if (bActiveProbeOwned) return; // an old no-argument callback has no authority over a newer owned operation
     bProbeRunning = false;
+	ActiveProbeGeneration=0;
     ArmProbe();
+}
+bool FVaRestConnectivity::CompleteOwnedProbe(FVaRestProbeToken Token)
+{
+	check(IsInGameThread());
+	const auto Keep=AsShared();
+	if (!Token.IsValid() || !bProbeRunning || !bActiveProbeOwned || ActiveProbeGeneration!=Token.Generation) return false;
+	bProbeRunning=false; bActiveProbeOwned=false; ActiveProbeGeneration=0;
+	ArmProbe();
+	return true;
 }
 FVaRestAttemptOutcome VaRest::Http::MakeOfflineOutcome()
 {

@@ -1,6 +1,9 @@
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 
 #include "VaRestInspector.h"
+#include "VaRestInspectorExportService.h"
+#include "VaRestInspectorExportAction.h"
+#include "VaRestInspectorConsole.h"
 
 #include "CoreGlobals.h"
 #include "GenericPlatform/GenericPlatformMemory.h"
@@ -99,6 +102,9 @@ public:
   check(IsInGameThread());
   using namespace VaRest::Inspector::Private;
   bShuttingDown=false;
+  VaRest::Inspector::Export::StartOnGT();
+  VaRest::Inspector::Console::StartOnGT();
+  ExportPreExit=FCoreDelegates::OnPreExit.AddRaw(this,&FVaRestInspectorModule::StopExports);
   BootstrapSupport=InspectAllocator(); bBootstrapInspected=true; // Pure facts, always uncalibrated, including meaningful initial-off.
 #if VAREST_WITH_INSPECTOR
   Policy=CurrentPolicy();
@@ -117,7 +123,7 @@ public:
  }
  void ShutdownModule() override
  {
-  check(IsInGameThread()); VaRest::Inspector::Private::BeginShutdown();
+  check(IsInGameThread()); FCoreDelegates::OnPreExit.Remove(ExportPreExit); StopExports(); VaRest::Inspector::Private::BeginShutdown();
 #if VAREST_WITH_INSPECTOR
   auto Keep=MoveTemp(Service);
   if (Keep) { Keep->DetachFacade(); Keep->Shutdown(); }
@@ -157,6 +163,22 @@ public:
   { Policy=CurrentPolicy(); Keep->RequestPolicy(Policy); Keep->Clear(); }
 #endif
  }
+ bool ClearScope(uint64 Id) override
+ {
+  check(IsInGameThread());
+#if VAREST_WITH_INSPECTOR
+  auto Keep=Service; return !VaRest::Inspector::Private::bShuttingDown && (!Keep || Keep->ClearScope(Id));
+#else
+  return false;
+#endif
+ }
+ void BeginPIESession(bool Preserve) override
+ {
+  check(IsInGameThread());
+#if VAREST_WITH_INSPECTOR
+  auto Keep=Service; if (Keep && !VaRest::Inspector::Private::bShuttingDown) Keep->BeginPIESession(Preserve);
+#endif
+ }
  uint64 GetRevision() const override
  {
   check(IsInGameThread());
@@ -164,6 +186,15 @@ public:
   auto Keep=Service; return Keep?Keep->Revision():0;
 #else
   return 0;
+#endif
+ }
+ FVaRestInspectorDiagnostics GetDiagnostics() const override
+ {
+  check(IsInGameThread());
+#if VAREST_WITH_INSPECTOR
+  auto Keep=Service; return Keep && !VaRest::Inspector::Private::bShuttingDown ? Keep->GetDiagnostics() : FVaRestInspectorDiagnostics();
+#else
+  return {};
 #endif
  }
  FVaRestInspectorChanged& OnChanged() override { check(IsInGameThread()); return Changed; }
@@ -185,7 +216,20 @@ public:
   return true;
 #endif
  }
+ bool ForEachLink(TFunctionRef<void(const FVaRestInspectorLinkView&)> Visitor) const override
+ {
+  check(IsInGameThread()); if (VaRest::Inspector::Private::bShuttingDown) return false;
+#if VAREST_WITH_INSPECTOR
+  auto Keep=Service; return !Keep || Keep->ForEachLink(Visitor);
+#else
+  return true;
+#endif
+ }
+ FVaRestInspectorExportTask ExportHar(FString Path,const FVaRestInspectorExportOptions& Options) override
+ { return VaRest::Inspector::Export::BeginOnGT(*this,MoveTemp(Path),Options); }
 private:
+ void StopExports() { VaRest::Inspector::Console::StopOnGT(); UVaRestInspectorExportAction::ShutdownAllOnGT(); VaRest::Inspector::Export::StopOnGT(); }
+ FDelegateHandle ExportPreExit;
  FVaRestInspectorChanged Changed;
 #if VAREST_WITH_INSPECTOR
  static VaRest::Inspector::Private::FCapturePolicy CurrentPolicy()

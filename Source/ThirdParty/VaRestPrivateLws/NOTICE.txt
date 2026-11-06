@@ -1,0 +1,18 @@
+VaRest is based in part on the work of the libwebsockets project (https://libwebsockets.org).
+
+Private Linux modular proof dependency: official libwebsockets v3.0.0, upstream commit
+eaa935a80adb38b5cc4d09ce06ec987b87dcddfa. See LICENSE for LGPL2.1 and its static-link exceptions.
+Existing individual source copyright/license notices are retained, including BSD sha-1.c.
+
+Changes in this private copy: client-ws.c pauses leave unread input to the outer
+read handler; ops-ws.c defers positive SSL pending re-entry while the client is paused,
+retaining cached and SSL data for normal resume and preserving server scheduling.
+Both C corrections are the exact Root-accepted combined Source002.
+SDK public-header GNU LWS_VISIBLE is hidden; public config is copied exactly
+from the reviewed SDK Linux x86_64 config; private platform config is statically selected.
+The source/native recipe manifests record exact origins, edits, settings and commands.
+SDK public-header adjustments are carried from the existing SDK, separately inventoried;
+they are not asserted to reproduce every unknown vendor C-source patch.
+
+This is recovery-stage preparation. No archive, binding or runtime qualification is
+conferred by these sources/notices, and no other platform repair is claimed.

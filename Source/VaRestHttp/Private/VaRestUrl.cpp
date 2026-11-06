@@ -356,6 +356,14 @@ bool VaRest::Http::HasControlInAuthority(FStringView Url)
 
 TValueOrError<FString, FString> VaRest::Http::ExpandPathTemplate(FStringView Template, TConstArrayView<TPair<FString, FString>> Params)
 {
+	TArray<FPathParam, TInlineAllocator<8>> Raw;
+	for (const auto& Param : Params)
+		Raw.Emplace(Param.Key, Param.Value);
+	return ExpandPathParameters(Template, Raw);
+}
+
+TValueOrError<FString, FString> VaRest::Http::ExpandPathParameters(FStringView Template, TConstArrayView<FPathParam> Params)
+{
 	TArray<bool, TInlineAllocator<8>> Used;
 	Used.SetNumZeroed(Params.Num());
 	FString Out;
@@ -403,17 +411,33 @@ TValueOrError<FString, FString> VaRest::Http::ExpandPathTemplate(FStringView Tem
 		{
 			return MakeError(FString::Printf(TEXT("path parameter {%s} has no value"), *FString(Name)));
 		}
-		if (Params[Found].Value.IsEmpty())
+		const FPathParam& Param = Params[Found];
+		if (Param.bArray)
+		{
+			if (Param.Values.IsEmpty() || (Param.Values.Num() == 1 && Param.Values[0].IsEmpty()))
+				return MakeError(FString::Printf(TEXT("path parameter {%s} is empty"), *FString(Name)));
+			if (Param.Values.Num() == 1 && (Param.Values[0] == TEXT(".") || Param.Values[0] == TEXT("..")))
+				return MakeError(FString::Printf(TEXT("path parameter {%s} is a dot-segment"), *FString(Name)));
+			for (int32 Element = 0; Element < Param.Values.Num(); ++Element)
+			{
+				if (Element)
+					Out.AppendChar(TEXT(','));
+				Out += PercentEncode(Param.Values[Element]);
+			}
+			i = Close;
+			continue;
+		}
+		if (Param.Value.IsEmpty())
 		{
 			return MakeError(FString::Printf(TEXT("path parameter {%s} is empty"), *FString(Name)));
 		}
 		// Review I1: '.' is unreserved, so "id=.." would expand to "/users/../delete" and curl (which never sets
 		// CURLOPT_PATH_AS_IS) would send "/delete". %2E does not help, servers decode and normalise it.
-		if (Params[Found].Value == TEXT(".") || Params[Found].Value == TEXT(".."))
+		if (Param.Value == TEXT(".") || Param.Value == TEXT(".."))
 		{
 			return MakeError(FString::Printf(TEXT("path parameter {%s} is a dot-segment"), *FString(Name)));
 		}
-		Out += PercentEncode(Params[Found].Value);
+		Out += PercentEncode(Param.Value);
 		i = Close;
 	}
 	for (int32 p = 0; p < Params.Num(); ++p)

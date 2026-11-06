@@ -1,34 +1,55 @@
-![GitHub](https://img.shields.io/github/license/ufna/VaRest)
-![GitHub release (latest by date including pre-releases)](https://img.shields.io/github/v/release/ufna/VaRest?include_prereleases)
+# VaRest 2.0
 
-> [!IMPORTANT]
-> Hi there. Thank you for your interest and support over the years! I want to inform you that I will be archiving the VaRest project. While this means I will no longer be actively maintaining it, I encourage anyone interested to fork the repository and continue development if you wish.
->
-> Feel free to use the existing code as a foundation for your own projects. I appreciate the contributions and enthusiasm of this community, and I hope VaRest continues to be a valuable resource for you.
+HTTP, JSON, WebSocket and Socket.IO for Unreal Engine, with C++ and Blueprint APIs.
 
-# VaRest
+This branch is **2.0.0-dev**, targeting **Unreal Engine 5.8**. It contains the new implementation and migration shims. Release qualification, packaged Blueprint checks and the platform pass are still in progress; see the [development passport](docs/passport/2026-11-04-varest2-development.md).
 
-VaRest is the plugin for [Unreal Engine 4](https://www.unrealengine.com/) that makes REST server communications easier to use.
+## What is in 2.0
 
-Key features:
+- `FVaRestJson`: UTF-8 parsing, document-backed values, JSON writing and struct conversion with naming rules.
+- HTTP request builders and API assets: typed results, cancellation, retries, auth refresh, envelopes, caching and a durable offline queue.
+- GameInstance Hubs for game clients and sockets; an engine Hub for editor utilities.
+- VaRest's own WebSocket transport, routed messages, request/reply, heartbeat, reconnect and send queues.
+- Socket.IO namespaces, events, acknowledgements and binary attachments over WebSocket.
+- Network Inspector: HTTP attempts, socket frames, namespace state, statistics, redacted cURL and HAR export.
+- OpenAPI JSON import, generated types and endpoints, previews, reports and controlled reimport.
+- Deprecated 1.x Blueprint nodes retained for existing assets. New graphs use the 2.0 nodes.
 
-* Flexible Http/Https request management with support of different Verbs and Content Types
-* **No C++ coding required**, everything can be managed via blueprints
-* Blueprintable FJsonObject wrapper with almost full support of Json features: different types of values, **arrays**, **binary data** content, both ways serializarion to FString, etc.
-* Blueprintable FJsonValue wrapper - **full Json features made for blueprints!**
-* Both bindable events and **latent functions** are provided to control the asynchronous requests
+## Get started
 
-Check the [Wiki](http://bit.ly/VaRest-Docs) for plugin usage examples and installation notes.
+1. Put this repository in your project's `Plugins/VaRest` directory and enable VaRest.
+2. Regenerate project files and build your Unreal Editor target with a compatible C++ toolchain.
+3. In Blueprint, use **Get Json** or **Send Request**, or create a `VaRestApi` asset and use **Call Endpoint**. Bind success, error and cancellation paths.
+4. Open **Tools → Debug → VaRest Network Inspector** to inspect captured traffic.
 
-Current version: **1.1 R 33** (UE 5.2)
+For C++, add the modules you use to your project's `Build.cs`: `VaRestJson`, `VaRestHttp`, `VaRestWebSocket`, or `VaRestSocketIO`. The legacy `VaRest` module is needed only by compatibility code.
 
-![SCREENSHOT](SCREENSHOT.jpg)
+```cpp
+#include "VaRestClient.h"
+#include "VaRestJson.h"
 
+// Configure and own the client on the game thread.
+FVaRestClient Client = FVaRestClient::Make(TEXTVIEW("https://api.example.test"));
+FVaRestRequestHandle Request = Client.Get<FVaRestJson>(TEXTVIEW("/profile"))
+    .OnSuccess([](const FVaRestJson& Profile) { /* consume the JSON */ })
+    .OnError([](const FVaRestError& Error) { /* handle the failure */ })
+    .Send();
+```
 
-Legal info
-----------
+Keep client state in a game-thread owner and release native client aliases before HTTP module shutdown. A GameInstance Hub supplies game-scoped clients; a standalone `Make()` client uses process scope 0.
 
-Unreal® is a trademark or registered trademark of Epic Games, Inc. in the United States of America and elsewhere.
+## Guides
 
-Unreal® Engine, Copyright 1998 – 2021, Epic Games, Inc. All rights reserved.
+- [2.0 APIs, ownership, sockets and OpenAPI](docs/dev/varest2.md)
+- [Network Inspector](docs/dev/inspector.md)
+- [HTTP cache, offline queue and connectivity](docs/dev/cache-offline.md)
+- [Migrating existing 1.x projects](docs/MIGRATION.md)
+- [Development and qualification status](docs/passport/2026-11-04-varest2-development.md)
+- [Local development host](docs/dev/host-project.md)
+
+The descriptor declares Win64, Mac, Linux, Android and iOS runtime modules. The live Inspector window is desktop-only; runtime capture and HAR export are separate from that UI. A descriptor entry does not establish a successful native build on each platform.
+
+## License
+
+See [LICENSE](LICENSE). Unreal and Unreal Engine are trademarks or registered trademarks of Epic Games, Inc.
 

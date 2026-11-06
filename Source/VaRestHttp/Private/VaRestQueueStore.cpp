@@ -158,10 +158,14 @@ TValueOrError<VaRest::Http::FQueueItem,FString> VaRest::Http::DecodeQueueRecord(
     auto Parsed=FVaRestJson::ParseOwned(MoveTemp(Parts.Metadata),Options);
     if (Parsed.HasError()) return Refuse();
     const auto Root=Parsed.StealValue();
-    if (!Root.IsObject() || Root.Num()!=18 || !Root[TEXT("version")].IsNumber() || Root[TEXT("version")].AsDouble()!=1.0) return Refuse();
-    const TArray<FString> Allowed{TEXT("version"),TEXT("queueId"),TEXT("sequence"),TEXT("runId"),TEXT("originalRequestId"),
+    if (!Root.IsObject() || !Root[TEXT("version")].IsNumber()) return Refuse();
+    const double Version=Root[TEXT("version")].AsDouble();
+    const bool bV2=Version==2.0;
+    if ((!bV2 && Version!=1.0) || Root.Num()!=(bV2 ? 19 : 18)) return Refuse();
+    TArray<FString> Allowed{TEXT("version"),TEXT("queueId"),TEXT("sequence"),TEXT("runId"),TEXT("originalRequestId"),
         TEXT("createdUtc"),TEXT("scope"),TEXT("verb"),TEXT("url"),TEXT("authMode"),TEXT("idempotent"),TEXT("idempotencyKey"),
         TEXT("tag"),TEXT("bodyKind"),TEXT("contentType"),TEXT("body"),TEXT("bodySha256"),TEXT("headers")};
+    if (bV2) Allowed.Add(TEXT("endpoint"));
     TSet<FString> Seen;
     for (const auto& Member : Root.Members())
     {
@@ -179,6 +183,12 @@ TValueOrError<VaRest::Http::FQueueItem,FString> VaRest::Http::DecodeQueueRecord(
         || !Kind.IsSet() || *Kind>static_cast<uint8>(EVaRestBodyKind::Binary)
         || !Root[TEXT("idempotent")].IsBool()) return Refuse();
     FQueueItem Item;
+    if (bV2)
+    {
+        if (!Root[TEXT("endpoint")].IsString()) return Refuse();
+        Item.Endpoint=Root[TEXT("endpoint")].AsString();
+        if (!QueueStorePrivate::Plain(Item.Endpoint,256)) return Refuse();
+    }
     Item.QueueId=Root[TEXT("queueId")].AsString();
     FGuid Id;
     if (!QueueStorePrivate::Hex(Item.QueueId,32) || !FGuid::ParseExact(Item.QueueId,EGuidFormats::Digits,Id) || !Id.IsValid()
@@ -251,9 +261,10 @@ FGuid VaRest::Http::QueueRunId()
 
 TArray<uint8> VaRest::Http::EncodeQueueRecord(const FQueueItem& Item)
 {
-    if (Item.Body.Bytes.Num()>32*1024*1024 || QueueMetadataCharge(Item)>256*1024 || Item.Headers.Num()>128) return {};
+    if (Item.Body.Bytes.Num()>32*1024*1024 || QueueMetadataCharge(Item)>256*1024 || Item.Headers.Num()>128
+        || !QueueStorePrivate::Plain(Item.Endpoint,256)) return {};
     FVaRestJson Root = FVaRestJson::Object();
-    Root.Set(TEXT("version"), 1);
+    Root.Set(TEXT("version"), 2);
     Root.Set(TEXT("queueId"), Item.QueueId);
     Root.Set(TEXT("sequence"), LexToString(Item.Sequence));
     Root.Set(TEXT("runId"), Item.OriginalRun.ToString(EGuidFormats::DigitsLower));
@@ -266,6 +277,7 @@ TArray<uint8> VaRest::Http::EncodeQueueRecord(const FQueueItem& Item)
     Root.Set(TEXT("idempotent"), Item.bIdempotent);
     Root.Set(TEXT("idempotencyKey"), Item.IdempotencyKey);
     Root.Set(TEXT("tag"), Item.Tag);
+    Root.Set(TEXT("endpoint"), Item.Endpoint);
     Root.Set(TEXT("bodyKind"), static_cast<int32>(Item.Body.Kind));
     Root.Set(TEXT("contentType"), Item.Body.ContentType);
     Root.Set(TEXT("body"), TEXT(""));
@@ -300,11 +312,12 @@ FString VaRest::Http::QueueFileName(uint64 Sequence, FStringView QueueId)
 
 namespace VaRest::Http::QueueStorePrivate
 {
-    void AsyncBool(FIoWork&& Work,TUniqueFunction<void(bool)>&& Done,int64 Reservation=0,bool bControlDuringStop=false)
+    bool AsyncBool(FIoWork&& Work,TUniqueFunction<void(bool)>&& Done,int64 Reservation=0,bool bControlDuringStop=false)
     {
         auto Callback=MakeShared<TUniqueFunction<void(bool)>,ESPMode::ThreadSafe>(MoveTemp(Done));
         if (!LaunchPersistence(MoveTemp(Work),[Callback](FIoResult&& Result){ (*Callback)(Result.bOk); },Reservation,bControlDuringStop))
-            (*Callback)(false);
+		{ (*Callback)(false); return false; }
+		return true;
     }
     FString PendingPath(const FString& Directory,uint64 Sequence,const FString& Id)
     { return FPaths::ChangeExtension(FPaths::Combine(Directory,QueueFileName(Sequence,Id)),TEXT("pending")); }
@@ -337,6 +350,7 @@ void VaRest::Http::FQueueStore::Prepare(FString Directory,FString Origin,FVaRest
         Metadata.OriginalRequestId=Item.OriginalRequestId; Metadata.CreatedUtc=Item.CreatedUtc;
         Metadata.Scope=Item.Scope; Metadata.Verb=Item.Verb; Metadata.Url=Item.Url; Metadata.Headers=Item.Headers;
         Metadata.IdempotencyKey=Item.IdempotencyKey; Metadata.Tag=Item.Tag; Metadata.AuthMode=Item.AuthMode;
+        Metadata.Endpoint=Item.Endpoint;
         Metadata.bIdempotent=Item.bIdempotent;
         Metadata.Body=FVaRestRequestBody::FromBytes(TArray<uint8>(),Item.Body.Kind,Item.Body.ContentType);
         const auto MetaBytes=EncodeQueueRecord(Metadata);
@@ -404,7 +418,17 @@ void VaRest::Http::FQueueStore::Abort(FString Directory,uint64 Sequence,FString 
 void VaRest::Http::FQueueStore::Retire(FString Directory,uint64 Sequence,FString QueueId,
     TUniqueFunction<void(bool)>&& Done)
 {
-    QueueStorePrivate::AsyncBool([Directory=MoveTemp(Directory),Sequence,QueueId=MoveTemp(QueueId)]
+	RetireImpl(MoveTemp(Directory),Sequence,MoveTemp(QueueId),MoveTemp(Done),false);
+}
+bool VaRest::Http::FQueueStore::RetireOwned(FString Directory,uint64 Sequence,FString QueueId,
+	TUniqueFunction<void(bool)>&& Done)
+{
+	return RetireImpl(MoveTemp(Directory),Sequence,MoveTemp(QueueId),MoveTemp(Done),true);
+}
+bool VaRest::Http::FQueueStore::RetireImpl(FString Directory,uint64 Sequence,FString QueueId,
+	TUniqueFunction<void(bool)>&& Done,bool bControlDuringStop)
+{
+    return QueueStorePrivate::AsyncBool([Directory=MoveTemp(Directory),Sequence,QueueId=MoveTemp(QueueId)]
     {
         auto& Platform=FPlatformFileManager::Get().GetPlatformPhysical();
         const FString From=FPaths::Combine(Directory,QueueFileName(Sequence,QueueId));
@@ -424,13 +448,13 @@ void VaRest::Http::FQueueStore::Retire(FString Directory,uint64 Sequence,FString
         if (Result.bOk && InspectPersistencePath(From).Kind==EPathKind::Missing)
             VaRest::Http::DeleteFile(Tombstone);
         return Result;
-    },MoveTemp(Done));
+    },MoveTemp(Done),0,bControlDuringStop);
 }
 int64 VaRest::Http::QueueMetadataCharge(const FQueueItem& Item)
 {
     int64 Bytes=sizeof(FQueueItem)+Item.QueueId.GetAllocatedSize()+Item.Scope.GetAllocatedSize()
         +Item.Verb.GetAllocatedSize()+Item.Url.GetAllocatedSize()+Item.IdempotencyKey.GetAllocatedSize()
-        +Item.Tag.GetAllocatedSize()+Item.Body.ContentType.GetAllocatedSize()+Item.Headers.GetPairs().GetAllocatedSize();
+        +Item.Tag.GetAllocatedSize()+Item.Endpoint.GetAllocatedSize()+Item.Body.ContentType.GetAllocatedSize()+Item.Headers.GetPairs().GetAllocatedSize();
     for (const auto& Header : Item.Headers) Bytes+=Header.Key.GetAllocatedSize()+Header.Value.GetAllocatedSize();
     Bytes+=Item.OriginalPartNames.GetAllocatedSize();
     for (const FString& Name : Item.OriginalPartNames) Bytes+=Name.GetAllocatedSize();

@@ -13,959 +13,1176 @@
 #include "VaRestJsonDocument.h"
 #include "VaRestJsonLog.h"
 #include "VaRestJsonWriter.h"
+#include "VaRestJsonReader.h"
+#include "RapidJsonIncludes.h"
+#include "JsonUtils/RapidJsonUtils.h"
+#include "StructUtils/UserDefinedStruct.h"
 
 namespace VaRest::Json::Convert::DecodePrivate
 {
-	struct FSegment
-	{
-		/** Object key when Index < 0 */
-		FUtf8StringView Key;
-		int32 Index = -1;
-	};
+struct FSegment
+{
+	/** Object key when Index < 0 */
+	FUtf8StringView Key;
+	int32 Index = -1;
+};
 
-	const TCHAR* TypeName(const FNode& Value)
+const TCHAR* TypeName(const FNode& Value)
+{
+	switch (Value.Type)
 	{
-		switch (Value.Type)
-		{
-		case EVaRestJsonType::Null:   return TEXT("null");
-		case EVaRestJsonType::Bool:   return TEXT("a bool");
-		case EVaRestJsonType::Number: return TEXT("a number");
-		case EVaRestJsonType::String: return TEXT("a string");
-		case EVaRestJsonType::Array:  return TEXT("an array");
-		case EVaRestJsonType::Object: return TEXT("an object");
-		case EVaRestJsonType::None:   break;
-		}
-		return TEXT("nothing");
+	case EVaRestJsonType::Null: return TEXT("null");
+	case EVaRestJsonType::Bool: return TEXT("a bool");
+	case EVaRestJsonType::Number: return TEXT("a number");
+	case EVaRestJsonType::String: return TEXT("a string");
+	case EVaRestJsonType::Array: return TEXT("an array");
+	case EVaRestJsonType::Object: return TEXT("an object");
+	case EVaRestJsonType::None: break;
+	}
+	return TEXT("nothing");
+}
+
+FString TextOf(const FNode& Value)
+{
+	return FString::ConstructFromPtrSize(Value.Str.Data, static_cast<int32>(Value.Str.Len));
+}
+
+/**
+ * Issues a report keeps per decode; later ones are only counted, and one closing entry says how many. Input can hold
+ * an issue every two bytes ([0,0,...] into strings), and each kept issue formats its path.
+ */
+inline constexpr int32 MaxRecordedIssues = 100;
+
+/**
+ * Whether Text may become an FName (or an object path, whose parts become FNames, SoftObjectPath.cpp:224-245).
+ * NAME_SIZE (NameTypes.h:57) characters or more abort FName construction in every build with checks: a checkf in
+ * FindOrStoreString (UnrealNames.cpp:3271-3281). Text from a response must never get there, so it is a mismatch.
+ */
+bool FitsName(const FString& Text)
+{
+	return Text.Len() < NAME_SIZE;
+}
+
+/**
+ * Text as an object path, for FSoftObjectPath and soft pointer targets; what was expected when it is not one. "" (what
+ * encode writes for the null path) and "None" are the null path (SoftObjectPath.cpp:189-193). Any other text that
+ * SetPath resets to the null path is not a path: SetPath resets text without the leading '/', with a trailing or a
+ * doubled delimiter, without a log (SoftObjectPath.cpp:200-217), which would clear the field silently (spec 2.4).
+ */
+const TCHAR* ParseObjectPath(const FString& Text, FSoftObjectPath& Out)
+{
+	if (!FitsName(Text))
+	{
+		return TEXT("an object path shorter than 1024 characters");
+	}
+	if (ContainsNul(Text))
+	{
+		return TEXT("an object path without U+0000");
+	}
+	Out.SetPath(FStringView(Text));
+	if (Out.IsNull() && !Text.IsEmpty() && !Text.Equals(TEXT("None"), ESearchCase::CaseSensitive))
+	{
+		return TEXT("an object path (\"/Package/Path.Asset\")");
+	}
+	return nullptr;
+}
+
+struct FDecodeContext
+{
+	const FVaRestJsonConvertOptions& Options;
+	const TSharedRef<const FVaRestJsonRuleSnapshot, ESPMode::ThreadSafe> Rules;
+	FJsonBudget Budget;
+	TSet<const UEnum*> CheckedEnums;
+	/** Per-conversion immutable native spellings: repeated enum fields do not allocate every enumerator again. */
+	TMap<const UEnum*, TArray<FString>> EnumNames;
+	/** The document being read, handed to BytesResolver */
+	const FVaRestJson::FDocumentRef& Source;
+	FVaRestJsonDecodeReport* Report;
+	/** Where the walk is; formatted only when an issue is recorded */
+	TArray<FSegment, TInlineAllocator<16>> Path;
+	int32 Depth = 0;
+	/** Every issue, recorded or not */
+	int32 NumWarnings = 0;
+	int32 NumErrors = 0;
+	/** Errors past MaxRecordedIssues: the closing entry goes to Errors when there are any */
+	int32 NumUnrecordedErrors = 0;
+	/** A failure that stops the whole decode (depth): nothing more is read */
+	bool bAborted = false;
+	/** Without a report: the issue the summary line names */
+	FVaRestJsonError FirstIssue;
+	FUtf8Scratch Scratch;
+
+	FDecodeContext(const FVaRestJsonConvertOptions& InOptions, const FVaRestJson::FDocumentRef& InSource, FVaRestJsonDecodeReport* InReport)
+		: Options(InOptions)
+		, Rules(InOptions.Rules ? InOptions.Rules.ToSharedRef() : FVaRestJsonRules::DefaultSnapshot())
+		, Budget({InOptions.MaxOutputBytes, InOptions.MaxValues, InOptions.MaxWorkUnits})
+		, Source(InSource)
+		, Report(InReport)
+	{
+		if (Budget.HasFailed())
+			Charge(0, 0, 0);
 	}
 
-	FString TextOf(const FNode& Value)
+	bool Charge(int64 Bytes, int64 Values, int64 Work)
 	{
-		return FString::ConstructFromPtrSize(Value.Str.Data, static_cast<int32>(Value.Str.Len));
-	}
-
-	/**
-	 * Issues a report keeps per decode; later ones are only counted, and one closing entry says how many. Input can hold
-	 * an issue every two bytes ([0,0,...] into strings), and each kept issue formats its path.
-	 */
-	inline constexpr int32 MaxRecordedIssues = 100;
-
-	/**
-	 * Whether Text may become an FName (or an object path, whose parts become FNames, SoftObjectPath.cpp:224-245).
-	 * NAME_SIZE (NameTypes.h:57) characters or more abort FName construction in every build with checks: a checkf in
-	 * FindOrStoreString (UnrealNames.cpp:3271-3281). Text from a response must never get there, so it is a mismatch.
-	 */
-	bool FitsName(const FString& Text)
-	{
-		return Text.Len() < NAME_SIZE;
-	}
-
-	/**
-	 * Text as an object path, for FSoftObjectPath and soft pointer targets; what was expected when it is not one. "" (what
-	 * encode writes for the null path) and "None" are the null path (SoftObjectPath.cpp:189-193). Any other text that
-	 * SetPath resets to the null path is not a path: SetPath resets text without the leading '/', with a trailing or a
-	 * doubled delimiter, without a log (SoftObjectPath.cpp:200-217), which would clear the field silently (spec 2.4).
-	 */
-	const TCHAR* ParseObjectPath(const FString& Text, FSoftObjectPath& Out)
-	{
-		if (!FitsName(Text))
-		{
-			return TEXT("an object path shorter than 1024 characters");
-		}
-		if (ContainsNul(Text))
-		{
-			return TEXT("an object path without U+0000");
-		}
-		Out.SetPath(FStringView(Text));
-		if (Out.IsNull() && !Text.IsEmpty() && !Text.Equals(TEXT("None"), ESearchCase::CaseSensitive))
-		{
-			return TEXT("an object path (\"/Package/Path.Asset\")");
-		}
-		return nullptr;
-	}
-
-	struct FDecodeContext
-	{
-		const FVaRestJsonConvertOptions& Options;
-		/** The document being read, handed to BytesResolver */
-		const FVaRestJson::FDocumentRef& Source;
-		FVaRestJsonDecodeReport* Report;
-		/** Where the walk is; formatted only when an issue is recorded */
-		TArray<FSegment, TInlineAllocator<16>> Path;
-		int32 Depth = 0;
-		/** Every issue, recorded or not */
-		int32 NumWarnings = 0;
-		int32 NumErrors = 0;
-		/** Errors past MaxRecordedIssues: the closing entry goes to Errors when there are any */
-		int32 NumUnrecordedErrors = 0;
-		/** A failure that stops the whole decode (depth): nothing more is read */
-		bool bAborted = false;
-		/** Without a report: the issue the summary line names */
-		FVaRestJsonError FirstIssue;
-		FUtf8Scratch Scratch;
-
-		FDecodeContext(const FVaRestJsonConvertOptions& InOptions, const FVaRestJson::FDocumentRef& InSource, FVaRestJsonDecodeReport* InReport)
-			: Options(InOptions)
-			, Source(InSource)
-			, Report(InReport)
-		{
-		}
-
-		/**
-		 * "items[3].name", the syntax FVaRestJson::Path reads. A key longer than LongKeyBytes is cut there (at a character
-		 * boundary) and marked "...", so a hostile key costs its length once, not once per issue beneath it.
-		 */
-		FString PathString() const
-		{
-			FString Out;
-			for (const FSegment& Segment : Path)
-			{
-				if (Segment.Index >= 0)
-				{
-					Out += FString::Printf(TEXT("[%d]"), Segment.Index);
-					continue;
-				}
-				if (!Out.IsEmpty())
-				{
-					Out.AppendChar(TEXT('.'));
-				}
-				if (Segment.Key.Len() <= LongKeyBytes)
-				{
-					Out += FString::ConstructFromPtrSize(Segment.Key.GetData(), Segment.Key.Len());
-					continue;
-				}
-				int32 Cut = LongKeyBytes;
-				while (Cut > 0 && (static_cast<uint8>(Segment.Key[Cut]) & 0xC0) == 0x80)
-				{
-					--Cut; // Segment.Key[Cut] continues a UTF-8 sequence: cut before the sequence starts
-				}
-				Out += FString::ConstructFromPtrSize(Segment.Key.GetData(), Cut);
-				Out += TEXT("...");
-			}
-			return Out;
-		}
-
-		void Record(bool bError, FString Message)
-		{
-			++(bError ? NumErrors : NumWarnings);
-			const int32 NumIssues = NumErrors + NumWarnings;
-			if (Report ? NumIssues > MaxRecordedIssues : NumIssues > 1)
-			{
-				// Counted only, and the path is never formatted (Finish adds the closing entry)
-				NumUnrecordedErrors += bError ? 1 : 0;
-				return;
-			}
-			FVaRestJsonError Issue;
-			Issue.Message = MoveTemp(Message);
-			Issue.Path = PathString();
-			if (Report)
-			{
-				(bError ? Report->Errors : Report->Warnings).Add(MoveTemp(Issue));
-			}
-			else
-			{
-				FirstIssue = MoveTemp(Issue);
-			}
-		}
-
-		/** The value does not fit its field, which keeps its value. Spec 2.4: a warning; an error in strict mode. */
-		bool Mismatch(const FNode& Value, const TCHAR* Expected)
-		{
-			Record(Options.bStrict, FString::Printf(TEXT("expected %s, got %s"), Expected, TypeName(Value)));
+		if (bAborted)
 			return false;
-		}
-
-		/** A lenient coercion that worked ("42" -> 42): recorded like a mismatch (strict mode never coerces) */
-		void Coerced(const TCHAR* What)
-		{
-			Record(Options.bStrict, FString(What));
-		}
-
-		/** A value nested past MaxDepth (spec 2.2): the whole decode fails, nothing more is read */
-		bool TooDeep()
-		{
-			Record(true, FString::Printf(TEXT("value nested deeper than %d levels"), MaxDepth));
-			bAborted = true;
-			return false;
-		}
-
-		bool Enter()
-		{
-			if (Depth >= MaxDepth)
-			{
-				return TooDeep();
-			}
-			++Depth;
+		if (Budget.Charge(Bytes, Values, Work))
 			return true;
-		}
-
-		void Leave()
-		{
-			--Depth;
-		}
-	};
-
-	bool DecodeValue(const FNode& Value, const FProperty* Property, void* Address, FDecodeContext& Context);
-	bool DecodeStruct(const FNode& Value, const UScriptStruct* Struct, void* Data, FDecodeContext& Context);
-
-	/** The number Value holds; lenient decode also takes the number a string spells ("42"). Holder keeps that parse alive. */
-	const FNode* NumberOf(const FNode& Value, const FDecodeContext& Context, FVaRestJson& Holder)
-	{
-		if (Value.Type == EVaRestJsonType::Number)
-		{
-			return &Value;
-		}
-		if (Value.Type != EVaRestJsonType::String || Context.Options.bStrict)
-		{
-			return nullptr;
-		}
-		if (Value.Str.Len > 64)
-		{
-			return nullptr; // no number worth coercing is that long; bounds the parse on hostile input
-		}
-		TValueOrError<FVaRestJson, FVaRestJsonError> Parsed = FVaRestJson::Parse(Value.Str.View());
-		if (!Parsed.HasValue() || !Parsed.GetValue().IsNumber())
-		{
-			return nullptr;
-		}
-		Holder = Parsed.StealValue();
-		return Holder.GetNodeInternal();
-	}
-
-	bool DecodeBool(const FNode& Value, const FBoolProperty* BoolProperty, void* Address, FDecodeContext& Context)
-	{
-		if (Value.Type == EVaRestJsonType::Bool)
-		{
-			BoolProperty->SetPropertyValue(Address, Value.Bool);
-			return true;
-		}
-		if (!Context.Options.bStrict)
-		{
-			int64 Number = 0;
-			if (NodeToInt64(Value, Number) && (Number == 0 || Number == 1))
-			{
-				BoolProperty->SetPropertyValue(Address, Number == 1);
-				Context.Coerced(TEXT("a bool was read from 0/1"));
-				return true;
-			}
-			if (Value.Type == EVaRestJsonType::String)
-			{
-				const FUtf8StringView Text = Value.Str.View();
-				const bool bTrue = Text.Equals(UTF8TEXT("true"), ESearchCase::CaseSensitive);
-				if (bTrue || Text.Equals(UTF8TEXT("false"), ESearchCase::CaseSensitive))
-				{
-					BoolProperty->SetPropertyValue(Address, bTrue);
-					Context.Coerced(TEXT("a bool was read from a string"));
-					return true;
-				}
-			}
-		}
-		return Context.Mismatch(Value, TEXT("a bool"));
-	}
-
-	bool DecodeInteger(const FNode& Value, const FNumericProperty* Numeric, void* Address, FDecodeContext& Context)
-	{
-		FVaRestJson Holder;
-		const FNode* Number = NumberOf(Value, Context, Holder);
-		bool bStored = false;
-		if (Number && IsUnsignedInteger(Numeric))
-		{
-			uint64 Unsigned = 0;
-			if (NodeToUInt64(*Number, Unsigned) && Numeric->CanHoldValue(Unsigned))
-			{
-				Numeric->SetIntPropertyValue(Address, Unsigned);
-				bStored = true;
-			}
-		}
-		else if (Number)
-		{
-			int64 Signed = 0;
-			if (NodeToInt64(*Number, Signed) && Numeric->CanHoldValue(Signed))
-			{
-				Numeric->SetIntPropertyValue(Address, Signed);
-				bStored = true;
-			}
-		}
-		if (!bStored)
-		{
-			return Context.Mismatch(Value, TEXT("an integer in the field's range"));
-		}
-		if (Number != &Value)
-		{
-			Context.Coerced(TEXT("an integer was read from a string"));
-		}
-		return true;
-	}
-
-	bool DecodeFloatingPoint(const FNode& Value, const FNumericProperty* Numeric, void* Address, FDecodeContext& Context)
-	{
-		FVaRestJson Holder;
-		const FNode* Number = NumberOf(Value, Context, Holder);
-		double D = 0.0;
-		if (!Number || !NodeToDouble(*Number, D))
-		{
-			return Context.Mismatch(Value, TEXT("a number"));
-		}
-		if (Numeric->IsA<FFloatProperty>() && FMath::Abs(D) >= FloatRoundsToInfinity)
-		{
-			return Context.Mismatch(Value, TEXT("a number in float range"));
-		}
-		Numeric->SetFloatingPointPropertyValue(Address, D);
-		if (Number != &Value)
-		{
-			Context.Coerced(TEXT("a number was read from a string"));
-		}
-		return true;
-	}
-
-	/** Text for a string/name/text field: a string; lenient decode also takes a number's or bool's JSON text */
-	bool TextFor(const FNode& Value, FDecodeContext& Context, FString& Out)
-	{
-		if (Value.Type == EVaRestJsonType::String)
-		{
-			Out = TextOf(Value);
-			return true;
-		}
-		if (!Context.Options.bStrict && (Value.Type == EVaRestJsonType::Number || Value.Type == EVaRestJsonType::Bool))
-		{
-			TArray<uint8> Bytes;
-			Write(Value, EVaRestJsonFormat::Condensed, Bytes); // a scalar: never too deep
-			Out = FString::ConstructFromPtrSize(reinterpret_cast<const UTF8CHAR*>(Bytes.GetData()), Bytes.Num());
-			Context.Coerced(TEXT("a string was read from a number or bool"));
-			return true;
-		}
-		return Context.Mismatch(Value, TEXT("a string"));
-	}
-
-	/** By authored name (as encode writes it), exact first; the autogenerated _MAX entry is not a value anyone sends */
-	bool FindEnumerator(const UEnum* Enum, const FString& Name, bool bAllowCase, int64& OutValue, bool& bOutCaseOnly)
-	{
-		const int32 Count = Enum->NumEnums() - (Enum->ContainsExistingMax() ? 1 : 0);
-		for (int32 i = 0; i < Count; ++i)
-		{
-			if (Enum->GetAuthoredNameStringByIndex(i).Equals(Name, ESearchCase::CaseSensitive))
-			{
-				OutValue = Enum->GetValueByIndex(i);
-				bOutCaseOnly = false;
-				return true;
-			}
-		}
-		if (bAllowCase)
-		{
-			for (int32 i = 0; i < Count; ++i)
-			{
-				if (Enum->GetAuthoredNameStringByIndex(i).Equals(Name, ESearchCase::IgnoreCase))
-				{
-					OutValue = Enum->GetValueByIndex(i);
-					bOutCaseOnly = true;
-					return true;
-				}
-			}
-		}
+		Record(true, Budget.GetFailureMessage());
+		bAborted = true; // a logical refusal is fatal in lenient mode too
 		return false;
 	}
 
-	bool DecodeEnum(const FNode& Value, const UEnum* Enum, const FNumericProperty* Underlying, void* Address, FDecodeContext& Context)
+	bool Abort(const TCHAR* Message)
 	{
-		int64 EnumValue = 0;
+		if (!bAborted)
+			Record(true, Message);
+		bAborted = true;
+		return false;
+	}
+
+	bool Elements(int64 Count, int64 ElementBytes)
+	{
+		if (bAborted)
+			return false;
+		if (Budget.ChargeProduct(Count, ElementBytes, Count, Count))
+			return true;
+		Record(true, Budget.GetFailureMessage());
+		bAborted = true;
+		return false;
+	}
+
+	bool Visit(const FNode& Value, int64 StorageBytes)
+	{
+		// Two conservative counted TCHAR buffers: conversion temporary and destination copy.
+		const int64 TextBytes = Value.Type == EVaRestJsonType::String ? (int64(Value.Str.Len) + 1) * sizeof(TCHAR) * 2 : 0;
+		return Charge(StorageBytes + TextBytes, 1, int64(Value.Type == EVaRestJsonType::String ? Value.Str.Len : 0) + 1);
+	}
+
+	/**
+	 * "items[3].name", the syntax FVaRestJson::Path reads. A key longer than LongKeyBytes is cut there (at a character
+	 * boundary) and marked "...", so a hostile key costs its length once, not once per issue beneath it.
+	 */
+	FString PathString() const
+	{
+		FString Out;
+		for (const FSegment& Segment : Path)
+		{
+			if (Segment.Index >= 0)
+			{
+				Out += FString::Printf(TEXT("[%d]"), Segment.Index);
+				continue;
+			}
+			if (!Out.IsEmpty())
+			{
+				Out.AppendChar(TEXT('.'));
+			}
+			if (Segment.Key.Len() <= LongKeyBytes)
+			{
+				Out += FString::ConstructFromPtrSize(Segment.Key.GetData(), Segment.Key.Len());
+				continue;
+			}
+			int32 Cut = LongKeyBytes;
+			while (Cut > 0 && (static_cast<uint8>(Segment.Key[Cut]) & 0xC0) == 0x80)
+			{
+				--Cut; // Segment.Key[Cut] continues a UTF-8 sequence: cut before the sequence starts
+			}
+			Out += FString::ConstructFromPtrSize(Segment.Key.GetData(), Cut);
+			Out += TEXT("...");
+		}
+		return Out;
+	}
+
+	void Record(bool bError, FString Message)
+	{
+		++(bError ? NumErrors : NumWarnings);
+		const int32 NumIssues = NumErrors + NumWarnings;
+		if (Report ? NumIssues > MaxRecordedIssues : NumIssues > 1)
+		{
+			// Counted only, and the path is never formatted (Finish adds the closing entry)
+			NumUnrecordedErrors += bError ? 1 : 0;
+			return;
+		}
+		FVaRestJsonError Issue;
+		Issue.Message = MoveTemp(Message);
+		Issue.Path = PathString();
+		if (Report)
+		{
+			(bError ? Report->Errors : Report->Warnings).Add(MoveTemp(Issue));
+		}
+		else
+		{
+			FirstIssue = MoveTemp(Issue);
+		}
+	}
+
+	/** The value does not fit its field, which keeps its value. Spec 2.4: a warning; an error in strict mode. */
+	bool Mismatch(const FNode& Value, const TCHAR* Expected)
+	{
+		Record(Options.bStrict, FString::Printf(TEXT("expected %s, got %s"), Expected, TypeName(Value)));
+		return false;
+	}
+
+	/** A lenient coercion that worked ("42" -> 42): recorded like a mismatch (strict mode never coerces) */
+	void Coerced(const TCHAR* What)
+	{
+		Record(Options.bStrict, FString(What));
+	}
+
+	/** A value nested past MaxDepth (spec 2.2): the whole decode fails, nothing more is read */
+	bool TooDeep()
+	{
+		Record(true, FString::Printf(TEXT("value nested deeper than %d levels"), MaxDepth));
+		bAborted = true;
+		return false;
+	}
+
+	bool Enter()
+	{
+		if (Depth >= MaxDepth)
+		{
+			return TooDeep();
+		}
+		++Depth;
+		return true;
+	}
+
+	void Leave()
+	{
+		--Depth;
+	}
+};
+
+bool DecodeValue(const FNode& Value, const FProperty* Property, void* Address, FDecodeContext& Context);
+bool DecodeStruct(const FNode& Value, const UScriptStruct* Struct, void* Data, FDecodeContext& Context);
+
+/** The number Value holds; lenient decode also takes the number a string spells ("42"). Holder keeps that parse alive. */
+const FNode* NumberOf(const FNode& Value, FDecodeContext& Context, FVaRestJson& Holder)
+{
+	if (Value.Type == EVaRestJsonType::Number)
+	{
+		return &Value;
+	}
+	if (Value.Type != EVaRestJsonType::String || Context.Options.bStrict)
+	{
+		return nullptr;
+	}
+	if (Value.Str.Len > 64)
+	{
+		return nullptr; // no number worth coercing is that long; bounds the parse on hostile input
+	}
+	if (!Context.Charge(JsonNodeBudgetBytes + int64(Value.Str.Len) + 1, 0, Value.Str.Len))
+		return nullptr;
+	TValueOrError<FVaRestJson, FVaRestJsonError> Parsed = FVaRestJson::Parse(Value.Str.View());
+	if (!Parsed.HasValue() || !Parsed.GetValue().IsNumber())
+	{
+		return nullptr;
+	}
+	Holder = Parsed.StealValue();
+	return Holder.GetNodeInternal();
+}
+
+bool DecodeBool(const FNode& Value, const FBoolProperty* BoolProperty, void* Address, FDecodeContext& Context)
+{
+	if (Value.Type == EVaRestJsonType::Bool)
+	{
+		BoolProperty->SetPropertyValue(Address, Value.Bool);
+		return true;
+	}
+	if (!Context.Options.bStrict)
+	{
+		int64 Number = 0;
+		if (NodeToInt64(Value, Number) && (Number == 0 || Number == 1))
+		{
+			BoolProperty->SetPropertyValue(Address, Number == 1);
+			Context.Coerced(TEXT("a bool was read from 0/1"));
+			return true;
+		}
 		if (Value.Type == EVaRestJsonType::String)
 		{
-			bool bCaseOnly = false;
-			if (!FindEnumerator(Enum, TextOf(Value), !Context.Options.bStrict, EnumValue, bCaseOnly))
+			const FUtf8StringView Text = Value.Str.View();
+			const bool bTrue = Text.Equals(UTF8TEXT("true"), ESearchCase::CaseSensitive);
+			if (bTrue || Text.Equals(UTF8TEXT("false"), ESearchCase::CaseSensitive))
 			{
-				return Context.Mismatch(Value, *FString::Printf(TEXT("an enumerator of %s"), *Enum->GetName()));
+				BoolProperty->SetPropertyValue(Address, bTrue);
+				Context.Coerced(TEXT("a bool was read from a string"));
+				return true;
 			}
-			Underlying->SetIntPropertyValue(Address, EnumValue);
+		}
+	}
+	return Context.Mismatch(Value, TEXT("a bool"));
+}
+
+bool DecodeInteger(const FNode& Value, const FNumericProperty* Numeric, void* Address, FDecodeContext& Context)
+{
+	FVaRestJson Holder;
+	const FNode* Number = NumberOf(Value, Context, Holder);
+	bool bStored = false;
+	if (Number && IsUnsignedInteger(Numeric))
+	{
+		uint64 Unsigned = 0;
+		if (NodeToUInt64(*Number, Unsigned) && Numeric->CanHoldValue(Unsigned))
+		{
+			Numeric->SetIntPropertyValue(Address, Unsigned);
+			bStored = true;
+		}
+	}
+	else if (Number)
+	{
+		int64 Signed = 0;
+		if (NodeToInt64(*Number, Signed) && Numeric->CanHoldValue(Signed))
+		{
+			Numeric->SetIntPropertyValue(Address, Signed);
+			bStored = true;
+		}
+	}
+	if (!bStored)
+	{
+		return Context.Mismatch(Value, TEXT("an integer in the field's range"));
+	}
+	if (Number != &Value)
+	{
+		Context.Coerced(TEXT("an integer was read from a string"));
+	}
+	return true;
+}
+
+bool DecodeFloatingPoint(const FNode& Value, const FNumericProperty* Numeric, void* Address, FDecodeContext& Context)
+{
+	FVaRestJson Holder;
+	const FNode* Number = NumberOf(Value, Context, Holder);
+	double D = 0.0;
+	if (!Number || !NodeToDouble(*Number, D))
+	{
+		return Context.Mismatch(Value, TEXT("a number"));
+	}
+	if (Numeric->IsA<FFloatProperty>() && FMath::Abs(D) >= FloatRoundsToInfinity)
+	{
+		return Context.Mismatch(Value, TEXT("a number in float range"));
+	}
+	Numeric->SetFloatingPointPropertyValue(Address, D);
+	if (Number != &Value)
+	{
+		Context.Coerced(TEXT("a number was read from a string"));
+	}
+	return true;
+}
+
+/** Text for a string/name/text field: a string; lenient decode also takes a number's or bool's JSON text */
+bool TextFor(const FNode& Value, FDecodeContext& Context, FString& Out)
+{
+	if (Value.Type == EVaRestJsonType::String)
+	{
+		Out = TextOf(Value);
+		return true;
+	}
+	if (!Context.Options.bStrict && (Value.Type == EVaRestJsonType::Number || Value.Type == EVaRestJsonType::Bool))
+	{
+		if (!Context.Charge(64 + 2 * 64 * sizeof(TCHAR), 0, 64))
+			return false;
+		TArray<uint8> Bytes;
+		Write(Value, EVaRestJsonFormat::Condensed, Bytes); // a scalar: never too deep
+		Out = FString::ConstructFromPtrSize(reinterpret_cast<const UTF8CHAR*>(Bytes.GetData()), Bytes.Num());
+		Context.Coerced(TEXT("a string was read from a number or bool"));
+		return true;
+	}
+	return Context.Mismatch(Value, TEXT("a string"));
+}
+
+/** By authored name (as encode writes it), exact first; the autogenerated _MAX entry is not a value anyone sends */
+bool CheckEnum(const UEnum* Enum, FDecodeContext& Context)
+{
+	if (!Context.CheckedEnums.Contains(Enum))
+	{
+		const int64 Count = Enum->NumEnums();
+		if (!Context.Charge(0, 0, Count * Count + 1))
+			return false;
+		FString Error;
+		if (!ValidateEnumRules(Enum, Context.Rules->Find(Enum), Error))
+		{
+			Context.Record(true, FString::Printf(TEXT("%s: %s"), *Enum->GetPathName(), *Error));
+			Context.bAborted = true;
+			return false;
+		}
+		Context.Rules->WarnIfMissing(Enum);
+		Context.CheckedEnums.Add(Enum);
+	}
+	return true;
+}
+
+bool EqualIgnoringCaseCounted(FStringView Left, FStringView Right)
+{
+	if (Left.Len() != Right.Len())
+		return false;
+	for (int32 Index = 0; Index < Left.Len(); ++Index)
+	{
+		if (FChar::ToUpper(Left[Index]) != FChar::ToUpper(Right[Index]))
+			return false;
+	}
+	return true;
+}
+
+bool FindEnumerator(const UEnum* Enum, const FString& Name, bool bAllowCase, int64& OutValue, bool& bOutCaseOnly, FDecodeContext& Context)
+{
+	if (!CheckEnum(Enum, Context))
+	{
+		return false;
+	}
+	bOutCaseOnly = false;
+	const int32 Count = Enum->NumEnums() - (Enum->ContainsExistingMax() ? 1 : 0);
+	if (!Context.Charge(0, 0, int64(Count) * (int64(Name.Len()) + 1) * (bAllowCase ? 2 : 1)))
+		return false;
+	const FVaRestJsonResolvedRules* Rules = Context.Rules->Find(Enum);
+	const bool bCanonicalOnly = Rules && !Rules->Enums.IsEmpty();
+	auto* Names = Context.EnumNames.Find(Enum);
+	if (!Names)
+	{
+		TArray<FString> Built; Built.Reserve(Count);
+		for (int32 Index = 0; Index < Count; ++Index) Built.Add(Enum->GetAuthoredNameStringByIndex(Index));
+		Names = &Context.EnumNames.Add(Enum, MoveTemp(Built));
+	}
+	for (int32 i = 0; i < Count; ++i)
+	{
+		if (bCanonicalOnly && Enum->GetIndexByValue(Enum->GetValueByIndex(i)) != i)
+		{
+			continue; // the encoder/namespace validator use the first native entry for each runtime value
+		}
+		const FVaRestJsonEnumRule* Rule = FindEnumRule(Enum, Enum->GetValueByIndex(i), *Context.Rules);
+		if (Rule ? (!Rule->bUnset && VaRest::Json::EqualWireText(Rule->Json, Name))
+				 : VaRest::Json::EqualWireText((*Names)[i], Name))
+		{
+			OutValue = Enum->GetValueByIndex(i);
+			bOutCaseOnly = false;
+			return true;
+		}
+	}
+	if (bAllowCase)
+	{
+		for (int32 i = 0; i < Count; ++i)
+		{
+			if (bCanonicalOnly && Enum->GetIndexByValue(Enum->GetValueByIndex(i)) != i)
+			{
+				continue;
+			}
+			if (!FindEnumRule(Enum, Enum->GetValueByIndex(i), *Context.Rules) && EqualIgnoringCaseCounted((*Names)[i], Name))
+			{
+				OutValue = Enum->GetValueByIndex(i);
+				bOutCaseOnly = true;
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+bool DecodeEnum(const FNode& Value, const UEnum* Enum, const FNumericProperty* Underlying, void* Address, FDecodeContext& Context)
+{
+	if (!CheckEnum(Enum, Context))
+	{
+		return false;
+	}
+	int64 EnumValue = 0;
+	if (Value.Type == EVaRestJsonType::String)
+	{
+		bool bCaseOnly = false;
+		if (!FindEnumerator(Enum, TextOf(Value), !Context.Options.bStrict, EnumValue, bCaseOnly, Context))
+		{
+			return Context.Mismatch(Value, *FString::Printf(TEXT("an enumerator of %s"), *Enum->GetName()));
+		}
+		Underlying->SetIntPropertyValue(Address, EnumValue);
+		if (bCaseOnly)
+		{
+			Context.Coerced(TEXT("an enumerator name was matched ignoring case"));
+		}
+		return true;
+	}
+	if (NodeToInt64(Value, EnumValue) && Enum->IsValidEnumValue(EnumValue))
+	{
+		if (const FVaRestJsonEnumRule* Rule = FindEnumRule(Enum, EnumValue, *Context.Rules); Rule && Rule->bUnset)
+		{
+			return Context.Mismatch(Value, TEXT("a non-unset enumerator"));
+		}
+		Underlying->SetIntPropertyValue(Address, EnumValue);
+		return true;
+	}
+	return Context.Mismatch(Value, *FString::Printf(TEXT("an enumerator of %s"), *Enum->GetName()));
+}
+
+/**
+ * The whole key is a JSON integer: optional '-', digits, no leading zero, within 64 bits. Not a JSON parse: that
+ * would allocate a document per key and accept " 5", "5.0" and "1e0", collapsing them silently with "5".
+ */
+bool ParseIntegerKey(FUtf8StringView Text, bool& bNegative, uint64& Magnitude)
+{
+	bNegative = Text.Len() > 0 && Text[0] == UTF8CHAR('-');
+	int32 i = bNegative ? 1 : 0;
+	if (i >= Text.Len() || (Text[i] == UTF8CHAR('0') && Text.Len() > i + 1))
+	{
+		return false;
+	}
+	Magnitude = 0;
+	for (; i < Text.Len(); ++i)
+	{
+		const uint32 C = static_cast<uint8>(Text[i]);
+		if (C < '0' || C > '9')
+		{
+			return false;
+		}
+		const uint64 Digit = C - '0';
+		if (Magnitude > (MAX_uint64 - Digit) / 10)
+		{
+			return false;
+		}
+		Magnitude = Magnitude * 10 + Digit;
+	}
+	return !bNegative || Magnitude <= 9223372036854775808ull;
+}
+
+/** A JSON object key into a map key: string, name, integer (the whole key a JSON integer), enumerator name or value */
+bool DecodeMapKey(FUtf8StringView Text, const FProperty* KeyProperty, void* Key, FDecodeContext& Context)
+{
+	FString KeyText = FString::ConstructFromPtrSize(Text.GetData(), Text.Len());
+	if (const FStrProperty* StrKey = CastField<FStrProperty>(KeyProperty))
+	{
+		if (ContainsNul(KeyText))
+		{
+			// FString retains the suffix, but equal-length native keys can compare only up to U+0000.
+			// Report even a single key: another spelling can later alias it in the native map.
+			Context.Record(Context.Options.bStrict,
+				TEXT("FString map key contains U+0000 and may merge with another key; keep FVaRestJson for exact key identity"));
+			if (Context.Options.bStrict)
+			{
+				return false;
+			}
+		}
+		*StrKey->GetPropertyValuePtr(Key) = MoveTemp(KeyText);
+		return true;
+	}
+	if (const FNameProperty* NameKey = CastField<FNameProperty>(KeyProperty))
+	{
+		if (!FitsName(KeyText))
+		{
+			Context.Record(Context.Options.bStrict, FString::Printf(TEXT("map key of %d characters is too long for a name"), KeyText.Len()));
+			return false;
+		}
+		if (ContainsNul(KeyText))
+		{
+			// FName(TCHAR*) would stop at it: "a\u0000b" and "a\u0000c" would both be the key a, and merge
+			Context.Record(Context.Options.bStrict, TEXT("map key with U+0000 cannot be a name"));
+			return false;
+		}
+		NameKey->SetPropertyValue(Key, FName(*KeyText));
+		return true;
+	}
+	const FNumericProperty* Underlying = nullptr;
+	const UEnum* Enum = nullptr;
+	if (const FEnumProperty* EnumKey = CastField<FEnumProperty>(KeyProperty))
+	{
+		Underlying = EnumKey->GetUnderlyingProperty();
+		Enum = EnumKey->GetEnum();
+	}
+	else if (const FNumericProperty* NumericKey = CastField<FNumericProperty>(KeyProperty))
+	{
+		Underlying = NumericKey;
+		Enum = NumericKey->GetIntPropertyEnum();
+	}
+	if (Underlying)
+	{
+		if (Enum && !CheckEnum(Enum, Context))
+		{
+			return false;
+		}
+		int64 EnumValue = 0;
+		bool bCaseOnly = false;
+		if (Enum && FindEnumerator(Enum, KeyText, !Context.Options.bStrict, EnumValue, bCaseOnly, Context))
+		{
+			Underlying->SetIntPropertyValue(Key, EnumValue);
 			if (bCaseOnly)
 			{
 				Context.Coerced(TEXT("an enumerator name was matched ignoring case"));
 			}
 			return true;
 		}
-		if (NodeToInt64(Value, EnumValue) && Enum->IsValidEnumValue(EnumValue))
+		bool bNegative = false;
+		uint64 Magnitude = 0;
+		if (ParseIntegerKey(Text, bNegative, Magnitude)) // "5", "-5" yes; "05", "5.0", "1e0", " 5", "5x" no
 		{
-			Underlying->SetIntPropertyValue(Address, EnumValue);
+			if (!Enum && IsUnsignedInteger(Underlying))
+			{
+				// Only through CanHoldValue(uint64): CanHoldValue(int64) on a uint64 property accepts -1
+				// ((int64)(uint64)-1 == -1, UnrealType.h:2172-2175), which would store 18446744073709551615 and merge
+				// the pair with that key's
+				if (!bNegative && Underlying->CanHoldValue(Magnitude))
+				{
+					Underlying->SetIntPropertyValue(Key, Magnitude);
+					return true;
+				}
+			}
+			else if (bNegative || Magnitude <= static_cast<uint64>(MAX_int64))
+			{
+				const int64 Signed = !bNegative                            ? static_cast<int64>(Magnitude)
+									 : Magnitude == 9223372036854775808ull ? MIN_int64
+																		   : -static_cast<int64>(Magnitude);
+				if (Enum ? Enum->IsValidEnumValue(Signed) : Underlying->CanHoldValue(Signed))
+				{
+					if (Enum)
+					{
+						const FVaRestJsonEnumRule* Rule = FindEnumRule(Enum, Signed, *Context.Rules);
+						if (Rule && Rule->bUnset)
+						{
+							Context.Record(Context.Options.bStrict, TEXT("an unset enumerator cannot be a JSON map key"));
+							return false;
+						}
+					}
+					Underlying->SetIntPropertyValue(Key, Signed);
+					return true;
+				}
+			}
+		}
+	}
+	// The key itself is in the path (shortened there when long), not repeated here
+	Context.Record(Context.Options.bStrict, FString::Printf(TEXT("map key does not fit %s"), *KeyProperty->GetClass()->GetName()));
+	return false;
+}
+
+void AssignBytes(FScriptArrayHelper& Helper, const TArray<uint8>& Bytes)
+{
+	Helper.EmptyValues(Bytes.Num());
+	Helper.AddValues(Bytes.Num());
+	if (Bytes.Num() > 0)
+	{
+		FMemory::Memcpy(Helper.GetRawPtr(0), Bytes.GetData(), Bytes.Num());
+	}
+}
+
+bool DecodeArray(const FNode& Value, const FArrayProperty* ArrayProperty, void* Address, FDecodeContext& Context)
+{
+	FScriptArrayHelper Helper(ArrayProperty, Address);
+	const bool bBytes = IsPlainByteArray(ArrayProperty);
+	if (bBytes && Context.Options.BytesResolver)
+	{
+		// WebSocket spec §19 item 10: the caller decides first (Socket.IO attachments); declining keeps the built-in forms
+		TArray<uint8> Resolved;
+		if (Context.Options.BytesResolver(FVaRestJson::MakeInternal(Context.Source, const_cast<FNode*>(&Value)), Context.PathString(), Resolved))
+		{
+			// Callback allocation is outside this account; copying its result into the field is controlled here.
+			if (!Context.Elements(Resolved.Num(), sizeof(uint8)))
+				return false;
+			AssignBytes(Helper, Resolved);
 			return true;
 		}
-		return Context.Mismatch(Value, *FString::Printf(TEXT("an enumerator of %s"), *Enum->GetName()));
 	}
-
-	/**
-	 * The whole key is a JSON integer: optional '-', digits, no leading zero, within 64 bits. Not a JSON parse: that
-	 * would allocate a document per key and accept " 5", "5.0" and "1e0", collapsing them silently with "5".
-	 */
-	bool ParseIntegerKey(FUtf8StringView Text, bool& bNegative, uint64& Magnitude)
+	if (Value.Type == EVaRestJsonType::Null)
 	{
-		bNegative = Text.Len() > 0 && Text[0] == UTF8CHAR('-');
-		int32 i = bNegative ? 1 : 0;
-		if (i >= Text.Len() || (Text[i] == UTF8CHAR('0') && Text.Len() > i + 1))
-		{
+		Helper.EmptyValues(); // spec 2.4: null clears a container
+		return true;
+	}
+	if (Value.Type == EVaRestJsonType::String && bBytes)
+	{
+		const int64 MaxDecodedBytes = ((int64(Value.Str.Len) + 3) / 4) * 3;
+		if (MaxDecodedBytes >= MAX_int32)
+			return Context.Abort(TEXT("base64 decoded output cannot fit its buffer"));
+		if (!Context.Charge(2 * MaxDecodedBytes, MaxDecodedBytes, Value.Str.Len))
 			return false;
-		}
-		Magnitude = 0;
-		for (; i < Text.Len(); ++i)
+		TArray<uint8> Decoded;
+		if (!FBase64::Decode(TextOf(Value), Decoded))
 		{
-			const uint32 C = static_cast<uint8>(Text[i]);
-			if (C < '0' || C > '9')
-			{
-				return false;
-			}
-			const uint64 Digit = C - '0';
-			if (Magnitude > (MAX_uint64 - Digit) / 10)
-			{
-				return false;
-			}
-			Magnitude = Magnitude * 10 + Digit;
+			return Context.Mismatch(Value, TEXT("base64 text or an array of bytes"));
 		}
-		return !bNegative || Magnitude <= 9223372036854775808ull;
+		AssignBytes(Helper, Decoded);
+		return true;
 	}
-
-	/** A JSON object key into a map key: string, name, integer (the whole key a JSON integer), enumerator name or value */
-	bool DecodeMapKey(FUtf8StringView Text, const FProperty* KeyProperty, void* Key, FDecodeContext& Context)
+	if (Value.Type != EVaRestJsonType::Array)
 	{
-		const FString KeyText = FString::ConstructFromPtrSize(Text.GetData(), Text.Len());
-		if (const FStrProperty* StrKey = CastField<FStrProperty>(KeyProperty))
-		{
-			StrKey->SetPropertyValue(Key, KeyText);
-			return true;
-		}
-		if (const FNameProperty* NameKey = CastField<FNameProperty>(KeyProperty))
-		{
-			if (!FitsName(KeyText))
-			{
-				Context.Record(Context.Options.bStrict, FString::Printf(TEXT("map key of %d characters is too long for a name"), KeyText.Len()));
-				return false;
-			}
-			if (ContainsNul(KeyText))
-			{
-				// FName(TCHAR*) would stop at it: "a\u0000b" and "a\u0000c" would both be the key a, and merge
-				Context.Record(Context.Options.bStrict, TEXT("map key with U+0000 cannot be a name"));
-				return false;
-			}
-			NameKey->SetPropertyValue(Key, FName(*KeyText));
-			return true;
-		}
-		const FNumericProperty* Underlying = nullptr;
-		const UEnum* Enum = nullptr;
-		if (const FEnumProperty* EnumKey = CastField<FEnumProperty>(KeyProperty))
-		{
-			Underlying = EnumKey->GetUnderlyingProperty();
-			Enum = EnumKey->GetEnum();
-		}
-		else if (const FNumericProperty* NumericKey = CastField<FNumericProperty>(KeyProperty))
-		{
-			Underlying = NumericKey;
-			Enum = NumericKey->GetIntPropertyEnum();
-		}
-		if (Underlying)
-		{
-			int64 EnumValue = 0;
-			bool bCaseOnly = false;
-			if (Enum && FindEnumerator(Enum, KeyText, !Context.Options.bStrict, EnumValue, bCaseOnly))
-			{
-				Underlying->SetIntPropertyValue(Key, EnumValue);
-				if (bCaseOnly)
-				{
-					Context.Coerced(TEXT("an enumerator name was matched ignoring case"));
-				}
-				return true;
-			}
-			bool bNegative = false;
-			uint64 Magnitude = 0;
-			if (ParseIntegerKey(Text, bNegative, Magnitude)) // "5", "-5" yes; "05", "5.0", "1e0", " 5", "5x" no
-			{
-				if (!Enum && IsUnsignedInteger(Underlying))
-				{
-					// Only through CanHoldValue(uint64): CanHoldValue(int64) on a uint64 property accepts -1
-					// ((int64)(uint64)-1 == -1, UnrealType.h:2172-2175), which would store 18446744073709551615 and merge
-					// the pair with that key's
-					if (!bNegative && Underlying->CanHoldValue(Magnitude))
-					{
-						Underlying->SetIntPropertyValue(Key, Magnitude);
-						return true;
-					}
-				}
-				else if (bNegative || Magnitude <= static_cast<uint64>(MAX_int64))
-				{
-					const int64 Signed = !bNegative ? static_cast<int64>(Magnitude)
-						: Magnitude == 9223372036854775808ull ? MIN_int64 : -static_cast<int64>(Magnitude);
-					if (Enum ? Enum->IsValidEnumValue(Signed) : Underlying->CanHoldValue(Signed))
-					{
-						Underlying->SetIntPropertyValue(Key, Signed);
-						return true;
-					}
-				}
-			}
-		}
-		// The key itself is in the path (shortened there when long), not repeated here
-		Context.Record(Context.Options.bStrict, FString::Printf(TEXT("map key does not fit %s"), *KeyProperty->GetClass()->GetName()));
+		return Context.Mismatch(Value, TEXT("an array"));
+	}
+	if (!Context.Enter())
+	{
 		return false;
 	}
-
-	void AssignBytes(FScriptArrayHelper& Helper, const TArray<uint8>& Bytes)
+	// Replaced, not appended: every element starts from the inner type's defaults
+	if (Value.Arr.Num > MAX_int32)
+		return Context.Abort(TEXT("array cannot fit its element count"));
+	const int32 Count = static_cast<int32>(Value.Arr.Num);
+	if (!Context.Elements(Value.Arr.Num, ArrayProperty->Inner->GetElementSize()))
+		return false;
+	Helper.EmptyValues(Count);
+	Helper.AddValues(Count);
+	for (int32 i = 0; i < Count && !Context.bAborted; ++i)
 	{
-		Helper.EmptyValues(Bytes.Num());
-		Helper.AddValues(Bytes.Num());
-		if (Bytes.Num() > 0)
-		{
-			FMemory::Memcpy(Helper.GetRawPtr(0), Bytes.GetData(), Bytes.Num());
-		}
+		Context.Path.Add(FSegment{FUtf8StringView(), i});
+		DecodeValue(*Value.Arr.Items[i], ArrayProperty->Inner, Helper.GetRawPtr(i), Context);
+		Context.Path.Pop(EAllowShrinking::No);
 	}
+	Context.Leave();
+	return !Context.bAborted;
+}
 
-	bool DecodeArray(const FNode& Value, const FArrayProperty* ArrayProperty, void* Address, FDecodeContext& Context)
+bool DecodeSet(const FNode& Value, const FSetProperty* SetProperty, void* Address, FDecodeContext& Context)
+{
+	FScriptSetHelper Helper(SetProperty, Address);
+	if (Value.Type == EVaRestJsonType::Null)
 	{
-		FScriptArrayHelper Helper(ArrayProperty, Address);
-		const bool bBytes = IsPlainByteArray(ArrayProperty);
-		if (bBytes && Context.Options.BytesResolver)
+		Helper.EmptyElements();
+		return true;
+	}
+	if (Value.Type != EVaRestJsonType::Array)
+	{
+		return Context.Mismatch(Value, TEXT("an array"));
+	}
+	if (!Context.Enter())
+	{
+		return false;
+	}
+	const FProperty* ElementProperty = SetProperty->ElementProp;
+	if (Value.Arr.Num > MAX_int32)
+		return Context.Abort(TEXT("set cannot fit its element count"));
+	if (!Context.Elements(Value.Arr.Num, ElementProperty->GetElementSize()) || !Context.Elements(1, ElementProperty->GetElementSize()))
+		return false;
+	Helper.EmptyElements(static_cast<int32>(Value.Arr.Num));
+	void* Element = ElementProperty->AllocateAndInitializeValue();
+	for (uint32 i = 0; i < Value.Arr.Num && !Context.bAborted; ++i)
+	{
+		ElementProperty->DestroyValue(Element);
+		ElementProperty->InitializeValue(Element);
+		Context.Path.Add(FSegment{FUtf8StringView(), static_cast<int32>(i)});
+		if (DecodeValue(*Value.Arr.Items[i], ElementProperty, Element, Context))
 		{
-			// WebSocket spec §19 item 10: the caller decides first (Socket.IO attachments); declining keeps the built-in forms
-			TArray<uint8> Resolved;
-			if (Context.Options.BytesResolver(FVaRestJson::MakeInternal(Context.Source, const_cast<FNode*>(&Value)), Context.PathString(), Resolved))
-			{
-				AssignBytes(Helper, Resolved);
-				return true;
-			}
+			Helper.AddElement(Element); // hashes and compares: duplicates collapse (UnrealType.h:6208-6236)
 		}
-		if (Value.Type == EVaRestJsonType::Null)
+		Context.Path.Pop(EAllowShrinking::No);
+	}
+	ElementProperty->DestroyAndFreeValue(Element);
+	Context.Leave();
+	return !Context.bAborted;
+}
+
+bool DecodeMap(const FNode& Value, const FMapProperty* MapProperty, void* Address, FDecodeContext& Context)
+{
+	const FNumericProperty* NumericKey = CastField<FNumericProperty>(MapProperty->KeyProp);
+	const FEnumProperty* EnumKey = CastField<FEnumProperty>(MapProperty->KeyProp);
+	const UEnum* Enum = EnumKey ? EnumKey->GetEnum() : NumericKey ? NumericKey->GetIntPropertyEnum()
+																  : nullptr;
+	if (Enum)
+	{
+		const int64 Count = Enum->NumEnums();
+		if (!Context.Charge(0, 0, Count * Count + 1))
+			return false;
+		FString Error;
+		if (!ValidateEnumRules(Enum, Context.Rules->Find(Enum), Error, Context.Options.bEnumsAsNumbers))
 		{
-			Helper.EmptyValues(); // spec 2.4: null clears a container
-			return true;
-		}
-		if (Value.Type == EVaRestJsonType::String && bBytes)
-		{
-			TArray<uint8> Decoded;
-			if (!FBase64::Decode(TextOf(Value), Decoded))
-			{
-				return Context.Mismatch(Value, TEXT("base64 text or an array of bytes"));
-			}
-			AssignBytes(Helper, Decoded);
-			return true;
-		}
-		if (Value.Type != EVaRestJsonType::Array)
-		{
-			return Context.Mismatch(Value, TEXT("an array"));
-		}
-		if (!Context.Enter())
-		{
+			Context.Record(true, FString::Printf(TEXT("%s: %s"), *Enum->GetPathName(), *Error));
+			Context.bAborted = true;
 			return false;
 		}
-		// Replaced, not appended: every element starts from the inner type's defaults
-		const int32 Count = static_cast<int32>(Value.Arr.Num);
-		Helper.EmptyValues(Count);
-		Helper.AddValues(Count);
-		for (int32 i = 0; i < Count && !Context.bAborted; ++i)
-		{
-			Context.Path.Add(FSegment{ FUtf8StringView(), i });
-			DecodeValue(*Value.Arr.Items[i], ArrayProperty->Inner, Helper.GetRawPtr(i), Context);
-			Context.Path.Pop(EAllowShrinking::No);
-		}
-		Context.Leave();
-		return !Context.bAborted;
 	}
-
-	bool DecodeSet(const FNode& Value, const FSetProperty* SetProperty, void* Address, FDecodeContext& Context)
+	FScriptMapHelper Helper(MapProperty, Address);
+	if (Value.Type == EVaRestJsonType::Null)
 	{
-		FScriptSetHelper Helper(SetProperty, Address);
-		if (Value.Type == EVaRestJsonType::Null)
-		{
-			Helper.EmptyElements();
-			return true;
-		}
-		if (Value.Type != EVaRestJsonType::Array)
-		{
-			return Context.Mismatch(Value, TEXT("an array"));
-		}
-		if (!Context.Enter())
-		{
-			return false;
-		}
-		const FProperty* ElementProperty = SetProperty->ElementProp;
-		Helper.EmptyElements(static_cast<int32>(Value.Arr.Num));
-		void* Element = ElementProperty->AllocateAndInitializeValue();
-		for (uint32 i = 0; i < Value.Arr.Num && !Context.bAborted; ++i)
-		{
-			ElementProperty->DestroyValue(Element);
-			ElementProperty->InitializeValue(Element);
-			Context.Path.Add(FSegment{ FUtf8StringView(), static_cast<int32>(i) });
-			if (DecodeValue(*Value.Arr.Items[i], ElementProperty, Element, Context))
-			{
-				Helper.AddElement(Element); // hashes and compares: duplicates collapse (UnrealType.h:6208-6236)
-			}
-			Context.Path.Pop(EAllowShrinking::No);
-		}
-		ElementProperty->DestroyAndFreeValue(Element);
-		Context.Leave();
-		return !Context.bAborted;
+		Helper.EmptyValues();
+		return true;
 	}
-
-	bool DecodeMap(const FNode& Value, const FMapProperty* MapProperty, void* Address, FDecodeContext& Context)
+	if (Value.Type != EVaRestJsonType::Object)
 	{
-		FScriptMapHelper Helper(MapProperty, Address);
-		if (Value.Type == EVaRestJsonType::Null)
-		{
-			Helper.EmptyValues();
-			return true;
-		}
-		if (Value.Type != EVaRestJsonType::Object)
-		{
-			return Context.Mismatch(Value, TEXT("an object"));
-		}
-		if (!Context.Enter())
-		{
-			return false;
-		}
-		const FProperty* KeyProperty = MapProperty->KeyProp;
-		const FProperty* ValueProperty = MapProperty->ValueProp;
-		Helper.EmptyValues(static_cast<int32>(Value.Obj.Num));
-		void* Key = KeyProperty->AllocateAndInitializeValue();
-		void* Item = ValueProperty->AllocateAndInitializeValue();
-		for (uint32 m = 0; m < Value.Obj.Num && !Context.bAborted; ++m)
-		{
-			const FMember& M = Value.Obj.Members[m];
-			KeyProperty->DestroyValue(Key);
-			KeyProperty->InitializeValue(Key);
-			ValueProperty->DestroyValue(Item);
-			ValueProperty->InitializeValue(Item);
-			Context.Path.Add(FSegment{ M.Key.View(), -1 });
-			if (DecodeMapKey(M.Key.View(), KeyProperty, Key, Context) && DecodeValue(*M.Value, ValueProperty, Item, Context))
-			{
-				// AddPair overwrites an equal key (UnrealType.h:5402-5440): case-variant FString keys collapse, the last value wins
-				Helper.AddPair(Key, Item);
-			}
-			Context.Path.Pop(EAllowShrinking::No);
-		}
-		KeyProperty->DestroyAndFreeValue(Key);
-		ValueProperty->DestroyAndFreeValue(Item);
-		Context.Leave();
-		return !Context.bAborted;
+		return Context.Mismatch(Value, TEXT("an object"));
 	}
-
-	bool DecodeSpecial(const FNode& Value, ESpecialStruct Special, void* Data, FDecodeContext& Context)
+	if (!Context.Enter())
 	{
-		if (Special == ESpecialStruct::Json)
+		return false;
+	}
+	const FProperty* KeyProperty = MapProperty->KeyProp;
+	const FProperty* ValueProperty = MapProperty->ValueProp;
+	const int64 EntryBytes = int64(KeyProperty->GetElementSize()) + ValueProperty->GetElementSize();
+	if (Value.Obj.Num > MAX_int32)
+		return Context.Abort(TEXT("map cannot fit its element count"));
+	if (!Context.Elements(Value.Obj.Num, EntryBytes) || !Context.Elements(1, EntryBytes))
+		return false;
+	Helper.EmptyValues(static_cast<int32>(Value.Obj.Num));
+	void* Key = KeyProperty->AllocateAndInitializeValue();
+	void* Item = ValueProperty->AllocateAndInitializeValue();
+	for (uint32 m = 0; m < Value.Obj.Num && !Context.bAborted; ++m)
+	{
+		const FMember& M = Value.Obj.Members[m];
+		KeyProperty->DestroyValue(Key);
+		KeyProperty->InitializeValue(Key);
+		ValueProperty->DestroyValue(Item);
+		ValueProperty->InitializeValue(Item);
+		Context.Path.Add(FSegment{M.Key.View(), -1});
+		if (!Context.Charge((int64(M.Key.Len) + 1) * sizeof(TCHAR) * 2, 1, M.Key.Len))
 		{
-			// Its own copy: a decoded struct never shares a document with the response it came from (spec 2.2 thread
-			// contract). The containers open around the field count, as encode counts them (EmitJson): a value that nests
-			// the struct past MaxDepth fails the decode, not the struct's next encode. A parsed document never gets there
-			// (the parser has the same limit); one built through Set/Add can.
-			FVaRestJson::FDocumentRef Copy = MakeShared<FDocument, ESPMode::ThreadSafe>();
-			FNode* Root = Copy->DeepCopy(Value, Context.Depth);
-			if (!Root)
-			{
-				return Context.TooDeep();
-			}
-			Copy->Root = Root;
-			*static_cast<FVaRestJson*>(Data) = FVaRestJson::MakeInternal(MoveTemp(Copy), Root);
-			return true;
-		}
-		if (Value.Type == EVaRestJsonType::Null)
-		{
-			return true; // spec 2.4: null keeps a struct's value
-		}
-		switch (Special)
-		{
-		case ESpecialStruct::DateTime:
-		{
-			if (Value.Type == EVaRestJsonType::String)
-			{
-				// ParseIso8601 reads a C string: "...Z\u0000junk" would read as the date before the U+0000
-				const FString Text = TextOf(Value);
-				FDateTime Parsed;
-				if (!ContainsNul(Text) && FDateTime::ParseIso8601(*Text, Parsed))
-				{
-					*static_cast<FDateTime*>(Data) = Parsed;
-					return true;
-				}
-			}
-			return Context.Mismatch(Value, TEXT("an ISO 8601 date-time"));
-		}
-		case ESpecialStruct::Timespan:
-		{
-			FVaRestJson Holder;
-			const FNode* Number = NumberOf(Value, Context, Holder);
-			double Seconds = 0.0;
-			if (Number && NodeToDouble(*Number, Seconds) && Seconds >= FTimespan::MinValue().GetTotalSeconds() && Seconds <= FTimespan::MaxValue().GetTotalSeconds())
-			{
-				// FromSeconds's own arithmetic, but not its unchecked cast to int64 ticks (Timespan.h:673-676): at the top of
-				// the range the seconds round to 2^63 ticks, one past int64 (MaxValue's own seconds, which encode writes, do).
-				// That one rounding step is MaxValue; the range check keeps every other value inside int64.
-				const double Ticks = FMath::FloorToDouble(Seconds * ETimespan::TicksPerSecond + 0.5);
-				*static_cast<FTimespan*>(Data) = Ticks < 9223372036854775808.0 ? FTimespan(static_cast<int64>(Ticks)) : FTimespan::MaxValue();
-				if (Number != &Value)
-				{
-					Context.Coerced(TEXT("seconds were read from a string"));
-				}
-				return true;
-			}
-			return Context.Mismatch(Value, TEXT("a number of seconds"));
-		}
-		case ESpecialStruct::Guid:
-		{
-			if (Value.Type == EVaRestJsonType::String)
-			{
-				const FString Text = TextOf(Value);
-				FGuid Parsed;
-				if (!ContainsNul(Text) && FGuid::Parse(Text, Parsed))
-				{
-					*static_cast<FGuid*>(Data) = Parsed;
-					return true;
-				}
-			}
-			return Context.Mismatch(Value, TEXT("a GUID"));
-		}
-		case ESpecialStruct::SoftObjectPath:
-			if (Value.Type == EVaRestJsonType::String)
-			{
-				FSoftObjectPath Parsed;
-				if (const TCHAR* Expected = ParseObjectPath(TextOf(Value), Parsed))
-				{
-					return Context.Mismatch(Value, Expected);
-				}
-				// The whole value for FSoftClassPath too: it adds no data members (SoftObjectPath.h:531-591)
-				*static_cast<FSoftObjectPath*>(Data) = MoveTemp(Parsed);
-				return true;
-			}
-			return Context.Mismatch(Value, TEXT("an object path"));
-		case ESpecialStruct::None:
-		case ESpecialStruct::Json:
+			Context.Path.Pop(EAllowShrinking::No);
 			break;
+		}
+		if (DecodeMapKey(M.Key.View(), KeyProperty, Key, Context) && DecodeValue(*M.Value, ValueProperty, Item, Context))
+		{
+			// AddPair overwrites an equal key (UnrealType.h:5402-5440): case-variant FString keys collapse, the last value wins
+			Helper.AddPair(Key, Item);
+		}
+		Context.Path.Pop(EAllowShrinking::No);
+	}
+	KeyProperty->DestroyAndFreeValue(Key);
+	ValueProperty->DestroyAndFreeValue(Item);
+	Context.Leave();
+	return !Context.bAborted;
+}
+
+bool DecodeSpecial(const FNode& Value, ESpecialStruct Special, void* Data, FDecodeContext& Context)
+{
+	if (Special == ESpecialStruct::Json)
+	{
+		if (!ChargeJsonCopy(Value, Context.Budget, Context.Depth))
+			return Context.Budget.HasFailed() ? Context.Charge(0, 0, 0) : Context.TooDeep();
+		// Its own copy: a decoded struct never shares a document with the response it came from (spec 2.2 thread
+		// contract). The containers open around the field count, as encode counts them (EmitJson): a value that nests
+		// the struct past MaxDepth fails the decode, not the struct's next encode. A parsed document never gets there
+		// (the parser has the same limit); one built through Set/Add can.
+		FVaRestJson::FDocumentRef Copy = MakeShared<FDocument, ESPMode::ThreadSafe>();
+		FNode* Root = Copy->DeepCopy(Value, Context.Depth);
+		if (!Root)
+		{
+			return Context.TooDeep();
+		}
+		Copy->Root = Root;
+		*static_cast<FVaRestJson*>(Data) = FVaRestJson::MakeInternal(MoveTemp(Copy), Root);
+		return true;
+	}
+	if (Value.Type == EVaRestJsonType::Null)
+	{
+		return true; // spec 2.4: null keeps a struct's value
+	}
+	switch (Special)
+	{
+	case ESpecialStruct::DateTime:
+	{
+		if (Value.Type == EVaRestJsonType::String)
+		{
+			// ParseIso8601 reads a C string: "...Z\u0000junk" would read as the date before the U+0000
+			const FString Text = TextOf(Value);
+			FDateTime Parsed;
+			if (!ContainsNul(Text) && FDateTime::ParseIso8601(*Text, Parsed))
+			{
+				*static_cast<FDateTime*>(Data) = Parsed;
+				return true;
+			}
+		}
+		return Context.Mismatch(Value, TEXT("an ISO 8601 date-time"));
+	}
+	case ESpecialStruct::Timespan:
+	{
+		FVaRestJson Holder;
+		const FNode* Number = NumberOf(Value, Context, Holder);
+		double Seconds = 0.0;
+		if (Number && NodeToDouble(*Number, Seconds) && Seconds >= FTimespan::MinValue().GetTotalSeconds() && Seconds <= FTimespan::MaxValue().GetTotalSeconds())
+		{
+			// FromSeconds's own arithmetic, but not its unchecked cast to int64 ticks (Timespan.h:673-676): at the top of
+			// the range the seconds round to 2^63 ticks, one past int64 (MaxValue's own seconds, which encode writes, do).
+			// That one rounding step is MaxValue; the range check keeps every other value inside int64.
+			const double Ticks = FMath::FloorToDouble(Seconds * ETimespan::TicksPerSecond + 0.5);
+			*static_cast<FTimespan*>(Data) = Ticks < 9223372036854775808.0 ? FTimespan(static_cast<int64>(Ticks)) : FTimespan::MaxValue();
+			if (Number != &Value)
+			{
+				Context.Coerced(TEXT("seconds were read from a string"));
+			}
+			return true;
+		}
+		return Context.Mismatch(Value, TEXT("a number of seconds"));
+	}
+	case ESpecialStruct::Guid:
+	{
+		if (Value.Type == EVaRestJsonType::String)
+		{
+			const FString Text = TextOf(Value);
+			FGuid Parsed;
+			if (!ContainsNul(Text) && FGuid::Parse(Text, Parsed))
+			{
+				*static_cast<FGuid*>(Data) = Parsed;
+				return true;
+			}
+		}
+		return Context.Mismatch(Value, TEXT("a GUID"));
+	}
+	case ESpecialStruct::SoftObjectPath:
+		if (Value.Type == EVaRestJsonType::String)
+		{
+			FSoftObjectPath Parsed;
+			if (const TCHAR* Expected = ParseObjectPath(TextOf(Value), Parsed))
+			{
+				return Context.Mismatch(Value, Expected);
+			}
+			// The whole value for FSoftClassPath too: it adds no data members (SoftObjectPath.h:531-591)
+			*static_cast<FSoftObjectPath*>(Data) = MoveTemp(Parsed);
+			return true;
+		}
+		return Context.Mismatch(Value, TEXT("an object path"));
+	case ESpecialStruct::None:
+	case ESpecialStruct::Json:
+		break;
+	}
+	return true;
+}
+
+/** A field value, including C-style array members (a JSON array of up to ArrayDim elements) */
+bool DecodeField(const FNode& Value, const FProperty* Property, void* Address, FDecodeContext& Context)
+{
+	if (Property->ArrayDim == 1)
+	{
+		return DecodeValue(Value, Property, Address, Context);
+	}
+	if (!Context.Visit(Value, 0))
+		return false;
+	if (Value.Type != EVaRestJsonType::Array)
+	{
+		return Context.Mismatch(Value, TEXT("an array"));
+	}
+	if (!Context.Enter())
+	{
+		return false;
+	}
+	const int32 Count = FMath::Min<int32>(static_cast<int32>(Value.Arr.Num), Property->ArrayDim);
+	if (static_cast<int32>(Value.Arr.Num) > Property->ArrayDim)
+	{
+		Context.Record(Context.Options.bStrict, FString::Printf(TEXT("%u elements for a fixed array of %d; the rest are ignored"), Value.Arr.Num, Property->ArrayDim));
+	}
+	for (int32 i = 0; i < Count && !Context.bAborted; ++i)
+	{
+		Context.Path.Add(FSegment{FUtf8StringView(), i});
+		DecodeValue(*Value.Arr.Items[i], Property, static_cast<uint8*>(Address) + static_cast<SIZE_T>(Property->GetElementSize()) * i, Context);
+		Context.Path.Pop(EAllowShrinking::No);
+	}
+	Context.Leave();
+	return !Context.bAborted;
+}
+
+bool DecodeStruct(const FNode& Value, const UScriptStruct* Struct, void* Data, FDecodeContext& Context)
+{
+	if (!Context.Visit(Value, Struct->GetStructureSize()))
+		return false;
+	const ESpecialStruct Special = ClassifyStruct(Struct);
+	if (Special != ESpecialStruct::None)
+	{
+		return DecodeSpecial(Value, Special, Data, Context);
+	}
+	const FFieldMapRef Fields = GetFieldMap(Struct, Context.Options.Naming, Context.Rules);
+	if (!Fields->Error.IsEmpty())
+	{
+		Context.Record(true, Fields->Error);
+		Context.bAborted = true;
+		return false;
+	}
+	if (Value.Type == EVaRestJsonType::Null)
+	{
+		return true; // spec 2.4: null keeps a struct's values
+	}
+	if (Value.Type != EVaRestJsonType::Object)
+	{
+		return Context.Mismatch(Value, TEXT("an object"));
+	}
+	if (!Context.Enter())
+	{
+		return false;
+	}
+	const int32 FieldCount = Fields->Fields.Num();
+	// Per field, the member that feeds it: the best tier wins (exact beats case-insensitive beats normalised, in any
+	// member order); within a tier the last occurrence wins, as lookups do (spec 2.1).
+	TArray<int32, TInlineAllocator<32>> Chosen;
+	TArray<uint8, TInlineAllocator<32>> ChosenTier;
+	if (!Context.Elements(FieldCount, sizeof(int32) + sizeof(uint8)))
+		return false;
+	Chosen.Init(INDEX_NONE, FieldCount);
+	ChosenTier.Init(MAX_uint8, FieldCount);
+	const FNode::FObj& Obj = Value.Obj;
+	for (uint32 m = 0; m < Obj.Num; ++m)
+	{
+		const FMember& M = Obj.Members[m];
+		if (!Context.Charge(M.Key.Len, 1, int64(M.Key.Len) + 1))
+			break;
+		uint8 Tier = 0;
+		const int32 Field = Fields->Match(M.Key.View(), M.Key.Hash, Context.Scratch, Tier);
+		if (Field != INDEX_NONE && Tier <= ChosenTier[Field])
+		{
+			Chosen[Field] = static_cast<int32>(m);
+			ChosenTier[Field] = Tier;
+		}
+	}
+	for (int32 f = 0; f < FieldCount && !Context.bAborted; ++f)
+	{
+		if (!Context.Charge(0, 1, 1))
+			break;
+		if (Chosen[f] == INDEX_NONE)
+		{
+			continue; // spec 2.4: an absent field keeps its value
+		}
+		const FMember& M = Obj.Members[Chosen[f]];
+		const FFieldInfo& Field = Fields->Fields[f];
+		const FProperty* Property = Field.Property;
+		if (M.Value->Type == EVaRestJsonType::Null && Field.Rule.bNullable)
+		{
+			continue; // a nullable field keeps its current/authored default, including containers
+		}
+		Context.Path.Add(FSegment{M.Key.View(), -1});
+		DecodeField(*M.Value, Property, Property->ContainerPtrToValuePtr<void>(Data), Context);
+		Context.Path.Pop(EAllowShrinking::No);
+	}
+	Context.Leave();
+	return !Context.bAborted;
+}
+
+bool DecodeValue(const FNode& Value, const FProperty* Property, void* Address, FDecodeContext& Context)
+{
+	if (!Context.Visit(Value, Property->GetElementSize()))
+		return false;
+	if (const FBoolProperty* BoolProperty = CastField<FBoolProperty>(Property))
+	{
+		return DecodeBool(Value, BoolProperty, Address, Context);
+	}
+	if (const FEnumProperty* EnumProperty = CastField<FEnumProperty>(Property))
+	{
+		return DecodeEnum(Value, EnumProperty->GetEnum(), EnumProperty->GetUnderlyingProperty(), Address, Context);
+	}
+	if (const FNumericProperty* Numeric = CastField<FNumericProperty>(Property))
+	{
+		if (const UEnum* Enum = Numeric->GetIntPropertyEnum())
+		{
+			return DecodeEnum(Value, Enum, Numeric, Address, Context);
+		}
+		return Numeric->IsFloatingPoint() ? DecodeFloatingPoint(Value, Numeric, Address, Context) : DecodeInteger(Value, Numeric, Address, Context);
+	}
+	if (const FStrProperty* StrProperty = CastField<FStrProperty>(Property))
+	{
+		FString Text;
+		if (!TextFor(Value, Context, Text))
+		{
+			return false;
+		}
+		// The checked conversion already owns this counted string; transfer its buffer once.
+		*StrProperty->GetPropertyValuePtr(Address) = MoveTemp(Text);
+		return true;
+	}
+	if (const FNameProperty* NameProperty = CastField<FNameProperty>(Property))
+	{
+		FString Text;
+		if (!TextFor(Value, Context, Text))
+		{
+			return false;
+		}
+		if (!FitsName(Text))
+		{
+			return Context.Mismatch(Value, TEXT("a name shorter than 1024 characters"));
+		}
+		if (ContainsNul(Text))
+		{
+			return Context.Mismatch(Value, TEXT("a name without U+0000")); // FName(TCHAR*) would stop at it
+		}
+		NameProperty->SetPropertyValue(Address, FName(*Text));
+		return true;
+	}
+	if (const FTextProperty* TextProperty = CastField<FTextProperty>(Property))
+	{
+		FString Text;
+		if (!TextFor(Value, Context, Text))
+		{
+			return false;
+		}
+		TextProperty->SetPropertyValue(Address, FText::AsCultureInvariant(MoveTemp(Text))); // spec 2.4: culture-invariant
+		return true;
+	}
+	if (const FStructProperty* StructProperty = CastField<FStructProperty>(Property))
+	{
+		return DecodeStruct(Value, StructProperty->Struct, Address, Context);
+	}
+	if (const FArrayProperty* ArrayProperty = CastField<FArrayProperty>(Property))
+	{
+		return DecodeArray(Value, ArrayProperty, Address, Context);
+	}
+	if (const FSetProperty* SetProperty = CastField<FSetProperty>(Property))
+	{
+		return DecodeSet(Value, SetProperty, Address, Context);
+	}
+	if (const FMapProperty* MapProperty = CastField<FMapProperty>(Property))
+	{
+		return DecodeMap(Value, MapProperty, Address, Context);
+	}
+	if (const FOptionalProperty* Optional = CastField<FOptionalProperty>(Property))
+	{
+		if (Value.Type == EVaRestJsonType::Null)
+		{
+			Optional->MarkUnset(Address); // spec 2.4: null <-> unset
+			return true;
+		}
+		const bool bWasSet = Optional->IsSet(Address);
+		if (!bWasSet && !Context.Elements(1, Optional->GetValueProperty()->GetElementSize()))
+			return false;
+		// The existing value when set (PropertyOptional.h:35-56), a fresh one otherwise
+		void* Inner = Optional->MarkSetAndGetInitializedValuePointerToReplace(Address);
+		if (!DecodeValue(Value, Optional->GetValueProperty(), Inner, Context))
+		{
+			// A mismatch keeps the field as it was (spec 2.4): unset stays unset, a set value is left untouched
+			if (!bWasSet)
+			{
+				Optional->MarkUnset(Address);
+			}
+			return false;
 		}
 		return true;
 	}
-
-	/** A field value, including C-style array members (a JSON array of up to ArrayDim elements) */
-	bool DecodeField(const FNode& Value, const FProperty* Property, void* Address, FDecodeContext& Context)
+	if (const FSoftObjectProperty* SoftProperty = CastField<FSoftObjectProperty>(Property))
 	{
-		if (Property->ArrayDim == 1)
-		{
-			return DecodeValue(Value, Property, Address, Context);
-		}
-		if (Value.Type != EVaRestJsonType::Array)
-		{
-			return Context.Mismatch(Value, TEXT("an array"));
-		}
-		if (!Context.Enter())
-		{
-			return false;
-		}
-		const int32 Count = FMath::Min<int32>(static_cast<int32>(Value.Arr.Num), Property->ArrayDim);
-		if (static_cast<int32>(Value.Arr.Num) > Property->ArrayDim)
-		{
-			Context.Record(Context.Options.bStrict, FString::Printf(TEXT("%u elements for a fixed array of %d; the rest are ignored"), Value.Arr.Num, Property->ArrayDim));
-		}
-		for (int32 i = 0; i < Count && !Context.bAborted; ++i)
-		{
-			Context.Path.Add(FSegment{ FUtf8StringView(), i });
-			DecodeValue(*Value.Arr.Items[i], Property, static_cast<uint8*>(Address) + static_cast<SIZE_T>(Property->GetElementSize()) * i, Context);
-			Context.Path.Pop(EAllowShrinking::No);
-		}
-		Context.Leave();
-		return !Context.bAborted;
-	}
-
-	bool DecodeStruct(const FNode& Value, const UScriptStruct* Struct, void* Data, FDecodeContext& Context)
-	{
-		const ESpecialStruct Special = ClassifyStruct(Struct);
-		if (Special != ESpecialStruct::None)
-		{
-			return DecodeSpecial(Value, Special, Data, Context);
-		}
 		if (Value.Type == EVaRestJsonType::Null)
 		{
-			return true; // spec 2.4: null keeps a struct's values
-		}
-		if (Value.Type != EVaRestJsonType::Object)
-		{
-			return Context.Mismatch(Value, TEXT("an object"));
-		}
-		if (!Context.Enter())
-		{
-			return false;
-		}
-		const FFieldMapRef Fields = GetFieldMap(Struct, Context.Options.Naming);
-		const int32 FieldCount = Fields->Fields.Num();
-		// Per field, the member that feeds it: the best tier wins (exact beats case-insensitive beats normalised, in any
-		// member order); within a tier the last occurrence wins, as lookups do (spec 2.1).
-		TArray<int32, TInlineAllocator<32>> Chosen;
-		TArray<uint8, TInlineAllocator<32>> ChosenTier;
-		Chosen.Init(INDEX_NONE, FieldCount);
-		ChosenTier.Init(MAX_uint8, FieldCount);
-		const FNode::FObj& Obj = Value.Obj;
-		for (uint32 m = 0; m < Obj.Num; ++m)
-		{
-			const FMember& M = Obj.Members[m];
-			uint8 Tier = 0;
-			const int32 Field = Fields->Match(M.Key.View(), M.Key.Hash, Context.Scratch, Tier);
-			if (Field != INDEX_NONE && Tier <= ChosenTier[Field])
-			{
-				Chosen[Field] = static_cast<int32>(m);
-				ChosenTier[Field] = Tier;
-			}
-		}
-		for (int32 f = 0; f < FieldCount && !Context.bAborted; ++f)
-		{
-			if (Chosen[f] == INDEX_NONE)
-			{
-				continue; // spec 2.4: an absent field keeps its value
-			}
-			const FMember& M = Obj.Members[Chosen[f]];
-			const FProperty* Property = Fields->Fields[f].Property;
-			Context.Path.Add(FSegment{ M.Key.View(), -1 });
-			DecodeField(*M.Value, Property, Property->ContainerPtrToValuePtr<void>(Data), Context);
-			Context.Path.Pop(EAllowShrinking::No);
-		}
-		Context.Leave();
-		return !Context.bAborted;
-	}
-
-	bool DecodeValue(const FNode& Value, const FProperty* Property, void* Address, FDecodeContext& Context)
-	{
-		if (const FBoolProperty* BoolProperty = CastField<FBoolProperty>(Property))
-		{
-			return DecodeBool(Value, BoolProperty, Address, Context);
-		}
-		if (const FEnumProperty* EnumProperty = CastField<FEnumProperty>(Property))
-		{
-			return DecodeEnum(Value, EnumProperty->GetEnum(), EnumProperty->GetUnderlyingProperty(), Address, Context);
-		}
-		if (const FNumericProperty* Numeric = CastField<FNumericProperty>(Property))
-		{
-			if (const UEnum* Enum = Numeric->GetIntPropertyEnum())
-			{
-				return DecodeEnum(Value, Enum, Numeric, Address, Context);
-			}
-			return Numeric->IsFloatingPoint() ? DecodeFloatingPoint(Value, Numeric, Address, Context) : DecodeInteger(Value, Numeric, Address, Context);
-		}
-		if (const FStrProperty* StrProperty = CastField<FStrProperty>(Property))
-		{
-			FString Text;
-			if (!TextFor(Value, Context, Text))
-			{
-				return false;
-			}
-			StrProperty->SetPropertyValue(Address, Text);
+			SoftProperty->SetPropertyValue(Address, FSoftObjectPtr());
 			return true;
 		}
-		if (const FNameProperty* NameProperty = CastField<FNameProperty>(Property))
+		if (Value.Type == EVaRestJsonType::String)
 		{
-			FString Text;
-			if (!TextFor(Value, Context, Text))
+			FSoftObjectPath Parsed;
+			if (const TCHAR* Expected = ParseObjectPath(TextOf(Value), Parsed))
 			{
-				return false;
+				return Context.Mismatch(Value, Expected);
 			}
-			if (!FitsName(Text))
-			{
-				return Context.Mismatch(Value, TEXT("a name shorter than 1024 characters"));
-			}
-			if (ContainsNul(Text))
-			{
-				return Context.Mismatch(Value, TEXT("a name without U+0000")); // FName(TCHAR*) would stop at it
-			}
-			NameProperty->SetPropertyValue(Address, FName(*Text));
+			SoftProperty->SetPropertyValue(Address, FSoftObjectPtr(MoveTemp(Parsed)));
 			return true;
 		}
-		if (const FTextProperty* TextProperty = CastField<FTextProperty>(Property))
-		{
-			FString Text;
-			if (!TextFor(Value, Context, Text))
-			{
-				return false;
-			}
-			TextProperty->SetPropertyValue(Address, FText::AsCultureInvariant(MoveTemp(Text))); // spec 2.4: culture-invariant
-			return true;
-		}
-		if (const FStructProperty* StructProperty = CastField<FStructProperty>(Property))
-		{
-			return DecodeStruct(Value, StructProperty->Struct, Address, Context);
-		}
-		if (const FArrayProperty* ArrayProperty = CastField<FArrayProperty>(Property))
-		{
-			return DecodeArray(Value, ArrayProperty, Address, Context);
-		}
-		if (const FSetProperty* SetProperty = CastField<FSetProperty>(Property))
-		{
-			return DecodeSet(Value, SetProperty, Address, Context);
-		}
-		if (const FMapProperty* MapProperty = CastField<FMapProperty>(Property))
-		{
-			return DecodeMap(Value, MapProperty, Address, Context);
-		}
-		if (const FOptionalProperty* Optional = CastField<FOptionalProperty>(Property))
-		{
-			if (Value.Type == EVaRestJsonType::Null)
-			{
-				Optional->MarkUnset(Address); // spec 2.4: null <-> unset
-				return true;
-			}
-			const bool bWasSet = Optional->IsSet(Address);
-			// The existing value when set (PropertyOptional.h:35-56), a fresh one otherwise
-			void* Inner = Optional->MarkSetAndGetInitializedValuePointerToReplace(Address);
-			if (!DecodeValue(Value, Optional->GetValueProperty(), Inner, Context))
-			{
-				// A mismatch keeps the field as it was (spec 2.4): unset stays unset, a set value is left untouched
-				if (!bWasSet)
-				{
-					Optional->MarkUnset(Address);
-				}
-				return false;
-			}
-			return true;
-		}
-		if (const FSoftObjectProperty* SoftProperty = CastField<FSoftObjectProperty>(Property))
-		{
-			if (Value.Type == EVaRestJsonType::Null)
-			{
-				SoftProperty->SetPropertyValue(Address, FSoftObjectPtr());
-				return true;
-			}
-			if (Value.Type == EVaRestJsonType::String)
-			{
-				FSoftObjectPath Parsed;
-				if (const TCHAR* Expected = ParseObjectPath(TextOf(Value), Parsed))
-				{
-					return Context.Mismatch(Value, Expected);
-				}
-				SoftProperty->SetPropertyValue(Address, FSoftObjectPtr(MoveTemp(Parsed)));
-				return true;
-			}
-			return Context.Mismatch(Value, TEXT("an object path"));
-		}
-		Context.Record(true, FString::Printf(TEXT("%s properties are not converted"), *Property->GetClass()->GetName()));
-		return false;
+		return Context.Mismatch(Value, TEXT("an object path"));
 	}
-
-	bool Refuse(FVaRestJsonDecodeReport* Report, const FString& Message)
-	{
-		FVaRestJsonError Error;
-		Error.Message = Message;
-		if (Report)
-		{
-			Report->Errors.Add(MoveTemp(Error));
-		}
-		else
-		{
-			UE_LOG(LogVaRestJson, Warning, TEXT("FVaRestJsonConvert: %s"), *Message);
-		}
-		return false;
-	}
-
-	bool Finish(const FDecodeContext& Context, bool bStored, const FString& What)
-	{
-		const int32 NumIssues = Context.NumWarnings + Context.NumErrors;
-		if (Context.Report && NumIssues > MaxRecordedIssues)
-		{
-			FVaRestJsonError More;
-			More.Message = FString::Printf(TEXT("%d more issue(s) not recorded"), NumIssues - MaxRecordedIssues);
-			(Context.NumUnrecordedErrors > 0 ? Context.Report->Errors : Context.Report->Warnings).Add(MoveTemp(More));
-		}
-		if (!Context.Report && NumIssues > 0)
-		{
-			// One line per decode, not per issue: a big response with a systematic mismatch must not flood the log
-			UE_LOG(LogVaRestJson, Warning, TEXT("FVaRestJsonConvert: decoding %s: %d warning(s), %d error(s); first at '%s': %s"),
-				*What, Context.NumWarnings, Context.NumErrors, *Context.FirstIssue.Path, *Context.FirstIssue.Message);
-		}
-		return bStored && !Context.bAborted && Context.NumErrors == 0;
-	}
+	Context.Record(true, FString::Printf(TEXT("%s properties are not converted"), *Property->GetClass()->GetName()));
+	return false;
 }
+
+bool Refuse(FVaRestJsonDecodeReport* Report, const FString& Message)
+{
+	FVaRestJsonError Error;
+	Error.Message = Message;
+	if (Report)
+	{
+		Report->Errors.Add(MoveTemp(Error));
+	}
+	else
+	{
+		UE_LOG(LogVaRestJson, Warning, TEXT("FVaRestJsonConvert: %s"), *Message);
+	}
+	return false;
+}
+
+bool Finish(const FDecodeContext& Context, bool bStored, const FString& What)
+{
+	if (Context.Report) Context.Report->bBudgetExceeded |= Context.Budget.HasFailed();
+	const int32 NumIssues = Context.NumWarnings + Context.NumErrors;
+	if (Context.Report && NumIssues > MaxRecordedIssues)
+	{
+		FVaRestJsonError More;
+		More.Message = FString::Printf(TEXT("%d more issue(s) not recorded"), NumIssues - MaxRecordedIssues);
+		(Context.NumUnrecordedErrors > 0 ? Context.Report->Errors : Context.Report->Warnings).Add(MoveTemp(More));
+	}
+	if (!Context.Report && NumIssues > 0)
+	{
+		// One line per decode, not per issue: a big response with a systematic mismatch must not flood the log
+		UE_LOG(LogVaRestJson, Warning, TEXT("FVaRestJsonConvert: decoding %s: %d warning(s), %d error(s); first at '%s': %s"),
+			*What, Context.NumWarnings, Context.NumErrors, *Context.FirstIssue.Path, *Context.FirstIssue.Message);
+	}
+	return bStored && !Context.bAborted && Context.NumErrors == 0;
+}
+} // namespace VaRest::Json::Convert::DecodePrivate
 
 bool FVaRestJsonConvert::JsonToStruct(const FVaRestJson& Json, const UScriptStruct* Struct, void* Data, const FVaRestJsonConvertOptions& Options, FVaRestJsonDecodeReport* OutReport)
 {
@@ -986,17 +1203,56 @@ bool FVaRestJsonConvert::JsonToStruct(const FVaRestJson& Json, const UScriptStru
 bool FVaRestJsonConvert::Utf8ToStruct(TConstArrayView<uint8> Utf8, const UScriptStruct* Struct, void* Data, const FVaRestJsonConvertOptions& Options, FVaRestJsonDecodeReport* OutReport)
 {
 	using namespace VaRest::Json::Convert::DecodePrivate;
-	TValueOrError<FVaRestJson, FVaRestJsonError> Parsed = FVaRestJson::Parse(Utf8);
+	if (Options.MaxOutputBytes < 0)
+		return Refuse(OutReport, TEXT("JSON logical limits must be nonnegative"));
+	FVaRestJsonParseOptions ParseOptions;
+	ParseOptions.MaxValues = Options.MaxValues;
+	ParseOptions.MaxWorkUnits = Options.MaxWorkUnits;
+	TValueOrError<FVaRestJson, FVaRestJsonError> Parsed = FVaRestJson::Parse(Utf8, ParseOptions);
 	if (!Parsed.HasValue())
 	{
 		if (OutReport)
 		{
 			OutReport->Errors.Add(Parsed.GetError());
+			OutReport->bBudgetExceeded |= Parsed.GetError().bBudgetExceeded;
 			return false;
 		}
 		return Refuse(nullptr, FString::Printf(TEXT("cannot decode %s: %s"), Struct ? *Struct->GetName() : TEXT("a null struct"), *Parsed.GetError().ToString()));
 	}
 	return JsonToStruct(Parsed.GetValue(), Struct, Data, Options, OutReport);
+}
+
+bool FVaRestJsonConvert::JsonArrayToStructInternal(const FVaRestJson& Json, const UScriptStruct* Struct, void* Data,
+	const FVaRestJsonConvertOptions& Options, FVaRestJsonDecodeReport* OutReport)
+{
+	using namespace VaRest::Json::Convert;
+	using namespace VaRest::Json::Convert::DecodePrivate;
+	if (!Struct || !Data || !Json.IsArray() || ClassifyStruct(Struct) != ESpecialStruct::None)
+		return Refuse(OutReport, TEXT("positional decode requires an argument array and an ordinary struct"));
+	FDecodeContext Context(Options, Json.GetDocumentInternal(), OutReport);
+	const auto Fields = GetFieldMap(Struct, Options.Naming, Context.Rules);
+	if (!Fields->Error.IsEmpty()) return Refuse(OutReport, Fields->Error);
+	const auto& Array = *Json.GetNodeInternal();
+	if (!Context.Visit(Array, Struct->GetStructureSize()) || !Context.Enter()) return Finish(Context, false, Struct->GetName());
+	int32 Position = 0;
+	for (const auto& Field : Fields->Fields)
+	{
+		if (!Context.Charge(0, 1, 1)) break;
+		// Match TryGetConvertedFieldsInternal exactly: DecodeOnly fields never occupy a wire argument slot.
+		if (Field.Rule.Presence == EVaRestJsonPresence::DecodeOnly) continue;
+		Context.Path.Add(FSegment{FUtf8StringView(), Position});
+		if (static_cast<uint32>(Position) >= Array.Arr.Num)
+			Context.Record(Options.bStrict, TEXT("missing positional argument; kept its authored default"));
+		else
+		{
+			const auto& Argument = *Array.Arr.Items[Position];
+			if (!(Argument.Type == EVaRestJsonType::Null && Field.Rule.bNullable))
+				DecodeField(Argument, Field.Property, Field.Property->ContainerPtrToValuePtr<void>(Data), Context);
+		}
+		Context.Path.Pop(EAllowShrinking::No);
+		++Position;
+	}
+	Context.Leave(); return Finish(Context, !Context.bAborted, Struct->GetName());
 }
 
 bool FVaRestJsonConvert::JsonToProperty(const FVaRestJson& Json, const FProperty* Property, void* Value, const FVaRestJsonConvertOptions& Options, FVaRestJsonDecodeReport* OutReport)
@@ -1043,3 +1299,5 @@ bool VaRest::Json::DecodeStructForTryGet(const FVaRestJson& Json, const UScriptS
 	FVaRestJsonDecodeReport Report; // a report keeps TryGet quiet; lenient warnings are not failures
 	return FVaRestJsonConvert::JsonToStruct(Json, Struct, Data, FVaRestJsonConvertOptions(), &Report);
 }
+
+#include "VaRestJsonConvertStream.inl"

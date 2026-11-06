@@ -26,7 +26,8 @@ EVaRestErrorKind VaRest::Http::KindFor(EVaRestTransportFailure Failure, FName De
 	// ruling I-7's refresh refused by the configuration): sending it again fails again
 	if (IsOneOf(Detail, { TEXT("BodyRejected"), TEXT("InvalidHeader"), TEXT("UploadReadFailed"), TEXT("BodyFileMissing"),
 		TEXT("HttpDisabled"), TEXT("DomainNotAllowed"), TEXT("AuthInvalid"), TEXT("AuthRefreshConfig"), TEXT("PersistenceStopped"),
-		TEXT("QueueWriteFailed"), TEXT("QueueFull"), TEXT("PersistenceCredentials"), TEXT("QueueConfig"), TEXT("QueueOrigin") }))
+		TEXT("QueueWriteFailed"), TEXT("QueueFull"), TEXT("PersistenceCredentials"), TEXT("QueueConfig"), TEXT("QueueOrigin"),
+		TEXT("LogicalCapacity"), TEXT("DispatchCapacity"), TEXT("LifecycleCapacity"), TEXT("LifecycleGeneration"), TEXT("QueueDetached") }))
 	{
 		return EVaRestErrorKind::Config;
 	}

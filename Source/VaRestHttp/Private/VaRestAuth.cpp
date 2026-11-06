@@ -7,6 +7,7 @@
 #include "Misc/Base64.h"
 #include "VaRestAuthInternal.h"
 #include "VaRestClientState.h"
+#include "VaRestClientCredentialsPrivate.h"
 #include "VaRestExchangeState.h"
 #include "VaRestHttpLog.h"
 #include "VaRestIdentity.h"
@@ -53,6 +54,12 @@ FVaRestClient FVaRestAuthRefreshContext::GetClient() const
 	// Concurrency review M-10: an empty client's requests fail Kind=Config, which the auth reports as its refresh's failure
 	const TSharedPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> Pinned = State.Pin();
 	return Pinned.IsValid() ? VaRest::Http::FClientAccess::Wrap(Pinned) : FVaRestClient();
+}
+
+bool FVaRestAuthRefreshContext::IsCurrentOnGT() const
+{
+	check(IsInGameThread());
+	const auto Pinned=State.Pin(); return Pinned && Pinned->IsCurrentRefreshOnGT(RefreshId);
 }
 
 namespace VaRest::Http::AuthPrivate
@@ -206,8 +213,19 @@ namespace VaRest::Http::AuthPrivate
 		virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) override
 		{
 			FExchangeState& Ex = Internals(*Exchange);
+			const auto Continue=[&]() {
+				if ((Ex.Managed.IsValid() && Ex.Managed.Control->IsStopped()) || FClientState::IsShuttingDown() ||
+					Ex.bFinished || Ex.Phase!=EVaRestExchangePhase::InChain) return false;
+				if (Ex.IsCancelRequested() || (Ex.Managed.IsValid() && Ex.State->GetManagedLifetime().Gate->IsClosed()))
+				{
+					auto Canceled=MoveTemp(OnOutcome); if (Canceled) Canceled(FVaRestAttemptOutcome::Canceled()); return false;
+				}
+				return true;
+			};
+			if (!Continue()) return;
             if (Ex.bQueueWhenOffline && !QueueIdentityStillCurrent(Ex))
-            { OnOutcome(LocalFailure(TEXT("QueueIdentity"))); return; }
+            { if (Continue()) OnOutcome(LocalFailure(TEXT("QueueIdentity"))); return; }
+			if (!Continue()) return;
             if (!Ex.ReplayIdentityScope.IsEmpty())
             {
                 const auto Current = Ex.State->GetConfig();
@@ -215,11 +233,13 @@ namespace VaRest::Http::AuthPrivate
                 { OnOutcome(LocalFailure(TEXT("QueueOrigin"))); return; }
                 FString CurrentScope;
                 if ((Ex.AuthMode != EVaRestAuthMode::None && Current->Auth != Ex.Config->Auth)
-                    || !RequestIdentityScope(*Current, Ex.State->GetSessionData(), Ex.AuthMode, Ex.RequestHeaders, CurrentScope)
+                    || !RequestIdentityScope(*Current, Ex.State->GetSessionData(), Ex.AuthMode, Ex.RequestHeaders, CurrentScope, &Ex.State->GetManagedLifetime())
                     || CurrentScope != Ex.ReplayIdentityScope)
-                { OnOutcome(LocalFailure(TEXT("QueueIdentity"))); return; }
+                { if (Continue()) OnOutcome(LocalFailure(TEXT("QueueIdentity"))); return; }
             }
+			if (!Continue()) return;
 			CheckConditionalIdentity(Ex);
+			if (!Continue()) return;
 			// First, before the configuration check and the session: the refresh request (plan decision 23) and NoAuth() -- a
 			// login -- go out bare, with neither credentials nor session headers. MarkAuthRefresh sends the refresh request with
 			// AuthMode None too; the flag is checked as well, so the refresh request is bare by what it is, not by a mode.
@@ -233,18 +253,21 @@ namespace VaRest::Http::AuthPrivate
 			if (Auth)
 			{
 				const FString Invalid = Auth->GetConfigError();
+				if (!Continue()) return;
 				if (!Invalid.IsEmpty())
 				{
 					// Ruling Q7: a programmer error, for Required and IfAvailable alike -- sending without the key would hide it.
 					// Escaped: a custom auth names itself, and the message is text a game may log as it is (as Resolve's).
 					const TSharedRef<const FVaRestRedactor, ESPMode::ThreadSafe> Redactor = RedactorFor(Ex);
 					const FString AuthName = EscapeForLog(Auth->GetAuthName().ToString());
+					if (!Continue()) return;
 					if (Ex.LogLevel != EVaRestLogLevel::None && UE_LOG_ACTIVE(LogVaRestHttp, Warning))
 					{
 						// Task 3: the request's own redactor, as every line about it
 						UE_LOG(LogVaRestHttp, Warning, TEXT("#%llu VaRest: %s %s -> misconfigured auth (%s); not sent"), Ex.RequestId, *EscapeForLog(Ex.Verb),
 							*EscapeForLog(Redactor->RedactUrl(Ex.Url)), *AuthName);
 					}
+					if (!Continue()) return;
 					FVaRestAttemptOutcome Refused;
 					Refused.Failure = EVaRestTransportFailure::Other;
 					Refused.FailureDetail = TEXT("AuthInvalid");
@@ -256,19 +279,30 @@ namespace VaRest::Http::AuthPrivate
 					return;
 				}
 			}
-			const FVaRestSessionData& Session = Ex.State->GetSessionData();
+			const FVaRestSessionData Session = Ex.State->GetSessionData(); // an Apply callback can change the live session reentrantly
 			TArray<TPair<FString, FString>> AuthQuery;
 			FVaRestAuthTarget Target(Ex.AttemptHeaders, AuthQuery, Session);
 			Target.RequestId = Ex.RequestId;
 			// False only for an auth with no credentials: no auth at all is true (ApplyCredentials)
-			if (!ApplyCredentials(Auth, Target) && Ex.AuthMode == EVaRestAuthMode::Required && Auth)
+			const bool bApplied=ApplyCredentials(Auth,Target);
+			if (!Continue()) return;
+			if (!Target.ConfigError.IsEmpty())
+			{
+				FVaRestAttemptOutcome Refused;
+				Refused.Failure=EVaRestTransportFailure::Other; Refused.FailureDetail=TEXT("AuthInvalid");
+				Refused.FailureMessage=EscapeControlsForLog(RedactorFor(Ex)->ScrubText(Target.ConfigError));
+				OnOutcome(MoveTemp(Refused)); return;
+			}
+			if (!bApplied && Ex.AuthMode == EVaRestAuthMode::Required && Auth)
 			{
 				const FString AuthName = EscapeForLog(Auth->GetAuthName().ToString());
+				if (!Continue()) return;
 				if (Ex.LogLevel != EVaRestLogLevel::None && UE_LOG_ACTIVE(LogVaRestHttp, Warning))
 				{
 					UE_LOG(LogVaRestHttp, Warning, TEXT("#%llu VaRest: %s %s -> no credentials (%s); not sent"), Ex.RequestId, *EscapeForLog(Ex.Verb),
 						*EscapeForLog(RedactorFor(Ex)->RedactUrl(Ex.Url)), *AuthName);
 				}
+				if (!Continue()) return;
 				FVaRestAttemptOutcome Refused;
 				Refused.Failure = EVaRestTransportFailure::Other;
 				Refused.FailureDetail = TEXT("NoCredentials");
@@ -285,6 +319,7 @@ namespace VaRest::Http::AuthPrivate
 			// Task 12 review M-7: what this attempt now carries -- a token set while it queued among it -- stays scrubbed from
 			// its lines, its trace and its error's URL after the client forgets it (a logout while the transport has it)
 			RememberAppliedRedactor(Ex);
+			if (!Continue()) return;
 			Next.Proceed(Exchange, MoveTemp(OnOutcome));
 		}
 	};
@@ -292,11 +327,13 @@ namespace VaRest::Http::AuthPrivate
 
 bool VaRest::Http::ApplyCredentials(const IVaRestAuth* Auth, FVaRestAuthTarget& Target)
 {
+	Target.ConfigError.Reset();
 	for (const FVaRestHeaders::FPair& Pair : Target.Session.Headers)
 	{
 		Target.Headers.Set(Pair.Key, Pair.Value);
 	}
-	return !Auth || Auth->Apply(Target);
+	const bool bApplied=!Auth || Auth->Apply(Target);
+	return bApplied && Target.ConfigError.IsEmpty();
 }
 
 bool VaRest::Http::CanRefreshNow(const IVaRestAuth& Auth, const FVaRestSessionData& Session)
@@ -362,4 +399,9 @@ FVaRestAuth::FRef FVaRestAuth::Basic(FStringView InUser, FStringView InPassword)
 	const FTCHARToUTF8 Utf8(*Pair, Pair.Len());
 	const FString Credential = FBase64::Encode(reinterpret_cast<const uint8*>(Utf8.Get()), static_cast<uint32>(Utf8.Length()));
 	return MakeShared<VaRest::Http::AuthPrivate::FBasicAuth, ESPMode::ThreadSafe>(Credential, FString(InPassword), MoveTemp(ConfigError));
+}
+
+FVaRestAuth::FRef FVaRestAuth::ClientCredentials(const FVaRestClientCredentialsConfig& Config)
+{
+	return VaRest::Http::MakeClientCredentialsAuth(Config);
 }

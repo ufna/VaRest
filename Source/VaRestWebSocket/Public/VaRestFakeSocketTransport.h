@@ -64,6 +64,8 @@ public:
 	// ---- what the consumer did
 	/** Game thread: the frames Send accepted, in order */
 	const TArray<FVaRestSocketFrame>& GetSent() const { return Sent; }
+	/** Last accepted service idle-deadline command. Expiration remains explicitly scripted by the test. */
+	double GetIdleDeadlineSeconds() const { return IdleDeadlineSeconds; }
 	/** Game thread: the consumer called Close, or its release closed or cancelled the attempt */
 	bool WasCloseRequested() const { return bCloseRequested; }
 	/**
@@ -110,6 +112,7 @@ private:
 	std::atomic<bool> bReleased{ false };
 	std::atomic<int64> ConsumedBytes{ 0 };
 	TArray<FVaRestSocketFrame> Sent;
+	double IdleDeadlineSeconds = 0;
 };
 
 /** The fake transport of WebSocket spec 16.1, for the socket layer's tests (W2-W5). Game thread. Not for games. */

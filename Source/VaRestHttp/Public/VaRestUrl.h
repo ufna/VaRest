@@ -8,6 +8,17 @@
 
 namespace VaRest::Http
 {
+	/** Raw scalar/array arguments only. Encoding and the fixed comma separator are owned by template substitution. */
+	struct FPathParam
+	{
+		FString Key;
+		FString Value;
+		TArray<FString> Values;
+		bool bArray = false;
+		FPathParam(FString InKey, FString InValue) : Key(MoveTemp(InKey)), Value(MoveTemp(InValue)) {}
+		FPathParam(FString InKey, TArray<FString> InValues) : Key(MoveTemp(InKey)), Values(MoveTemp(InValues)), bArray(true) {}
+	};
+
 	/** RFC 3986: every byte of Text's UTF-8 but the unreserved set (ALPHA DIGIT - . _ ~) becomes %XX, upper-case (spec 3.2) */
 	VARESTHTTP_API FString PercentEncode(FStringView Text);
 
@@ -52,6 +63,9 @@ namespace VaRest::Http
 	 * an absolute URL with userinfo: a caller that shows it redacts it first (final review M8).
 	 */
 	VARESTHTTP_API TValueOrError<FString, FString> ExpandPathTemplate(FStringView Template, TConstArrayView<TPair<FString, FString>> Params);
+
+	/** Same checked substitution, plus simple-style arrays: separately encode elements, then insert literal commas. */
+	VARESTHTTP_API TValueOrError<FString, FString> ExpandPathParameters(FStringView Template, TConstArrayView<FPathParam> Params);
 
 	/** Appends ?k=v&... (or &k=v when Url has a query), each key and value PercentEncode'd, in order, repeats kept (OpenAPI N9), before any '#' */
 	VARESTHTTP_API void AppendQuery(FString& Url, TConstArrayView<TPair<FString, FString>> Query);

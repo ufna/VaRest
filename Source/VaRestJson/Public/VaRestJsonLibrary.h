@@ -80,6 +80,21 @@ public:
 	UFUNCTION(BlueprintPure, Category = "VaRest|Json", meta = (DisplayName = "Is Null (Json)"))
 	static bool IsNullJson(const FVaRestJson& Json);
 
+	/** Scalar root access for parsed values and legacy-value migration. Wrong types return Default. */
+	UFUNCTION(BlueprintPure,Category="VaRest|Json",meta=(DisplayName="As Bool (Json)"))
+	static bool JsonAsBool(const FVaRestJson& Json,bool Default=false);
+	UFUNCTION(BlueprintPure,Category="VaRest|Json",meta=(DisplayName="As Int (Json)"))
+	static int32 JsonAsInt(const FVaRestJson& Json,int32 Default=0);
+	UFUNCTION(BlueprintPure,Category="VaRest|Json",meta=(DisplayName="As Int64 (Json)"))
+	static int64 JsonAsInt64(const FVaRestJson& Json,int64 Default=0);
+	UFUNCTION(BlueprintPure,Category="VaRest|Json",meta=(DisplayName="As Number (Json)"))
+	static double JsonAsNumber(const FVaRestJson& Json,double Default=0.0);
+	UFUNCTION(BlueprintPure,Category="VaRest|Json",meta=(DisplayName="As String (Json)"))
+	static FString JsonAsString(const FVaRestJson& Json,const FString& Default);
+	/** Element handles share the input document; this does not deep-copy the elements. */
+	UFUNCTION(BlueprintPure,Category="VaRest|Json",meta=(DisplayName="Array Elements (Json)"))
+	static TArray<FVaRestJson> JsonArrayElements(const FVaRestJson& Json);
+
 	// ---- typed getters: the field's value, or Default when it is missing or of another type
 
 	UFUNCTION(BlueprintPure, Category = "VaRest|Json", meta = (DisplayName = "Get String Field"))

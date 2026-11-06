@@ -24,6 +24,12 @@ void UVaRestJsonValue::SetRootValue(TSharedPtr<FJsonValue>& JsonValue)
 {
 	JsonVal = JsonValue;
 }
+FVaRestJson UVaRestJsonValue::ToVaRestJson() const { return FVaRestJson::FromJsonValue(JsonVal); }
+UVaRestJsonValue* UVaRestJsonValue::FromVaRestJson(const FVaRestJson& Json)
+{
+	auto Value=Json.ToJsonValue();if (!Value.IsValid()) return nullptr;
+	auto* Result=NewObject<UVaRestJsonValue>();Result->SetRootValue(Value);return Result;
+}
 
 //////////////////////////////////////////////////////////////////////////
 // FJsonValue API

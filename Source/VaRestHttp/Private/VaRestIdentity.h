@@ -11,8 +11,9 @@ class IVaRestAuth;
 namespace VaRest::Http
 {
     struct FClientConfig;
+    struct FNativeClientRegistration;
     bool RequestIdentityScope(const FClientConfig& Config, const FVaRestSessionData& Session,
-        EVaRestAuthMode Mode, const FVaRestHeaders& BuiltHeaders, FString& OutScope);
+        EVaRestAuthMode Mode, const FVaRestHeaders& BuiltHeaders, FString& OutScope, const FNativeClientRegistration* Native=nullptr);
 	/** Strict scheme/ASCII host/port origin; no userinfo. IPv6 alternatives compare conservatively. */
 	bool CanonicalOrigin(FStringView Url, FString& OutOrigin);
 	bool SameOrigin(FStringView Left, FStringView Right);
@@ -24,7 +25,7 @@ namespace VaRest::Http
 	FString SessionScope(const FVaRestSessionData& Data);
 	/** Pure query; every false result clears OutIdentity. Never invokes Apply. */
 	bool AuthIdentity(const IVaRestAuth* Auth, EVaRestAuthMode Mode,
-		const FVaRestSessionData& Session, FString& OutIdentity);
+		const FVaRestSessionData& Session, FString& OutIdentity, const FNativeClientRegistration* Native=nullptr);
 	FString CacheKey(FStringView Verb, FStringView Url, FStringView Identity,
 		const FVaRestHeaders& Built, const FVaRestHeaders& SessionHeaders);
 }

@@ -269,6 +269,15 @@ void FVaRestFakeTransport::CancelCall(int32 Index)
 	Finish(Index, FVaRestFakeResponse::Failed(EVaRestTransportFailure::Canceled, TEXT("Cancelled")));
 }
 
+bool FVaRestFakeTransport::ReleaseCompletedClock(int32 Index)
+{
+	check(IsInGameThread());
+	if (!Entries.IsValidIndex(Index) || !Entries[Index]->Call.bCompleted)
+		return false;
+	Entries[Index]->Call.Request.Clock.Reset();
+	return true;
+}
+
 void FVaRestFakeTransport::Finish(int32 Index, FVaRestFakeResponse&& Response)
 {
 	FEntry& Entry = *Entries[Index];

@@ -20,6 +20,34 @@
 
 #define LOCTEXT_NAMESPACE "K2Node_VaRestMakeJson"
 
+namespace
+{
+bool RefusesJsonType(const FEdGraphPinType& Type, FString& OutReason)
+{
+	// Mirrors the converter's property support, including the stricter JSON object-key types.
+	const auto IsNotData = [](FName Category)
+	{
+		return Category == UEdGraphSchema_K2::PC_Exec || Category == UEdGraphSchema_K2::PC_Object || Category == UEdGraphSchema_K2::PC_Class
+			|| Category == UEdGraphSchema_K2::PC_Interface || Category == UEdGraphSchema_K2::PC_Delegate || Category == UEdGraphSchema_K2::PC_MCDelegate
+			|| Category == UEdGraphSchema_K2::PC_FieldPath;
+	};
+	if (IsNotData(Type.PinCategory) || (Type.IsMap() && IsNotData(Type.PinValueType.TerminalCategory)))
+	{
+		OutReason = LOCTEXT("NotJson", "Make Json values must be data: objects, classes, interfaces, delegates, field paths and exec are not converted to JSON").ToString();
+		return true;
+	}
+	if (Type.IsMap() && Type.PinCategory != UEdGraphSchema_K2::PC_String && Type.PinCategory != UEdGraphSchema_K2::PC_Name
+		&& Type.PinCategory != UEdGraphSchema_K2::PC_Int && Type.PinCategory != UEdGraphSchema_K2::PC_Int64
+		&& Type.PinCategory != UEdGraphSchema_K2::PC_Byte && Type.PinCategory != UEdGraphSchema_K2::PC_Enum
+		&& Type.PinCategory != UEdGraphSchema_K2::PC_Wildcard)
+	{
+		OutReason = LOCTEXT("NotJsonMapKey", "Map keys must be strings, names, integers or enums (they become JSON object keys)").ToString();
+		return true;
+	}
+	return false;
+}
+}
+
 const FName UK2Node_VaRestMakeJson::JsonPinName(TEXT("Json"));
 
 FName UK2Node_VaRestMakeJson::PinNameFor(int32 Id)
@@ -152,19 +180,7 @@ bool UK2Node_VaRestMakeJson::IsConnectionDisallowed(const UEdGraphPin* MyPin, co
 {
 	if (IndexOfValuePin(MyPin) != INDEX_NONE)
 	{
-		// What the converter refuses (IsSupported, VaRestJsonConvertNames.cpp:458-498): object references, delegates, field paths
-		const auto IsNotData = [](FName Category)
-		{
-			return Category == UEdGraphSchema_K2::PC_Exec || Category == UEdGraphSchema_K2::PC_Object || Category == UEdGraphSchema_K2::PC_Class
-				|| Category == UEdGraphSchema_K2::PC_Interface || Category == UEdGraphSchema_K2::PC_Delegate || Category == UEdGraphSchema_K2::PC_MCDelegate
-				|| Category == UEdGraphSchema_K2::PC_FieldPath;
-		};
-		// A map pin's category is its key type; the value type is in PinValueType
-		if (IsNotData(OtherPin->PinType.PinCategory) || (OtherPin->PinType.IsMap() && IsNotData(OtherPin->PinType.PinValueType.TerminalCategory)))
-		{
-			OutReason = LOCTEXT("NotJson", "Make Json values must be data: objects, classes, interfaces, delegates, field paths and exec are not converted to JSON").ToString();
-			return true;
-		}
+		if (RefusesJsonType(OtherPin->PinType, OutReason)) return true;
 	}
 	return Super::IsConnectionDisallowed(MyPin, OtherPin, OutReason);
 }
@@ -193,6 +209,12 @@ void UK2Node_VaRestMakeJson::ReportEntryErrors(FCompilerResultsLog& MessageLog) 
 		if (!ValuePin || ValuePin->LinkedTo.Num() == 0 || ValuePin->PinType.PinCategory == UEdGraphSchema_K2::PC_Wildcard)
 		{
 			MessageLog.Error(*FString::Printf(TEXT("@@: connect a value for the key \"%s\""), *Key), this);
+		}
+		else
+		{
+			FString Reason;
+			if (RefusesJsonType(ValuePin->PinType, Reason))
+				MessageLog.Error(*FString::Printf(TEXT("@@: the value for key \"%s\" is unsupported: %s"), *Key, *Reason), this);
 		}
 	}
 }

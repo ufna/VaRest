@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "HAL/CriticalSection.h"
 #include "VaRestLwsService.h"
+#include "VaRestNativeOwnerHost1.h"
 #include "VaRestSocketTransport.h"
 
 namespace VaRest::WebSocket::Lws
@@ -24,7 +25,13 @@ namespace VaRest::WebSocket::Lws
 		virtual TSharedRef<IVaRestSocketConnection, ESPMode::ThreadSafe> Connect(FVaRestSocketConnectRequest&& Request, TFunction<void()> OnEvents = nullptr) override;
 
 		/** Game thread: the context and the thread, made once (plan decision 8); false when that failed, or after Shutdown */
-		bool EnsureStarted();
+        bool EnsureStarted();
+        // Nonvirtual private-module forwards; IVaRestSocketTransport is unchanged.
+        FVaRestNativeOwnerHostStep1 StartNativeOwnerSession1();
+        FVaRestNativeOwnerHostStep1 FinishNativeOwnerSession1();
+        FVaRestNativeOwnerHostStep1 AdvanceNativeOwnerFinish1();
+        // Existing session only; no lazy Service, Start, join or delegate dispatch.
+        FVaRestNativeOwnerHostStep1 PumpNativeOwnerSession1();
 		/** Game thread: every connection ends (FService::Shutdown), the thread stops, the context goes; later connects end with Shutdown */
 		void Shutdown();
 		/** Game thread: a forking server's child starts again, with a context and a thread of its own (LwsWebSocketsManager.cpp:260-279) */
@@ -38,8 +45,20 @@ namespace VaRest::WebSocket::Lws
 		 */
 		bool IsShuttingDown() const;
 
-	private:
-		FServiceOptions Options;
+    private:
+#if defined(__linux__) && defined(__x86_64__) && !defined(__ANDROID__)
+        // Sole I3-C Host-control caller; actual H/O/service-owner closure remains required.
+        // No ready/capability Boolean or default-selection switch is accepted.
+        [[gnu::visibility("hidden")]] VrStatus EnsureNativeStartedOnCurrentControl();
+#if defined(VAREST_USE_PRIVATE_LWS3) && VAREST_USE_PRIVATE_LWS3
+        VrStatus NativeHostStatus1(const FService&, VrStatus) const;
+        bool NativeHostFinished1(const FService&) const;
+        bool NativeHostStartCommitted1(const FService&) const;
+        bool NativeHostAdvanceAllowed1(const FService&) const;
+        FVaRestNativeOwnerHostStep1 NativeHostFinishResult1(const FService&, VrStatus) const;
+#endif
+#endif
+        FServiceOptions Options;
 		TSharedPtr<FService, ESPMode::ThreadSafe> Service;
 		bool bShutDown = false;
 		uint64 NextId = 1;

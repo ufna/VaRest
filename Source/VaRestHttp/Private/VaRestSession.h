@@ -5,6 +5,8 @@
 #include "CoreMinimal.h"
 #include "VaRestAuthTypes.h"
 
+class IVaRestAuth;
+
 namespace VaRest::Http
 {
 	/** One session event waiting for its listeners (concurrency review I-2) */
@@ -29,7 +31,8 @@ namespace VaRest::Http
 		/** The refresh failed otherwise (Kind: Connection, Timeout or Config): the session stays */
 		Failed,
 		/** ClearSession (a logout) while waiting: Kind=Auth */
-		Cleared
+		Cleared,
+		Unavailable // private managed External delivery when no refresh can start; RequestGate never receives this
 	};
 
 	struct FRefreshEnded
@@ -45,6 +48,15 @@ namespace VaRest::Http
 	};
 
 	using FRefreshWaiter = TUniqueFunction<void(const FRefreshEnded&)>;
+	enum class ERefreshWaiterKind : uint8 { RequestGate,External };
+	struct FRefreshWaiterEntry
+	{
+		FRefreshWaiterEntry(uint64 InId,FRefreshWaiter&& InCallback,ERefreshWaiterKind InKind)
+			: Key(InId),Value(MoveTemp(InCallback)),Kind(InKind) {}
+		uint64 Key=0;
+		FRefreshWaiter Value;
+		ERefreshWaiterKind Kind=ERefreshWaiterKind::RequestGate;
+	};
 
 	/** Spec 4.2's single flight: the refresh running now and who waits for it */
 	struct FRefreshInFlight
@@ -58,7 +70,9 @@ namespace VaRest::Http
 		 * with it (the auth gate's waiter).
 		 */
 		bool bProactive = false;
-		TArray<TPair<uint64, FRefreshWaiter>> Waiters;
+		/** Original provider without prolonging its lifetime: dropping a provider must still release its pending Done. */
+		TWeakPtr<IVaRestAuth, ESPMode::ThreadSafe> Auth;
+		TArray<FRefreshWaiterEntry> Waiters;
 	};
 
 	/**

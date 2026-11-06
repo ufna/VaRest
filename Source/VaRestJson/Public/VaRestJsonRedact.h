@@ -28,6 +28,8 @@ enum class EVaRestRedactKeyKind : uint8
 class VARESTJSON_API FVaRestRedactRules
 {
 public:
+	/** Per-payload policy for authentication objects such as Socket.IO CONNECT. Other key kinds are unchanged. */
+	void RedactAllJsonValues() { bAllJsonValues = true; }
 	/**
 	 * An exact key, normalised like every key: a key name (for a token path, its last segment: normalisation removes '.', so a
 	 * whole path never matches), a header name, a project addition. A key holding '?', ';', '#', '=' or '&' is refused with a
@@ -35,6 +37,8 @@ public:
 	 * never match there. That holds for a JSON key too, which may legally contain them: only the built-in rules cover it.
 	 */
 	void AddKey(FStringView Key);
+	/** Union already-validated policies; neither source policy is weakened. Build before publication. */
+	void Append(const FVaRestRedactRules& Other);
 	/** False for a key AddKey refuses (one holding '?', ';', '#', '=' or '&'); logs nothing, so a caller can check once where a key enters */
 	static bool IsAcceptableKey(FStringView Key);
 
@@ -48,6 +52,7 @@ private:
 	bool MatchesNormalized(FUtf8StringView Normalized, EVaRestRedactKeyKind Kind) const;
 
 	TArray<TArray<UTF8CHAR>> AddedKeys;
+	bool bAllJsonValues = false;
 };
 
 enum class EVaRestRedactStop : uint8

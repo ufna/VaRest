@@ -50,7 +50,7 @@ bool FVaRestOfflineSecretSnapshotNeverWrittenTest::RunTest(const FString& Parame
 {
 using namespace VaRest::Http;
 using namespace VaRest::Http::Testing;
-for (int32 Variant=0;Variant<3;++Variant)
+for (int32 Variant=0;Variant<4;++Variant)
 {
     FScopedPersistenceTest Disk;
     FTestRig Rig;
@@ -65,6 +65,7 @@ ON_SCOPE_EXIT {Rig.Client.CancelAll(); Rig.Drain();};
     const auto Outcome=MakeOutcome<void>();
     const auto Queued=MakeShared<int32,ESPMode::ThreadSafe>(0);
     Observe(Rig.Client.Post<void>(Path).Body(MoveTemp(Body)).Tag(Variant==2 ? FName(TEXT("s+7")) : NAME_None)
+        .Endpoint(Variant==3 ? FName(TEXT("s+7")) : NAME_None)
         .Idempotent().QueueWhenOffline(),Outcome).OnQueued([Queued](const FString&){ ++*Queued; }).Send();
     Rig.Client.ClearSecretValues();
     if (!TestTrue(TEXT("guard refusal completes"),Rig.Wait(Outcome))) return false;

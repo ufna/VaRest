@@ -9,6 +9,7 @@
 #include "VaRestHttpStatsInternal.h"
 #include "VaRestIdentity.h"
 #include "VaRestRetryInternal.h"
+#include "VaRestManagedCallbacks.h"
 
 namespace VaRest::Http::CachePrivate
 {
@@ -134,6 +135,7 @@ void FCacheOperation::Start()
     Ex.CacheLookup=EVaRestTraceCacheLookup::None;
     if (!BuildCacheKey(Ex,Key,Identity))
     {
+        if (Ex.Managed.IsValid() && !CanContinue()) return; // an identity provider can close/Stop the real managed client
         if (!Ex.Config->Connectivity->IsOnline() && !Ex.bConnectivityProbe && !Ex.bIsAuthRefresh)
             Complete(MakeOfflineOutcome());
         else Next.Proceed(Exchange,MoveTemp(Done));
@@ -151,9 +153,16 @@ void FCacheOperation::Start()
     Wait=FPersistenceWait::Begin(Exchange,MoveTemp(Done));
     if (!Wait->IsPending()) return;
     Disk=Ex.State->GetDiskCacheFor(*Ex.Config,Ex.CachePolicy.DiskBytes);
-    const bool bAccepted=Disk->Find(Key,Ex.Config->Clock->Now(),FDateTime::UtcNow(),
-        [Self=AsShared()](TSharedPtr<const FCacheEntry,ESPMode::ThreadSafe> Candidate)
-        { Self->AfterLookup(MoveTemp(Candidate),true); });
+    FCacheReadDone Read=[Self=AsShared()](TSharedPtr<const FCacheEntry,ESPMode::ThreadSafe> Candidate)
+	{ Self->AfterLookup(MoveTemp(Candidate),true); };
+	if (!PrepareManagedCacheRead(Exchange,Read))
+	{
+		if (!IsManagedStopped(Exchange)) Complete(MakeManagedCapacityOutcome(TEXT("LogicalCapacity")));
+		return;
+	}
+	const double Now=Ex.Config->Clock->Now();
+	if (IsManagedStopped(Exchange)) return;
+    const bool bAccepted=Disk->Find(Key,Now,FDateTime::UtcNow(),MoveTemp(Read));
     if (!bAccepted)
     {
         if (PersistenceAccepting()) AfterLookup(nullptr,true);
@@ -174,6 +183,7 @@ void FCacheOperation::OnResult(FVaRestAttemptOutcome&& Outcome)
     FString CurrentKey,CurrentIdentity;
     const bool bSame=!Ex.bCacheIdentityChanged && BuildCacheKey(Ex,CurrentKey,CurrentIdentity)
         && CurrentKey==Key && CurrentIdentity==Identity && Epoch==Ex.State->GetCacheEpoch();
+    if (Ex.Managed.IsValid() && !CanContinue()) return;
     if (!bSame) { Complete(MoveTemp(Outcome)); return; }
     FVaRestHeaders VaryHeaders=Ex.RequestHeaders;
     if (Ex.bCacheConditional) { VaryHeaders.Remove(TEXT("If-None-Match")); VaryHeaders.Remove(TEXT("If-Modified-Since")); }
@@ -219,6 +229,7 @@ void FCacheOperation::OnResult(FVaRestAttemptOutcome&& Outcome)
     if (Outcome.Status==200 && !Outcome.IsTransportFailure() && !Outcome.bBodyInFile)
     {
         const auto Meta=ReadCacheMetadata(Outcome.Headers,Ex.CachePolicy.DefaultTtlSeconds,Ex.Config->Clock->Now(),FDateTime::UtcNow());
+        if (Ex.Managed.IsValid() && !CanContinue()) return;
         if (Meta.bNoStore)
         {
             Ex.State->GetMemoryCache().Remove(Key);
@@ -265,16 +276,19 @@ public:
 // The callback is settled directly, never recursively fed through OnResult.
 bool FCacheOperation::CanContinue()
 {
+    if (IsManagedStopped(Exchange)) return false;
     if (bSettled) return false;
     if (Wait.IsValid()) return Wait->CanHandoff();
     auto& Ex=Internals(*Exchange);
     if (IsOwnerGone(Ex)) MarkOwnerGone(Ex);
-    if (Ex.bFinished || Ex.bCompletionQueued || Ex.Phase!=EVaRestExchangePhase::InChain || Ex.IsCancelRequested())
+    if (Ex.bFinished || Ex.bCompletionQueued || Ex.Phase!=EVaRestExchangePhase::InChain || Ex.IsCancelRequested() || IsManagedClosed(Exchange))
     {
         Complete(FVaRestAttemptOutcome::Canceled());
         return false;
     }
-    if (Ex.DeadlineAt>0 && Ex.Config->Clock->Now()>=Ex.DeadlineAt-DeadlineTimerSlack)
+    const bool bExpired=Ex.DeadlineAt>0 && Ex.Config->Clock->Now()>=Ex.DeadlineAt-DeadlineTimerSlack;
+	if (IsManagedStopped(Exchange)) return false;
+    if (bExpired)
     {
         Ex.PersistenceAbort->store(true,std::memory_order_relaxed);
         Complete(MakeDeadlineOutcome());
@@ -294,11 +308,14 @@ void FCacheOperation::AfterLookup(TSharedPtr<const FCacheEntry,ESPMode::ThreadSa
         Candidate.Reset();
         Ex.bCacheIdentityChanged = true;
     }
+    if (Ex.Managed.IsValid() && !CanContinue()) return;
     Ex.bCacheLookupPending = false;
     if (Candidate.IsValid() && Ex.Handler.IsValid() && Ex.Handler->DecodesJson()
         && Ex.MaxJsonBytes>0 && Candidate->Body.Num()>Ex.MaxJsonBytes) Candidate.Reset();
     Entry = MoveTemp(Candidate);
-    if (Entry.IsValid() && Entry->Metadata.IsFresh(Ex.Config->Clock->Now()) && !bForceValidation)
+    const bool bFresh=Entry.IsValid() && Entry->Metadata.IsFresh(Ex.Config->Clock->Now()) && !bForceValidation;
+    if (Ex.Managed.IsValid() && !CanContinue()) return;
+    if (bFresh)
     {
         Ex.CacheLookup = bDisk ? EVaRestTraceCacheLookup::HitDisk : EVaRestTraceCacheLookup::HitMemory;
         if (!Ex.bCacheHitCounted) { Ex.bCacheHitCounted=true; FHttpStats::CacheHit(Ex.State->GetCounters()); }
@@ -341,7 +358,7 @@ bool VaRest::Http::BuildCacheKey(const FExchangeState& Ex,FString& OutKey,FStrin
         for (const auto& Header : Session.Headers) KnownHeaders.Set(Header.Key,Header.Value);
         if (!CacheHeadersEligible(KnownHeaders,FVaRestHeaders())) return false;
     }
-    if (!RequestIdentityScope(*Ex.Config,Session,Ex.AuthMode,Built,OutIdentity)) return false;
+    if (!RequestIdentityScope(*Ex.Config,Session,Ex.AuthMode,Built,OutIdentity,&Ex.State->GetManagedLifetime())) return false;
     OutKey=CacheKey(Ex.Verb,Ex.Url,OutIdentity,Built,Ex.AuthMode==EVaRestAuthMode::None ? FVaRestHeaders() : Session.Headers);
     return true;
 }

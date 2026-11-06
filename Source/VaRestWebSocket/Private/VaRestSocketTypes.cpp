@@ -230,6 +230,7 @@ const TCHAR* LexToString(EVaRestSocketEventType Type)
 	case EVaRestSocketEventType::Drained: return TEXT("Drained");
 	case EVaRestSocketEventType::Closed: return TEXT("Closed");
 	case EVaRestSocketEventType::Error: return TEXT("Error");
+	case EVaRestSocketEventType::Flow: return TEXT("Flow");
 	default: return TEXT("?");
 	}
 }

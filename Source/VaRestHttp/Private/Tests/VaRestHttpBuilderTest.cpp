@@ -261,6 +261,32 @@ bool FVaRestHttpBuilderVerbTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpBuilderConnectTest, "VaRest.Http.Builder.UnsupportedConnect",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestHttpBuilderConnectTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	FTestRig Rig;
+	Rig.Client.WithRetry(FVaRestRetryPolicy{});
+	for (const TCHAR* Verb : {TEXT("CONNECT"), TEXT("connect"), TEXT("CoNnEcT")})
+	{
+		auto Outcome = MakeOutcome<FVaRestJson>();
+		Observe(Rig.Client.Request(Verb, TEXT("/tunnel")).Idempotent(), Outcome).Send();
+		TestEqual(TEXT("refusal is delivered after Send"), Outcome->CompleteCalls.load() + Outcome->ErrorCalls.load(), 0);
+		TestTrue(TEXT("unsupported verb completes"), Rig.Wait(Outcome));
+		TestTrue(TEXT("CONNECT is a nonretryable Config refusal"), Outcome->Error.Kind == EVaRestErrorKind::Config && !Outcome->Error.bRetryable
+			&& Outcome->Error.Message.Contains(TEXT("CONNECT proxy tunnels are not supported")));
+		TestTrue(TEXT("one error and completion, no success"), Outcome->ErrorCalls.load() == 1 && Outcome->CompleteCalls.load() == 1 && Outcome->SuccessCalls.load() == 0);
+		TestEqual(TEXT("no CONNECT attempt reaches the transport, even with retry and Idempotent"), Rig.Fake->NumCalls(), 0);
+	}
+	auto Custom = MakeOutcome<FVaRestJson>();
+	Observe(Rig.Client.Request(TEXT("CONNECTX"), TEXT("/custom")), Custom).Send();
+	TestTrue(TEXT("a different custom token still completes"), Rig.Wait(Custom) && Custom->SuccessCalls.load() == 1);
+	TestEqual(TEXT("only the custom control reaches transport"), Rig.Fake->NumCalls(), 1);
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpBuilderEmptyClientTest, "VaRest.Http.Builder.EmptyClient",
 	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
 

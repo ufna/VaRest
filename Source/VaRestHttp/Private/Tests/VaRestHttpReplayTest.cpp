@@ -23,10 +23,12 @@ Rig.Client.WithStorageDirectories(FPaths::Combine(Disk.Root,TEXT("Cache")), FPat
 Rig.Client.WithAuth(FVaRestAuth::Bearer()).WithOfflineQueue(TEXT("orders-account-A"));
 Rig.Client.SetBearerToken(TEXT("A-old-token"));
 Rig.Connectivity->ReportOffline();
+FScopedTraceRecorder Trace(EVaRestTraceDetail::Metadata);
 const auto Queued = MakeShared<TArray<FString>,ESPMode::ThreadSafe>();
 for (int32 Number : {1,2})
 {
     Rig.Client.Post<void>(TEXT("/orders")).Body(LexToString(Number)).Idempotent().QueueWhenOffline()
+        .Endpoint(TEXT("ReplayEntry_17"))
         .OnQueued([Queued](const FString& Id) { Queued->Add(Id); }).Send();
 }
 if (!TestTrue(TEXT("two durable items"), PumpUntil([Queued] { return Queued->Num()==2; }))) return false;
@@ -47,6 +49,16 @@ if (!TestTrue(TEXT("second starts after durable removal"), PumpUntil([&Rig] { re
 Rig.Fake->Complete(1, FVaRestFakeResponse::Text(200, TEXT("ok-two")));
 if (!TestTrue(TEXT("two results"), PumpUntil([Results] { return Results->Num()==2; }))) return false;
 TestEqual(TEXT("first result id"), (*Results)[0].QueueId, (*Queued)[0]);
+for (int32 Index=0;Index<2;++Index)
+{
+    const uint64 ReplayRequest=Rig.Fake->GetCall(Index).Request.RequestId;
+    TestTrue(TEXT("actual replay Started retains endpoint and durable queue identity"),Trace.Recorder->For(ReplayRequest).ContainsByPredicate([&](const FVaRestTraceEvent& Event)
+    {
+        if (Event.Kind!=EVaRestTraceKind::Started) return false;
+        const auto& Started=Event.Payload.Get<FVaRestTraceStarted>();
+        return Started.Endpoint==FName(TEXT("ReplayEntry_17")) && Started.QueueReplayOf.QueueId.Equals((*Queued)[Index],ESearchCase::CaseSensitive);
+    }));
+}
 TestEqual(TEXT("second result id"), (*Results)[1].QueueId, (*Queued)[1]);
 TestEqual(TEXT("drained queue"), Rig.Client.GetQueuedCount(), 0);
 TestTrue(TEXT("drained workers"), Rig.Drain());

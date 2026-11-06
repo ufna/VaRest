@@ -8,38 +8,40 @@ public class VaRestEditor : ModuleRules
 	{
         PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
         DefaultBuildSettings = BuildSettingsVersion.V5;
-		
+
 		PrivateIncludePaths.AddRange(
 			new string[] {
 				"VaRestEditor/Private",
-				
+
 				// ... add other private include paths required here ...
 			});
-			
-		
+
+
 		PublicDependencyModuleNames.AddRange(
 			new string[]
 			{
 				"Core",
+				"CoreUObject",
+				"Engine",
+				"BlueprintGraph", // exported spawner/provider contract
+				"VaRestHttp", // exported API/socket entry types
                 "VaRest"
 
 				// ... add other public dependencies that you statically link with here ...
 			});
-			
-		
+
+
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
-                "CoreUObject",
-                "Engine",
                 "Slate",
                 "SlateCore",
                 "InputCore",
                 "AssetTools",
+                "AssetRegistry",
                 "UnrealEd",     // for FAssetEditorManager
                 "KismetWidgets",
                 "KismetCompiler",
-                "BlueprintGraph",
                 "GraphEditor",
                 "Kismet",       // for FWorkflowCentricApplication
                 "PropertyEditor",
@@ -51,10 +53,12 @@ public class VaRestEditor : ModuleRules
                 // VaRest 2: the v2 Make Json node's "Remove key" context menu (UToolMenu)
                 "ToolMenus",
                 // VaRest 2: struct <-> JSON cache invalidation, the v2 Make Json node, their tests
-                "VaRestJson"
+                "VaRestJson",
+                "VaRestWebSocket",
+                "VaRestSocketIO"
 			});
-		
-		
+
+
 		DynamicallyLoadedModuleNames.AddRange(
 			new string[]
 			{

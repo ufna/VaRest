@@ -148,13 +148,18 @@ public:
  bool Start(const FCapturePolicy&);
  void RequestPolicy(const FCapturePolicy&);
  void Pause(); void Clear(); void Tick(); void Shutdown();
+ void BeginPIESession(bool bPreserveLog);
+ bool ClearScope(uint64 ScopeId);
+ void ClearScopeNow(uint64 ScopeId);
  void ApplyAttached(const FVaRestTraceSnapshot&);
  void SetCapture(bool);
  bool IsCapturing() const { return bCapturing && !bShutdown; }
  bool IsShutdown() const { return bShutdown; }
  uint64 Revision() const;
+ FVaRestInspectorDiagnostics GetDiagnostics() const { check(IsInGameThread()); return bShutdown ? FVaRestInspectorDiagnostics() : Store.Diagnostics(); }
  bool TrySnapshot(TSharedPtr<const FVaRestInspectorSnapshot,ESPMode::ThreadSafe>&) const;
  bool ForEachRecord(TFunctionRef<void(const FVaRestInspectorRecordView&)>);
+ bool ForEachLink(TFunctionRef<void(const FVaRestInspectorLinkView&)>);
  void AttachFacade(FVaRestInspectorChanged&,bool* ShutdownFlag);
  void DetachFacade();
  enum class EControl:uint8 { None,Start,Pause,Clear,Shutdown };
@@ -206,6 +211,8 @@ private:
  FOverflowRecovery Recovery;
  uint64 Generation=0,ServiceRevision=0,NotifiedRevision=0,RecoveryCount=0,LastRecoveryWatermark=0;
  int32 DispatchDepth=0;
+ TArray<uint64,TInlineAllocator<16>> ScopedClear;
+ bool bDeferredPIE=false,bPIEPreserve=false;
  bool bCapturing=false,bShutdown=false,bDirty=false,bDeferredClear=false,bDeferredShutdown=false,bHasCaptureRequest=false,bRequestedCapture=false,bTicking=false,bHasPolicyRequest=false;
  uint8 RefuseBefore=0;
 };

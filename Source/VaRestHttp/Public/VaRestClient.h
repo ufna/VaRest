@@ -19,13 +19,17 @@
 #include "VaRestUrl.h"
 #include "VaRestStage.h"
 
+#include <atomic>
 #include <type_traits>
 
 class FVaRestAuthRefreshContext;
 class FVaRestClient;
+class FVaRestClientWeak;
 /** VaRestAuth.h defines it; declared here for FVaRestClient::RefreshAuth (VaRestAuth.h includes this header) */
 enum class EVaRestAuthRefreshOutcome : uint8;
 class FVaRestRequestHandle;
+class FVaRestDynamicResult;
+struct FVaRestDynamicResultConfig;
 class IVaRestAuth;
 class FVaRestConnectivity;
 /** Declared here for FRequestSpec's friendship; the definition below carries [[nodiscard]] (allowed on a later declaration) */
@@ -36,6 +40,11 @@ namespace VaRest::Http
 {
 	struct FClientAccess;
 	struct FRequestSpecAccess;
+	struct FDynamicRequestAccess;
+	class FNativeLifetimeControl;
+	class FNativeInputBorrow;
+	class FClientAdmissionGate;
+	class FQueueReplayOperation;
 
 	/**
 	 * What a TVaRestRequest collects; Send moves it into an exchange. Private by shape (bead VaRest-uq3, plan decision 18):
@@ -55,6 +64,9 @@ namespace VaRest::Http
 		friend class ::TVaRestRequest;
 		friend class ::FVaRestClient;
 		friend struct FRequestSpecAccess;
+		friend struct FDynamicRequestAccess;
+		friend class FNativeLifetimeControl;
+		friend class FNativeInputBorrow;
 
 		FRequestSpec(TSharedPtr<FClientState, ESPMode::ThreadSafe> InState, FStringView InVerb, FStringView InPath);
 
@@ -66,12 +78,14 @@ namespace VaRest::Http
 		TSharedPtr<const FClientConfig, ESPMode::ThreadSafe> ConfigAtBuild;
 		FString Verb;
 		FString Path;
-		TArray<TPair<FString, FString>> PathParams;
+		TArray<FPathParam> PathParams;
 		TArray<TPair<FString, FString>> Query;
 		FVaRestHeaders Headers;
+		bool bPreserveOwnHeaderLines = false;
 		FVaRestRequestBody Body;
 		FString BuildError;
 		FName Tag;
+		FName Endpoint;
 		EVaRestPriority Priority = EVaRestPriority::Normal;
 		TWeakObjectPtr<const UObject> Owner;
 		bool bHasOwner = false;
@@ -83,7 +97,10 @@ namespace VaRest::Http
 		TOptional<float> ActivityTimeout;
 		TOptional<int64> MaxJsonBytes;
 		EVaRestJsonNaming Naming = EVaRestJsonNaming::CamelCase;
-		bool bStrictDecode = false;
+		TOptional<bool> bStrictDecode;
+		/** Build-time JSON body policy; response conversion instead uses the Send-time config snapshot. */
+		FString JsonContentType = TEXT("application/json");
+		TSharedPtr<const FVaRestJsonRuleSnapshot, ESPMode::ThreadSafe> JsonRules;
 		/** Retry() / NoRetry(); unset: the client's policy */
 		TOptional<FVaRestRetryPolicy> Retry;
 		TOptional<FVaRestCachePolicy> Cache;
@@ -101,12 +118,26 @@ namespace VaRest::Http
         FVaRestTraceQueueReplay QueueReplayOf;
         FString ReplayIdentityScope;
         FName QueueTerminalDetail;
+		TSharedPtr<FQueueReplayOperation, ESPMode::ThreadSafe> QueueReplay;
+		TUniqueFunction<void(const FFinish&,const TArray<uint8>&)> InternalTerminalObserver;
 		/** Spec review I-2: the request id to use instead of a new one -- the refresh's own (FVaRestTrace::NewRequestId); 0 = a new one */
 		uint64 PresetRequestId = 0;
 		/** The current body is a struct, encoded with Naming: Naming() now fails. A later Body() or BodyFile() clears it. */
 		bool bStructBodySet = false;
 		TUniquePtr<IResultHandler> Handler;
 		bool bSent = false;
+		/** Refusal result stays in the adopted whole spec through GTK/worker delivery and precreated GTK cleanup. */
+		TUniquePtr<FFinish> NativeRefusalFinish;
+		FName NativeRefusalReason;
+
+		// Intrusive whole-spec handoff for opted-in managed Send; ordinary builders never register this node.
+		// Pending nodes have no finite inventory bound (Root Task5 disposal ruling); this is not an operation permit.
+		FRequestSpec* NativeInputNext = nullptr;
+		TSharedPtr<FClientAdmissionGate,ESPMode::ThreadSafe> NativeInputGate; // counted until complete GT payload destruction
+		std::atomic<uint64> NativeInputBorrows{0}; // closed bit plus outstanding access count
+		std::atomic<bool> bNativeInputReady{false};
+		std::atomic<bool> bNativeInputFinished{false};
+		std::atomic<bool> bNativeInputDiscarded{false};
 	};
 
 	/** The inline builder's Send() calls this from the caller's module, so it is exported; it forwards to FRequestSpecAccess::Send */
@@ -161,6 +192,13 @@ public:
 	TVaRestRequest Path(FStringView Name, FStringView Value) &&
 	{
 		Spec->PathParams.Emplace(FString(Name), FString(Value));
+		return MoveTemp(*this);
+	}
+
+	/** Path simple-style array: raw elements are individually percent-encoded, with literal comma separators. */
+	TVaRestRequest ParamValues(FStringView Name, TConstArrayView<FString> Values) &&
+	{
+		Spec->PathParams.Emplace(FString(Name), TArray<FString>(Values.GetData(), Values.Num()));
 		return MoveTemp(*this);
 	}
 
@@ -228,7 +266,7 @@ public:
 			{
 				Spec->Fail(FString::Printf(TEXT("the JSON body cannot be written: %s"), *Written.GetError().Message));
 			}
-			Spec->Body = FVaRestRequestBody::FromBytes(MoveTemp(Bytes), EVaRestBodyKind::Json, TEXT("application/json"));
+			Spec->Body = FVaRestRequestBody::FromBytes(MoveTemp(Bytes), EVaRestBodyKind::Json, Spec->JsonContentType);
 			Spec->bStructBodySet = false; // task 9 review minor 1: a later Body() replaced the struct one
 		}
 		return MoveTemp(*this);
@@ -268,13 +306,14 @@ public:
 	{
 		FVaRestJsonConvertOptions Options;
 		Options.Naming = Spec->Naming;
+		Options.Rules = Spec->JsonRules;
 		TArray<uint8> Bytes;
 		FVaRestJsonError EncodeError;
 		if (!FVaRestJsonConvert::StructToUtf8(VaRest::Json::GetScriptStruct<StructType>(), &Value, Bytes, Options, EVaRestJsonFormat::Condensed, &EncodeError))
 		{
 			Spec->Fail(FString::Printf(TEXT("the struct body cannot be written: %s"), *EncodeError.Message));
 		}
-		Spec->Body = FVaRestRequestBody::FromBytes(MoveTemp(Bytes), EVaRestBodyKind::Json, TEXT("application/json"));
+		Spec->Body = FVaRestRequestBody::FromBytes(MoveTemp(Bytes), EVaRestBodyKind::Json, Spec->JsonContentType);
 		Spec->bStructBodySet = true;
 		return MoveTemp(*this);
 	}
@@ -349,6 +388,13 @@ public:
 		return MoveTemp(*this);
 	}
 
+	/** Trace identity of an authored endpoint; request path/verb and native admission are unchanged. */
+	TVaRestRequest Endpoint(FName Name) &&
+	{
+		Spec->Endpoint = Name;
+		return MoveTemp(*this);
+	}
+
 	/** Spec 3.2: keep the raw bytes in FVaRestResponse::Body after a successful decode (a copy for JSON: the parse is in situ) */
 	TVaRestRequest KeepBody() &&
 	{
@@ -368,8 +414,12 @@ public:
 	 * .bak. An error response's body goes to the temp file too; its first 4 KiB are read back for FVaRestError, so a JSON
 	 * error body larger than that is not parsed into FVaRestError::Body and arrives only as its RawBody prefix.
 	 */
-	TVaRestRequest SaveTo(FStringView FilePath) && requires (std::is_void_v<T> || std::is_same_v<T, FVaRestResponse>)
+	TVaRestRequest SaveTo(FStringView FilePath) && requires (std::is_void_v<T> || std::is_same_v<T, FVaRestResponse> || std::is_same_v<T,FVaRestDynamicResult>)
 	{
+		if constexpr (std::is_same_v<T,FVaRestDynamicResult>)
+		{
+			if (!Handler().GetResultType().IsNone()) Spec->Fail(TEXT("dynamic SaveTo() requires a None response type"));
+		}
 		if (FilePath.IsEmpty())
 		{
 			Spec->Fail(TEXT("SaveTo() needs a file path"));
@@ -622,16 +672,18 @@ private:
 	friend class FVaRestClient;
 	/** MarkAuthRefresh: a refresh request is made only by the context an auth's Refresh is handed (plan decision 23) */
 	friend class ::FVaRestAuthRefreshContext;
+	friend struct VaRest::Http::FDynamicRequestAccess;
 
 	/**
 	 * Plan decision 23: a refresh request bypasses the auth stages (AuthMode None), the envelope, retry and (ruling M-8) the
 	 * limiter's queue; InPresetId, when not 0, becomes its request id (spec review I-2). Retry(), Envelope() and AuthMode()
 	 * refuse to undo it afterwards.
 	 */
-	TVaRestRequest MarkAuthRefresh(uint64 InPresetId) &&
+	TVaRestRequest MarkAuthRefresh(uint64 InPresetId, FName InTraceEndpoint = NAME_None) &&
 	{
 		Spec->bAuthRefresh = true;
 		Spec->PresetRequestId = InPresetId;
+		Spec->Endpoint = InTraceEndpoint;
 		Spec->AuthMode = EVaRestAuthMode::None;
 		Spec->Envelope.Reset();
 		Spec->bNoEnvelope = true;
@@ -668,7 +720,13 @@ public:
 	static FVaRestClient Make(FStringView BaseUrl);
 
 	bool IsValid() const { return State.IsValid(); }
+	/** GT. Keep a native weak identity without retaining the client's affine configuration through Stop. */
+	FVaRestClientWeak AsWeak() const;
+	/** GTK. Plain naming/strict/rules snapshot for sibling transports; never includes config callbacks or a client alias. */
+	FVaRestJsonConvertOptions GetJsonOptionsOnGT() const;
 	uint64 GetId() const;
+	/** Immutable client scope; ordinary Make and empty handles use Process scope 0. */
+	uint64 GetScopeId() const;
 	FString GetBaseUrl() const;
 	/** Game thread: requests sent and not yet finished, those waiting in the limiter's queue included (spec 4.6) */
 	int32 GetInFlightCount() const;
@@ -692,6 +750,12 @@ public:
 	FVaRestClient& WithoutHeader(FStringView Name);
 	/** How struct bodies name their fields (spec 2.4); decode accepts every spelling regardless */
 	FVaRestClient& WithNaming(EVaRestJsonNaming Naming);
+	/** Default response conversion strictness; a request's StrictDecode(bool) overrides its Send-time snapshot. */
+	FVaRestClient& WithStrictDecode(bool bStrict = true);
+	/** JSON and struct Body defaults only; explicit request headers win. Invalid media is refused like WithHeader. */
+	FVaRestClient& WithJsonContentType(FStringView ContentType);
+	/** Immutable rules for later struct-body builders and Send-time response conversion; null uses global defaults. */
+	FVaRestClient& WithJsonRules(TSharedPtr<const FVaRestJsonRuleSnapshot, ESPMode::ThreadSafe> Rules);
 	FVaRestClient& WithTransport(TSharedRef<IVaRestTransport, ESPMode::ThreadSafe> Transport);
 	/**
 	 * Requests already sent keep the clock they started with; a rotated secret value keeps the time it has left
@@ -747,7 +811,10 @@ public:
 	 *   WithHeader() are still the ones the request snapshotted at Send() (spec 3.1). A PerAttempt stage holds the slot
 	 *   while it works; one that answers its attempt itself while the transport call still runs gives the slot back with
 	 *   its answer, and the call it left is canceled. So is a call still running when an Outer stage's answer for the
-	 *   request is accepted; its slot comes back with that call's Canceled end (M4a final review A1).
+	 *   request is accepted. A logically finished request returns a grant still held by its custom stage on a later
+	 *   game-thread task; the canceled call's late end cannot return it twice.
+	 *   Canceling a request held before transport returns its grant on a later game-thread task, without waiting for
+	 *   the custom stage's callback. A late callback cannot release a newer attempt's grant.
 	 * - An auth's refresh request (FVaRestAuthRefreshContext::Request) skips the queue and takes no slot: during a refresh
 	 *   one more connection is out per refresh request the auth sends (BearerRefresh sends one), so a client whose slots
 	 *   all hold long polls can still refresh (ruling M-8).
@@ -802,8 +869,8 @@ public:
 	// change reach every listener in order, after the change is done (concurrency review C-1, I-2). The game's own changes
 	// end a session refresh in flight (plan decision 3): a new access token resumes what waits on it, ClearSession and
 	// NotifySessionExpired fail it, and a new refresh token with no access token sends what waits on it behind a refresh
-	// from that token. A write that keeps the access token (a new expiry, an import of the live session) lets the refresh
-	// finish (M4a final review B3, B4). Requests parked behind a session refresh that this ends or resumes continue from a
+	// from that token. A new refresh token with the same access token restarts the refresh later, retaining all waiters;
+	// the old answer cannot replace or expire the session. Expiry-only writes let the refresh finish. Parked requests continue from a
 	// later game-thread task, never inside this call.
 	/**
 	 * The access token (a login, a token from elsewhere). Replaced, or Refreshed with bSameIdentity (plan decision 5); the
@@ -874,11 +941,10 @@ public:
 	 * A session refresh in flight is not ended by this (Task 16 review M-5, ruled): the refresh belongs to the session, so it
 	 * runs to its end with the auth that started it and its result applies to the session -- a rejection expires it -- and
 	 * requests parked behind it keep their Send()-time auth. The game's own session calls end it: a new access token from
-	 * SetBearerToken(), SetSession() or ImportSession(), ClearSession(), NotifySessionExpired(). Two writes made during a refresh
-	 * are the exceptions (M4a final review M-2): (same access token, new refresh token) does NOT end it -- the refresh in flight
-	 * still uses the old refresh token, and a rejection then expires the session, so call ClearSession() first if the new
-	 * refresh token must survive (bead VaRest-zj4); (empty access token, same refresh token) re-parks the waiters behind a new
-	 * refresh while the in-flight one continues (B4).
+	 * SetBearerToken(), SetSession() or ImportSession(), ClearSession(), NotifySessionExpired(). Keeping the access token
+	 * but replacing the refresh token invalidates the old answer and starts
+	 * a replacement refresh on a later GT task using the original provider. All waiters share that replacement, including
+	 * RefreshAuth callers. (Empty access token, same refresh token) leaves the existing refresh running (B4).
 	 */
 	FVaRestClient& WithAuth(TSharedRef<IVaRestAuth, ESPMode::ThreadSafe> InAuth);
 	/**
@@ -927,6 +993,8 @@ public:
 	 * client alive that long, so capture your own object weakly instead. If the client goes first -- its last handle
 	 * dropped while none of its requests is in flight -- OnDone is destroyed uncalled, on the game thread; at engine exit it
 	 * is destroyed uncalled too (decision 2).
+	 * Managed clients admit at most64 External subscriptions, including answers pending delivery. Overflow reports
+	 * asynchronous Failed(Config); permanent retirement discards callbacks on GT, including already prepared answers.
 	 */
 	void RefreshAuth(TUniqueFunction<void(EVaRestAuthRefreshOutcome Outcome, EVaRestErrorKind FailedKind)>&& OnDone);
 
@@ -945,8 +1013,8 @@ public:
 	TVaRestRequest<T> Head(FStringView Path) const { return Request<T>(TEXTVIEW("HEAD"), Path); }
 
 	/**
-	 * Any verb, an RFC 9110 token taken as it is (no trimming): anything else, an empty verb included, fails the request
-	 * with Kind=Config and nothing is sent (final review I3). T defaults to FVaRestJson (spec 3.2). An empty client gives
+	 * An RFC 9110 token taken as it is (no trimming), except CONNECT: proxy tunnels are unsupported. An invalid or
+	 * unsupported verb, an empty verb included, fails with Kind=Config and nothing is sent. T defaults to FVaRestJson (spec 3.2). An empty client gives
 	 * a builder whose Send() logs an error, sends nothing and delivers Kind=Config to OnError and OnComplete from a later
 	 * game-thread tick (final review M7; decision 3).
 	 * The handle that Send() returns is empty: IsActive() is false and
@@ -964,10 +1032,13 @@ public:
 		NewSpec->Handler = MakeUnique<VaRest::Http::TResultHandler<T>>();
 		return TVaRestRequest<T>(MoveTemp(NewSpec));
 	}
+	/** GT activation/admission. Include VaRestDynamicRequest.h; ordinary Request<T> stays unchanged. */
+	TVaRestRequest<FVaRestDynamicResult> RequestDynamic(FStringView Verb,FStringView Path,FVaRestDynamicResultConfig&& Config) const;
 
 private:
 	/** Defined in VaRestClientState.h (Private): VaRestHttp and its tests reach the state through it */
 	friend struct VaRest::Http::FClientAccess;
+	friend class FVaRestClientWeak;
 
 	TSharedPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> GetStateInternal() const { return State; }
 
@@ -977,4 +1048,17 @@ private:
 	}
 
 	TSharedPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> State;
+};
+
+/** Native weak identity, safe to copy/destroy on any thread. PinOnGT refuses retired or stopped clients.
+ * A successful pin is a normal strong client shell: release it on GT before Http Stop. */
+class VARESTHTTP_API FVaRestClientWeak
+{
+public:
+	FVaRestClientWeak() = default;
+	FVaRestClient PinOnGT() const;
+private:
+	friend class FVaRestClient;
+	explicit FVaRestClientWeak(const TSharedPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe>& InState) : State(InState) {}
+	TWeakPtr<VaRest::Http::FClientState, ESPMode::ThreadSafe> State;
 };

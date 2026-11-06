@@ -90,6 +90,7 @@ namespace VaRest::Http
 		};
 #endif
 
+		struct FSocketFrameAdmission;
 		/** An excerpt prepared on the game thread and launched right after the event that announces it (bExcerptPending) */
 		struct FJob
 		{
@@ -97,6 +98,9 @@ namespace VaRest::Http
 			uint64 RequestId = 0;
 			int32 Attempt = 0;
 			uint64 DispatchId = 0;
+			uint64 SocketId = 0, FrameId = 0;
+			/** Socket excerpts also bound task metadata, including small/empty payloads. Pure native lease. */
+			TSharedPtr<FSocketFrameAdmission, ESPMode::ThreadSafe> FrameAdmission;
 			int64 TotalBytes = 0;
 			/** The admission counter's share of this job's copy (concurrency review M-12: released whatever path drops the job) */
 			FAdmission Admitted;

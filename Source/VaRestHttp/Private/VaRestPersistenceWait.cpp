@@ -4,15 +4,17 @@
 
 #include "VaRestClientState.h"
 #include "VaRestExchangeState.h"
+#include "VaRestManagedCallbacks.h"
 #include "VaRestPersistence.h"
 #include "VaRestRetryInternal.h"
 
 VaRest::Http::FPersistenceWait::FPersistenceWait(const FVaRestExchangeRef& Exchange, FVaRestOutcomeCallback&& Done)
-    : HeldExchange(Exchange), Completion(MoveTemp(Done))
+	: HeldExchange(Exchange)
+	, Completion(MoveTemp(Done))
 {
 }
 TSharedRef<VaRest::Http::FPersistenceWait, ESPMode::ThreadSafe> VaRest::Http::FPersistenceWait::Begin(const FVaRestExchangeRef& Exchange,
-                                                                                                      FVaRestOutcomeCallback&& Done)
+	FVaRestOutcomeCallback&& Done)
 {
 	const TSharedRef<FPersistenceWait, ESPMode::ThreadSafe> Wait = MakeShareable(new FPersistenceWait(Exchange, MoveTemp(Done)));
 	check(IsInGameThread());
@@ -36,8 +38,7 @@ TSharedRef<VaRest::Http::FPersistenceWait, ESPMode::ThreadSafe> VaRest::Http::FP
 	}
 	Ex.bPersistenceOwned = true;
 	const TWeakPtr<FPersistenceWait, ESPMode::ThreadSafe> Weak(Wait);
-	Ex.Interrupt = [Weak]
-	{
+	Ex.Interrupt = [Weak] {
 		if (const auto Pinned = Weak.Pin())
 			return Pinned->InterruptNow();
 		return false;
@@ -48,7 +49,11 @@ TSharedRef<VaRest::Http::FPersistenceWait, ESPMode::ThreadSafe> VaRest::Http::FP
 void VaRest::Http::FPersistenceWait::Disarm()
 {
 	auto& Ex = Internals(*HeldExchange);
+	if (IsManagedStopped(HeldExchange))
+		return;
 	Ex.Config->Clock->ClearTimer(Timer);
+	if (IsManagedStopped(HeldExchange))
+		return;
 	Ex.Interrupt.Reset();
 }
 FVaRestOutcomeCallback VaRest::Http::FPersistenceWait::TakeCompletion()
@@ -58,6 +63,11 @@ FVaRestOutcomeCallback VaRest::Http::FPersistenceWait::TakeCompletion()
 		return {};
 	bEnded = true;
 	Disarm();
+	if (IsManagedStopped(HeldExchange))
+	{
+		Completion.Reset();
+		return {};
+	}
 	return MoveTemp(Completion);
 }
 void VaRest::Http::FPersistenceWait::FinishUnchecked(FVaRestAttemptOutcome&& Outcome)
@@ -69,18 +79,31 @@ void VaRest::Http::FPersistenceWait::FinishUnchecked(FVaRestAttemptOutcome&& Out
 bool VaRest::Http::FPersistenceWait::CanHandoff()
 {
 	check(IsInGameThread());
+	if (IsManagedStopped(HeldExchange))
+	{
+		bEnded = true;
+		Completion.Reset();
+		return false;
+	}
 	if (bEnded)
 		return false;
 	auto& Ex = Internals(*HeldExchange);
 	if (IsOwnerGone(Ex))
 		MarkOwnerGone(Ex);
-	if (Ex.bFinished || Ex.bCompletionQueued || Ex.Phase != EVaRestExchangePhase::InChain || Ex.IsCancelRequested())
+	if (Ex.bFinished || Ex.bCompletionQueued || Ex.Phase != EVaRestExchangePhase::InChain || Ex.IsCancelRequested() || IsManagedClosed(HeldExchange))
 	{
 		Ex.PersistenceAbort->store(true, std::memory_order_relaxed);
 		FinishUnchecked(FVaRestAttemptOutcome::Canceled());
 		return false;
 	}
-	if (Ex.DeadlineAt > 0 && Ex.Config->Clock->Now() >= Ex.DeadlineAt - DeadlineTimerSlack)
+	const bool bExpired = Ex.DeadlineAt > 0 && Ex.Config->Clock->Now() >= Ex.DeadlineAt - DeadlineTimerSlack;
+	if (IsManagedStopped(HeldExchange))
+	{
+		bEnded = true;
+		Completion.Reset();
+		return false;
+	}
+	if (bExpired)
 	{
 		Ex.PersistenceAbort->store(true, std::memory_order_relaxed);
 		FinishUnchecked(MakeDeadlineOutcome());
@@ -107,6 +130,12 @@ bool VaRest::Http::FPersistenceWait::InterruptNow()
 }
 void VaRest::Http::FPersistenceWait::CheckDeadline()
 {
+	if (IsManagedStopped(HeldExchange))
+	{
+		bEnded = true;
+		Completion.Reset();
+		return;
+	}
 	if (bEnded)
 		return;
 	auto& Ex = Internals(*HeldExchange);
@@ -118,6 +147,12 @@ void VaRest::Http::FPersistenceWait::CheckDeadline()
 	if (Ex.DeadlineAt <= 0.0)
 		return;
 	const double Left = Ex.DeadlineAt - Ex.Config->Clock->Now();
+	if (IsManagedStopped(HeldExchange))
+	{
+		bEnded = true;
+		Completion.Reset();
+		return;
+	}
 	if (Left <= DeadlineTimerSlack)
 	{
 		Ex.PersistenceAbort->store(true, std::memory_order_relaxed);
@@ -125,10 +160,23 @@ void VaRest::Http::FPersistenceWait::CheckDeadline()
 		return;
 	}
 	const TWeakPtr<FPersistenceWait, ESPMode::ThreadSafe> Weak(AsShared());
-	Timer = Ex.Config->Clock->SetTimer(Left,
-	                                   [Weak]
-	                                   {
-		                                   if (const auto Pinned = Weak.Pin())
-			                                   Pinned->CheckDeadline();
-	                                   });
+	const auto Ref = Ex.Managed;
+	FNativeLogicalTailLease Active;
+	if (Ref.IsValid())
+	{
+		Active = Ref.Store->TryAddLogicalTailOnGT(Ref);
+		if (!Active.IsHeld())
+		{
+			FinishUnchecked(MakeManagedCapacityOutcome(TEXT("LogicalCapacity")));
+			return;
+		}
+	}
+	TUniqueFunction<void()> Callback = [Weak] { if (const auto Pinned=Weak.Pin()) Pinned->CheckDeadline(); };
+	if (!PrepareManagedGTCallback(HeldExchange, Callback))
+	{
+		if (!IsManagedStopped(HeldExchange))
+			FinishUnchecked(MakeManagedCapacityOutcome(TEXT("LogicalCapacity")));
+		return;
+	}
+	Timer = Ex.Config->Clock->SetTimer(Left, MoveTemp(Callback));
 }

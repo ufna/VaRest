@@ -18,13 +18,27 @@
 #include "VaRestHttpLog.h"
 #include "VaRestHttpStatsInternal.h"
 #include "VaRestHttpTesting.h"
+#include "VaRestManagedOperation.h"
+#include "VaRestManagedOutcome.h"
+#include "VaRestManagedDispatch.h"
+#include "VaRestManagedCallbacks.h"
+#include "VaRestDynamicRequestAccess.h"
 #include "VaRestRetryInternal.h"
 #include "VaRestTraceExcerpts.h"
 #include "VaRestTracePoints.h"
 #include "VaRestUrl.h"
 
+#include <optional>
+
 namespace VaRest::Http::PipelinePrivate
 {
+	struct FDeferredDynamicFinish
+	{
+		~FDeferredDynamicFinish() { check(IsInGameThread());if (!bConsumed && Abandon) Abandon(); }
+		FFinish Finish;
+		TUniqueFunction<void()> Abandon;
+		bool bConsumed=false;
+	};
 	/**
 	 * A game-thread task: UE::Tasks' GameThreadNormalPri is ENamedThreads::GameThread (TaskPrivate.cpp:614-615). Every
 	 * delivery goes through here. The game thread runs its named queue at frame boundaries and also inside tick-group and
@@ -138,6 +152,19 @@ namespace VaRest::Http::PipelinePrivate
 	/** Decision 8's throttle: the game thread reads the probe this often while an attempt runs */
 	constexpr double ProgressInterval = 0.1;
 
+	void DeleteManagedTemp(FNativeLogicalTailLease&& Permission, FString&& Path)
+	{
+		check(IsInGameThread() && Permission.IsHeld());
+		const auto Control = Permission.Reference().Control;
+		if (Control->IsStopped())
+			return;
+		UE::Tasks::Launch(TEXT("VaRest.ManagedDeleteTemp"), [Held = MoveTemp(Permission), File = MoveTemp(Path), Control]() mutable {
+			if (!Control->IsStopped())
+				IFileManager::Get().Delete(*File, false, false, true);
+			Held.Reset(); // disk work finished; all remaining captures are native Control/plain filename
+		});
+	}
+
 	/** Game thread: calls OnProgress when the probe changed since the last call */
 	void DeliverProgress(FExchangeState& Ex)
 	{
@@ -171,6 +198,8 @@ namespace VaRest::Http::PipelinePrivate
 	/** Serial: the dispatch this chain polls for (M4a final review A1); it stops once that dispatch is not the live one */
 	void ScheduleProgress(const FVaRestExchangeRef& Exchange, uint32 Serial)
 	{
+		if (IsManagedStopped(Exchange))
+			return;
 		FExchangeState& Ex = Internals(*Exchange);
 		if (!Ex.TransportCall.IsValid() || Ex.LiveDispatch != Serial || Exchange->IsCancelRequested() || Ex.bFinished)
 		{
@@ -181,8 +210,7 @@ namespace VaRest::Http::PipelinePrivate
 			return;
 		}
 		const TWeakPtr<FVaRestExchange, ESPMode::ThreadSafe> Weak = Exchange;
-		Ex.ProgressTimer = Ex.Config->Clock->SetTimer(ProgressInterval, [Weak, Serial]
-		{
+		TUniqueFunction<void()> Poll = [Weak, Serial] {
 			const TSharedPtr<FVaRestExchange, ESPMode::ThreadSafe> Pinned = Weak.Pin();
 			if (!Pinned.IsValid() || !Internals(*Pinned).TransportCall.IsValid() || Internals(*Pinned).LiveDispatch != Serial)
 			{
@@ -196,7 +224,10 @@ namespace VaRest::Http::PipelinePrivate
 			}
 			DeliverProgress(Internals(*Pinned));
 			ScheduleProgress(Pinned.ToSharedRef(), Serial);
-		});
+		};
+		if (!PrepareManagedGTCallback(Exchange, Poll))
+			return; // optional progress sample refused at shared64; actual physical end still delivers its final counts
+		Ex.ProgressTimer = Ex.Config->Clock->SetTimer(ProgressInterval, MoveTemp(Poll));
 	}
 
 	/**
@@ -210,11 +241,15 @@ namespace VaRest::Http::PipelinePrivate
 	 */
 	void CancelHeldCall(FExchangeState& Ex)
 	{
+		if (Ex.Managed.IsValid() && Ex.Managed.Control->IsStopped())
+			return;
 		if (!Ex.TransportCall.IsValid())
 		{
 			return;
 		}
 		Ex.Config->Clock->ClearTimer(Ex.ProgressTimer);
+		if (Ex.Managed.IsValid() && Ex.Managed.Control->IsStopped())
+			return; // a real virtual clock call may stop native ownership; no later normal transport/service call
 		const TSharedPtr<IVaRestTransportCall, ESPMode::ThreadSafe> Orphan = MoveTemp(Ex.TransportCall);
 		Ex.TransportCall.Reset();
 		Ex.LiveDispatch = 0;
@@ -225,7 +260,7 @@ namespace VaRest::Http::PipelinePrivate
 	 * Background thread (the restore-the-bug runs put it on the game thread): spec 1's "parsing, decoding ... run on
 	 * UE::Tasks". Ex is read only through its atomic cancel flag, which any thread may read.
 	 */
-	void RunDecode(IResultHandler& Handler, FFinish& Finish, const FExchangeState& Ex)
+	void RunDecode(IResultHandler* Handler, FFinish& Finish, const FExchangeState& Ex)
 	{
 #if !UE_BUILD_SHIPPING
 		if (IsInGameThread())
@@ -259,7 +294,8 @@ namespace VaRest::Http::PipelinePrivate
 			// Review M-4: the cancel flag is read again right before the rename
 			if (Finish.SaveTo.IsEmpty() || FinalizeSaveTo(Finish, [&Ex] { return Ex.IsCancelRequested(); }))
 			{
-				Handler.Decode(Finish);
+				if (Handler)
+					Handler->Decode(Finish);
 			}
 		}
 		else if (Finish.Error.Kind == EVaRestErrorKind::Http)
@@ -391,6 +427,8 @@ namespace VaRest::Http::PipelinePrivate
 				{
 					FExchangeState& Granted = Internals(*Exchange);
 					Granted.bInLimiterQueue = false;
+					const auto Released = MakeShared<bool, ESPMode::ThreadSafe>(false);
+					Granted.LimiterGrantReleased = Released;
 					// Concurrency review M-1: out of the queue, the deadline's queue timer goes; the transport stage checks the
 					// deadline again at dispatch
 					Granted.Config->Clock->ClearTimer(Granted.QueueDeadline);
@@ -402,17 +440,19 @@ namespace VaRest::Http::PipelinePrivate
 						// line is written here, as for an abort. The flag is never cleared, so Proceed's own read agrees.
 						LogEndedInQueue(Granted, FVaRestAttemptOutcome::Canceled());
 					}
-					Next.Proceed(Exchange, [Exchange, Outcome, bReleased = false](FVaRestAttemptOutcome&& Result) mutable
+					Next.Proceed(Exchange, [Exchange, Outcome, Released](FVaRestAttemptOutcome&& Result) mutable
 					{
 						// The slot is freed before the outcome goes further up: an Outer stage that re-issues (Retry, the auth
 						// gate) queues again; a PerAttempt stage that proceeds twice re-issues inside this one grant (ruling
 						// I-3, re-review N-12). Once: this callback goes to a custom PerAttempt stage now, not only to the
 						// transport stage's exactly-once completion, and a stage that reports twice (review C-3: the second
 						// report is ignored) must not free another attempt's slot.
-						if (!bReleased)
+						if (!*Released)
 						{
-							bReleased = true;
-							Internals(*Exchange).State->GetLimiter().Release();
+							*Released = true;
+							auto& Current = Internals(*Exchange);
+							if (Current.LimiterGrantReleased == Released) Current.LimiterGrantReleased.Reset();
+							Current.State->GetLimiter().Release();
 						}
 						(*Outcome)(MoveTemp(Result));
 					});
@@ -460,6 +500,26 @@ namespace VaRest::Http::PipelinePrivate
 		virtual void Process(const FVaRestExchangeRef& Exchange, const FVaRestStageNext& Next, FVaRestOutcomeCallback&& OnOutcome) override
 		{
 			FExchangeState& Ex = Internals(*Exchange);
+			FNativeLogicalTailLease ManagedStack;
+			FManagedOperationPayload* ManagedPayload = nullptr;
+			if (Ex.Managed.IsValid())
+			{
+				if (IsManagedStopped(Exchange))
+					return;
+				if (IsManagedClosed(Exchange))
+				{
+					OnOutcome(FVaRestAttemptOutcome::Canceled());
+					return;
+				}
+				ManagedStack = Ex.Managed.Store->TryAddLogicalTailOnGT(Ex.Managed);
+				if (!ManagedStack.IsHeld())
+				{
+					OnOutcome(MakeManagedCapacityOutcome(TEXT("LogicalCapacity")));
+					return;
+				}
+				ManagedPayload = ManagedStack.ManagedPayloadOnGT();
+				check(ManagedPayload);
+			}
 			if (IsOwnerGone(Ex))
 			{
 				// Spec 3.2: "owner gone -> no callbacks, no further retries": no attempt starts for it
@@ -493,6 +553,13 @@ namespace VaRest::Http::PipelinePrivate
 				// Plan decision 10 (spec 4.7, "plus the retry Deadline across attempts"): the time left bounds this attempt,
 				// and with none left it never starts -- a long wait in the limiter's queue counts
 				const double Left = Ex.DeadlineAt - Cfg.Clock->Now();
+				if (IsManagedStopped(Exchange))
+					return;
+				if (IsManagedClosed(Exchange))
+				{
+					OnOutcome(FVaRestAttemptOutcome::Canceled());
+					return;
+				}
 				if (Left <= 0.0)
 				{
 					OnOutcome(MakeDeadlineOutcome());
@@ -506,12 +573,38 @@ namespace VaRest::Http::PipelinePrivate
 				AttemptActivity = AttemptActivity > 0.0 ? FMath::Min(AttemptActivity, Left) : 0.0;
 				AttemptTimeout = AttemptTimeout > 0.0 ? FMath::Min(AttemptTimeout, Left) : Left;
 			}
+			FNativeLogicalTailLease FileCleanup;
+			if (ManagedPayload && Ex.DispatchCount == MAX_uint32)
+			{
+				OnOutcome(MakeManagedCapacityOutcome(TEXT("DispatchCapacity")));
+				return;
+			}
 			if (!Ex.SaveTo.IsEmpty())
 			{
+				if (ManagedPayload)
+				{
+					FileCleanup = Ex.Managed.Store->TryAddLogicalTailOnGT(Ex.Managed);
+					if (!FileCleanup.IsHeld())
+					{
+						OnOutcome(MakeManagedCapacityOutcome(TEXT("LogicalCapacity")));
+						return;
+					}
+				}
 				if (!Ex.TempFile.IsEmpty())
 				{
 					// An earlier attempt's file; removed off the game thread (spec 1: disk IO on UE::Tasks)
-					UE::Tasks::Launch(TEXT("VaRest.DeleteTemp"), [Stale = Ex.TempFile] { IFileManager::Get().Delete(*Stale, false, false, true); });
+					if (!ManagedPayload)
+						UE::Tasks::Launch(TEXT("VaRest.DeleteTemp"), [Stale = Ex.TempFile] { IFileManager::Get().Delete(*Stale, false, false, true); });
+					else if (Ex.FileCleanup.IsHeld())
+						DeleteManagedTemp(MoveTemp(Ex.FileCleanup), FString(Ex.TempFile));
+					// Otherwise its physical callback/owned IO still holds the earlier file's preadmitted cleanup.
+				}
+				if (IsManagedStopped(Exchange))
+					return;
+				if (IsManagedClosed(Exchange))
+				{
+					OnOutcome(FVaRestAttemptOutcome::Canceled());
+					return;
 				}
 				// Next to the destination: the same file system, so the final rename is a rename (spec 3.2: "atomic rename on
 				// success"). A new name for every start, not every attempt: a stage after the attempt boundary may re-issue
@@ -547,6 +640,8 @@ namespace VaRest::Http::PipelinePrivate
 			Request.ResponseFile = Ex.TempFile;
 			// Reviews M-6, M13: the transport stops a JSON body past its cap instead of receiving all of it first
 			Request.MaxBodyBytes = Ex.Handler.IsValid() && Ex.Handler->DecodesJson() ? Ex.MaxJsonBytes : 0;
+			if (Ex.MaxDynamicInputBytes>0 && Request.ResponseFile.IsEmpty())
+				Request.MaxBodyBytes=Request.MaxBodyBytes>0 ? FMath::Min(Request.MaxBodyBytes,Ex.MaxDynamicInputBytes) : Ex.MaxDynamicInputBytes;
 			Request.Clock = Cfg.Clock;
 			Request.Probe->UploadTotal = Ex.Body.ContentLength;
 			Ex.Probe = Request.Probe;
@@ -570,14 +665,36 @@ namespace VaRest::Http::PipelinePrivate
 			ThisDispatch.Serial = ++Ex.DispatchCount;
 			ThisDispatch.Probe = Request.Probe;
 			ThisDispatch.ResponseFile = Ex.TempFile;
+			std::optional<FManagedDispatchPreparation> Prepared;
+			if (ManagedPayload)
+			{
+				FManagedAttemptDelivery Delivery = [Exchange, Cleanup = MoveTemp(FileCleanup)](
+													   FDispatchTag&& Tag, FVaRestTransportResult&& Result, FVaRestOutcomeCallback&& Done) mutable {
+					Internals(*Exchange).State->OnAttemptDone(Exchange, MoveTemp(Tag), MoveTemp(Result), MoveTemp(Done), MoveTemp(Cleanup));
+				};
+				Prepared.emplace(ManagedPayload->DispatchesOnGT().PrepareOnGT(ThisDispatch, OnOutcome, Cfg.Clock, Delivery));
+				if (IsManagedStopped(Exchange))
+					return;
+				if (!Prepared->IsValid())
+				{
+					Ex.TempFile.Reset(); // this newly chosen name never reached a physical Start; older files keep their own cleanup owner
+					OnOutcome(IsManagedClosed(Exchange) ? FVaRestAttemptOutcome::Canceled() : MakeManagedCapacityOutcome(TEXT("DispatchCapacity")));
+					return;
+				}
+				Request.Clock = Prepared->ClockViewOnGT();
+			}
+			const auto& Dispatch = Prepared ? Prepared->TagOnGT() : ThisDispatch;
 			// IN-2: on the game thread, immediately before the transport starts
-			TracePoints::AttemptDispatched(Ex, ThisDispatch);
+			TracePoints::AttemptDispatched(Ex, Dispatch);
+			if (IsManagedStopped(Exchange))
+				return;
 			// The gap was this attempt's; the next one reports its own (IN-2), and so its own wait behind a refresh
 			Ex.NextGap = EVaRestTraceGap::None;
 			Ex.NextGapSeconds = 0.0;
 			Ex.AuthWait = 0.0;
 			Ex.AuthRefreshId = 0;
-			if (Exchange->IsCancelRequested() || Ex.bFinished || Ex.bCompletionQueued)
+			if (Exchange->IsCancelRequested() || Ex.bFinished || Ex.bCompletionQueued || IsManagedClosed(Exchange) ||
+				(Prepared && Ex.Phase != EVaRestExchangePhase::InChain))
 			{
 				// M4a final review A2 (review C M-1): the emit ran code that is not VaRest's -- a trace sink -- and it may
 				// cancel (concurrency review M-5's rule, kept at every other emit). No attempt goes out after Cancel() returned
@@ -589,28 +706,71 @@ namespace VaRest::Http::PipelinePrivate
 				Unsent.FailureDetail = TEXT("Canceled");
 				if (!Ex.bFinished)
 				{
-					TracePoints::AttemptEnded(Ex, Unsent, ThisDispatch, /*bCurrent*/ true);
+					TracePoints::AttemptEnded(Ex, Unsent, Dispatch, /*bCurrent*/ true);
 				}
-				OnOutcome(FVaRestAttemptOutcome::Canceled());
+				if (IsManagedStopped(Exchange))
+					return;
+				if (Prepared)
+				{
+					Ex.TempFile.Reset();
+					auto Unstarted = Prepared->TakeUnstartedOutcomeOnGT();
+					if (Unstarted)
+						Unstarted(FVaRestAttemptOutcome::Canceled());
+				}
+				else
+					OnOutcome(FVaRestAttemptOutcome::Canceled());
 				return;
 			}
 			// A call still held here belongs to a PerAttempt stage that proceeded again while it ran (a hedge; the stage
 			// contract does not promise concurrent trips): this dispatch becomes the live one, and the other's progress chain
 			// stops (ScheduleProgress), its end arriving as a stale one
 			Ex.Config->Clock->ClearTimer(Ex.ProgressTimer);
-			Ex.LiveDispatch = ThisDispatch.Serial;
-			Ex.LiveDispatchAttempt = ThisDispatch.Attempt;
-			Ex.TransportCall = Cfg.Transport->Start(MoveTemp(Request), [Guard = FCompletionGuard(Exchange, MoveTemp(ThisDispatch), MoveTemp(OnOutcome))](FVaRestTransportResult&& Result) mutable
+			if (IsManagedStopped(Exchange))
+				return;
+			if (Prepared && (IsManagedClosed(Exchange) || Ex.IsCancelRequested() || Ex.bFinished || Ex.bCompletionQueued ||
+								Ex.Phase != EVaRestExchangePhase::InChain))
 			{
-				Guard.Deliver(MoveTemp(Result));
-			});
+				FVaRestTransportResult Unsent;
+				Unsent.Failure = EVaRestTransportFailure::Canceled;
+				Unsent.FailureDetail = TEXT("Canceled");
+				if (!Ex.bFinished)
+					TracePoints::AttemptEnded(Ex, Unsent, Dispatch, true);
+				if (IsManagedStopped(Exchange))
+					return;
+				Ex.TempFile.Reset();
+				auto Unstarted = Prepared->TakeUnstartedOutcomeOnGT();
+				if (Unstarted)
+					Unstarted(FVaRestAttemptOutcome::Canceled());
+				return;
+			}
+			Ex.LiveDispatch = Dispatch.Serial;
+			Ex.LiveDispatchAttempt = Dispatch.Attempt;
+			const uint32 StartedSerial = Dispatch.Serial;
+			if (Prepared)
+			{
+				auto Call = Cfg.Transport->Start(MoveTemp(Request), Prepared->TakeCompletionOnGT());
+				if (IsManagedStopped(Exchange))
+					return; // no Cancel/service lookup after observed Stop; the returned owner dies on this GTK stack
+				if (Ex.bFinished || Ex.bCompletionQueued || Ex.LiveDispatch != StartedSerial)
+				{
+					Call->Cancel(); // a reentrant named handback/terminal must not be overwritten by the late Start return
+					return;
+				}
+				Ex.TransportCall = Call;
+			}
+			else
+				Ex.TransportCall = Cfg.Transport->Start(MoveTemp(Request), [Guard = FCompletionGuard(Exchange, MoveTemp(ThisDispatch), MoveTemp(OnOutcome))](FVaRestTransportResult&& Result) mutable {
+					Guard.Deliver(MoveTemp(Result));
+				});
+			if (IsManagedStopped(Exchange))
+				return;
 			if (bWantsProgress)
 			{
-				ScheduleProgress(Exchange, Ex.LiveDispatch);
+				ScheduleProgress(Exchange, Prepared ? StartedSerial : Ex.LiveDispatch);
 			}
 		}
 	};
-}
+	} // namespace VaRest::Http::PipelinePrivate
 
 FVaRestAttemptOutcome FVaRestAttemptOutcome::Canceled()
 {
@@ -667,6 +827,8 @@ void FVaRestStageNext::Proceed(const FVaRestExchangeRef& Exchange, FVaRestOutcom
 {
 	check(IsInGameThread());
 	const VaRest::Http::FExchangeState& Ex = VaRest::Http::Internals(*Exchange);
+	if (Ex.Managed.IsValid() && Ex.Managed.Control->IsStopped())
+		return;
 	// Only a request in the chain starts an attempt. Its answer accepted -- being decoded (Phase Decoding), delivered
 	// (Done), or its delivery queued (Task 8 review minor 1; Phase stays InChain until that task runs) -- a backoff, a park
 	// or a stage that proceeds again after it starts none: one check for re-review N-6's whole family (Task 8 re-review)
@@ -675,8 +837,39 @@ void FVaRestStageNext::Proceed(const FVaRestExchangeRef& Exchange, FVaRestOutcom
 		OnOutcome(FVaRestAttemptOutcome::Canceled());
 		return;
 	}
+	VaRest::Http::FNativeLogicalTailLease ManagedStack;
+	FVaRestOutcomeCallback ManagedOutcome;
+	if (Ex.Managed.IsValid())
+	{
+		const auto Control = Ex.Managed.Control;
+		if (Ex.State->GetManagedLifetime().Gate->IsClosed())
+		{
+			OnOutcome(FVaRestAttemptOutcome::Canceled());
+			return;
+		}
+		// The active Process stack and the retained callback are distinct obligations: a stage may drop its callback
+		// and reenter Stop before Process returns. Both are INCLUDED in the same64, never an uncounted borrowed stack.
+		ManagedStack = Ex.Managed.Store->TryAddLogicalTailOnGT(Ex.Managed);
+		if (!ManagedStack.IsHeld())
+		{
+			OnOutcome(VaRest::Http::MakeManagedCapacityOutcome(TEXT("LogicalCapacity")));
+			return;
+		}
+		auto* Payload = ManagedStack.ManagedPayloadOnGT();
+		check(Payload);
+		ManagedOutcome = Payload->OutcomesOnGT().WrapOnGT(OnOutcome);
+		if (Control->IsStopped())
+			return; // local cleanup can destroy a captured owner which reenters Stop
+		if (!ManagedOutcome)
+		{
+			OnOutcome(Ex.State->GetManagedLifetime().Gate->IsClosed() ? FVaRestAttemptOutcome::Canceled()
+																	  : VaRest::Http::MakeManagedCapacityOutcome(TEXT("LogicalCapacity")));
+			return;
+		}
+	}
 	checkf(Chain->IsValidIndex(Index), TEXT("FVaRestStageNext: the transport stage is last and never proceeds"));
-	(*Chain)[Index]->Process(Exchange, FVaRestStageNext(Chain, Index + 1), MoveTemp(OnOutcome));
+	auto& Callback = Ex.Managed.IsValid() ? ManagedOutcome : OnOutcome;
+	(*Chain)[Index]->Process(Exchange, FVaRestStageNext(Chain, Index + 1), MoveTemp(Callback));
 }
 
 FVaRestStageRef VaRest::Http::MakeAttemptBoundaryStage()
@@ -704,6 +897,10 @@ VaRest::Http::FFinish VaRest::Http::FClientState::MakeFinish(const FExchangeStat
 	Finish.bKeepBody = Exchange.bKeepBody;
 	Finish.DecodeOptions = Exchange.DecodeOptions;
 	Finish.ParseOptions.MaxInputBytes = Exchange.MaxJsonBytes;
+	if (Exchange.Handler)
+		Exchange.Handler->ConfigureParseOptions(Finish.ParseOptions);
+	if (Exchange.MaxDynamicInputBytes>0)
+		Finish.ParseOptions.MaxInputBytes=Finish.ParseOptions.MaxInputBytes>0 ? FMath::Min(Finish.ParseOptions.MaxInputBytes,Exchange.MaxDynamicInputBytes) : Exchange.MaxDynamicInputBytes;
 	Finish.Clock = Exchange.Config->Clock;
 	Finish.Envelope = Exchange.Envelope;
 	Finish.LogLevel = Exchange.LogLevel;
@@ -713,6 +910,12 @@ VaRest::Http::FFinish VaRest::Http::FClientState::MakeFinish(const FExchangeStat
 bool VaRest::Http::FClientState::Resolve(FExchangeState& Exchange, FString& OutError) const
 {
 	const FClientConfig& Cfg = *Exchange.Config;
+	if (Exchange.Handler && !Exchange.Handler->ValidateConfiguration(OutError)) return false;
+	if (Exchange.bOnHttpThread && Exchange.Handler && Exchange.Handler->RequiresGameThreadDelivery())
+	{
+		OutError=TEXT("dynamic results require game-thread delivery; OnHttpThread is not supported");
+		return false;
+	}
 	// Final review I3: the verb is request-line text. curl sends any verb but GET, POST, PUT, HEAD and DELETE verbatim as
 	// CURLOPT_CUSTOMREQUEST (CurlHttp.cpp:990-993), so CR LF or a space in it would rewrite the request line and inject
 	// headers. The engine refuses only an empty one, as a retryable-looking EHttpFailureReason::Other
@@ -729,6 +932,12 @@ bool VaRest::Http::FClientState::Resolve(FExchangeState& Exchange, FString& OutE
 			*EscapeForLog(Exchange.Verb));
 		return false;
 	}
+	// VaRest exposes HTTP requests, not proxy tunnels. Some engine backends assert on CONNECT in PreCheck.
+	if (Exchange.Verb.Equals(TEXT("CONNECT"), ESearchCase::IgnoreCase))
+	{
+		OutError = TEXT("CONNECT proxy tunnels are not supported by VaRest");
+		return false;
+	}
 	if (Cfg.BaseUrl.Contains(TEXT("#")))
 	{
 		// Decision 33 (review M22): a base URL may carry a query (kept, before the request's own pairs), not a fragment
@@ -741,7 +950,7 @@ bool VaRest::Http::FClientState::Resolve(FExchangeState& Exchange, FString& OutE
 
 	// The template is expanded before the join, so a brace in the base URL is never touched. Only the path is a template
 	// (review M12): a brace in the query is the caller's text and goes out as written.
-	TValueOrError<FString, FString> Expanded = ExpandPathTemplate(Exchange.PathTemplate, Exchange.PathParams);
+	TValueOrError<FString, FString> Expanded = ExpandPathParameters(Exchange.PathTemplate, Exchange.PathParams);
 	if (Expanded.HasError())
 	{
 		// Final review M8: ExpandPathTemplate has no redactor, so its message names no template; an absolute Path may carry
@@ -778,9 +987,12 @@ bool VaRest::Http::FClientState::Resolve(FExchangeState& Exchange, FString& OutE
 
 	// Client defaults, then the request's own: they win whatever the case of the name (spec 3.2: "Every content type can be overridden with Header")
 	Exchange.RequestHeaders = Cfg.DefaultHeaders;
+	if (Exchange.bPreserveOwnHeaderLines)
+		for (const auto& Pair : Exchange.OwnHeaders) Exchange.RequestHeaders.Remove(Pair.Key);
 	for (const FVaRestHeaders::FPair& Pair : Exchange.OwnHeaders)
 	{
-		Exchange.RequestHeaders.Set(Pair.Key, Pair.Value);
+		if (Exchange.bPreserveOwnHeaderLines) Exchange.RequestHeaders.Add(Pair.Key, Pair.Value);
+		else Exchange.RequestHeaders.Set(Pair.Key, Pair.Value);
 	}
 	if (!Exchange.Body.IsEmpty() && Exchange.Verb.Equals(TEXT("GET"), ESearchCase::IgnoreCase))
 	{
@@ -812,6 +1024,10 @@ bool VaRest::Http::FClientState::Resolve(FExchangeState& Exchange, FString& OutE
 
     if (Exchange.bQueueWhenOffline)
     {
+		if (Cfg.ManagedQueueStatus!=EManagedQueueStatus::Ordinary && Cfg.ManagedQueueStatus!=EManagedQueueStatus::Active)
+		{ OutError=Cfg.ManagedQueueStatus==EManagedQueueStatus::AccountRequired ? TEXT("QueueAccountRequired") : TEXT("QueueNotActivated");return false; }
+		if (Cfg.QueueBinding && (!Exchange.QueueCapture.IsHeld() || !Exchange.QueueCapture.GetBinding()->AllowsEnqueue()))
+		{ OutError = TEXT("QueueDetached"); return false; }
         if (Exchange.bIsAuthRefresh || Exchange.bConnectivityProbe || !Exchange.QueueReplayOf.QueueId.IsEmpty()
             || Cfg.QueueName.IsEmpty() || !Cfg.QueueConfigError.IsEmpty() || !Cfg.StorageConfigError.IsEmpty()
             || !Exchange.Queue.IsValid() || (!Exchange.bIdempotent && !IsIdempotentVerb(Exchange.Verb))
@@ -860,8 +1076,10 @@ bool VaRest::Http::FClientState::Resolve(FExchangeState& Exchange, FString& OutE
 	Exchange.Timeout = Exchange.TimeoutOverride.Get(Cfg.Timeout);
 	Exchange.ActivityTimeout = Exchange.ActivityTimeoutOverride.Get(Cfg.ActivityTimeout);
 	Exchange.MaxJsonBytes = Exchange.MaxJsonBytesOverride.Get(Cfg.MaxJsonBytes);
+	Exchange.MaxDynamicInputBytes = Exchange.Handler ? Exchange.Handler->GetDynamicMaxInputBytes() : 0;
 	Exchange.DecodeOptions.Naming = Exchange.Naming;
 	Exchange.DecodeOptions.bStrict = Exchange.bStrictDecode;
+	Exchange.DecodeOptions.Rules = Cfg.JsonRules;
 	Exchange.LogLevel = EffectiveLogLevel(Cfg.LogLevel);
 	if (Exchange.RetryOverride.IsSet() && Exchange.RetryPolicy.IsEnabled() && !Exchange.bRetryEligible && Exchange.LogLevel != EVaRestLogLevel::None
 		&& UE_LOG_ACTIVE(LogVaRestHttp, Log))
@@ -895,6 +1113,8 @@ void VaRest::Http::FClientState::Enter(const FVaRestExchangeRef& Exchange)
 	LLM_SCOPE_BYTAG(VaRest);
 	FExchangeState& Ex = Internals(*Exchange);
 	FApiScope Scope(Ex);
+	if (Ex.Managed.IsValid() && Ex.Managed.Control->IsStopped())
+		return; // already-owned managed Enter is discarded; never enter normal trace/delivery after captured Stop
 	// Spec 3.1: "A request snapshots the configuration at Send()" -- SendRequest took it (decision 27); an exchange made
 	// any other way gets one here
 	if (!Ex.Config.IsValid())
@@ -902,6 +1122,14 @@ void VaRest::Http::FClientState::Enter(const FVaRestExchangeRef& Exchange)
 		Ex.Config = GetConfig();
 	}
 	Ex.StartedAt = Ex.Config->Clock->Now();
+	if (Ex.Managed.IsValid() && Ex.Managed.Control->IsStopped())
+		return; // exact original clock is an external callout and may have reentered Stop
+	if (Ex.Managed.IsValid() && ManagedLifetime.Gate->IsClosed())
+	{
+		Ex.CancelReason = EVaRestCancelReason::User;
+		Ex.bCancelRequested = true;
+		Ex.PersistenceAbort->store(true, std::memory_order_relaxed);
+	}
 	Ex.Phase = EVaRestExchangePhase::InChain;
 	// Task 15 review M-1: a refresh request's id is preset (spec review I-2), and a second exchange under one id would
 	// replace the first here -- CancelAll and the shutdown cancel would no longer see the first (Complete removes only its
@@ -936,18 +1164,33 @@ void VaRest::Http::FClientState::Enter(const FVaRestExchangeRef& Exchange)
 		// Canceled before it reached the game thread, its owner is already gone, or the engine is exiting: no transport call.
 		// Still Started and Completed for a sink (Inspector 2.3: the record is sealed, not missing).
 		TracePoints::Started(Ex);
+		if (Ex.Managed.IsValid() && Ex.Managed.Control->IsStopped())
+			return;
 		Complete(Exchange, MakeFinish(Ex));
 		return;
 	}
 
 	FString Problem;
 	const bool bResolved = Ex.BuildError.IsEmpty() && Resolve(Ex, Problem);
+	if (Ex.Managed.IsValid() && Ex.Managed.Control->IsStopped())
+		return; // Resolve can call the configured transport's virtual body-policy hook
 	// IN-1, after Resolve: a sink sees the URL and the headers the request goes out with
 	TracePoints::Started(Ex);
+	if (Ex.Managed.IsValid() && Ex.Managed.Control->IsStopped())
+		return;
+	if (Ex.Managed.IsValid() && ManagedLifetime.Gate->IsClosed())
+	{
+		Ex.CancelReason = EVaRestCancelReason::User;
+		Ex.bCancelRequested = true;
+		Ex.PersistenceAbort->store(true, std::memory_order_relaxed);
+		Complete(Exchange, MakeFinish(Ex));
+		return;
+	}
 	if (!bResolved)
 	{
 		FFinish Finish = MakeFinish(Ex);
 		Finish.Error.Kind = EVaRestErrorKind::Config;
+		if (Ex.Handler) Finish.Error.Code=Ex.Handler->GetConfigurationFailureCode();
 		Finish.Error.Message = Ex.BuildError.IsEmpty() ? MoveTemp(Problem) : Ex.BuildError;
 		// It never reaches the log stage: its Basic line is written here
 		LogConfigError(Ex, Finish.Error.Message);
@@ -959,18 +1202,26 @@ void VaRest::Http::FClientState::Enter(const FVaRestExchangeRef& Exchange)
 		OnChainDone(Exchange, MakeOfflineOutcome());
 		return;
 	}
-	FVaRestStageNext(Ex.Config->Chain.ToSharedRef(), 0).Proceed(Exchange, [Exchange](FVaRestAttemptOutcome&& Outcome)
-	{
+	FVaRestStageNext(Ex.Config->Chain.ToSharedRef(), 0).Proceed(Exchange, [Exchange](FVaRestAttemptOutcome&& Outcome) {
 		Internals(*Exchange).State->OnChainDone(Exchange, MoveTemp(Outcome));
 	});
 }
 
 void VaRest::Http::FClientState::OnAttemptDone(const FVaRestExchangeRef& Exchange, FDispatchTag&& Tag, FVaRestTransportResult&& Result, FVaRestOutcomeCallback&& OnOutcome)
 {
+	FNativeLogicalTailLease NoFileCleanup;
+	OnAttemptDone(Exchange, MoveTemp(Tag), MoveTemp(Result), MoveTemp(OnOutcome), MoveTemp(NoFileCleanup));
+}
+
+void VaRest::Http::FClientState::OnAttemptDone(const FVaRestExchangeRef& Exchange, FDispatchTag&& Tag,
+	FVaRestTransportResult&& Result, FVaRestOutcomeCallback&& OnOutcome, FNativeLogicalTailLease&& FileCleanup)
+{
 	using namespace PipelinePrivate;
 	check(IsInGameThread());
 	LLM_SCOPE_BYTAG(VaRest);
 	FExchangeState& Ex = Internals(*Exchange);
+	if (IsManagedStopped(Exchange))
+		return;
 	// M4a final review A1 (VaRest-tqt): only the end of the dispatch TransportCall holds touches the exchange's one-call
 	// slots. Any other is stale: a call a stage answered for, which the attempt boundary or EndWaits canceled, or one a
 	// PerAttempt stage's second trip replaced. Its slots now name another call (or none), so resetting them would leave
@@ -981,6 +1232,13 @@ void VaRest::Http::FClientState::OnAttemptDone(const FVaRestExchangeRef& Exchang
 		Ex.TransportCall.Reset();
 		Ex.LiveDispatch = 0;
 	}
+	if (IsManagedStopped(Exchange))
+		return;
+	if (Ex.Managed.IsValid() && !Tag.ResponseFile.IsEmpty() && Tag.ResponseFile == Ex.TempFile && !Ex.bFinished && !Ex.bCompletionQueued)
+	{
+		check(FileCleanup.IsHeld() && !Ex.FileCleanup.IsHeld());
+		Ex.FileCleanup = MoveTemp(FileCleanup); // later one finalizer/next attempt inherits this EXISTING file permission
+	}
 	// Spec 4.8: every attempt that reached a transport, as the transport counted it -- a retried or replayed attempt each
 	// time, a late one whose request a cancel already finished, and a stale one (their bytes moved all the same)
 	FHttpStats::Transferred(Counters, Result.BytesUp, Result.BytesDown);
@@ -990,16 +1248,25 @@ void VaRest::Http::FClientState::OnAttemptDone(const FVaRestExchangeRef& Exchang
 		MarkOwnerGone(Ex);
 	}
 	// Only a live physical dispatch is evidence. A locally dropped completion and an overdue dispatch are not.
-	if (bCurrent && !Ex.bFinished && !Ex.bCompletionQueued && !Ex.IsCancelRequested() && !IsOwnerGone(Ex)
-		&& (Ex.DeadlineAt <= 0.0 || Ex.Config->Clock->Now() < Ex.DeadlineAt)
-		&& Result.FailureDetail != FName(TEXT("TransportDropped"))
-		&& Result.Failure != EVaRestTransportFailure::Canceled)
+	bool bEvidence = bCurrent && !Ex.bFinished && !Ex.bCompletionQueued && !Ex.IsCancelRequested() && !IsOwnerGone(Ex);
+	if (bEvidence && Ex.DeadlineAt > 0.0)
+	{
+		bEvidence = Ex.Config->Clock->Now() < Ex.DeadlineAt;
+		if (IsManagedStopped(Exchange))
+			return;
+		if (Ex.Managed.IsValid() && (IsManagedClosed(Exchange) || Ex.IsCancelRequested()))
+			bEvidence = false;
+	}
+	if (bEvidence && Result.FailureDetail != FName(TEXT("TransportDropped")) && Result.Failure != EVaRestTransportFailure::Canceled)
 	{
 		// A received status proves reachability even if its body hit a shorter wire timeout.
-		if (Result.Status > 0) Ex.Config->Connectivity->ReportOnline(Ex.RequestId);
+		if (Result.Status > 0)
+			Ex.Config->Connectivity->ReportOnline(Ex.RequestId);
 		else if (KindFor(Result.Failure, Result.FailureDetail) == EVaRestErrorKind::Connection)
 			Ex.Config->Connectivity->ReportOffline(Ex.RequestId);
 	}
+	if (IsManagedStopped(Exchange))
+		return;
 	if (!Ex.bFinished)
 	{
 		// IN-3, "when the outcome re-enters the stage chain". After Completed (a cancel finished the request while the
@@ -1008,11 +1275,17 @@ void VaRest::Http::FClientState::OnAttemptDone(const FVaRestExchangeRef& Exchang
 		// AttemptDispatched stays paired; it announces no excerpt and leaves the decode marker alone.
 		TracePoints::AttemptEnded(Ex, Result, Tag, bCurrent);
 	}
+	if (IsManagedStopped(Exchange))
+		return;
 	if (bCurrent)
 	{
 		Ex.Config->Clock->ClearTimer(Ex.ProgressTimer);
+		if (IsManagedStopped(Exchange))
+			return;
 		// The final counts, so a caller sees 100% even when the transfer was quicker than one tick (decision 8)
 		DeliverProgress(Ex);
+		if (IsManagedStopped(Exchange))
+			return;
 	}
 	else if (!Tag.ResponseFile.IsEmpty() && (Tag.ResponseFile != Ex.TempFile || Ex.bFinished || Ex.bCompletionQueued))
 	{
@@ -1021,7 +1294,13 @@ void VaRest::Http::FClientState::OnAttemptDone(const FVaRestExchangeRef& Exchang
 		// call held it open. The call has ended, so this cannot race it; off the game thread (spec 1). Ex.TempFile while the
 		// request is in the chain or decoding is its later owner's: the next dispatch deletes it, or the decode task renames
 		// or deletes it (RunDecode); once the answer is accepted without a decode, nothing else will.
-		UE::Tasks::Launch(TEXT("VaRest.DeleteTemp"), [Stale = MoveTemp(Tag.ResponseFile)] { IFileManager::Get().Delete(*Stale, false, false, true); });
+		if (Ex.Managed.IsValid())
+		{
+			check(FileCleanup.IsHeld());
+			DeleteManagedTemp(MoveTemp(FileCleanup), MoveTemp(Tag.ResponseFile));
+		}
+		else
+			UE::Tasks::Launch(TEXT("VaRest.DeleteTemp"), [Stale = MoveTemp(Tag.ResponseFile)] { IFileManager::Get().Delete(*Stale, false, false, true); });
 	}
 	FVaRestAttemptOutcome Outcome;
 	Outcome.Status = Result.Status;
@@ -1035,6 +1314,13 @@ void VaRest::Http::FClientState::OnAttemptDone(const FVaRestExchangeRef& Exchang
 	Outcome.BytesUp = Result.BytesUp;
 	Outcome.BytesDown = Result.BytesDown;
 	OnOutcome(MoveTemp(Outcome));
+	// A custom stage may consume the transport's canceled end while retaining its own outcome callback. The current
+	// physical call has ended, so cancellation can now retire this logical request without waiting for that stage.
+	if (bCurrent && !IsManagedStopped(Exchange) && Ex.IsCancelRequested() && !Ex.bFinished && !Ex.bCompletionQueued
+		&& Ex.Phase == EVaRestExchangePhase::InChain)
+	{
+		Complete(Exchange, MakeFinish(Ex));
+	}
 }
 
 void VaRest::Http::FClientState::OnChainDone(const FVaRestExchangeRef& Exchange, FVaRestAttemptOutcome&& Outcome)
@@ -1042,6 +1328,8 @@ void VaRest::Http::FClientState::OnChainDone(const FVaRestExchangeRef& Exchange,
 	using namespace PipelinePrivate;
 	check(IsInGameThread());
 	FExchangeState& Ex = Internals(*Exchange);
+	if (IsManagedStopped(Exchange))
+		return;
 	if (Ex.bFinished || Ex.bCompletionQueued || Ex.Phase != EVaRestExchangePhase::InChain)
 	{
 		// Finished, its answer's delivery queued (Task 8 review minor 1), or a second outcome while the first is being
@@ -1049,7 +1337,13 @@ void VaRest::Http::FClientState::OnChainDone(const FVaRestExchangeRef& Exchange,
 		// finished or queued one's attempt file is removed (a second outcome's file is its decode task's to finish).
 		if ((Ex.bFinished || Ex.bCompletionQueued) && !Ex.TempFile.IsEmpty())
 		{
-			UE::Tasks::Launch(TEXT("VaRest.DeleteTemp"), [Stale = Ex.TempFile] { IFileManager::Get().Delete(*Stale, false, false, true); });
+			if (Ex.Managed.IsValid())
+			{
+				if (Ex.FileCleanup.IsHeld())
+					DeleteManagedTemp(MoveTemp(Ex.FileCleanup), FString(Ex.TempFile));
+			}
+			else
+				UE::Tasks::Launch(TEXT("VaRest.DeleteTemp"), [Stale = Ex.TempFile] { IFileManager::Get().Delete(*Stale, false, false, true); });
 		}
 		return;
 	}
@@ -1078,16 +1372,30 @@ void VaRest::Http::FClientState::OnChainDone(const FVaRestExchangeRef& Exchange,
 	Finish.bBodyInFile = Outcome.bBodyInFile;
 
 	static const FName TooLarge(TEXT("ResponseTooLarge"));
+	int64 EffectiveInputLimit=Ex.MaxDynamicInputBytes;
+	if (Ex.Handler && Ex.Handler->DecodesJson() && Ex.MaxJsonBytes>0)
+		EffectiveInputLimit=EffectiveInputLimit>0 ? FMath::Min(EffectiveInputLimit,Ex.MaxJsonBytes) : Ex.MaxJsonBytes;
+	const bool bDynamicOversized=Ex.MaxDynamicInputBytes>0 && !Finish.bBodyInFile && Finish.Body.Num()>EffectiveInputLimit;
+	if (Ex.MaxDynamicInputBytes>0 && (bDynamicOversized || (Outcome.IsTransportFailure() && Outcome.FailureDetail==TooLarge)))
+		Finish.bLogicalDecodeBudgetRefused=true;
+	if (bDynamicOversized) Finish.Body.Reset(); // apply the stricter JSON/dynamic cap before synthetic/cache/custom retention
 	// Plan decision 12: one classification for this error and for the retry stage (Task 8)
 	const FAttemptClass Class = ClassifyAttempt(Outcome);
-	if (Outcome.IsTransportFailure() && Outcome.FailureDetail == TooLarge && Class.Kind == EVaRestErrorKind::Http)
+	if (((Outcome.IsTransportFailure() && Outcome.FailureDetail == TooLarge) || bDynamicOversized) && Class.Kind == EVaRestErrorKind::Http)
 	{
 		// Reviews M-6, M13: an error response whose body passed the JSON cap is still the HTTP error it was; the body is gone
 		Finish.Error.Kind = EVaRestErrorKind::Http;
 		Finish.Error.HttpStatus = Outcome.Status;
-		Finish.Error.Message = FString::Printf(TEXT("%s (its body is over the MaxJsonBytes limit of %lld and was not kept)"),
-			*FVaRestError::DefaultMessage(EVaRestErrorKind::Http, Outcome.Status), Ex.MaxJsonBytes);
+		Finish.Error.Message = Ex.MaxDynamicInputBytes>0
+			? FString::Printf(TEXT("%s (its body is over the effective input limit of %lld and was not kept)"),*FVaRestError::DefaultMessage(EVaRestErrorKind::Http,Outcome.Status),EffectiveInputLimit)
+			: FString::Printf(TEXT("%s (its body is over the MaxJsonBytes limit of %lld and was not kept)"),*FVaRestError::DefaultMessage(EVaRestErrorKind::Http,Outcome.Status),Ex.MaxJsonBytes);
 		Finish.Error.bRetryable = Class.bRetryable;
+	}
+	else if (Ex.MaxDynamicInputBytes>0 && ((Outcome.IsTransportFailure() && Outcome.FailureDetail==TooLarge) || bDynamicOversized))
+	{
+		Finish.Error.Kind=EVaRestErrorKind::Config;
+		Finish.Error.Code=TEXT("DecodeBudget");
+		Finish.Error.Message=FString::Printf(TEXT("the response exceeds the effective dynamic input limit of %lld"),EffectiveInputLimit);
 	}
 	else if (Outcome.IsTransportFailure() && Outcome.FailureDetail == TooLarge)
 	{
@@ -1113,6 +1421,14 @@ void VaRest::Http::FClientState::OnChainDone(const FVaRestExchangeRef& Exchange,
 		Finish.Error.bRetryable = Class.bRetryable;
 	}
 
+	const bool bCanDecode=!Ex.Handler || Ex.Handler->PrepareDecodeOnGT(Finish);
+	if (IsManagedStopped(Exchange)) return;
+	if (Ex.Managed.IsValid())
+	{
+		BeginManagedCompletion(Exchange, MoveTemp(Finish), bCanDecode);
+		return;
+	}
+	if (!bCanDecode) { Complete(Exchange,MoveTemp(Finish));return; }
 	const bool bHasBody = Finish.Body.Num() > 0 || Finish.bBodyInFile;
 	// A download to finish (SaveTo's success, from the transport or from a stage, review M1) or to clean up: disk IO, never
 	// on the game thread
@@ -1147,7 +1463,9 @@ void VaRest::Http::FClientState::OnChainDone(const FVaRestExchangeRef& Exchange,
 		Finish.ExcerptAttempt = Ex.ExcerptOnDecodeAttempt;
 		Finish.ExcerptDispatchId = Ex.ExcerptOnDecodeDispatchId;
 		Finish.ExcerptRedactor = RedactorFor(Ex);
-		Finish.ExcerptCap = FVaRestTrace::GetDetailSettings().BodyCap;
+		const auto ExcerptSettings = FVaRestTrace::GetDetailSettings();
+		Finish.ExcerptCap = ExcerptSettings.BodyCap;
+		Finish.ExcerptBinaryCap = ExcerptSettings.BinaryCap;
 		// Task 21 review M-1: handed over, so the decode task resolves it. EmitOnDecode drops a handed-over excerpt only when
 		// no sink wants Bodies any more; the body check above keeps its empty-body return from dropping one. One not handed
 		// over (an error, an empty body a stage put there, a request finished first) stays marked and resolves as Skipped:
@@ -1156,6 +1474,11 @@ void VaRest::Http::FClientState::OnChainDone(const FVaRestExchangeRef& Exchange,
 		Ex.ExcerptOnDecodeDispatchId = 0;
 	}
 	Finish.bTimeDecode = FVaRestTrace::Detail() != EVaRestTraceDetail::None;
+	if (Ex.Handler && Ex.Handler->GetCompletionPolicy()==EResultCompletionPolicy::LaterFrame)
+	{
+		FDynamicRequestAccess::BeginNativeDecodeOnGT(Exchange,MoveTemp(Finish));
+		return;
+	}
 	// Re-review N-6: a stage that waits (a backoff, a park) is ended here, as Complete ends it -- the decode task runs for
 	// a while before Complete, and a timer or a refresh's end in that window would start a network attempt for a request
 	// already being delivered; so is a retry waiting in the limiter's queue (Task 8 review minor 3). Ended right after the
@@ -1179,7 +1502,7 @@ void VaRest::Http::FClientState::OnChainDone(const FVaRestExchangeRef& Exchange,
 		// scope (TaskPrivate.h:192, :521); one from elsewhere -- a custom stage answering from its own timer -- would not.
 		LLM_SCOPE_BYTAG(VaRest);
 		// Spec 1: "Parsing, decoding, cache disk IO ... run on UE::Tasks background tasks"
-		RunDecode(*Decoder, Pending, Internals(*Held));
+		RunDecode(Decoder.Get(), Pending, Internals(*Held));
 		OnGameThread(TEXT("VaRest.Deliver"), [Target = MoveTemp(Held), Delivered = MoveTemp(Decoder), Done = MoveTemp(Pending)]() mutable
 		{
 			FExchangeState& Returned = Internals(*Target);
@@ -1198,15 +1521,52 @@ void VaRest::Http::FClientState::Complete(const FVaRestExchangeRef& Exchange, FF
 	using namespace PipelinePrivate;
 	check(IsInGameThread());
 	FExchangeState& Ex = Internals(*Exchange);
+	if (Ex.Managed.IsValid())
+	{
+		BeginManagedCompletion(Exchange, MoveTemp(Finish), false);
+		return;
+	}
 	if (Ex.bFinished)
 	{
 		return;
 	}
+	if (Ex.bDynamicFinalizing) return;
 	if (Ex.Phase == EVaRestExchangePhase::Decoding && !Ex.Handler.IsValid())
 	{
 		// Review C-3: a decode task holds the handler. It completes the exchange when it returns (as Canceled when the
 		// cancel flag is set: see below), so finishing here would leave nothing to deliver to and lose every callback.
 		return;
+	}
+	const bool bDynamic=Ex.Handler && Ex.Handler->GetCompletionPolicy()==EResultCompletionPolicy::LaterFrame;
+	if (bDynamic && !Ex.bLaterFrameReady)
+	{
+		if (Ex.bLaterFramePending) return;
+		Ex.bLaterFramePending=true;
+		Ex.bCompletionQueued=true;
+		auto Pending=MakeShared<FDeferredDynamicFinish,ESPMode::ThreadSafe>();
+		Pending->Finish=MoveTemp(Finish);
+		Pending->Abandon=[Exchange] { if (const auto State=Internals(*Exchange).State) State->DropDeferredDynamicCompletion(Exchange); };
+		TUniqueFunction<void()> Resume=[Exchange,Pending]() mutable {
+			Pending->bConsumed=true;
+			Pending->Abandon.Reset();
+			auto& Returned=Internals(*Exchange);
+			Returned.bLaterFrameReady=true;
+			Returned.bLaterFramePending=false;
+			if (Returned.State) Returned.State->Complete(Exchange,MoveTemp(Pending->Finish));
+		};
+		if (Ex.Handler->DeferCompletionOnGT(Resume))
+		{
+			EndWaits(Ex); // pending flag already bars reentrant outcomes; initial frame permission is already selected
+			return;
+		}
+		Pending->bConsumed=true;
+		Pending->Abandon.Reset();
+		Finish=MoveTemp(Pending->Finish);
+		Ex.bLaterFramePending=false;
+		Ex.bLaterFrameReady=true;
+		Finish.Error.Kind=EVaRestErrorKind::Config;
+		Finish.Error.Code=TEXT("DecodeBudget");
+		Finish.Error.Message=TEXT("the dynamic request has no available preadmitted frame completion");
 	}
 	const bool bOwnedSilentShutdown = Ex.bPersistenceOwned && Ex.CancelReason == EVaRestCancelReason::Shutdown;
 	if (Ex.ApiDepth > 0 && !bOwnedSilentShutdown)
@@ -1232,6 +1592,20 @@ void VaRest::Http::FClientState::Complete(const FVaRestExchangeRef& Exchange, FF
 	}
 	ReleasePersistenceCompletion(Ex.PersistenceCompletionTicket);
 	Ex.PersistenceCompletionTicket = 0;
+	if (bDynamic)
+	{
+		TGuardValue<bool> Finalizing(Ex.bDynamicFinalizing,true);
+		if (IsOwnerGone(Ex)) MarkOwnerGone(Ex);
+		if (IsShuttingDown()) { Ex.CancelReason=EVaRestCancelReason::Shutdown;Ex.bCancelRequested=true; }
+		if (Ex.IsCancelRequested() || Finish.bQueued) Ex.Handler->DiscardValue();
+		else Ex.Handler->Finalize(Finish);
+		Finish.Response.Elapsed=Ex.Config->Clock->Now()-Ex.StartedAt;
+		// Finalizer/default/copy/clock work has returned. A newly invalidated value is discarded before the final sample.
+		if (IsOwnerGone(Ex)) MarkOwnerGone(Ex);
+		if (IsShuttingDown()) { Ex.CancelReason=EVaRestCancelReason::Shutdown;Ex.bCancelRequested=true; }
+		if (Ex.IsCancelRequested()) Ex.Handler->DiscardValue();
+		Ex.Handler->ValidateTerminalOnGT(Finish);
+	}
 
 	if (IsOwnerGone(Ex))
 	{
@@ -1268,7 +1642,7 @@ void VaRest::Http::FClientState::Complete(const FVaRestExchangeRef& Exchange, FF
 	EndWaits(Ex);
 
 	const FClientConfig& Cfg = *Ex.Config;
-	Finish.Response.Elapsed = Cfg.Clock->Now() - Ex.StartedAt;
+	if (!bDynamic) Finish.Response.Elapsed = Cfg.Clock->Now() - Ex.StartedAt;
 	Finish.Response.Attempts = Ex.Attempt;
 	if (Finish.Error.IsError())
 	{
@@ -1283,6 +1657,7 @@ void VaRest::Http::FClientState::Complete(const FVaRestExchangeRef& Exchange, FF
 	}
 
 	Ex.bDone = true;
+    Ex.QueueCapture.Reset(); // terminal legacy exchange cannot admit more queue IO; accepted jobs retain their own tickets
     if (Ex.bQueueWhenOffline) Ex.QueueAdmission.store(EQueueAdmission::Finished, std::memory_order_release);
 	// Task 16 review M-7: this exchange's own entry only. A second exchange that Enter let in under the same id (it ensures)
 	// replaced it; removing by id would take that one out, and CancelAll and the shutdown cancel would no longer reach it.
@@ -1296,6 +1671,7 @@ void VaRest::Http::FClientState::Complete(const FVaRestExchangeRef& Exchange, FF
 		// whether or not the map entry was this exchange's: a second exchange under the id (the ensure in Enter) replaced
 		// it, and both were counted in
 		FHttpStats::RequestFinished(Counters);
+		Ex.bStatsFinished=true;
 	}
 	// IN-5: before any callback, OnHttpThread ones included, and also when none will run (owner gone, shutdown)
 	TracePoints::Completed(Ex, Finish);
@@ -1306,7 +1682,8 @@ void VaRest::Http::FClientState::Complete(const FVaRestExchangeRef& Exchange, FF
 	TUniquePtr<IResultHandler> Handler = MoveTemp(Ex.Handler);
 	// Spec 3.2: owner gone -> no callbacks; nor at engine exit (decision 2)
 	const bool bSilent = Ex.CancelReason == EVaRestCancelReason::OwnerGone || Ex.CancelReason == EVaRestCancelReason::Shutdown;
-	if (!Handler.IsValid() || bSilent)
+	// Completed is a user callout; it can retire a managed wrapper or invalidate an ordinary request owner.
+	if (!Handler.IsValid() || bSilent || IsOwnerGone(Ex) || IsShuttingDown() || ManagedAdmissionIsClosed())
 	{
 		return;
 	}
@@ -1319,7 +1696,14 @@ void VaRest::Http::FClientState::Complete(const FVaRestExchangeRef& Exchange, FF
         if (Queued) Queued(Finish.QueueId);
         return;
     }
-	if (Ex.bOnHttpThread)
+	if (Finish.Error.IsError() && PrimaryError.IsBound())
+	{
+		const auto ObserverOwner=AsShared();
+		const FVaRestError Error=Finish.Error;
+		ObserverOwner->PrimaryError.Broadcast(Error);
+		if (IsShuttingDown() || IsOwnerGone(Ex) || ManagedAdmissionIsClosed()) return;
+	}
+	if (Ex.bOnHttpThread && !Handler->RequiresGameThreadDelivery())
 	{
 		// Decision 4: the game thread has seen the result (Completed, Task 15); the callbacks run on a worker.
 		// Decision 28 (review C-5): the owner, live here on the game thread, is pinned until the callbacks return -- a
@@ -1350,6 +1734,25 @@ void VaRest::Http::FClientState::Complete(const FVaRestExchangeRef& Exchange, FF
 	Handler->Deliver(Finish);
 }
 
+void VaRest::Http::FClientState::DropDeferredDynamicCompletion(const FVaRestExchangeRef& Exchange)
+{
+	check(IsInGameThread());
+	auto& Ex=Internals(*Exchange);
+	if (Ex.bFinished) return;
+	Ex.bLaterFramePending=false;
+	Ex.bCompletionQueued=false;
+	Ex.CancelReason=IsShuttingDown() ? EVaRestCancelReason::Shutdown : EVaRestCancelReason::OwnerGone;
+	Ex.bCancelRequested=true;
+	Ex.PersistenceAbort->store(true,std::memory_order_relaxed);
+	// Actual owned GTK drop, with no fabricated Completed/user callback/transport cancellation or later service post.
+	FinishRequestBookkeeping(Exchange);
+	Ex.Interrupt.Reset();
+	const uint64 Ticket=Ex.PersistenceCompletionTicket;
+	Ex.PersistenceCompletionTicket=0;
+	ReleasePersistenceCompletion(Ticket);
+	if (Ex.Handler) Ex.Handler->DiscardValue();
+}
+
 void VaRest::Http::FClientState::Cancel(const FVaRestExchangeRef& Exchange, EVaRestCancelReason Reason)
 {
 	using namespace PipelinePrivate;
@@ -1359,6 +1762,8 @@ void VaRest::Http::FClientState::Cancel(const FVaRestExchangeRef& Exchange, EVaR
 	// sender's tags (Complete)
 	LLM_SCOPE_BYTAG(VaRest);
 	FExchangeState& Ex = Internals(*Exchange);
+	if (Ex.Managed.IsValid() && Ex.Managed.Control->IsStopped())
+		return;
 	if (Ex.bFinished)
 	{
 		return;
@@ -1389,6 +1794,8 @@ void VaRest::Http::FClientState::Cancel(const FVaRestExchangeRef& Exchange, EVaR
 		{
 			// Review M-3: no progress tick after Cancel() returns (ScheduleProgress re-arms nothing once the flag is set)
 			Ex.Config->Clock->ClearTimer(Ex.ProgressTimer);
+			if (Ex.Managed.IsValid() && Ex.Managed.Control->IsStopped())
+				return;
 			// The transport answers Canceled through the normal path, which releases what the attempt holds
 			Ex.TransportCall->Cancel();
 			return;
@@ -1398,6 +1805,8 @@ void VaRest::Http::FClientState::Cancel(const FVaRestExchangeRef& Exchange, EVaR
 		// and the wait holds the request, so the wait is ended below as well. Defence in depth since M4a final review A1:
 		// the attempt boundary cancels such a call when the stage's answer passes it, so a wait never starts with one held.
 		CancelHeldCall(Ex);
+		if (Ex.Managed.IsValid() && Ex.Managed.Control->IsStopped())
+			return;
 	}
 	if (Ex.Interrupt)
 	{
@@ -1413,6 +1822,8 @@ void VaRest::Http::FClientState::Cancel(const FVaRestExchangeRef& Exchange, EVaR
 		{
 			return;
 		}
+		if (Ex.Managed.IsValid() && Ex.Managed.Control->IsStopped())
+			return;
 		// Concurrency review M-4: nothing answered (the stage's state is gone); finish it below, as for any other holder
 	}
 	// Held by a custom stage, or its answer is queued for the game thread: finish now; what arrives later is ignored
@@ -1422,15 +1833,34 @@ void VaRest::Http::FClientState::Cancel(const FVaRestExchangeRef& Exchange, EVaR
 void VaRest::Http::FClientState::EndWaits(FExchangeState& Ex)
 {
 	check(IsInGameThread());
+	if (Ex.Managed.IsValid() && Ex.Managed.Control->IsStopped())
+		return;
+	// A custom PerAttempt stage may still own its outcome after this logical request ends. Claim this grant before any
+	// callout below, then return its slot later: Release can grant another request and invoke arbitrary stage code.
+	const auto Released = MoveTemp(Ex.LimiterGrantReleased);
+	if (Released && !*Released)
+	{
+		*Released = true;
+		PipelinePrivate::OnGameThread(TEXT("VaRest.ReleaseCanceledGrant"),
+			[Weak = TWeakPtr<FClientState, ESPMode::ThreadSafe>(AsShared()), Native = Ex.Managed]
+			{
+				if (FClientState::IsShuttingDown() || (Native.IsValid() && Native.Control->IsStopped())) return;
+				if (const auto State = Weak.Pin()) State->GetLimiter().Release();
+			});
+	}
 	// M4a final review A1 (d), review A M-1: an Outer stage's answer accepted while its attempt is on the wire (a user's own
 	// timeout stage). Nothing uses that call's result any more; canceled, it stops holding its limiter slot -- its Canceled
-	// end passes the grant's release -- and writing a SaveTo file the decode task is about to finish. On the normal path
+	// end observes the grant's release claim -- and writing a SaveTo file the decode task is about to finish. On the normal path
 	// OnAttemptDone cleared the slot before OnChainDone runs, so this does nothing there.
 	PipelinePrivate::CancelHeldCall(Ex);
+	if (Ex.Managed.IsValid() && Ex.Managed.Control->IsStopped())
+		return;
 	if (Ex.bInLimiterQueue)
 	{
 		// Its abort answers Canceled up the chain (FLimiterStage), and no slot was held
 		Limiter.Abort(Ex.RequestId);
+		if (Ex.Managed.IsValid() && Ex.Managed.Control->IsStopped())
+			return; // abort invokes an actual stage callback before returning
 	}
 	if (Ex.Interrupt)
 	{
@@ -1454,6 +1884,7 @@ void VaRest::Http::FClientState::CancelAll(FName InTag, EVaRestCancelReason Reas
 	}
 	for (const FVaRestExchangeRef& Target : Targets)
 	{
+		if (ManagedLifetime.IsValid() && ManagedLifetime.Control->IsStopped()) break;
 		Cancel(Target, Reason);
 	}
 }
@@ -1464,9 +1895,15 @@ namespace VaRest::Http::PipelinePrivate
 	std::atomic<bool> bShuttingDown{ false };
 }
 
+void VaRest::Http::FClientState::SuppressForShutdown()
+{
+	check(IsInGameThread());
+	PipelinePrivate::bShuttingDown = true;
+}
+
 void VaRest::Http::FClientState::CancelForShutdown()
 {
-	PipelinePrivate::bShuttingDown = true;
+	SuppressForShutdown();
 	ForEachLive([](FClientState& Client) { Client.CancelAll(NAME_None, EVaRestCancelReason::Shutdown); });
 }
 

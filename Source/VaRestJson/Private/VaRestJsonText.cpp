@@ -29,6 +29,18 @@ namespace VaRest::Json::TextPrivate
 	/** Rejects oversize input before anything is allocated */
 	bool ExceedsLimit(int64 InputBytes, const FVaRestJsonParseOptions& Options, FVaRestJsonError& OutError)
 	{
+		if (Options.MaxInputBytes < 0 || Options.MaxValues < 0 || Options.MaxWorkUnits < 0)
+		{
+			OutError = FVaRestJsonError();
+			OutError.Message = TEXT("JSON parse limits must be nonnegative");
+			return true;
+		}
+		if (InputBytes >= MAX_int32 || (Options.MaxWorkUnits > 0 && InputBytes > Options.MaxWorkUnits))
+		{
+			OutError = FVaRestJsonError();
+			OutError.Message = InputBytes >= MAX_int32 ? TEXT("JSON input cannot fit its terminated buffer") : TEXT("JSON logical work limit exceeded by input bytes");
+			return true;
+		}
 		if (Options.MaxInputBytes > 0 && InputBytes > Options.MaxInputBytes)
 		{
 			OutError = FVaRestJsonError();

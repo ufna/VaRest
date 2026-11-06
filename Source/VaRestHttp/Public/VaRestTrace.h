@@ -13,6 +13,9 @@
 
 #include <atomic>
 
+class FVaRestRedactor;
+namespace VaRest::Http { struct FSocketFrameCaptureData; }
+
 /**
  * Inspector 1.2 / IN-14: body excerpts in the trace. Default on in every build but Shipping; a target may set it in
  * GlobalDefinitions (a Shipping test build that wants capture sets 1). With 0 no body byte is copied for a sink, and
@@ -110,9 +113,11 @@ enum class EVaRestExcerptSkip : uint8
 /** IN-6: a redacted body excerpt. FVaRestRedactor builds it (logs use it in M3); M4's Excerpt event carries it. */
 struct VARESTHTTP_API FVaRestTraceExcerpt
 {
-	/** Redacted UTF-8 text: a JSON prefix, form pairs, plain text or a descriptor. Shared and never changed. */
+	/** Redacted UTF-8 text or, only with bBinaryCaptured, scrubbed binary bytes. Shared and never changed. */
 	TSharedPtr<const TArray<uint8>, ESPMode::ThreadSafe> Bytes;
 	EVaRestExcerptKind Kind = EVaRestExcerptKind::Text;
+	/** Explicit binary opt-in; Binary without this marker holds a text descriptor, never captured body bytes. */
+	bool bBinaryCaptured = false;
 	/** The whole body's size */
 	int64 TotalBytes = 0;
 	bool bTruncated = false;
@@ -123,6 +128,7 @@ struct VARESTHTTP_API FVaRestTraceExcerpt
 	FString Sha256Prefix;
 	EVaRestExcerptSkip SkipReason = EVaRestExcerptSkip::None;
 
+	/** Captured binary projects to hex; other kinds retain their redacted UTF-8 text/descriptor projection. */
 	FString ToText() const;
 };
 
@@ -453,8 +459,109 @@ struct FVaRestTraceMarker
 	FString Text;
 };
 
+/** IW-1..IW-6 live in the core; protocol modules map their own enums without a reverse dependency. */
+enum class EVaRestTraceSocketLifecycle : uint8 { Created, Released };
+enum class EVaRestTraceSocketAttemptPhase : uint8 { Connecting, Open, Closed };
+enum class EVaRestTraceSocketGap : uint8 { None, Backoff, Offline, Background, Auth };
+enum class EVaRestTraceSocketCloseBy : uint8 { Client, Server, Transport, Heartbeat, Timeout };
+enum class EVaRestTraceSocketDirection : uint8 { In, Out };
+enum class EVaRestTraceSocketFrameKind : uint8 { Text, Binary };
+enum class EVaRestTraceSocketMessageKind : uint8 { Message, Request, Reply, ErrorReply, Control };
+enum class EVaRestTraceSocketLane : uint8 { Bypass, Ready, Backlog };
+enum class EVaRestTraceSocketNoteKind : uint8 { SendDropped, RequestEnded, Flow, Backpressure, Channel, Ping };
+enum class EVaRestTraceSocketDropReason : uint8 { Volatile, Overflow, Rejected, StalePin, SendLimit };
+enum class EVaRestTraceSocketRequestOutcome : uint8 { Replied, ErrorReply, Timeout, Connection, Canceled };
+enum class EVaRestTraceSocketChannelState : uint8 { Up, Down, Refused };
+
+struct FVaRestTraceSocketClose
+{
+	int32 Code = 0;
+	/** Value-scrubbed by the socket's held connection redactor. */
+	FString Reason;
+	bool bClean = false;
+	EVaRestTraceSocketCloseBy By = EVaRestTraceSocketCloseBy::Transport;
+	bool bWillReconnect = false;
+	double Delay = 0.0;
+	bool bWhileReadPaused = false;
+	FName Failure;
+	int32 HttpStatus = 0;
+	bool bGaveUp = false;
+	EVaRestErrorKind ErrorKind = EVaRestErrorKind::None;
+};
+
+struct FVaRestTraceSocket
+{
+	EVaRestTraceSocketLifecycle Phase = EVaRestTraceSocketLifecycle::Created;
+	uint64 SocketId = 0, ScopeId = 0;
+	FName Name, Protocol, Entry;
+	/** Redacted URL, including configured auth-placement keys. */
+	FString Url;
+	FVaRestTraceInitiator Initiator;
+	/** Snapshot-only live state; no socket objects or owner pointers enter the trace. */
+	FName State;
+	bool bReady = false, bPartial = false;
+	uint64 CurrentAttemptId = 0;
+};
+
+struct FVaRestTraceSocketAttempt
+{
+	uint64 SocketId = 0, AttemptId = 0;
+	EVaRestTraceSocketAttemptPhase Phase = EVaRestTraceSocketAttemptPhase::Connecting;
+	EVaRestTraceSocketGap GapBefore = EVaRestTraceSocketGap::None;
+	double GapSeconds = 0.0;
+	FString Url;
+	FVaRestHeaders HandshakeHeaders;
+	TArray<FString> Protocols;
+	double ConnectMs = 0.0;
+	FString Protocol;
+	FVaRestTraceSocketClose Close;
+	bool bPartial = false;
+};
+
+struct FVaRestTraceSocketFrame
+{
+	uint64 SocketId = 0, AttemptId = 0, FrameId = 0;
+	EVaRestTraceSocketDirection Dir = EVaRestTraceSocketDirection::In;
+	EVaRestTraceSocketFrameKind Kind = EVaRestTraceSocketFrameKind::Text;
+	int64 Bytes = 0;
+	FString Channel, Route, MsgId;
+	EVaRestTraceSocketMessageKind MsgKind = EVaRestTraceSocketMessageKind::Message;
+	FName ProtocolTag;
+	/** At most ten sizes; never an attachment body. */
+	TArray<int64> AttachmentSizes;
+	bool bAutoReplied = false;
+	double ReceivedAt = 0.0, CalledAt = 0.0;
+	EVaRestTraceSocketLane Lane = EVaRestTraceSocketLane::Backlog;
+	/** Inbound only: prepared on the native socket pipe. */
+	FVaRestTraceExcerpt Excerpt;
+	/** Outbound only: a later Excerpt{Frame} resolves this by SocketId and FrameId. */
+	bool bExcerptPending = false;
+};
+
+struct FVaRestTraceSocketNote
+{
+	uint64 SocketId = 0, AttemptId = 0;
+	EVaRestTraceSocketNoteKind Kind = EVaRestTraceSocketNoteKind::SendDropped;
+	int64 Count = 0;
+	EVaRestTraceSocketDropReason DropReason = EVaRestTraceSocketDropReason::Rejected;
+	FString MsgId, Channel, Route;
+	EVaRestTraceSocketRequestOutcome Outcome = EVaRestTraceSocketRequestOutcome::Canceled;
+	EVaRestErrorKind ErrorKind = EVaRestErrorKind::None;
+	double Latency = 0.0;
+	bool bPaused = false, bHigh = false;
+	int64 PendingBytes = 0;
+	EVaRestTraceSocketChannelState ChannelState = EVaRestTraceSocketChannelState::Down;
+	FString PublicId;
+	bool bRecovered = false;
+	FName Reason;
+	/** Value-scrubbed, including protocol session ids. */
+	FString Message;
+	double Rtt = 0.0;
+};
+
 using FVaRestTracePayload = TVariant<FVaRestTraceStarted, FVaRestTraceAttemptDispatched, FVaRestTraceAttemptEnded, FVaRestTraceNote, FVaRestTraceCompleted,
-	FVaRestTraceExcerptEvent, FVaRestTraceScope, FVaRestTraceClient, FVaRestTraceMarker>;
+	FVaRestTraceExcerptEvent, FVaRestTraceScope, FVaRestTraceClient, FVaRestTraceMarker,
+	FVaRestTraceSocket, FVaRestTraceSocketAttempt, FVaRestTraceSocketFrame, FVaRestTraceSocketNote>;
 
 struct FVaRestTraceEvent
 {
@@ -474,6 +581,10 @@ struct FVaRestTraceSnapshot
 	TArray<FVaRestTraceClient> Clients;
 	/** Every in-flight request as Started{Partial} */
 	TArray<FVaRestTraceStarted> InFlight;
+	TArray<FVaRestTraceSocket> Sockets;
+	TArray<FVaRestTraceSocketAttempt> SocketAttempts;
+	/** Current protocol channel metadata, produced on GTK without callback/owner objects. */
+	TArray<FVaRestTraceSocketNote> SocketNotes;
 };
 
 /**
@@ -543,6 +654,23 @@ private:
 };
 #endif
 
+/** Prepared native frame metadata/excerpt. Unpublished captures may be discarded on any thread.
+ * Publish on GTK only after the transport accepted the frame; no source bytes are borrowed after preparation. */
+class VARESTHTTP_API FVaRestSocketFrameCapture
+{
+public:
+	FVaRestSocketFrameCapture();
+	~FVaRestSocketFrameCapture();
+	FVaRestSocketFrameCapture(FVaRestSocketFrameCapture&& Other);
+	FVaRestSocketFrameCapture& operator=(FVaRestSocketFrameCapture&& Other);
+	FVaRestSocketFrameCapture(const FVaRestSocketFrameCapture&) = delete;
+	FVaRestSocketFrameCapture& operator=(const FVaRestSocketFrameCapture&) = delete;
+	void Publish();
+private:
+	friend class FVaRestTrace;
+	TUniquePtr<VaRest::Http::FSocketFrameCaptureData> Data;
+};
+
 /** The sink registry and the trace points' gate (Inspector 3.1, IN-10 to IN-12) */
 class VARESTHTTP_API FVaRestTrace
 {
@@ -581,6 +709,16 @@ public:
 
 	/** Stamps Seq and hands the event to every sink. Game thread for every kind but Excerpt. Callers checked Detail() first. */
 	static void Emit(EVaRestTraceKind Kind, double Time, FVaRestTracePayload&& Payload, EVaRestTraceSource Source = EVaRestTraceSource::Http);
+	/** GT, at outgoing hand-off: bounded copy, metadata announcement, then redaction on the core pipe.
+	 * The worker owns only native bytes, immutable redactor and native admission leases. */
+	static void EmitSocketFrame(double Time, FVaRestTraceSocketFrame&& Frame, TConstArrayView<uint8> Bytes,
+		TSharedPtr<const FVaRestRedactor, ESPMode::ThreadSafe> Redactor);
+	static FVaRestSocketFrameCapture PrepareSocketFrame(double Time, FVaRestTraceSocketFrame&& Frame, TConstArrayView<uint8> Bytes,
+		TSharedPtr<const FVaRestRedactor, ESPMode::ThreadSafe> Redactor, int32 JsonOffset = -1, bool bRedactAllJsonValues = false);
+	/** GTK attachment stack only: terminal events raised by OnAttached reach the new sink after publication.
+	 * Only plain event payloads are deferred; no callbacks, socket owners or client shells are retained. */
+	static bool IsAttachingOnGT();
+	static void EmitAfterAttachmentOnGT(EVaRestTraceKind Kind, double Time, FVaRestTracePayload&& Payload, EVaRestTraceSource Source);
 
 	/** Snapshot contributors (core: clients and in-flight requests; W5: sockets). Game thread. */
 	static TMulticastDelegate<void(FVaRestTraceSnapshot&)>& OnBuildSnapshot();
@@ -590,6 +728,11 @@ public:
 	/** IN-10: assigned at creation whatever the mask; any thread; never 0 */
 	static uint64 NewRequestId();
 	static uint64 NewClientId();
+	/** Mask-independent scope IDs; 0 means exhaustion, never wraps into a previously issued identity. */
+	static uint64 NewScopeId();
+	/** Mask-independent socket/frame identity. Zero means exhaustion; ids never wrap or get reused. */
+	static uint64 NewSocketId();
+	static uint64 NewSocketFrameId();
 
 	static FVaRestTraceCounters& Counters();
 

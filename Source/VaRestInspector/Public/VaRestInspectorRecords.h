@@ -22,7 +22,8 @@ class FStore;
 enum class EVaRestInspectorRecordKind : uint8
 {
 	Http,
-	Marker
+	Marker,
+	Socket
 };
 enum class EVaRestInspectorEndState : uint8
 {
@@ -68,6 +69,13 @@ struct FVaRestInspectorLink
 	FString QueueId;
 	bool bAuth = false;
 	bool bTargetEvicted = false;
+};
+/** Borrowed on GTK; strings expire when the link visitor returns. */
+struct FVaRestInspectorLinkView
+{
+	uint64 FromRequestId = 0, ToRequestId = 0;
+	FStringView QueueId;
+	bool bAuth = false, bTargetEvicted = false;
 };
 enum class EVaRestInspectorMarkerKind : uint8
 {
@@ -147,6 +155,19 @@ struct FVaRestInspectorDispatchView
 	FVaRestInspectorPacketView Dispatched, Ended, ResponseExcerpt;
 	FVaRestInspectorPhase Auth, Queued, Prepare, Send, Wait, Receive, Wall, Gap;
 };
+struct FVaRestInspectorSocketAttemptView
+{
+	uint64 AttemptId = 0;
+	FVaRestInspectorPacketView Connecting, Opened, Closed;
+	bool bHasConnecting = false, bHasOpened = false, bHasClosed = false;
+	bool bPartial = false;
+};
+struct FVaRestInspectorSocketFrameView
+{
+	uint64 FrameId = 0, AttemptId = 0;
+	FVaRestInspectorPacketView Metadata, Excerpt;
+	EVaRestInspectorDetailState ExcerptState = EVaRestInspectorDetailState::Absent;
+};
 // Byte counters report admitted payload/retained-owner charges, not RSS or
 // hidden post-destruction controller free tails; see decision8.
 struct FVaRestInspectorDiagnostics
@@ -160,6 +181,9 @@ struct FVaRestInspectorDiagnostics
 	int32 SnapshotControllers = 0;
 	bool bCapturing = false, bPendingLimits = false;
 	bool bLossCountersSaturated = false;
+	// Cumulative admitted HTTP/socket byte observations, independent of retained rows.
+	uint64 ObservedBytesUp = 0, ObservedBytesDown = 0;
+	bool bObservedBytesPartial = false;
 	int64 EffectiveStoreLimit = 0, RequestedStoreLimit = 0;
 };
 struct FVaRestInspectorRecordView
@@ -203,6 +227,28 @@ struct FVaRestInspectorRecordView
 	TConstArrayView<FVaRestInspectorDispatchView> Dispatches;
 	TConstArrayView<FVaRestInspectorPacketView> DispatchEvents, Notes, Excerpts;
 	TConstArrayView<FVaRestInspectorTimelineEntry> Timeline;
+	uint64 SocketFramesIn = 0, SocketFramesOut = 0, SocketFramesEvicted = 0, SocketFramesOmitted = 0;
+	uint64 SocketLateExcerptsEvicted = 0, SocketLateExcerptsUnknown = 0, SocketAttemptsOmitted = 0;
+	int32 SocketFramesRetained = 0, SocketCloseCode = 0;
+	uint64 SocketDroppedFrames = 0, SocketChannelsOmitted = 0;
+	int32 SocketChannelsRetained = 0;
+	int64 SocketPendingBytes = 0;
+	double SocketRtt = -1;
+	bool bSocketReadPaused = false, bSocketBackpressure = false;
+	FName SocketFailure;
+	FName SocketName, SocketProtocol, SocketEntry, SocketState;
+	bool bSocketReady = false, bSocketReleased = false;
+	/** Native readers and their source expire with the outer record visitor, including snapshot visitors. */
+	const void* SocketReaderSource = nullptr;
+	void (*SocketAttemptReader)(const void*, TFunctionRef<void(const FVaRestInspectorSocketAttemptView&)>) = nullptr;
+	void (*SocketFrameReader)(const void*, TFunctionRef<void(const FVaRestInspectorSocketFrameView&)>) = nullptr;
+	void (*SocketChannelReader)(const void*, TFunctionRef<void(const FVaRestInspectorPacketView&)>) = nullptr;
+	void ForEachSocketAttempt(TFunctionRef<void(const FVaRestInspectorSocketAttemptView&)> Visitor) const
+	{ check(IsInGameThread()); if (SocketAttemptReader) SocketAttemptReader(SocketReaderSource, Visitor); }
+	void ForEachSocketFrame(TFunctionRef<void(const FVaRestInspectorSocketFrameView&)> Visitor) const
+	{ check(IsInGameThread()); if (SocketFrameReader) SocketFrameReader(SocketReaderSource, Visitor); }
+	void ForEachSocketChannel(TFunctionRef<void(const FVaRestInspectorPacketView&)> Visitor) const
+	{ check(IsInGameThread()); if (SocketChannelReader) SocketChannelReader(SocketReaderSource, Visitor); }
 };
 /** Read operations are GT-only. Borrowed record views expire when the visitor returns. */
 class VARESTINSPECTOR_API FVaRestInspectorSnapshot final
@@ -215,6 +261,7 @@ public:
 	uint64 GetRevision() const;
 	void ForEachRecord(TFunctionRef<void(const FVaRestInspectorRecordView&)>) const;
 	void ForEachStats(TFunctionRef<void(const FVaRestInspectorHttpStats&)>) const;
+	void ForEachSocketStats(TFunctionRef<void(const FVaRestInspectorSocketStats&)>) const;
 	TConstArrayView<FVaRestInspectorLink> GetLinks() const;
 	const FVaRestInspectorDiagnostics& GetDiagnostics() const;
 

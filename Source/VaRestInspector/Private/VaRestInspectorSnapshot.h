@@ -20,6 +20,8 @@ enum class ESnapshotAllocationKind : uint8
 	Packets,
 	Notes,
 	Timeline,
+	SocketAttempt, SocketFrame, SocketChannel,
+	SocketStats,
 	StatsGroups,
 	Links,
 	Raw
@@ -37,15 +39,24 @@ public:
 	FSnapshotBuilder& operator=(const FSnapshotBuilder&) = delete;
 
 	bool Begin(const FStore& Store, int32 InRowCount);
-	bool MeasureSealedRow(FStringView Label);
-	bool MeasureMutableRow(FStringView Label);
+	bool MeasureSealedRow(FStringView Label, FStringView Scope = {});
+	bool MeasureMutableRow(FStringView Label, FStringView Scope = {});
 	bool MeasureDispatches(int32 Count);
 	bool MeasureHeaders(int32 Count);
 	bool MeasureNotes(int32 Count);
 	bool MeasureTimeline(int32 Count);
 	bool MeasurePacket(const FVaRestInspectorPacketView& Source,
 		const TSharedPtr<const TArray<uint8>, ESPMode::ThreadSafe>* Excerpt);
+	bool MeasureSocketAttempt(const FVaRestInspectorSocketAttemptView&);
+	bool MeasureSocketChannel(const FVaRestInspectorPacketView&);
+	bool ConstructSocketChannel(FSnapshotRowCopy&,const FVaRestInspectorPacketView&);
+	bool ConstructSocketAttempt(FSnapshotRowCopy&,const FVaRestInspectorSocketAttemptView&);
+	bool MeasureSocketFrame(const FVaRestInspectorSocketFrameView&,const TSharedPtr<const TArray<uint8>,ESPMode::ThreadSafe>*,const FVaRestInspectorPacketView&,const TSharedPtr<const TArray<uint8>,ESPMode::ThreadSafe>*);
+	bool ConstructSocketFrame(FSnapshotRowCopy&,const FVaRestInspectorSocketFrameView&,const TSharedPtr<const TArray<uint8>,ESPMode::ThreadSafe>*,const FVaRestInspectorPacketView&,const TSharedPtr<const TArray<uint8>,ESPMode::ThreadSafe>*);
 	bool MeasureStats(int32 Count);
+	bool MeasureSocketStats(int32 Count);
+	bool ConstructSocketStats(int32 Count);
+	bool ConstructSocketStatsGroup(const FVaRestInspectorSocketStats&,int32 Destination);
 	bool MeasureStatsGroup(const FStatsGroupSlot& Group);
 	bool ConstructStats(int32 Count);
 	bool ConstructStatsGroup(const FStatsGroupSlot& Group, int32 Destination);
@@ -68,8 +79,8 @@ public:
 	bool ConstructPacket(const FVaRestInspectorPacketView& Source,
 		const TSharedPtr<const TArray<uint8>, ESPMode::ThreadSafe>* Excerpt, FSnapshotPacket& Out);
 	void ConstructScalarPacket(const FPacketFixed& Source, FSnapshotPacket& Out);
-	bool ConstructSealedEntry(const TSharedPtr<const FRow, ESPMode::ThreadSafe>& Owner, FStringView Label);
-	bool ConstructMutableEntry(FSnapshotRowCopy* Copy, FStringView Label);
+	bool ConstructSealedEntry(const TSharedPtr<const FRow, ESPMode::ThreadSafe>& Owner, FStringView Label, FStringView Scope = {});
+	bool ConstructMutableEntry(FSnapshotRowCopy* Copy, FStringView Label, FStringView Scope = {});
 	bool Publish(TSharedPtr<const FVaRestInspectorSnapshot, ESPMode::ThreadSafe>& Out);
 	static void DestroyDomain(FVaRestInspectorSnapshot::FData& Data, FAllocationAdapter& Allocator);
 
@@ -85,7 +96,7 @@ private:
 	bool AddRecord(void* Address, ESnapshotAllocationKind Kind);
 	bool EnsureEntrySegment();
 	FSnapshotRowEntry* NextEntry();
-	bool CopyLabel(FStringView Label, FSnapshotRowEntry& Entry);
+	bool CopyLabel(FStringView Label, FSnapshotRowEntry& Entry, bool bScope = false);
 
 	TRefCountPtr<FBudgetAccount> Account;
 	FAllocationAdapter* Allocator = nullptr;
@@ -111,10 +122,30 @@ struct FSnapshotPacket
 	FPacketFixed Fixed;
 	const uint8* Backing = nullptr;
 	int32 BackingBytes = 0;
+	int32 ExcerptBytes = 0;
 	TSharedPtr<const TArray<uint8>, ESPMode::ThreadSafe> Excerpt;
 	bool bPresent = false;
 };
 
+struct FSnapshotSocketAttempt
+{
+ FSnapshotSocketAttempt* Next=nullptr;
+ uint64 Id=0;
+ bool Partial=false,HasConnecting=false,HasOpened=false,HasClosed=false;
+ FSnapshotPacket Connecting,Opened,Closed;
+};
+struct FSnapshotSocketFrame
+{
+ FSnapshotSocketFrame* Next=nullptr;
+ uint64 Id=0,Attempt=0;
+ EVaRestInspectorDetailState State=EVaRestInspectorDetailState::Absent;
+ FSnapshotPacket Metadata,Excerpt;
+};
+struct FSnapshotSocketChannel
+{
+ FSnapshotSocketChannel* Next=nullptr;
+ FSnapshotPacket Packet;
+};
 struct FSnapshotDispatch
 {
 	uint64 DispatchId = 0;
@@ -141,6 +172,12 @@ struct FSnapshotTimeline
 
 struct FSnapshotRowCopy
 {
+ FSnapshotSocketChannel* SocketChannels=nullptr;
+ FSnapshotSocketChannel* SocketChannelsTail=nullptr;
+ FSnapshotSocketAttempt* SocketAttempts=nullptr;
+ FSnapshotSocketAttempt* SocketAttemptsTail=nullptr;
+ FSnapshotSocketFrame* SocketFrames=nullptr;
+ FSnapshotSocketFrame* SocketFramesTail=nullptr;
 	FVaRestInspectorRecordView Value;
 	FSnapshotBuilder::ELivenessEvidence Evidence = FSnapshotBuilder::ELivenessEvidence::None;
 	uint64 PresenceStamp = 0;
@@ -165,6 +202,8 @@ struct FSnapshotRowEntry
 	FSnapshotRowCopy* Mutable = nullptr;
 	const TCHAR* ClientLabel = nullptr;
 	int32 ClientLabelChars = 0;
+	const TCHAR* ScopeLabel = nullptr;
+	int32 ScopeLabelChars = 0;
 };
 } // namespace VaRest::Inspector::Private
 #endif

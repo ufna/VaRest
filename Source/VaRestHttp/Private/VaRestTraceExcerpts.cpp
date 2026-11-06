@@ -15,6 +15,8 @@ namespace VaRest::Http::ExcerptsPrivate
 {
 	/** Trivially destructible: safe as a static (review I-4) */
 	std::atomic<int64> Pending{ 0 };
+	std::atomic<int32> PendingFrameJobs{ 0 };
+	inline constexpr int32 MaxFrameJobs = 4096;
 
 	bool Wanted()
 	{
@@ -25,15 +27,15 @@ namespace VaRest::Http::ExcerptsPrivate
 #endif
 	}
 
-	void Emit(EVaRestTraceExcerptOwner Owner, uint64 RequestId, int32 Attempt, uint64 DispatchId, FVaRestTraceExcerpt&& Excerpt, double Time)
+	void Emit(EVaRestTraceExcerptOwner Owner, uint64 RequestId, int32 Attempt, uint64 DispatchId, FVaRestTraceExcerpt&& Excerpt, double Time, uint64 SocketId = 0, uint64 FrameId = 0)
 	{
 		FVaRestTraceExcerptEvent Payload;
 		Payload.Owner = Owner;
 		Payload.RequestId = RequestId;
 		Payload.Attempt = Attempt;
-		Payload.DispatchId = DispatchId;
+		Payload.DispatchId = DispatchId; Payload.SocketId = SocketId; Payload.FrameId = FrameId;
 		Payload.Excerpt = MoveTemp(Excerpt);
-		FVaRestTrace::Emit(EVaRestTraceKind::Excerpt, Time, FVaRestTracePayload(TInPlaceType<FVaRestTraceExcerptEvent>(), MoveTemp(Payload)));
+		FVaRestTrace::Emit(EVaRestTraceKind::Excerpt, Time, FVaRestTracePayload(TInPlaceType<FVaRestTraceExcerptEvent>(), MoveTemp(Payload)), Owner == EVaRestTraceExcerptOwner::Frame ? EVaRestTraceSource::Socket : EVaRestTraceSource::Http);
 	}
 
 #if !UE_BUILD_SHIPPING
@@ -46,11 +48,13 @@ namespace VaRest::Http::ExcerptsPrivate
 	void CountCopied(int64) {}
 #endif
 
-	/** At most Cap bytes copied and admitted, or a backlog skip; nothing for a binary body over the cap */
-	Excerpts::FJob WithCopy(Excerpts::FJob&& Job, TConstArrayView<uint8> Bytes, int32 Cap, FString ContentType)
+	/** Admit before copying; binary bytes require their own explicit cap. Default oversized binary costs no body copy. */
+	Excerpts::FJob WithCopy(Excerpts::FJob&& Job, TConstArrayView<uint8> Bytes, int32 Cap, FString ContentType, int32 BinaryCap = 0)
 	{
-		const int32 Take = FMath::Min(Bytes.Num(), FMath::Max(0, Cap));
-		if (Take < Bytes.Num() && FVaRestRedactor::IsBinaryBody(ContentType, Bytes.Left(Take)))
+		const auto Probe = Bytes.Left(FMath::Min(Bytes.Num(), FMath::Max(0, FMath::Max(Cap, BinaryCap))));
+		const bool bBinary = FVaRestRedactor::IsBinaryBody(ContentType, Probe);
+		const int32 Take = FMath::Min(Bytes.Num(), FMath::Max(0, bBinary && BinaryCap > 0 ? BinaryCap : Cap));
+		if (Take < Bytes.Num() && bBinary && BinaryCap <= 0)
 		{
 			// M4a final review A7 (review C M-4): a binary body over the cap is described by its size and type alone -- the
 			// SHA-256 prefix needs the whole body -- so nothing is copied on the game thread and nothing is admitted (an image
@@ -61,6 +65,9 @@ namespace VaRest::Http::ExcerptsPrivate
 			};
 			return MoveTemp(Job);
 		}
+		// A longer binary probe can discover untyped JSON beyond the text cap's whitespace. Preserve that classification
+		// without copying past the text cap merely to repeat the sniff on the worker.
+		if (!bBinary && FVaRestRedactor::IsBinaryBody(ContentType, Bytes.Left(Take))) ContentType = TEXT("application/json");
 		TOptional<Excerpts::FAdmission> Admission = Excerpts::TryAdmit(Take);
 		if (!Admission.IsSet())
 		{
@@ -69,9 +76,9 @@ namespace VaRest::Http::ExcerptsPrivate
 		}
 		Job.Admitted = MoveTemp(Admission.GetValue());
 		CountCopied(Take);
-		Job.Redact = [Prefix = TArray<uint8>(Bytes.GetData(), Take), Type = MoveTemp(ContentType), Total = Job.TotalBytes, Cap](const FVaRestRedactor& Redactor)
+		Job.Redact = [Prefix = TArray<uint8>(Bytes.GetData(), Take), Type = MoveTemp(ContentType), Total = Job.TotalBytes, Cap, BinaryCap](const FVaRestRedactor& Redactor)
 		{
-			return Redactor.RedactBody(Type, Prefix, Total, Cap);
+			return Redactor.RedactBody(Type, Prefix, Total, Cap, BinaryCap);
 		};
 		return MoveTemp(Job);
 	}
@@ -102,11 +109,11 @@ namespace VaRest::Http::ExcerptsPrivate
 			Skipped.SkipReason = EVaRestExcerptSkip::Backlog;
 			Skipped.TotalBytes = Job.TotalBytes;
 			Skipped.bTruncated = Job.TotalBytes > 0;
-			Emit(Job.Owner, Job.RequestId, Job.Attempt, Job.DispatchId, MoveTemp(Skipped), Job.Time);
+			Emit(Job.Owner, Job.RequestId, Job.Attempt, Job.DispatchId, MoveTemp(Skipped), Job.Time, Job.SocketId, Job.FrameId);
 			return;
 		}
 		Launcher(TEXT("VaRest.TraceExcerpt"), [ForOwner = Job.Owner, Id = Job.RequestId, ForAttempt = Job.Attempt, ForDispatch = Job.DispatchId, Held = MoveTemp(Job.Admitted), At = Job.Time,
-			Redacting = Job.Redactor, Work = MoveTemp(Job.Redact)]() mutable
+			Redacting = Job.Redactor, Work = MoveTemp(Job.Redact), SocketId = Job.SocketId, FrameId = Job.FrameId, FrameSlot = MoveTemp(Job.FrameAdmission)]() mutable
 		{
 			LLM_SCOPE_BYTAG(VaRest_Trace);
 			if (!Wanted() || !Redacting.IsValid())
@@ -117,10 +124,118 @@ namespace VaRest::Http::ExcerptsPrivate
 			}
 			FVaRestTraceExcerpt Excerpt = Work(*Redacting);
 			// Counted out before the emit, here rather than when the task body dies, so a test that waits for the pipe sees it
-			Held.Reset();
-			Emit(ForOwner, Id, ForAttempt, ForDispatch, MoveTemp(Excerpt), At);
+			Held.Reset(); FrameSlot.Reset();
+			Emit(ForOwner, Id, ForAttempt, ForDispatch, MoveTemp(Excerpt), At, SocketId, FrameId);
 		});
 	}
+}
+
+namespace VaRest::Http::Excerpts
+{
+	struct FSocketFrameAdmission
+	{
+		~FSocketFrameAdmission() { ExcerptsPrivate::PendingFrameJobs.fetch_sub(1, std::memory_order_acq_rel); }
+		static TSharedPtr<FSocketFrameAdmission, ESPMode::ThreadSafe> TryAcquire()
+		{
+			auto& Counter = ExcerptsPrivate::PendingFrameJobs;
+			int32 Previous = Counter.load(std::memory_order_acquire);
+			while (Previous < ExcerptsPrivate::MaxFrameJobs)
+				if (Counter.compare_exchange_weak(Previous, Previous + 1, std::memory_order_acq_rel))
+					return MakeShared<FSocketFrameAdmission, ESPMode::ThreadSafe>();
+			return {};
+		}
+	};
+}
+
+namespace VaRest::Http
+{
+	struct FSocketFrameCaptureData
+	{
+		double Time = 0.0;
+		FVaRestTraceSocketFrame Frame;
+		Excerpts::FJob Job;
+		TOptional<FVaRestTraceExcerpt> Immediate;
+	};
+}
+FVaRestSocketFrameCapture::FVaRestSocketFrameCapture() = default;
+FVaRestSocketFrameCapture::~FVaRestSocketFrameCapture() = default;
+FVaRestSocketFrameCapture::FVaRestSocketFrameCapture(FVaRestSocketFrameCapture&& Other) = default;
+FVaRestSocketFrameCapture& FVaRestSocketFrameCapture::operator=(FVaRestSocketFrameCapture&& Other) = default;
+void FVaRestSocketFrameCapture::Publish()
+{
+	check(IsInGameThread());
+	auto Owned = MoveTemp(Data); if (!Owned || FVaRestTrace::Detail() == EVaRestTraceDetail::None) return;
+	const uint64 SocketId = Owned->Frame.SocketId, FrameId = Owned->Frame.FrameId;
+	FVaRestTrace::Emit(EVaRestTraceKind::SocketFrame, Owned->Time, FVaRestTracePayload(TInPlaceType<FVaRestTraceSocketFrame>(), MoveTemp(Owned->Frame)), EVaRestTraceSource::Socket);
+	if (Owned->Immediate.IsSet() && VaRest::Http::ExcerptsPrivate::Wanted())
+		VaRest::Http::ExcerptsPrivate::Emit(EVaRestTraceExcerptOwner::Frame, 0, 0, 0, MoveTemp(Owned->Immediate.GetValue()), Owned->Time, SocketId, FrameId);
+	Owned->Job.Launch();
+}
+void FVaRestTrace::EmitSocketFrame(double Time, FVaRestTraceSocketFrame&& Frame, TConstArrayView<uint8> Bytes,
+	TSharedPtr<const FVaRestRedactor, ESPMode::ThreadSafe> Redactor)
+{
+	auto Capture = PrepareSocketFrame(Time, MoveTemp(Frame), Bytes, MoveTemp(Redactor)); Capture.Publish();
+}
+
+FVaRestSocketFrameCapture FVaRestTrace::PrepareSocketFrame(double Time, FVaRestTraceSocketFrame&& InFrame, TConstArrayView<uint8> Bytes,
+	TSharedPtr<const FVaRestRedactor, ESPMode::ThreadSafe> Redactor, int32 JsonOffset, bool bRedactAllJsonValues)
+{
+	check(IsInGameThread() && InFrame.Dir == EVaRestTraceSocketDirection::Out);
+	if (Detail() == EVaRestTraceDetail::None) return {};
+	FVaRestSocketFrameCapture Capture; Capture.Data = MakeUnique<VaRest::Http::FSocketFrameCaptureData>();
+	Capture.Data->Frame = MoveTemp(InFrame); Capture.Data->Time = Time;
+	auto& Frame = Capture.Data->Frame;
+	FScopedCycles Cycles;
+	if (!Redactor) Redactor = MakeShared<const FVaRestRedactor, ESPMode::ThreadSafe>();
+	if (bRedactAllJsonValues)
+	{
+		auto Rules = Redactor->GetRules(); Rules.RedactAllJsonValues();
+		Redactor = MakeShared<const FVaRestRedactor, ESPMode::ThreadSafe>(MoveTemp(Rules), Redactor->GetSecrets());
+	}
+	Frame.Bytes = Bytes.Num(); Frame.AttachmentSizes.SetNum(FMath::Min(10, Frame.AttachmentSizes.Num()));
+	const bool bJsonSuffix = JsonOffset >= 0 && Frame.Kind == EVaRestTraceSocketFrameKind::Text;
+	if (bJsonSuffix) Bytes = Bytes.RightChop(FMath::Min(JsonOffset, Bytes.Num()));
+	Frame.Channel = Redactor->ScrubText(Frame.Channel); Frame.Route = Redactor->ScrubText(Frame.Route); Frame.MsgId = Redactor->ScrubText(Frame.MsgId);
+	const uint64 SocketId = Frame.SocketId, FrameId = Frame.FrameId;
+	auto& Job = Capture.Data->Job;
+	auto& Immediate = Capture.Data->Immediate;
+#if VAREST_WITH_TRACE_EXCERPTS
+	if (VaRest::Http::ExcerptsPrivate::Wanted())
+	{
+		const auto Settings = GetDetailSettings();
+		const int32 Cap = FMath::Max(0, Settings.FrameCap);
+		if (Cap > 0)
+		{
+			const bool bBinary = Frame.Kind == EVaRestTraceSocketFrameKind::Binary;
+			const int32 EffectiveCap = bBinary ? FMath::Min(Cap, FMath::Max(0, Settings.BinaryCap)) : Cap;
+			if (Bytes.IsEmpty() || (bBinary && EffectiveCap == 0))
+			{
+				// The descriptor needs no source bytes, redaction work or task slot. In particular a zero-byte frame cannot
+				// accumulate an unlimited queue of zero-charge redaction jobs.
+				FVaRestTraceExcerpt Description; Description.TotalBytes = Bytes.Num();
+				Description.Kind = bBinary ? EVaRestExcerptKind::Binary : EVaRestExcerptKind::Text;
+				Description.bBinaryCaptured = bBinary && EffectiveCap > 0;
+				if (bBinary && !Description.bBinaryCaptured)
+				{
+					const FString Label = FString::Printf(TEXT("<binary: %lld bytes, application/octet-stream>"), static_cast<long long>(Bytes.Num()));
+					const FTCHARToUTF8 Utf8(*Label, Label.Len());
+					Description.Bytes = MakeShared<const TArray<uint8>, ESPMode::ThreadSafe>(reinterpret_cast<const uint8*>(Utf8.Get()), Utf8.Length());
+				}
+				Immediate = MoveTemp(Description);
+			}
+			else
+			{
+				Job.Owner = EVaRestTraceExcerptOwner::Frame; Job.SocketId = SocketId; Job.FrameId = FrameId;
+				Job.Time = Time; Job.TotalBytes = Bytes.Num(); Job.Redactor = Redactor;
+				Job.FrameAdmission = VaRest::Http::Excerpts::FSocketFrameAdmission::TryAcquire();
+				if (!Job.FrameAdmission) Job.bBacklog = true;
+				else Job = VaRest::Http::ExcerptsPrivate::WithCopy(MoveTemp(Job), Bytes, EffectiveCap, bBinary ? FString(TEXT("application/octet-stream")) : (bJsonSuffix ? FString(TEXT("application/json")) : FString(TEXT("text/plain"))), bBinary ? EffectiveCap : 0);
+			}
+		}
+	}
+#endif
+	Frame.bExcerptPending = Job.IsSet() || Immediate.IsSet();
+	return Capture;
 }
 
 int64 VaRest::Http::Excerpts::AdmissionCap()
@@ -253,7 +368,7 @@ VaRest::Http::Excerpts::FJob VaRest::Http::Excerpts::PrepareRequest(const FExcha
 	}
 	// The request's own Content-Type wins (spec 3.2)
 	const FString* Type = Ex.RequestHeaders.Find(TEXT("Content-Type"));
-	return WithCopy(MoveTemp(Job), Body.Bytes, Detail.BodyCap, Type ? *Type : Body.ContentType);
+	return WithCopy(MoveTemp(Job), Body.Bytes, Detail.BodyCap, Type ? *Type : Body.ContentType, Detail.BinaryCap);
 }
 
 bool VaRest::Http::Excerpts::WillExcerptOnDecode(const FExchangeState& Ex, const FVaRestTransportResult& Result)
@@ -290,7 +405,8 @@ VaRest::Http::Excerpts::FJob VaRest::Http::Excerpts::PrepareResponse(const FExch
 		};
 		return Job;
 	}
-	return WithCopy(MoveTemp(Job), Result.Body, FVaRestTrace::GetDetailSettings().BodyCap, Result.ContentType);
+	const auto Detail = FVaRestTrace::GetDetailSettings();
+	return WithCopy(MoveTemp(Job), Result.Body, Detail.BodyCap, Result.ContentType, Detail.BinaryCap);
 }
 
 void VaRest::Http::Excerpts::EmitOnDecode(const FFinish& Finish)
@@ -304,15 +420,18 @@ void VaRest::Http::Excerpts::EmitOnDecode(const FFinish& Finish)
 	LLM_SCOPE_BYTAG(VaRest_Trace);
 	// The body itself, before ParseOwned unescapes it in place (VaRestDecode.cpp:115) and the envelope reads the result:
 	// IN-14's zero copies. The redactor's output is the excerpt's own.
-	const int32 Take = FMath::Min(Finish.Body.Num(), FMath::Max(0, Finish.ExcerptCap));
+	const int32 Take = FMath::Min(Finish.Body.Num(), FMath::Max(0, FMath::Max(Finish.ExcerptCap, Finish.ExcerptBinaryCap)));
 	FVaRestTraceExcerpt Excerpt = Finish.ExcerptRedactor->RedactBody(Finish.Response.ContentType, TConstArrayView<uint8>(Finish.Body.GetData(), Take), Finish.Body.Num(),
-		Finish.ExcerptCap);
+		Finish.ExcerptCap, Finish.ExcerptBinaryCap);
 	ExcerptsPrivate::Emit(EVaRestTraceExcerptOwner::Response, Finish.Response.RequestId, Finish.ExcerptAttempt, Finish.ExcerptDispatchId, MoveTemp(Excerpt),
 		Finish.Clock.IsValid() ? Finish.Clock->Now() : 0.0);
 }
 
 void VaRest::Http::Excerpts::ResolveDiscarded(FExchangeState& Ex)
 {
+	const auto ManagedControl = Ex.Managed.Control;
+	if (ManagedControl && ManagedControl->IsStopped())
+		return;
 	const int32 Attempt = Ex.ExcerptOnDecodeAttempt;
 	const uint64 DispatchId = Ex.ExcerptOnDecodeDispatchId;
 	if (Attempt <= 0)
@@ -332,5 +451,8 @@ void VaRest::Http::Excerpts::ResolveDiscarded(FExchangeState& Ex)
 	Skipped.SkipReason = EVaRestExcerptSkip::Discarded;
 	Skipped.TotalBytes = Ex.ExcerptOnDecodeBytes;
 	Skipped.bTruncated = Skipped.TotalBytes > 0;
-	ExcerptsPrivate::Emit(EVaRestTraceExcerptOwner::Response, Ex.RequestId, Attempt, DispatchId, MoveTemp(Skipped), Ex.Config->Clock->Now());
+	const double At = Ex.Config->Clock->Now();
+	if (ManagedControl && ManagedControl->IsStopped())
+		return;
+	ExcerptsPrivate::Emit(EVaRestTraceExcerptOwner::Response, Ex.RequestId, Attempt, DispatchId, MoveTemp(Skipped), At);
 }

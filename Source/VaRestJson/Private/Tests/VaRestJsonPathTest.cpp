@@ -123,12 +123,40 @@ bool FVaRestJsonPathIndexedCaseTest::RunTest(const FString& Parameters)
 		Wide.Set(*FString::Printf(TEXT("k%d"), i), i);
 	}
 	Wide.Set(TEXT("User"), FVaRestJson::Object().Set(TEXT("Id"), 7));
-	TestTrue(TEXT("indexed root"), Wide.GetNodeInternal()->Obj.Index != nullptr);
+	TestTrue(TEXT("indexed root"), Wide.GetNodeInternal()->Obj.GetIndex() != nullptr);
 	TestEqual(TEXT("exact dotted path"), Wide.Path(TEXT("User.Id")).AsInt(), 7);
 	TestEqual(TEXT("exact pointer"), Wide.Path(TEXT("/User/Id")).AsInt(), 7);
 	TestFalse(TEXT("indexed dotted lookup is case-sensitive"), Wide.Path(TEXT("user.Id")).IsValid());
 	TestFalse(TEXT("indexed pointer lookup is case-sensitive"), Wide.Path(TEXT("/USER/Id")).IsValid());
 	TestFalse(TEXT("inner key is case-sensitive"), Wide.Path(TEXT("User.ID")).IsValid());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonPathValidationTest, "VaRest.Json.Path.Validation",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestJsonPathValidationTest::RunTest(const FString& Parameters)
+{
+	for (const TCHAR* Path : { TEXT(""), TEXT("a"), TEXT("missing.items[0].token"), TEXT("[0][1].x"), TEXT("a[999999999]"),
+		TEXT("/"), TEXT("//"), TEXT("/x~0~1"), TEXT("/~01"), TEXT("/01"), TEXT("/-"), TEXT("/4294967296"), TEXT("温度.値") })
+	{
+		TestTrue(FString::Printf(TEXT("valid syntax: %s"), Path), FVaRestJson::IsValidPath(Path));
+	}
+	for (const TCHAR* Path : { TEXT(".a"), TEXT("a."), TEXT("a..b"), TEXT("missing..token"), TEXT("a["), TEXT("a[]"),
+		TEXT("a[x]"), TEXT("a[-1]"), TEXT("a[01]"), TEXT("a[1000000000]"), TEXT("a]"), TEXT("a[0]b"), TEXT("a.[0]"), TEXT("/~"), TEXT("/~2"), TEXT("/missing/x~2") })
+	{
+		TestFalse(FString::Printf(TEXT("invalid syntax: %s"), Path), FVaRestJson::IsValidPath(Path));
+	}
+	const FVaRestJson Fixture = VaRestJsonPathTest::Fixture();
+	TestTrue(TEXT("valid syntax is independent of whether a value exists"),
+		FVaRestJson::IsValidPath(TEXT("missing.items[0].token")) && !Fixture.Path(TEXT("missing.items[0].token")).IsValid());
+	// Both wire identities exist; dropping U+0000 would read the other value.
+	const FVaRestJson Counted = FVaRestJson::Parse(FStringView(TEXT("{\"a\\u0000x\":1,\"ax\":2}"))).StealValue();
+	const TCHAR Pointer[] = { TEXT('/'), TEXT('a'), 0, TEXT('x') };
+	const FStringView PointerView(Pointer, UE_ARRAY_COUNT(Pointer));
+	TestTrue(TEXT("a counted null is valid inside a pointer token"), FVaRestJson::IsValidPath(PointerView));
+	TestEqual(TEXT("pointer preserves the exact counted key"), Counted.Path(PointerView).AsInt(), 1);
+	TestEqual(TEXT("the other identity remains distinct"), Counted.Path(TEXT("/ax")).AsInt(), 2);
 	return true;
 }
 

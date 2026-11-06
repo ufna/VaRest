@@ -98,12 +98,16 @@ namespace VaRest::WebSocket
  * writes fragment headers into the bytes before each fragment (plan decision 6): a frame is consumed by sending, so move
  * it in. Any thread; a frame is not shared between threads.
  */
+struct FVaRestSocketFrameMetadata;
+
 struct VARESTWEBSOCKET_API FVaRestSocketFrame
 {
 	EVaRestSocketFrameKind Kind = EVaRestSocketFrameKind::Text;
 	TArray<uint8> Storage;
 	int32 Offset = VaRest::WebSocket::FrameHeadroom;
 	int32 Length = 0;
+	/** Optional immutable native codec metadata. It holds no reflected values or callbacks. */
+	TSharedPtr<const FVaRestSocketFrameMetadata, ESPMode::ThreadSafe> Metadata;
 
 	/** UTF-8 text, copied once after FrameHeadroom; not validated (the caller's bytes are the caller's). Past 2 GiB: an invalid frame */
 	static FVaRestSocketFrame Text(FUtf8StringView InText);
@@ -144,6 +148,7 @@ struct FVaRestSocketEnd
 	int32 HttpStatus = 0;
 	/** For logs and messages: libwebsockets' error string, the X509 error, which timeout fired, what VaRest refused */
 	FString Detail;
+	bool bWhileReadPaused = false;
 };
 
 enum class EVaRestSocketEventType : uint8
@@ -154,7 +159,8 @@ enum class EVaRestSocketEventType : uint8
 	Pong,
 	Drained,
 	Closed,
-	Error
+	Error,
+	Flow
 };
 
 /** One item of a connection's ordered event queue (WebSocket spec 2.1, 7.1) */
@@ -175,6 +181,9 @@ struct FVaRestSocketEvent
 	FVaRestSocketEnd End;
 	/** FPlatformTime::Seconds() when the transport queued it */
 	double Time = 0.0;
+	/** Message: a service-thread exact-text rule accepted its reply; Flow: current native pause state. */
+	bool bAutoReplied = false, bReadPaused = false;
+	int64 PendingBytes = 0;
 
 	bool IsTerminal() const { return Type == EVaRestSocketEventType::Closed || Type == EVaRestSocketEventType::Error; }
 };

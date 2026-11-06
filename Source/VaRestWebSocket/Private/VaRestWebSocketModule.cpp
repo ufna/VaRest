@@ -4,6 +4,11 @@
 #include "Misc/Fork.h"
 #include "Modules/ModuleManager.h"
 #include "VaRestLwsTransport.h"
+#include "VaRestNativeOwnerHost1.h"
+#if defined(__linux__) && defined(__x86_64__) && !defined(__ANDROID__) && defined(VAREST_USE_PRIVATE_LWS3) && VAREST_USE_PRIVATE_LWS3
+#include "NativeOwner/VaRestNativeOwnerPump.h"
+#endif
+#include "VaRestSocketState.h"
 #include "VaRestWebSocketLog.h"
 
 DEFINE_LOG_CATEGORY(LogVaRestSocket);
@@ -15,14 +20,76 @@ LLM_DEFINE_TAG(VaRest_WebSocket);
  * on: LoadStartupModules runs every phase (LaunchEngineLoop.cpp:4669-4695) after LoadStartupCoreModules (:3785, :3896). See the
  * Task 7 report (Task 1 review M-1)
  */
-class FVaRestWebSocketModule final : public IModuleInterface
+class FVaRestWebSocketModule final : public IVaRestNativeOwnerHost1
 {
 public:
+    virtual FVaRestNativeOwnerHostStep1 StartNativeOwnerSession1() override
+    {
+#if defined(__linux__) && defined(__x86_64__) && !defined(__ANDROID__) && defined(VAREST_USE_PRIVATE_LWS3) && VAREST_USE_PRIVATE_LWS3
+        const VrStatus Role = VaRest::WebSocket::Lws::RequireNativeOwnerControlThread(TEXT("Host StartNativeOwnerSession1"));
+        if (Role != VR_STATUS_OK) return {16,1,static_cast<uint32>(EVaRestNativeOwnerHostOutcome1::Refused),Role};
+        if (!VaRest::WebSocket::Lws::NativeOwnerRealThreadModeAllowed())
+            return {16,1,static_cast<uint32>(EVaRestNativeOwnerHostOutcome1::Refused),VR_STATUS_FORK_UNESTABLISHED};
+        // BOTH real guards precede even the existing lazy default slot.
+        return VaRest::WebSocket::Lws::GetDefault().StartNativeOwnerSession1();
+#else
+        return {16,1,static_cast<uint32>(EVaRestNativeOwnerHostOutcome1::Refused),7};
+#endif
+    }
+
+    virtual FVaRestNativeOwnerHostStep1 FinishNativeOwnerSession1() override
+    {
+#if defined(__linux__) && defined(__x86_64__) && !defined(__ANDROID__) && defined(VAREST_USE_PRIVATE_LWS3) && VAREST_USE_PRIVATE_LWS3
+        const VrStatus Role = VaRest::WebSocket::Lws::RequireNativeOwnerControlThread(TEXT("Host FinishNativeOwnerSession1"));
+        if (Role != VR_STATUS_OK) return {16,1,static_cast<uint32>(EVaRestNativeOwnerHostOutcome1::Refused),Role};
+        if (!VaRest::WebSocket::Lws::NativeOwnerRealThreadModeAllowed())
+            return {16,1,static_cast<uint32>(EVaRestNativeOwnerHostOutcome1::Refused),VR_STATUS_FORK_UNESTABLISHED};
+        // BOTH real guards precede even the existing lazy default slot.
+        return VaRest::WebSocket::Lws::GetDefault().FinishNativeOwnerSession1();
+#else
+        return {16,1,static_cast<uint32>(EVaRestNativeOwnerHostOutcome1::Refused),7};
+#endif
+    }
+
+    virtual FVaRestNativeOwnerHostStep1 AdvanceNativeOwnerFinish1() override
+    {
+#if defined(__linux__) && defined(__x86_64__) && !defined(__ANDROID__) && defined(VAREST_USE_PRIVATE_LWS3) && VAREST_USE_PRIVATE_LWS3
+        const VrStatus Role = VaRest::WebSocket::Lws::RequireNativeOwnerControlThread(TEXT("Host AdvanceNativeOwnerFinish1"));
+        if (Role != VR_STATUS_OK) return {16,1,static_cast<uint32>(EVaRestNativeOwnerHostOutcome1::Refused),Role};
+        if (!VaRest::WebSocket::Lws::NativeOwnerRealThreadModeAllowed())
+            return {16,1,static_cast<uint32>(EVaRestNativeOwnerHostOutcome1::Refused),VR_STATUS_FORK_UNESTABLISHED};
+        // BOTH real guards precede even the existing lazy default slot.
+        return VaRest::WebSocket::Lws::GetDefault().AdvanceNativeOwnerFinish1();
+#else
+        return {16,1,static_cast<uint32>(EVaRestNativeOwnerHostOutcome1::Refused),7};
+#endif
+    }
+
+    virtual FVaRestNativeOwnerHostStep1 PumpNativeOwnerSession1() override
+    {
+#if defined(__linux__) && defined(__x86_64__) && !defined(__ANDROID__) && defined(VAREST_USE_PRIVATE_LWS3) && VAREST_USE_PRIVATE_LWS3
+        const VrStatus Role = VaRest::WebSocket::Lws::RequireNativeOwnerControlThread(TEXT("Host PumpNativeOwnerSession1"));
+        if (Role != VR_STATUS_OK) return {16,1,static_cast<uint32>(EVaRestNativeOwnerHostOutcome1::Refused),Role};
+        if (!VaRest::WebSocket::Lws::NativeOwnerRealThreadModeAllowed())
+            return {16,1,static_cast<uint32>(EVaRestNativeOwnerHostOutcome1::Refused),VR_STATUS_FORK_UNESTABLISHED};
+        // Actual pre-Start Host frame/retention commitment is an external Source-H
+        // premise. Neither this call nor the default slot creates that authority.
+        return VaRest::WebSocket::Lws::GetDefault().PumpNativeOwnerSession1();
+#else
+        return {16,1,static_cast<uint32>(EVaRestNativeOwnerHostOutcome1::Refused),7};
+#endif
+    }
+
 	virtual void StartupModule() override
 	{
 		// Before any module shuts down (CoreDelegates.h:261-262); an automation run's Quit force-exits, so there neither this
 		// nor ShutdownModule runs (CLAUDE.md, VaRestHttpModule.cpp:24-26)
-		PreExitHandle = FCoreDelegates::OnEnginePreExit.AddStatic(&VaRest::WebSocket::Lws::ShutdownDefault);
+		VaRest::WebSocket::StartSocketsOnGT();
+		PreExitHandle = FCoreDelegates::OnEnginePreExit.AddLambda([]
+		{
+			VaRest::WebSocket::StopSocketsOnGT();
+			VaRest::WebSocket::Lws::ShutdownDefault();
+		});
 		if (FForkProcessHelper::IsForkRequested())
 		{
 			// A forking server's child makes its own context and thread (LwsWebSocketsManager.cpp:260-279; plan decision 22)
@@ -35,8 +102,10 @@ public:
 	{
 		FCoreDelegates::OnChildEndFramePostFork.Remove(ForkHandle);
 		FCoreDelegates::OnEnginePreExit.Remove(PreExitHandle);
+		VaRest::WebSocket::StopSocketsOnGT();
 		VaRest::WebSocket::Lws::ShutdownDefault();
 	}
+	virtual bool SupportsDynamicReloading() override { return false; }
 
 private:
 	FDelegateHandle PreExitHandle;

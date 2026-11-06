@@ -1,6 +1,7 @@
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 
 #include "VaRestClientState.h"
+#include "VaRestManagedRefreshDelivery.h"
 #include "VaRestOfflineInternal.h"
 #include "VaRestPersistenceGuard.h"
 #include "VaRestIdentity.h"
@@ -14,6 +15,8 @@
 #include "VaRestRetryInternal.h"
 #include "Misc/Paths.h"
 #include "VaRestTracePoints.h"
+#include "VaRestNativeScope.h"
+#include "VaRestTraceSnapshot.h"
 
 namespace VaRest::Http::ClientStatePrivate
 {
@@ -102,8 +105,11 @@ namespace VaRest::Http::ClientStatePrivate
 	}
 }
 
-VaRest::Http::FClientState::FClientState(uint64 InClientId, FClientConfig&& InConfig)
+VaRest::Http::FClientState::FClientState(uint64 InClientId, FClientConfig&& InConfig, FNativeClientRegistration InManaged)
 	: ClientId(InClientId)
+	, ScopeId(InConfig.ScopeLifetime.IsValid() ? InConfig.ScopeLifetime->GetId() : InConfig.ScopeId)
+	, ScopeLifetime(InConfig.ScopeLifetime)
+	, ManagedLifetime(MoveTemp(InManaged))
 	, Config(MakeShared<FClientConfig, ESPMode::ThreadSafe>(MoveTemp(InConfig)))
 	, Random(static_cast<int32>(static_cast<uint32>(InClientId * 2654435761ull) ^ FPlatformTime::Cycles()))
 {
@@ -111,11 +117,27 @@ VaRest::Http::FClientState::FClientState(uint64 InClientId, FClientConfig&& InCo
 
 VaRest::Http::FClientState::~FClientState()
 {
+	if (QueueBinding) QueueBinding->CloseCaptureAdmission();
+	const bool bManaged = ManagedLifetime.IsValid();
+	if (bManaged)
+	{
+		checkf(IsInGameThread(), TEXT("Managed client aliases/builders/configs must final-release on GT before module Stop"));
+		ManagedLifetime.Control->ClientSlotsOnGT().BeginRetirement(ManagedLifetime);
+		if (auto* Delivery=ManagedLifetime.Control->ClientSlotsOnGT().RefreshDeliveryOnGT(ManagedLifetime)) Delivery->RetireOnGT();
+		Session.Refresh.Reset(); // native-only tickets end here; original External captures were destroyed on GT above
+		Session.Pending.Reset();
+		if (!ManagedLifetime.Control->IsStopped())
+			ManagedLifetime.Control->ClientSlotsOnGT().DetachQueuesForRetirement(ManagedLifetime);
+	}
 	// IN-8. Off the game thread only when a game's own thread dropped the last FVaRestClient (the core hands its
 	// references to the game thread, review I-1); the event still goes out on the game thread. First, while Config is
 	// still here: the backstop below moves it away.
-	TracePoints::Client(ClientId, *Config, false);
-	if (!IsInGameThread())
+	if (bClientPublished && (!bManaged || !ManagedLifetime.Control->IsStopped())) TracePoints::Client(ClientId, *Config, false);
+	if (bManaged && ManagedLifetime.Control->IsStopped())
+	{
+		// Captured internal anchors destroy on GT after Stop without a trace, dead service call or replacement task.
+	}
+	else if (!IsInGameThread())
 	{
 #if !UE_BUILD_SHIPPING
 		++Testing::Counters().ClientStatesDestroyedOffGameThread;
@@ -124,39 +146,100 @@ VaRest::Http::FClientState::~FClientState()
 		// refresh waiters: game code and its captures, concurrency review M-9) die on the game thread. Moved, not copied
 		// (review N-3), so this thread keeps no reference; the task body dies on the game thread right after it runs
 		// (TaskPrivate.h:871-877).
-		UE::Tasks::Launch(TEXT("VaRest.ReleaseConfig"), [Id = ClientId, Doomed = MoveTemp(Config), DoomedSession = MoveTemp(Session), DoomedQueue = MoveTemp(Queue), DoomedEvents = MoveTemp(QueuedResult)] { Doomed->Connectivity->UnregisterProbe(Id); if (DoomedQueue) DoomedQueue->Leave(Id); }, UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
+		UE::Tasks::Launch(TEXT("VaRest.ReleaseConfig"), [Id = ClientId, Doomed = MoveTemp(Config), DoomedSession = MoveTemp(Session), DoomedQueue = MoveTemp(Queue), DoomedBinding = MoveTemp(QueueBinding), DoomedEvents = MoveTemp(QueuedResult)] { Doomed->Connectivity->UnregisterProbe(Id); if (DoomedQueue) DoomedQueue->Leave(DoomedBinding); }, UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
 	}
 	else
 	{
 		Config->Connectivity->UnregisterProbe(ClientId);
-        if (Queue) Queue->Leave(ClientId);
+		if (Queue && (!bManaged || !ManagedLifetime.Control->IsStopped())) Queue->Leave(QueueBinding,bManaged ? ManagedLifetime.Control : nullptr);
+		if (bManaged) { Queue.Reset();QueueBinding.Reset(); } // owned native drain rows retain the actual detached queues
+		if (bManaged && !ManagedLifetime.Control->IsStopped() && SecretExpiryTimer.IsValid()) Config->Clock->ClearTimer(SecretExpiryTimer);
 	}
-	ClientStatePrivate::FLiveRegistry& Registry = ClientStatePrivate::Live();
-	FScopeLock Lock(&Registry.Lock);
-	Registry.States.RemoveAll([this](const TWeakPtr<FClientState, ESPMode::ThreadSafe>& Weak) { return !Weak.IsValid() || Weak.HasSameObject(this); });
-}
-
-TSharedRef<VaRest::Http::FClientState, ESPMode::ThreadSafe> VaRest::Http::FClientState::Create(FClientConfig&& InConfig)
-{
-	check(IsInGameThread());
-	TSharedRef<FClientState, ESPMode::ThreadSafe> Created = MakeShared<FClientState, ESPMode::ThreadSafe>(FVaRestTrace::NewClientId(), MoveTemp(InConfig));
-	Created->EditConfig([](FClientConfig&) {});
 	{
 		ClientStatePrivate::FLiveRegistry& Registry = ClientStatePrivate::Live();
 		FScopeLock Lock(&Registry.Lock);
-		Registry.States.Add(Created);
+		Registry.States.RemoveAll([this](const TWeakPtr<FClientState, ESPMode::ThreadSafe>& Weak) { return !Weak.IsValid() || Weak.HasSameObject(this); });
+	} // a last-slot Closed sink may build another snapshot; never retain the registry lock across that callout
+	if (bManaged && !ManagedLifetime.Control->IsStopped() && !Queue.IsValid() && !Session.Refresh.IsValid() &&
+		Session.Pending.IsEmpty() && Session.ChangeDepth == 0 && !Session.bDelivering && !SecretExpiryTimer.IsValid())
+	{
+		// No queue/refresh obligations remain and the live probe/timer registrations were removed above.
+		// A current cell anchor can still be Reclaiming; the existing bounded ticker finishes its recorded barrier.
+		ManagedLifetime.Control->ClientSlotsOnGT().TryReleaseQuiescent(ManagedLifetime);
 	}
+}
+
+TSharedRef<VaRest::Http::FClientState, ESPMode::ThreadSafe> VaRest::Http::FClientState::Create(FClientConfig&& InConfig, FNativeClientRegistration InManaged,bool bPublishClient)
+{
+	check(IsInGameThread());
+	if (InManaged.IsValid())
+	{
+		InConfig.ManagedQueueStatus=InConfig.QueueName.IsEmpty() ? EManagedQueueStatus::AccountRequired : EManagedQueueStatus::Paused;
+		InConfig.bQueueActivationRequested=false;
+		InConfig.RegisteredQueue.Reset();InConfig.QueueBinding.Reset();
+		InConfig.QueueConfigError=InConfig.QueueName.IsEmpty() ? TEXT("QueueAccountRequired") : TEXT("QueueNotActivated");
+	}
+	TSharedRef<FClientState, ESPMode::ThreadSafe> Created = MakeShared<FClientState, ESPMode::ThreadSafe>(FVaRestTrace::NewClientId(), MoveTemp(InConfig), MoveTemp(InManaged));
+	Created->EditConfig([](FClientConfig&) {});
+	if (Created->ManagedLifetime.IsValid() && Created->GetConfig()->Auth) Created->SetAuth(Created->GetConfig()->Auth);
+	if (bPublishClient) Created->PublishCreatedOnGT();
+	return Created;
+}
+
+bool VaRest::Http::FClientState::PublishCreatedOnGT()
+{
+	check(IsInGameThread());
+	const auto Self=AsShared();
+	if (bClientPublished) return true;
+	if (ManagedAdmissionIsClosed() || (ScopeLifetime && !ScopeLifetime->AcceptsClientsOnGT())) return false;
+	const auto Register=[&]
+	{
+		ClientStatePrivate::FLiveRegistry& Registry = ClientStatePrivate::Live();
+		FScopeLock Lock(&Registry.Lock);
+		Registry.States.Add(Self);
+	};
+	if (!ManagedLifetime.IsValid()) Register(); // preserve ordinary snapshot/initial queue ordering
 	// IN-8, once the state is live (a sink added from this event's OnEvent finds it in its snapshot) and outside the lock:
 	// a sink's code runs here
-	Created->AttachConnectivity();
-	TracePoints::Client(Created->GetClientId(), *Created->GetConfig(), true);
-	return Created;
+	if (!ManagedLifetime.IsValid() && !GetConfig()->QueueName.IsEmpty()) RefreshQueueRegistration();
+	AttachConnectivity();
+	if (ManagedAdmissionIsClosed()) return false;
+	if (ManagedLifetime.IsValid()) Register();
+	bClientPublished=true; // a Created listener may retire this exact, already committed native client
+	TracePoints::Client(GetClientId(),*GetConfig(),true);
+	return true;
 }
 
 TSharedRef<const VaRest::Http::FClientConfig, ESPMode::ThreadSafe> VaRest::Http::FClientState::GetConfig() const
 {
 	FReadScopeLock ReadLock(ConfigLock);
 	return Config.ToSharedRef();
+}
+
+TSharedRef<const VaRest::Http::FClientConfig, ESPMode::ThreadSafe> VaRest::Http::FClientState::SnapshotForSend(
+	FQueueCaptureLease& QueueCapture, bool bMayEnqueue) const
+{
+	check(!QueueCapture.IsHeld());
+	FReadScopeLock ReadLock(ConfigLock);
+	if (bMayEnqueue && Config->QueueBinding)
+		Config->QueueBinding->TryCapture(QueueCapture);
+	return Config.ToSharedRef();
+}
+
+TSharedPtr<VaRest::Http::FQueueBinding, ESPMode::ThreadSafe> VaRest::Http::FClientState::DetachQueueBindingOnGT()
+{
+	check(IsInGameThread() && ManagedLifetime.IsValid());
+	const auto Self=AsShared();
+	if (ManagedLifetime.Control->IsStopped()) return nullptr;
+	TSharedPtr<FQueueBinding, ESPMode::ThreadSafe> Detached;
+	{
+		FWriteScopeLock WriteLock(ConfigLock);
+		Detached = QueueBinding;
+		if (Detached) Detached->RevokeOnGT();
+	}
+	// Only native atomics under the config lock. Queue removal and any eventual callout happen afterward.
+	ManagedLifetime.Control->ClientSlotsOnGT().DetachQueueBinding(ManagedLifetime,Detached,true);
+	return Detached;
 }
 
 TSharedRef<const FVaRestRedactor, ESPMode::ThreadSafe> VaRest::Http::RedactorFor(const FExchangeState& Ex)
@@ -210,24 +293,25 @@ void VaRest::Http::RememberAppliedRedactor(FExchangeState& Ex)
 void VaRest::Http::FClientState::EditConfig(TFunctionRef<void(FClientConfig&)> Edit)
 {
 	check(IsInGameThread());
+	const auto Self=AsShared(); // actual setter/registration callouts may release the last external client alias
+	if (ManagedLifetime.IsValid() && (ManagedLifetime.Control->IsStopped() || ManagedLifetime.Gate->IsClosed())) return;
 	const TSharedRef<const FClientConfig, ESPMode::ThreadSafe> Previous = GetConfig();
 	TSharedRef<FClientConfig, ESPMode::ThreadSafe> Next = MakeShared<FClientConfig, ESPMode::ThreadSafe>(*Previous);
 	Edit(*Next);
-    const bool bRegistrationChanged = !Previous->BaseUrl.Equals(Next->BaseUrl, ESearchCase::CaseSensitive)
-        || !Previous->QueueName.Equals(Next->QueueName, ESearchCase::CaseSensitive)
-        || !Previous->QueueRoot.Equals(Next->QueueRoot, ESearchCase::CaseSensitive)
-        || Previous->StorageConfigError != Next->StorageConfigError
-        || Previous->Connectivity != Next->Connectivity || Previous->Auth != Next->Auth
-        || Previous->OfflinePolicy.MaxQueued != Next->OfflinePolicy.MaxQueued
-        || Previous->OfflinePolicy.MaxAgeSeconds != Next->OfflinePolicy.MaxAgeSeconds
-        || Previous->OfflinePolicy.MaxItemBytes != Next->OfflinePolicy.MaxItemBytes
-        || Previous->OfflinePolicy.MaxBodyBytes != Next->OfflinePolicy.MaxBodyBytes;
+	const bool bRegistrationChanged=!SameQueueRegistrationTarget(*Previous,*Next);
     if (bRegistrationChanged)
     {
         Next->RegisteredQueue.Reset();
-        Next->QueueConfigError = TEXT("QueueConfig");
+		Next->QueueBinding.Reset();
+		if (ManagedLifetime.IsValid())
+		{
+			Next->bQueueActivationRequested=false;
+			Next->ManagedQueueStatus=Next->QueueName.IsEmpty() ? EManagedQueueStatus::AccountRequired : EManagedQueueStatus::Paused;
+			Next->QueueConfigError=Next->QueueName.IsEmpty() ? TEXT("QueueAccountRequired") : TEXT("QueueNotActivated");
+		}
+		else Next->QueueConfigError=TEXT("QueueConfig");
     }
-	Publish(Next);
+	if (!Publish(Next,Previous)) return; // a managed reentrant setter already published a newer complete snapshot
     if (bRegistrationChanged)
     {
 #if WITH_DEV_AUTOMATION_TESTS
@@ -243,8 +327,105 @@ void VaRest::Http::FClientState::EditConfig(TFunctionRef<void(FClientConfig&)> E
 	}
 }
 
-void VaRest::Http::FClientState::Publish(const TSharedRef<FClientConfig, ESPMode::ThreadSafe>& Next)
+bool VaRest::Http::FClientState::TrySwitchQueue(FClientConfig&& CompleteTarget,FString& OutError,bool bActivate)
 {
+	check(IsInGameThread());
+	const auto Self=AsShared();
+	OutError.Reset();
+	if (!ManagedLifetime.IsValid() || ManagedLifetime.Control->IsStopped() || ManagedLifetime.Gate->IsClosed())
+	{ OutError=TEXT("LifecycleClosed");return false; }
+	if (QueueRefreshRevision==MAX_uint64 || bQueueRegistrationActive)
+	{ OutError=TEXT("LifecycleBusy");return false; }
+	if (bActivate && CompleteTarget.QueueName.IsEmpty()) { OutError=TEXT("QueueAccountRequired");return false; }
+	if (!CompleteTarget.Transport.IsValid() || !IsValidCachePolicy(CompleteTarget.Cache) ||
+		!CompleteTarget.CacheConfigError.IsEmpty() || !FOfflineQueue::ValidateTarget(CompleteTarget,OutError))
+	{ if (OutError.IsEmpty()) OutError=TEXT("Config");return false; }
+	FNativeQueueBindingReservation Activation;
+	FName ReservationError;
+	const auto Previous=GetConfig();
+	const bool bActivationOnly=bActivate && !Queue && SameQueueRegistrationTarget(*Previous,CompleteTarget);
+	if (!ManagedLifetime.Control->ClientSlotsOnGT().ReserveQueueBinding(ManagedLifetime,Activation,ReservationError,!bActivationOnly))
+	{ OutError=ReservationError.ToString();return false; }
+	const auto PreviousQueue=Queue;
+	const auto PreviousBinding=QueueBinding;
+	auto Next=MakeShared<FClientConfig,ESPMode::ThreadSafe>(MoveTemp(CompleteTarget));
+	// A complete target can replace the auth and clock too. Prepare their redaction transaction without changing A.
+	TArray<FString> AuthKeys;
+	TArray<TPair<FName,FString>> AuthValues;
+	const auto StillCurrent=[&]{ return !ManagedLifetime.Control->IsStopped() && !ManagedLifetime.Gate->IsClosed() &&
+		&GetConfig().Get()==&Previous.Get(); };
+	if (bActivate)
+	{
+		FString Scope;
+		const bool bIdentityReady=RequestIdentityScope(*Next,GetSessionData(),EVaRestAuthMode::Required,Next->DefaultHeaders,Scope,&ManagedLifetime);
+		if (!StillCurrent()) { OutError=TEXT("LifecycleBusy");return false; }
+		if (!bIdentityReady) { OutError=TEXT("QueueIdentityRequired");return false; }
+	}
+	if (Next->Auth)
+	{
+		Next->Auth->GetRedactedKeys(AuthKeys);
+		if (!StillCurrent()) { OutError=TEXT("LifecycleBusy");return false; }
+		Next->Auth->GetSecretValues(AuthValues);
+		if (!StillCurrent()) { OutError=TEXT("LifecycleBusy");return false; }
+	}
+	AppendRedactKeys(Next->RedactedKeys,AuthKeys);
+	const double Now=Next->Clock->Now();
+	if (!StillCurrent()) { OutError=TEXT("LifecycleBusy");return false; }
+	double ClockDelta=0;
+	if (Previous->Clock!=Next->Clock)
+	{
+		ClockDelta=Now-Previous->Clock->Now();
+		if (!StillCurrent()) { OutError=TEXT("LifecycleBusy");return false; }
+	}
+	auto PreparedSecrets=Secrets;
+	PreparedSecrets.Rebase(ClockDelta);
+	PreparedSecrets.Prune(Now);
+	TArray<FName> PreparedSlots;
+	for (const auto& Value:AuthValues)
+	{
+		const FName Slot=AuthSecretSlot(Value.Key);
+		PreparedSecrets.Set(Slot,Value.Value,Now);PreparedSlots.AddUnique(Slot);
+	}
+	for (const FName Old:AuthSlots)
+		if (!PreparedSlots.Contains(Old)) PreparedSecrets.Set(Old,FString(),Now);
+	Next->RegisteredQueue.Reset();Next->QueueBinding.Reset();
+	Next->bQueueActivationRequested=bActivate;
+	Next->ManagedQueueStatus=Next->QueueName.IsEmpty() ? EManagedQueueStatus::AccountRequired :
+		(bActivate ? EManagedQueueStatus::PendingBusy : EManagedQueueStatus::Paused);
+	Next->QueueConfigError=Next->QueueName.IsEmpty() ? TEXT("QueueAccountRequired") :
+		(bActivate ? TEXT("QueueBusy") : TEXT("QueueNotActivated"));
+	// All derived-chain/clock callouts happen before Publish's managed compare-and-swap and exact revocation.
+	if (!Publish(Next,Previous,true,&PreparedSecrets,&PreparedSlots))
+	{ OutError=ManagedLifetime.Control->IsStopped() || ManagedLifetime.Gate->IsClosed() ? TEXT("LifecycleClosed") : TEXT("LifecycleBusy");return false; }
+	++QueueRefreshRevision; // invalidates any older Join paused inside its own provider/clock callout
+	Queue.Reset();QueueBinding.Reset();
+	if (bActivate)
+	{
+		const bool bParked=Activation.ParkForCurrentTarget();
+		check(bParked); // no callout between successful managed publication and this native-only transition
+	}
+	// Current native Send already sees the complete paused B. A's actual owners live in their existing drain row.
+	if (PreviousQueue && !ManagedLifetime.Control->IsStopped())
+		ManagedLifetime.Control->ClientSlotsOnGT().DetachQueueBinding(ManagedLifetime,PreviousBinding,true);
+	if (!ManagedLifetime.Control->IsStopped() && Previous->Connectivity!=GetConfig()->Connectivity)
+	{
+		Previous->Connectivity->UnregisterProbe(ClientId);
+		if (!ManagedLifetime.Control->IsStopped()) AttachConnectivity();
+	}
+	if (!ManagedLifetime.Control->IsStopped())
+	{
+		Previous->Clock->ClearTimer(SecretExpiryTimer);
+		if (!ManagedLifetime.Control->IsStopped() && !ManagedLifetime.Gate->IsClosed()) ScheduleSecretExpiry();
+	}
+	return true;
+}
+
+bool VaRest::Http::FClientState::Publish(const TSharedRef<FClientConfig, ESPMode::ThreadSafe>& Next,
+	const TSharedRef<const FClientConfig, ESPMode::ThreadSafe>& Expected,bool bRevokeOldQueue,
+	FVaRestSecretSet* PreparedSecrets,TArray<FName>* PreparedAuthSlots)
+{
+	Next->ScopeId = ScopeId;
+	Next->ScopeLifetime = ScopeLifetime;
 	// Spec 4's chain. Custom Outer stages first: they see every logical request once (decision 13); M4's built-in Outer
 	// stages (offline queue, cache, retry, the auth gate) go between them and the attempt boundary. The limiter opens each
 	// attempt (ruling I-3), so what follows it runs when the request leaves the queue; custom PerAttempt stages see the
@@ -292,10 +473,11 @@ void VaRest::Http::FClientState::Publish(const TSharedRef<FClientConfig, ESPMode
 	{
 		Rules.AddKey(Key);
 	}
-	Next->Redactor = MakeShared<FVaRestRedactor, ESPMode::ThreadSafe>(MoveTemp(Rules), Secrets.GetActive(Next->Clock->Now()));
+	const auto& KnownSecrets=PreparedSecrets ? *PreparedSecrets : Secrets;
+	Next->Redactor = MakeShared<FVaRestRedactor, ESPMode::ThreadSafe>(MoveTemp(Rules), KnownSecrets.GetActive(Next->Clock->Now()));
 	auto Guard = MakeShared<FPersistenceGuard, ESPMode::ThreadSafe>();
 	for (const FString& Key : Next->RedactedKeys) Guard->AddKey(Key);
-	for (const FString& Secret : Secrets.GetCurrentForPersistence()) Guard->AddSecret(Secret);
+	for (const FString& Secret : KnownSecrets.GetCurrentForPersistence()) Guard->AddSecret(Secret);
 	Next->PersistenceGuard = MoveTemp(Guard);
 
 	// The replaced snapshot is released after the lock is dropped: with it can go the last reference to a transport, a
@@ -303,6 +485,12 @@ void VaRest::Http::FClientState::Publish(const TSharedRef<FClientConfig, ESPMode
 	TSharedPtr<const FClientConfig, ESPMode::ThreadSafe> Replaced;
 	{
 		FWriteScopeLock WriteLock(ConfigLock);
+		if (ManagedLifetime.IsValid() && (Config.Get()!=&Expected.Get() || ManagedAdmissionIsClosed())) return false;
+		if (PreparedSecrets) Secrets=MoveTemp(*PreparedSecrets);
+		if (PreparedAuthSlots) AuthSlots=MoveTemp(*PreparedAuthSlots);
+		if (bRevokeOldQueue && Config->QueueBinding) Config->QueueBinding->RevokeOnGT();
+		if (Config->QueueBinding != Next->QueueBinding && Config->QueueBinding)
+			Config->QueueBinding->CloseCaptureAdmission();
 		Replaced = MoveTemp(Config);
 		Config = Next;
 	}
@@ -312,7 +500,9 @@ void VaRest::Http::FClientState::Publish(const TSharedRef<FClientConfig, ESPMode
 		// Review M-2: only on a change, and the grants from a later game-thread task -- a grant can run a request to its
 		// end at once, and Publish runs inside WithHeader(), SetSecretValue() and the like (decision 3)
 		Limiter.SetCapacity(Wanted);
-		UE::Tasks::Launch(TEXT("VaRest.LimiterPump"), [Weak = TWeakPtr<FClientState, ESPMode::ThreadSafe>(AsShared())]
+		if (ManagedLifetime.IsValid())
+			ManagedLifetime.Control->ClientSlotsOnGT().RequestLimiterPump(ManagedLifetime);
+		else UE::Tasks::Launch(TEXT("VaRest.LimiterPump"), [Weak = TWeakPtr<FClientState, ESPMode::ThreadSafe>(AsShared())]
 		{
 			// M4a final review A5 (review A M-4, spec 4.8): the task took the tags of the game's WithMaxConcurrent() call
 			// (TaskPrivate.h:192), and the attempts its grants run are VaRest's
@@ -323,6 +513,7 @@ void VaRest::Http::FClientState::Publish(const TSharedRef<FClientConfig, ESPMode
 			}
 		}, UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
 	}
+	return true;
 }
 
 void VaRest::Http::FClientState::ForEachLive(TFunctionRef<void(FClientState&)> Visit)
@@ -342,18 +533,24 @@ void VaRest::Http::FClientState::ForEachLive(TFunctionRef<void(FClientState&)> V
 	}
 	for (const TSharedRef<FClientState, ESPMode::ThreadSafe>& Client : Alive)
 	{
+		if (Client->ManagedLifetime.IsValid())
+			TracePrivate::HoldManagedSnapshotClientOnGT(Client);
 		Visit(*Client);
 	}
 	// Review M-9: a pin taken here can be a state's last reference. Released here, inside FVaRestTrace::AddSink's
 	// snapshot, the state's Client{Destroyed} would go out before the new sink is added, and the sink would keep a ghost
 	// client. Released from a later game-thread task, it reaches the sink after OnAttached.
-	UE::Tasks::Launch(TEXT("VaRest.ReleaseSnapshotPins"), [Kept = MoveTemp(Alive)] {}, UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
+	Alive.RemoveAll([](const auto& Client) { return Client->ManagedLifetime.IsValid(); });
+	if (!Alive.IsEmpty())
+		UE::Tasks::Launch(TEXT("VaRest.ReleaseSnapshotPins"), [Kept = MoveTemp(Alive)] {}, UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
 }
 
 void VaRest::Http::FClientState::SetSecret(FName Slot, const FString& Value)
 {
 	check(IsInGameThread());
+	if (ManagedLifetime.IsValid() && (ManagedLifetime.Control->IsStopped() || ManagedLifetime.Gate->IsClosed())) return;
 	const double Now = GetConfig()->Clock->Now();
+	if (ManagedAdmissionIsClosed()) return;
 	Secrets.Prune(Now); // review C1: expired values never count toward the next expiry
 	// Review M-1: under the game's own prefix, so the game cannot replace a session or auth value, and neither
 	// ClearSession nor an auth can forget the game's
@@ -370,7 +567,9 @@ void VaRest::Http::FClientState::SetSecrets(TConstArrayView<TPair<FName, FString
 void VaRest::Http::FClientState::SetSecrets(TConstArrayView<TPair<FName, FString>> Values, TFunctionRef<void(FClientConfig&)> AlsoEdit)
 {
 	check(IsInGameThread());
+	if (ManagedLifetime.IsValid() && (ManagedLifetime.Control->IsStopped() || ManagedLifetime.Gate->IsClosed())) return;
 	const double Now = GetConfig()->Clock->Now();
+	if (ManagedAdmissionIsClosed()) return;
 	Secrets.Prune(Now);
 	for (const TPair<FName, FString>& Value : Values)
 	{
@@ -383,6 +582,7 @@ void VaRest::Http::FClientState::SetSecrets(TConstArrayView<TPair<FName, FString
 void VaRest::Http::FClientState::ClearSecrets()
 {
 	check(IsInGameThread());
+	if (ManagedLifetime.IsValid() && (ManagedLifetime.Control->IsStopped() || ManagedLifetime.Gate->IsClosed())) return;
 	// Review I-1: the game's slots only. The session's (and an auth's) values stay known while they are in use, and the
 	// session's rotated ones keep their 10 minutes (Inspector D21): their expiry is scheduled again, not cleared.
 	Secrets.ClearSlots([](FName Slot) { return IsGameSecretSlot(Slot); });
@@ -393,12 +593,15 @@ void VaRest::Http::FClientState::ClearSecrets()
 void VaRest::Http::FClientState::SetAuth(const TSharedPtr<IVaRestAuth, ESPMode::ThreadSafe>& InAuth)
 {
 	check(IsInGameThread());
+	if (ManagedLifetime.IsValid() && (ManagedLifetime.Control->IsStopped() || ManagedLifetime.Gate->IsClosed())) return;
 	TArray<FString> Keys;
 	TArray<TPair<FName, FString>> Given;
 	if (InAuth.IsValid())
 	{
 		InAuth->GetRedactedKeys(Keys);
+		if (ManagedAdmissionIsClosed()) return;
 		InAuth->GetSecretValues(Given);
+		if (ManagedAdmissionIsClosed()) return;
 	}
 	TArray<TPair<FName, FString>> Values;
 	TArray<FName> NewSlots;
@@ -424,6 +627,7 @@ void VaRest::Http::FClientState::SetAuth(const TSharedPtr<IVaRestAuth, ESPMode::
 			Values.Emplace(Old, FString());
 		}
 	}
+	if (ManagedAdmissionIsClosed()) return;
 	AuthSlots = MoveTemp(NewSlots);
 	// IN-13 layers 2 and 3 in the auth's own republish: its key names are checked once where they enter (task 14 review M4)
 	SetSecrets(Values, [&InAuth, &Keys](FClientConfig& Edited)
@@ -436,23 +640,32 @@ void VaRest::Http::FClientState::SetAuth(const TSharedPtr<IVaRestAuth, ESPMode::
 void VaRest::Http::FClientState::SetClock(const TSharedRef<IVaRestClock, ESPMode::ThreadSafe>& NewClock)
 {
 	check(IsInGameThread());
+	if (ManagedLifetime.IsValid() && (ManagedLifetime.Control->IsStopped() || ManagedLifetime.Gate->IsClosed())) return;
 	// Task 14 review M6: an expiry is a time on the clock it was set with. Left as it is, the old clock's timer would prune at
 	// its deadline read on the new clock, and GetActive would compare old times with new ones: a rotated value could stop
 	// being scrubbed before its 10 minutes. Each keeps the time it had left.
 	const TSharedRef<const FClientConfig, ESPMode::ThreadSafe> Current = GetConfig();
 	Current->Clock->ClearTimer(SecretExpiryTimer);
-	Secrets.Rebase(NewClock->Now() - Current->Clock->Now());
+	if (ManagedAdmissionIsClosed()) return;
+	const double NewNow=NewClock->Now();
+	if (ManagedAdmissionIsClosed()) return;
+	const double PreviousNow=Current->Clock->Now();
+	if (ManagedAdmissionIsClosed()) return;
+	Secrets.Rebase(NewNow-PreviousNow);
 	EditConfig([&NewClock](FClientConfig& Edited) { Edited.Clock = NewClock; });
 	ScheduleSecretExpiry();
 }
 
 void VaRest::Http::FClientState::ScheduleSecretExpiry()
 {
+	if (ManagedAdmissionIsClosed()) return;
 	const TSharedRef<const FClientConfig, ESPMode::ThreadSafe> Current = GetConfig();
 	Current->Clock->ClearTimer(SecretExpiryTimer);
+	if (ManagedAdmissionIsClosed()) return;
 	// Review C1: prune first, and only a value still pending counts -- an expired one would re-arm a timer due at once,
 	// forever (a hang under the virtual clock, a republished configuration every frame under the real one)
 	const double Now = Current->Clock->Now();
+	if (ManagedAdmissionIsClosed()) return;
 	Secrets.Prune(Now);
 	const double ExpiresAt = Secrets.NextExpiry(Now);
 	if (ExpiresAt < 0.0)
@@ -464,10 +677,13 @@ void VaRest::Http::FClientState::ScheduleSecretExpiry()
 	{
 		if (const TSharedPtr<FClientState, ESPMode::ThreadSafe> Pinned = Weak.Pin())
 		{
+			if (Pinned->ManagedAdmissionIsClosed()) return;
 			// Reviews N-2, N-I3: the clock can fire a hair before ExpiresAt (the virtual clock rounds the delay to whole
 			// nanoseconds, so Now() may be one ulp below a double sum). Prune at the deadline this timer was armed for, or the
 			// value survives, NextExpiry returns it again and a timer due at once re-arms forever.
-			Pinned->Secrets.Prune(FMath::Max(Pinned->GetConfig()->Clock->Now(), ExpiresAt));
+			const double FiredAt=Pinned->GetConfig()->Clock->Now();
+			if (Pinned->ManagedAdmissionIsClosed()) return;
+			Pinned->Secrets.Prune(FMath::Max(FiredAt, ExpiresAt));
 			Pinned->EditConfig([](FClientConfig&) {}); // a redactor without the expired value
 			Pinned->ScheduleSecretExpiry();
 		}
@@ -476,23 +692,30 @@ void VaRest::Http::FClientState::ScheduleSecretExpiry()
 
 void VaRest::Http::FClientState::AttachConnectivity()
 {
+	if (ManagedLifetime.IsValid() && ManagedLifetime.Control->IsStopped()) return;
     const auto Reachability = GetConfig()->Connectivity;
+	if (ManagedLifetime.IsValid() && ManagedLifetime.Gate->IsClosed())
+	{ Reachability->UnregisterProbe(ClientId); return; }
     const TWeakPtr<FClientState, ESPMode::ThreadSafe> Weak(AsShared());
-    Reachability->RegisterProbe(ClientId, [Weak]
+    Reachability->RegisterOwnedProbe(ClientId, [Weak](FVaRestProbeToken Token)
     {
         const auto Pinned = Weak.Pin();
         if (!Pinned.IsValid() || FClientState::IsShuttingDown()) return false;
+		const auto& Native=Pinned->GetManagedLifetime();
+		if (Native.IsValid() && (Native.Control->IsStopped() || Native.Gate->IsClosed())) return false;
         const auto Current = Pinned->GetConfig();
-        return Current->RegisteredQueue.IsValid() && Current->RegisteredQueue->TryReplay(true);
-    }, [Weak]
+        return Current->RegisteredQueue.IsValid() && Current->RegisteredQueue->TryReplay(true,Token);
+    }, [Weak](FVaRestProbeToken Token)
     {
         const auto Pinned = Weak.Pin();
         if (!Pinned.IsValid() || FClientState::IsShuttingDown()) return false;
+		const auto& Native=Pinned->GetManagedLifetime();
+		if (Native.IsValid() && (Native.Control->IsStopped() || Native.Gate->IsClosed())) return false;
         const auto Current = Pinned->GetConfig();
         if (Current->HealthUrl.IsEmpty() || !SameOrigin(Current->BaseUrl, Current->HealthUrl)) return false;
-        FRequestSpecAccess::SendProbe(Pinned.ToSharedRef(), Current->HealthUrl,
-            [Connectivity = Current->Connectivity] { Connectivity->ProbeFinished(); });
-        return true;
+		const auto Handle=FRequestSpecAccess::SendProbe(Pinned.ToSharedRef(), Current->HealthUrl,
+			[Connectivity=Current->Connectivity,Token]{ Connectivity->CompleteOwnedProbe(Token); },Token);
+		return Handle.GetId()!=0;
     });
 }
 
@@ -519,10 +742,57 @@ void VaRest::Http::FClientState::ClearCacheState()
 void VaRest::Http::FClientState::RefreshQueueRegistration()
 {
     check(IsInGameThread());
-    if (Queue.IsValid()) Queue->Leave(ClientId);
+	const auto Self=AsShared();
+	const bool bExhausted=QueueRefreshRevision==MAX_uint64;
+	const uint64 Revision=bExhausted ? QueueRefreshRevision : ++QueueRefreshRevision;
+	if (bExhausted && ManagedLifetime.IsValid()) ManagedLifetime.Control->ClientSlotsOnGT().BeginRetirement(ManagedLifetime);
+	if (ManagedLifetime.IsValid() && bQueueRegistrationActive) return; // invalidate the outer managed Join; retry only CURRENT
+	TGuardValue<bool> Registering(bQueueRegistrationActive,true);
+	auto PreviousQueue=MoveTemp(Queue);auto PreviousBinding=MoveTemp(QueueBinding);
+	if (PreviousQueue)
+	{
+		if (ManagedLifetime.IsValid())
+		{
+			if (!ManagedLifetime.Control->IsStopped())
+				ManagedLifetime.Control->ClientSlotsOnGT().DetachQueueBinding(ManagedLifetime,PreviousBinding,ManagedLifetime.Gate->IsClosed());
+		}
+		else PreviousQueue->Leave(PreviousBinding);
+	}
+	if (bExhausted || QueueRefreshRevision!=Revision) return;
     FString Error;
-    Queue=FOfflineQueue::Join(AsShared(),Error);
-    EditConfig([this,&Error](FClientConfig& Edited){ Edited.QueueConfigError=Error; Edited.RegisteredQueue=Queue; });
+	TSharedPtr<FOfflineQueue,ESPMode::ThreadSafe> Joined;
+	TSharedPtr<FQueueBinding,ESPMode::ThreadSafe> JoinedBinding;
+	if (ManagedLifetime.IsValid() && (ManagedLifetime.Control->IsStopped() || ManagedLifetime.Gate->IsClosed()))
+	{
+		Error=TEXT("QueueDetached");
+	}
+	else if (ManagedLifetime.IsValid() && !GetConfig()->bQueueActivationRequested)
+	{
+		Error=GetConfig()->QueueName.IsEmpty() ? TEXT("QueueAccountRequired") : TEXT("QueueNotActivated");
+	}
+	else Joined=FOfflineQueue::Join(Self,Error,&JoinedBinding);
+	if (QueueRefreshRevision!=Revision)
+	{
+		if (Joined)
+		{
+			if (!ManagedLifetime.IsValid()) Joined->Leave(JoinedBinding);
+			else if (!ManagedLifetime.Control->IsStopped())
+				ManagedLifetime.Control->ClientSlotsOnGT().DetachQueueBinding(ManagedLifetime,JoinedBinding,false);
+		}
+		return;
+	}
+	if (ManagedLifetime.IsValid() && !Joined && Error!=TEXT("QueueBusy") && Error!=TEXT("LifecycleBusy"))
+		ManagedLifetime.Control->ClientSlotsOnGT().DiscardPendingQueueTarget(ManagedLifetime);
+	Queue=MoveTemp(Joined);QueueBinding=MoveTemp(JoinedBinding);
+    EditConfig([this,&Error](FClientConfig& Edited)
+	{
+		Edited.QueueConfigError=Error;Edited.RegisteredQueue=Queue;Edited.QueueBinding=QueueBinding;
+		if (ManagedLifetime.IsValid())
+			Edited.ManagedQueueStatus=Queue ? EManagedQueueStatus::Active :
+				(Edited.QueueName.IsEmpty() ? EManagedQueueStatus::AccountRequired :
+				(!Edited.bQueueActivationRequested ? EManagedQueueStatus::Paused :
+				((Error==TEXT("QueueBusy") || Error==TEXT("LifecycleBusy")) ? EManagedQueueStatus::PendingBusy : EManagedQueueStatus::Unavailable)));
+	});
 }
 
 #if WITH_DEV_AUTOMATION_TESTS

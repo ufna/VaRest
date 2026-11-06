@@ -5,8 +5,11 @@
 #include "CoreMinimal.h"
 #include "Engine/DeveloperSettings.h"
 #include "VaRestHttpTypes.h"
+#include "VaRestJsonConvert.h"
 
 #include "VaRestHttpSettings.generated.h"
+
+class UVaRestApi;
 
 /**
  * Project defaults for every FVaRestClient (spec 5.5), read when a client is made. M3 holds what M3 reads; the rest of
@@ -60,4 +63,45 @@ public:
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Requests", meta = (ClampMin = "0"))
 	int64 MaxJsonBytes = 32 * 1024 * 1024;
+
+	UPROPERTY(config, EditAnywhere, Category = "JSON")
+	EVaRestJsonNaming Naming = EVaRestJsonNaming::CamelCase;
+
+	/** API assets loaded before game instances and explicitly included by the cook delegate. */
+	UPROPERTY(config, EditAnywhere, Category = "API Assets")
+	TArray<TSoftObjectPtr<UVaRestApi>> Apis;
+
+	/** Relative to ProjectSavedDir exactly once. Absolute roots retain the native storage-root normalization. */
+	UPROPERTY(config, EditAnywhere, Category = "Storage")
+	FString CacheRoot = TEXT("VaRest/Cache");
+	UPROPERTY(config, EditAnywhere, Category = "Storage")
+	FString QueueRoot = TEXT("VaRest/Queue");
+	/** Explicit stable application profile; default PIE adds its own transient play-session partition. */
+	UPROPERTY(config, EditAnywhere, Category = "Storage")
+	FString StorageProfile = TEXT("Default");
+
+	/** Dynamic bridge admission counts. These are logical ownership/work limits, not process-RSS or latency promises. */
+	UPROPERTY(config, EditAnywhere, Category = "Dynamic Requests", meta = (ClampMin = "1", ClampMax = "256"))
+	int32 DynamicMaxPending = 64;
+	UPROPERTY(config, EditAnywhere, Category = "Dynamic Requests", meta = (ClampMin = "1", ClampMax = "256"))
+	int32 DynamicGlobalMaxPending = 256;
+	UPROPERTY(config, EditAnywhere, Category = "Dynamic Requests", meta = (ClampMin = "1"))
+	int64 DynamicMaxInputBytes = 32 * 1024 * 1024;
+	UPROPERTY(config, EditAnywhere, Category = "Dynamic Requests", meta = (ClampMin = "1"))
+	int64 DynamicMaxPendingInputBytes = 128 * 1024 * 1024;
+	/** Estimate-account admission allowance; actual DOM/allocator peak is a separate measurement. */
+	UPROPERTY(config, EditAnywhere, Category = "Dynamic Requests", meta = (ClampMin = "1"))
+	int64 DynamicParseAdmissionBytes = 128 * 1024 * 1024;
+	UPROPERTY(config, EditAnywhere, Category = "Dynamic Requests", meta = (ClampMin = "1"))
+	int64 DynamicMaxParseValues = 1000000;
+	UPROPERTY(config, EditAnywhere, Category = "Dynamic Requests", meta = (ClampMin = "1"))
+	int64 DynamicMaxParseWorkUnits = 8000000;
+	UPROPERTY(config, EditAnywhere, Category = "Dynamic Requests", meta = (ClampMin = "1"))
+	int64 DynamicMaxOutputBytes = 16 * 1024 * 1024;
+	UPROPERTY(config, EditAnywhere, Category = "Dynamic Requests", meta = (ClampMin = "1"))
+	int64 DynamicPendingOutputBytes = 128 * 1024 * 1024;
+	UPROPERTY(config, EditAnywhere, Category = "Dynamic Requests", meta = (ClampMin = "1"))
+	int64 DynamicMaxValues = 1000000;
+	UPROPERTY(config, EditAnywhere, Category = "Dynamic Requests", meta = (ClampMin = "1"))
+	int64 DynamicMaxWorkUnits = 8000000;
 };

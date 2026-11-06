@@ -226,7 +226,7 @@ struct FAdmissionRequest
 struct FStoreStoragePlan
 {
 	int32 IndexCapacity = 0, ArrivalCapacity = 0, MaxRows = 0;
-	int32 ClientCapacity = 0, ClientLookupCapacity = 0;
+	int32 ClientCapacity = 0, ClientLookupCapacity = 0, ScopeCapacity = 0;
 	int32 DeadlineCapacity = 0;
 	int32 RetainedCapacity = 0, RetainedLookupCapacity = 0;
 	int32 StatsGroupCapacity = 0, StatsIndexCapacity = 0;
@@ -239,7 +239,9 @@ enum class ERowKeyKind : uint8
 	Http,
 	CoreMarker,
 	CaptureOverflow,
-	DerivedQueueExpired
+	DerivedQueueExpired,
+	Socket,
+	SocketFrame
 };
 struct FRowKey
 {
@@ -299,9 +301,12 @@ public:
 		TSharedRef<FPendingAccount, ESPMode::ThreadSafe> Pending, FAllocationAdapter& Allocator);
 	void BeginGeneration(uint64 InGeneration, uint64 ConsumedOrdinal);
 	void Clear();
+	void BeginPIESession(bool bPreserveLog);
+	void ClearScope(uint64 Id, TConstArrayView<FVaRestTraceStarted> LiveRequests = {}, TConstArrayView<FVaRestTraceSocket> LiveSockets = {});
 	uint64 Revision() const;
 	bool TrySnapshot(TSharedPtr<const FVaRestInspectorSnapshot, ESPMode::ThreadSafe>& Out) const;
 	bool ForEachRecord(TFunctionRef<void(const FVaRestInspectorRecordView&)> Visitor) const;
+	bool ForEachLink(TFunctionRef<void(const FVaRestInspectorLinkView&)> Visitor) const;
 	FVaRestInspectorDiagnostics Diagnostics() const;
 	bool BindLossWitness(TSharedRef<FPendingAccount, ESPMode::ThreadSafe> Pending);
 	void ObserveQueueLoss(uint64 InGeneration, const FPendingAccount& Source);
@@ -398,6 +403,18 @@ private:
 	void ApplyCompletion(FRow& Row, FPacket& Packet);
 	EVaRestInspectorDetailState ApplyNote(FRow& Row, FPacket& Packet, uint64& OutNoteSerial);
 	bool ApplyMarker(FPacket& Packet);
+	bool ApplySocketPacket(FPacket& Packet);
+	void ObserveSocketStats(const FPacketFixed&);
+	void ApplySocketSnapshot(const FVaRestTraceSnapshot&,const FCapturePolicy&,TSharedRef<FPendingAccount,ESPMode::ThreadSafe>,FAllocationAdapter&);
+	bool DropSocketFrame(FRow& Row);
+	bool ApplySocketFrame(FRow& Row,FPacket& Packet);
+	bool ApplySocketAttempt(FRow& Row,FPacket& Packet);
+	void UpdateSocketDeadline(FRow& Row);
+	static void VisitSocketAttempts(const void*,TFunctionRef<void(const FVaRestInspectorSocketAttemptView&)>);
+	static void VisitSocketFrames(const void*,TFunctionRef<void(const FVaRestInspectorSocketFrameView&)>);
+	static void VisitSocketChannels(const void*,TFunctionRef<void(const FVaRestInspectorPacketView&)>);
+	int32 PrepareSocketChannel(FRow&,FStringView,bool& Replaced);
+	void ArchiveSocketChannel(FRow&,uint64 Serial,FStorePacketPtr& Owner);
 	bool TryAdmitInternalMarker(const FVaRestInspectorMarkerInfo& Info, uint64 ScopeId, uint64 ClientId,
 		bool bContextKnown, bool bMetadataOmitted, const FAdmissionAnchors& Anchors);
 	bool TryAdmitQueueExpiredMarker(FRow& SourceRow, uint64 NoteSerial);
@@ -432,19 +449,25 @@ private:
 	int32 ExpirePendingExcerpts();
 	void StopPendingExcerpts();
 	bool RemoveEligibleRow(uint64 RequestId);
-	bool RemoveEligibleRowNow(int32 IndexSlot);
+	bool RemoveEligibleRowNow(int32 IndexSlot, bool RetainId = true, bool Cleared = false);
 	void AppendArrival(FRow& Row);
 	void UnlinkArrival(FRow& Row);
 	void ResetArrival();
 	void FlushDeferred();
 	void FlushDeferredRemovals();
 	bool IsIdRetained(uint64 RequestId) const;
-	void RetainRemovedId(const FRow& Row);
+	bool IsKeyRetained(const FRowKey& Key) const;
+	bool IsKeyCleared(const FRowKey& Key) const;
+	void ForgetRetainedKey(const FRowKey& Key);
+	void RetainKey(const FRowKey& Key,const FStatsCaptureState* Stats=nullptr,bool Cleared=false,uint64 Scope=0,bool ContextKnown=false);
+	void RetainRemovedId(const FRow& Row,bool Cleared=false);
 	void ResetRetainedIds();
 	int32 IndexCapacity() const;
 	int32 RetainedIdCapacity() const;
 	void ApplyClient(uint64 ClientId, uint64 ScopeId, bool bCreated, FStringView Label);
-	void ApplyScope(uint64 ScopeId, bool bOpened, FStringView Label, bool bMetadataOmitted = false);
+	void ApplyScope(uint64 ScopeId, bool bOpened, FStringView Label, bool bMetadataOmitted = false, int32 PIEInstance = INDEX_NONE, bool bEditorScope = false);
+	FStringView ScopeLabel(uint64 ScopeId) const;
+	bool IsClearedScope(uint64 ScopeId) const;
 	FStringView ClientLabel(uint64 ClientId, TOptional<uint64> ExpectedScope = {}) const;
 	FStringView RowClientLabel(const FRow& Row) const;
 	bool AdmitText(FStringView Source, const FAdmissionAnchors& Anchors, FTicketedText& Out);
@@ -458,7 +481,7 @@ private:
 	bool MeasureMutableSnapshot(FSnapshotBuilder& Builder, const FRow& Row) const;
 	bool ConstructMutableSnapshot(FSnapshotBuilder& Builder, const FRow& Row, FSnapshotRowCopy& Copy) const;
 	bool MeasureSnapshot(FSnapshotBuilder& Builder) const;
-	static void VisitImmutableRow(const FRow& Row, FStringView Label, TFunctionRef<void(const FVaRestInspectorRecordView&)> Visitor);
+	static void VisitImmutableRow(const FRow& Row, FStringView Label, TFunctionRef<void(const FVaRestInspectorRecordView&)> Visitor, FStringView Scope = {});
 	void RefreshLossWitness() const;
 	void ResetLossObservation();
 	void InvalidateKnownNeverHistory() const;

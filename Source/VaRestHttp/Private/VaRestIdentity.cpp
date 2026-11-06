@@ -54,10 +54,18 @@ FString VaRest::Http::SessionScope(const FVaRestSessionData& Data)
 	return HashFields(TEXT("VaRest/session-scope/v1"), Fields);
 }
 
+namespace VaRest::Http::IdentityPrivate
+{
+bool CanQuery(const FNativeClientRegistration* Native)
+{
+	return !Native || !Native->IsValid() || (!Native->Control->IsStopped() && !Native->Gate->IsClosed());
+}
+}
 bool VaRest::Http::AuthIdentity(const IVaRestAuth* Auth, EVaRestAuthMode Mode,
-	const FVaRestSessionData& Session, FString& OutIdentity)
+	const FVaRestSessionData& Session, FString& OutIdentity, const FNativeClientRegistration* Native)
 {
 	OutIdentity.Reset();
+	if (!IdentityPrivate::CanQuery(Native)) return false;
 	if (Mode == EVaRestAuthMode::None)
 	{
 		OutIdentity = HashFields(TEXT("VaRest/anonymous/v1"), TArray<FString>{});
@@ -69,9 +77,11 @@ bool VaRest::Http::AuthIdentity(const IVaRestAuth* Auth, EVaRestAuthMode Mode,
 			? HashFields(TEXT("VaRest/anonymous/v1"), TArray<FString>{}) : SessionScope(Session);
 		return true;
 	}
-	if (!Auth->GetConfigError().IsEmpty()) return false;
+	const FString Error=Auth->GetConfigError();
+	if (!IdentityPrivate::CanQuery(Native) || !Error.IsEmpty()) return false;
 	FString ProviderIdentity;
-	if (!Auth->GetIdentity(Session, ProviderIdentity) || ProviderIdentity.IsEmpty()) return false;
+	const bool bIdentityReady=Auth->GetIdentity(Session, ProviderIdentity);
+	if (!IdentityPrivate::CanQuery(Native) || !bIdentityReady || ProviderIdentity.IsEmpty()) return false;
 	TArray<FString> Fields{MoveTemp(ProviderIdentity)};
 	Fields.Append(CanonicalHeaders(Session.Headers));
 	OutIdentity = HashFields(TEXT("VaRest/auth-scope/v1"), Fields);
@@ -180,15 +190,18 @@ namespace VaRest::Http::IdentityPrivate
     }
 }
 bool VaRest::Http::RequestIdentityScope(const FClientConfig& Config,const FVaRestSessionData& Session,
-    EVaRestAuthMode Mode,const FVaRestHeaders& BuiltHeaders,FString& OutScope)
+    EVaRestAuthMode Mode,const FVaRestHeaders& BuiltHeaders,FString& OutScope,const FNativeClientRegistration* Native)
 {
+    OutScope.Reset();
     FString Identity;
-    if (!AuthIdentity(Config.Auth.Get(),Mode,Session,Identity)) { OutScope.Reset(); return false; }
+    if (!AuthIdentity(Config.Auth.Get(),Mode,Session,Identity,Native)) return false;
     TArray<FString> Fields{Identity,LexToString(static_cast<uint8>(Mode))};
     if (Mode!=EVaRestAuthMode::None && Config.Auth.IsValid())
     {
         Fields.Add(Config.Auth->GetAuthName().ToString().ToLower());
+        if (!IdentityPrivate::CanQuery(Native)) return false;
         const FName Contract=Config.Auth->GetIdentityContractName();
+        if (!IdentityPrivate::CanQuery(Native)) return false;
         Fields.Add(Contract.ToString().ToLower());
         if (Contract.IsNone()) Fields.Add(IdentityPrivate::ProviderNonce(Config.Auth));
     }

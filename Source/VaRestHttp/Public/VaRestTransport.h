@@ -9,6 +9,8 @@
 
 #include <atomic>
 
+class IHttpRequest;
+
 /**
  * Written from the transport's threads while an attempt runs, read on the game thread: progress (spec 3.2) and the IN-3
  * transport times. Atomics, so neither side needs the other's lock.
@@ -146,6 +148,8 @@ namespace VaRest::Http
 {
 	/** The FHttpModule transport (spec 0.4: "UE's FHttpModule is the transport"); every client uses it unless WithTransport replaces it */
 	VARESTHTTP_API TSharedRef<IVaRestTransport, ESPMode::ThreadSafe> GetDefaultTransport();
+	/** GT compatibility bridge. The next attempt uses this engine request with the normal sink, policy and completion machinery. */
+	VARESTHTTP_API TSharedRef<IVaRestTransport, ESPMode::ThreadSafe> TransportForRequest(TSharedRef<IHttpRequest,ESPMode::ThreadSafe> Request);
 
 	/**
 	 * The verbs the engine's HTTP transport sends a body with: POST, PUT, PATCH, DELETE, any case (curl upper-cases the verb,

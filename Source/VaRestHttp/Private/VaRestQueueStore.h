@@ -42,6 +42,10 @@ public:
     static void Abort(FString Directory,uint64 Sequence,FString QueueId,TUniqueFunction<void(bool)>&& Done);
     static void Retire(FString Directory, uint64 Sequence, FString QueueId,
         TUniqueFunction<void(bool)>&& Done);
+	/** Same tombstone algorithm, with owned shutdown delivery. False means no IO was admitted (Done(false) already ran). */
+	static bool RetireOwned(FString Directory,uint64 Sequence,FString QueueId,TUniqueFunction<void(bool)>&& Done);
+private:
+	static bool RetireImpl(FString Directory,uint64 Sequence,FString QueueId,TUniqueFunction<void(bool)>&& Done,bool bControlDuringStop);
 };
 FString QueueFileName(uint64 Sequence, FStringView QueueId);
 FGuid QueueRunId(); // one random GUID per process, all jobs share it

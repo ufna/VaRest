@@ -834,15 +834,22 @@ FVaRestHeaders FVaRestRedactor::RedactHeaders(const FVaRestHeaders& In) const
 
 FVaRestTraceExcerpt FVaRestRedactor::RedactBody(FStringView ContentType, TConstArrayView<uint8> Prefix, int64 TotalBytes, int32 Cap) const
 {
+	return RedactBody(ContentType, Prefix, TotalBytes, Cap, 0);
+}
+
+FVaRestTraceExcerpt FVaRestRedactor::RedactBody(FStringView ContentType, TConstArrayView<uint8> Prefix, int64 TotalBytes, int32 Cap, int32 BinaryCap) const
+{
 	using namespace VaRest::Http::RedactorPrivate;
 	++FVaRestTrace::Counters().RedactorCalls;
 	FVaRestTraceExcerpt Excerpt;
 	Excerpt.TotalBytes = TotalBytes;
-	const int32 Seen = FMath::Min(Prefix.Num(), FMath::Max(Cap, 0));
+	const FStringView Type = MediaType(ContentType);
+	const auto Probe = Prefix.Left(FMath::Min(Prefix.Num(), FMath::Max(0, FMath::Max(Cap, BinaryCap))));
+	const EBodyClass Class = ClassifyBody(Type, Probe);
+	const int32 EffectiveCap = Class == EBodyClass::Binary && BinaryCap > 0 ? BinaryCap : Cap;
+	const int32 Seen = FMath::Min(Prefix.Num(), FMath::Max(EffectiveCap, 0));
 	const TConstArrayView<uint8> Head = Prefix.Left(Seen);
 	const bool bWhole = Seen == TotalBytes;
-	const FStringView Type = MediaType(ContentType);
-	const EBodyClass Class = ClassifyBody(Type, Head);
 	TArray<uint8> Out;
 
 	if (Class == EBodyClass::Json)
@@ -895,14 +902,24 @@ FVaRestTraceExcerpt FVaRestRedactor::RedactBody(FStringView ContentType, TConstA
 	}
 	else
 	{
-		// Layer 4: binary is a descriptor. Protobuf and FlatBuffers store strings verbatim, so no byte of the body reaches the
-		// excerpt: the prefix is read only for the SHA-256, and only when it is the whole body. The trace copies nothing for a
-		// binary body over the cap, and calls this with no prefix (IsBinaryBody; M4a final review A7).
 		Excerpt.Kind = EVaRestExcerptKind::Binary;
 		if (Prefix.Num() == TotalBytes)
 		{
 			Excerpt.Sha256Prefix = VaRest::Http::FSha256::Hash(Prefix).ToHex().Left(8);
 		}
+		if (BinaryCap > 0)
+		{
+			// Binary stays byte-exact apart from known-value redaction. No text decoder may repair NUL or invalid UTF-8.
+			Excerpt.bBinaryCaptured = true;
+			Out.Append(Head.GetData(), Head.Num());
+			Excerpt.bRedacted = ScrubUtf8(Out);
+			if (!bWhole) Excerpt.bRedacted |= TrimNeedleTail(Out);
+			Excerpt.bTruncated = !bWhole;
+			Excerpt.StopReason = bWhole ? FString() : FString(TEXT("cap"));
+			Excerpt.Bytes = Share(MoveTemp(Out));
+			return Excerpt;
+		}
+		// Default/log path: a descriptor only. A whole admitted body may supply its hash; oversized bodies need no copy.
 		Out = ToUtf8(FString::Printf(TEXT("<binary: %lld bytes, %s%s%s>"), TotalBytes,
 			Type.IsEmpty() ? TEXT("no content type") : *FString(Type),
 			Excerpt.Sha256Prefix.IsEmpty() ? TEXT("") : TEXT(", sha256 "), *Excerpt.Sha256Prefix));

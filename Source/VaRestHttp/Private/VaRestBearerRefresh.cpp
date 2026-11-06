@@ -232,7 +232,7 @@ namespace VaRest::Http::BearerRefreshPrivate
 			// Plan decision 23: through the context, so the request skips the auth stages, the envelope (the body is read raw),
 			// retry and the limiter's queue (ruling M-8), and carries the refresh's id (spec review I-2). Task 18 review M-3:
 			// Accept, so an endpoint that negotiates the format answers JSON, not the form encoding some default to.
-			TVaRestRequest<FVaRestJson> Refreshing = Context.Request<FVaRestJson>(TEXTVIEW("POST"), Config.RefreshPath).Header(TEXT("Accept"), TEXT("application/json"));
+			TVaRestRequest<FVaRestJson> Refreshing = Context.RequestForEndpoint<FVaRestJson>(TEXTVIEW("POST"), Config.RefreshPath, Config.TraceEndpoint).Header(TEXT("Accept"), TEXT("application/json"));
 			if (Config.Style == EVaRestRefreshStyle::OAuth2Form)
 			{
 				// RFC 6749 6
@@ -295,13 +295,28 @@ FVaRestAuth::FRef FVaRestAuth::BearerRefresh(const FVaRestBearerRefreshConfig& C
 	// Task 18 review I-1, ruling Q7: a configuration that cannot work is said once here (each case its own pattern, for the
 	// tests' expected errors) and fails every request Kind=Config through GetConfigError, the session kept; CanRefresh
 	// refuses too, so nothing sends the refresh. Each of these would be Rejected at every refresh: a logout for a typo.
-	// A malformed path is not checked: VaRestJson has no path validator, only the walkers (VaRestJsonPath.cpp:67-146).
+	// Syntax checks share VaRestJson's walkers; a valid path can still miss in a particular server response.
 	FString ConfigError;
 	if (Config.AccessTokenPath.IsEmpty())
 	{
 		// Path("") is the document itself (VaRestJsonPath.cpp:151-154): an object, whose AsString is ""
 		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: FVaRestAuth::BearerRefresh: AccessTokenPath is empty; requests fail with Kind=Config"));
 		ConfigError = TEXT("the BearerRefresh AccessTokenPath is empty");
+	}
+	else if (!FVaRestJson::IsValidPath(Config.AccessTokenPath))
+	{
+		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: FVaRestAuth::BearerRefresh: AccessTokenPath has invalid syntax; requests fail with Kind=Config"));
+		ConfigError = TEXT("the BearerRefresh AccessTokenPath has invalid syntax");
+	}
+	else if (!FVaRestJson::IsValidPath(Config.RefreshTokenPath))
+	{
+		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: FVaRestAuth::BearerRefresh: RefreshTokenPath has invalid syntax; requests fail with Kind=Config"));
+		ConfigError = TEXT("the BearerRefresh RefreshTokenPath has invalid syntax");
+	}
+	else if (!FVaRestJson::IsValidPath(Config.ExpiresInPath))
+	{
+		UE_LOG(LogVaRestHttp, Error, TEXT("VaRest: FVaRestAuth::BearerRefresh: ExpiresInPath has invalid syntax; requests fail with Kind=Config"));
+		ConfigError = TEXT("the BearerRefresh ExpiresInPath has invalid syntax");
 	}
 	else if (Config.RefreshPath.TrimStartAndEnd().IsEmpty())
 	{

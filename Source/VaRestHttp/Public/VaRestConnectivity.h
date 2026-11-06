@@ -6,6 +6,11 @@
 #include "VaRestClock.h"
 
 struct FVaRestAttemptOutcome;
+struct FVaRestProbeToken
+{
+	uint64 Generation=0;
+	bool IsValid() const { return Generation!=0; }
+};
 using FVaRestConnectivityChangedEvent = TMulticastDelegate<void(bool)>;
 
 namespace VaRest::Http::ConnectivityPrivate
@@ -28,8 +33,11 @@ public:
     void SetProbeInterval(double Seconds);
     /** Queue candidates across the scope precede fallback candidates; two-argument registrations remain preferred. */
     void RegisterProbe(uint64 ClientId, TFunction<bool()>&& TryStart, TFunction<bool()>&& TryFallback = {});
+	void RegisterOwnedProbe(uint64 ClientId,TFunction<bool(FVaRestProbeToken)>&& TryStart,
+		TFunction<bool(FVaRestProbeToken)>&& TryFallback={});
     void UnregisterProbe(uint64 ClientId);
     void ProbeFinished();
+	bool CompleteOwnedProbe(FVaRestProbeToken Token);
 
 private:
     friend void VaRest::Http::ConnectivityPrivate::PollOverride();
@@ -46,12 +54,15 @@ private:
     struct FProbeCandidates
     {
         TFunction<bool()> Preferred,Fallback;
+		TFunction<bool(FVaRestProbeToken)> OwnedPreferred,OwnedFallback;
     };
     TMap<uint64, FProbeCandidates> Probes;
     bool bOnline = true;
     bool bPublishedOnline = true;
     bool bDelivering = false;
     bool bProbeRunning = false;
+	bool bActiveProbeOwned=false;
+	uint64 NextProbeGeneration=1,ActiveProbeGeneration=0;
     double IntervalSeconds = 10.0;
     TArray<TTuple<bool, uint64, FString>> PendingEdges;
 };

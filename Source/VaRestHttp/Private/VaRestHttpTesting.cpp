@@ -27,6 +27,10 @@ VaRest::Http::Testing::FTestCounters& VaRest::Http::Testing::Counters()
 #endif
 
 #if WITH_DEV_AUTOMATION_TESTS
+int32& VaRest::Http::Testing::LiveDynamicCarriersOnGT()
+{
+	check(IsInGameThread()); static int32 Count=0; return Count;
+}
 bool VaRest::Http::Testing::PumpUntil(TFunctionRef<bool()> Done, double TimeoutSeconds, bool bTickCoreTicker)
 {
 	check(IsInGameThread());

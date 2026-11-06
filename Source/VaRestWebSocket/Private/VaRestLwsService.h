@@ -10,8 +10,16 @@
 #include "Templates/Function.h"
 #include "Templates/UniquePtr.h"
 #include "VaRestLwsInclude.h"
+#include "VaRestNativeOwnerHost1.h"
+#if WITH_DEV_AUTOMATION_TESTS
+#include "VaRestSocketPressureTesting.h"
+#endif
 
 #include <atomic>
+#if defined(__linux__) && defined(__x86_64__) && !defined(__ANDROID__)
+#include "VaRestNativeOwnerAbi.h"
+#include "Connector/VaRestNumericConnectorNative.h"
+#endif
 
 class FRunnableThread;
 class ISslCertificateManager;
@@ -20,6 +28,14 @@ class ISslManager;
 namespace VaRest::WebSocket::Lws
 {
 	class FService;
+#if defined(__linux__) && defined(__x86_64__) && !defined(__ANDROID__)
+	class FTransport;
+	class FCallerEntryTransaction;
+	class FNativeOwnerServiceAdapter;
+	class FNativeOwnerServiceChildSnapshot;
+	class FNativeOwnerResources1;
+	class FTrackedEngineRoots1;
+#endif
 
 	/** LWS's own close-ack wait after our close frame, fixed in 3.0 (T20: ops-ws.c.o rops_handle_POLLOUT_ws 0x103c-0x104a) */
 	inline constexpr double LwsCloseAckSeconds = 5.0;
@@ -35,8 +51,18 @@ namespace VaRest::WebSocket::Lws
 	/** The handshake header buffer, the engine's (LwsWebSocketsManager.cpp:187-190; spec 15) */
 	inline constexpr int32 HeaderBufferBytes = 32 * 1024;
 
+	/** Private queue-slot policy, not a byte/allocator estimate. Smaller values are for owned pressure fixtures. */
+	struct FQueuedEventWatermarks
+	{
+		int32 High = 4096, Low = 2048;
+		bool IsValid() const { return High > 0 && Low >= 0 && Low < High; }
+		bool IsHigh(int32 Queued) const { return Queued > High; }
+		bool IsLow(int32 Queued) const { return Queued <= Low; }
+	};
+
 	struct FServiceOptions
 	{
+		FQueuedEventWatermarks QueuedEvents;
 		/** lws_service's wait with no connection: commands wake it (lws_cancel_service) */
 		int32 IdleWaitMs = 30000;
 		/** ... with connections: LWS's own timers run only when lws_service returns (spec 2.1, T26) */
@@ -164,6 +190,10 @@ namespace VaRest::WebSocket::Lws
 		IServiceConnection* Find(uint64 Id) const;
 		/** lws_service's next wait (plan decision 12); public for the service's tests */
 		int32 ComputeWaitMs(double Now) const;
+#if WITH_DEV_AUTOMATION_TESTS
+		/** Service thread: queues a witness, acknowledged only after an actual completed service pass. */
+		void QueuePressureFenceForTests(PressureTesting::FPassFence Fence);
+#endif
 
 		/**
 		 * The protocol's callback (lws_protocols::callback): the service comes from the context's user pointer. The service
@@ -172,6 +202,83 @@ namespace VaRest::WebSocket::Lws
 		static int Callback(lws* Wsi, lws_callback_reasons Reason, void* User, void* In, size_t Len);
 
 	private:
+#if defined(__linux__) && defined(__x86_64__) && !defined(__ANDROID__)
+		friend class FTransport;
+		friend class FConn;
+		friend class FCallerEntryTransaction;
+		friend class FTrackedEngineRoots1;
+		// ZERO external callers. Actual normally-loaded WS/strong service graph,
+		// initialized physical GT, Core/H/provider/return and continuous O are
+		// SOURCE preconditions; these private methods/state do not appoint them.
+		[[gnu::visibility("hidden")]] VrStatus PrepareNativeOwnerOnCurrentControl();
+		[[gnu::visibility("hidden")]] VrStatus AttachActualOwnerDuringEntry(FCallerEntryTransaction&);
+		[[gnu::visibility("hidden")]] VrStatus FinishNativeOwnerEntryDisposition(FCallerEntryTransaction&, VrStatus);
+		[[gnu::visibility("hidden")]] VrStatus FinishNativeOwnerNoCreateOnCurrentControl();
+		// Profile2 fresh-only9248 holder: Journal9024 +Storage48 +Binding96
+		// +Control64 +View16. This is never an entered-resource cleanup proof.
+		[[gnu::visibility("hidden")]] bool NativeEntryResourcesAreMetadataOnly() const;
+		// Dormant real tracked private lane; ordinary/default selection is unchanged.
+		[[gnu::visibility("hidden")]] VrStatus PrepareNativeStartupPhaseBeforeResourcesOnCurrentControl();
+		[[gnu::visibility("hidden")]] VrStatus CreateNativeCleanupChildOnCurrentControl();
+        VrStatus CreateNativeChildInCreatingScopeOnCurrentControl();
+		[[gnu::visibility("hidden")]] VrStatus FinishNativeCleanupChildOnCurrentControl();
+        [[gnu::visibility("hidden")]] VrStatus StartNativeOnCurrentControl();
+        // Direct qualified Host frame only; no Service/adapter/session creation.
+        [[gnu::visibility("hidden")]] FVaRestNativeOwnerHostStep1 PumpNativeOnCurrentControl();
+        FVaRestNativeOwnerHostStep1 NativeFrameDisposition1(FVaRestNativeOwnerHostStep1) const;
+        void RunNativeService(const FNativeOwnerServiceChildSnapshot&);
+        void DrainNativeCommands(uint32 Limit);
+        bool NativeMode() const { return NativeChildSnapshot != nullptr; }
+        const NumericConnectorC1::FResourceBinding1* NativeBinding() const;
+        NumericConnectorC1::FNative1* NativeObject() const;
+        const VrLwsCustody1* NativeView() const;
+        const VrLwsTurnBorrow1* NativeBorrow() const;
+        VrStatus SubmitNativeResolve(const FString&, uint16, uint64, VrTicket&);
+        VrStatus CopyNativeResolve(VrTicket, VrResult&);
+        bool NativeTicketMatches(VrTicket) const;
+        VrStatus DiscardNativeResolve(VrTicket);
+        lws_vhost* NativeVhost(uint32) const;
+        struct FNativeRunning1
+        {
+            lws_vhost* Vhosts[2] {};
+            const VrLwsTurnBorrow1* Borrow = nullptr; // Actual stack borrow; service invocation only.
+            uint64 MaxConnId = 0;
+            uint64 VisitAfter = 0;
+            uint32 CreateDisposition = 0, DestroyDisposition = 0;
+            int32 RawRunStatus = 0;
+            uint32 FinishStep = 0;
+            bool InC = false;
+            bool NoProxyCaptured = false;
+            uint8 CommandsLeft = 0, CopiedSlots = 0;
+            uint8 Padding[4] {};
+        };
+        static_assert(sizeof(FNativeRunning1) == 64);
+        FNativeRunning1 NativeRunning;
+		enum class ENativeEntryPhase1 : uint8
+		{ Fresh, Entering, Attaching, Attached, NoCreatePending, Retained, Finished, ChildCreated, JoinedPending };
+		struct FNativeCreatingEntry1
+		{
+			TSharedPtr<FNativeOwnerServiceAdapter, ESPMode::ThreadSafe> Adapter;
+			// Explicit FService metadata deletion: a default TUniquePtr deleter
+			// cannot access Resources' private dtor. No automatic native ACK.
+			FNativeOwnerResources1* Resources = nullptr;
+			VrStatus AdmissionStatus = VR_STATUS_NO_RESULT;
+			VrStatus AttachStatus = VR_STATUS_NO_RESULT; // Exact observed adapter return, NO_RESULT before any call.
+			VrStatus CallerDispositionStatus = VR_STATUS_NO_RESULT;
+			ENativeEntryPhase1 Phase = ENativeEntryPhase1::Fresh;
+			bool InEntry = false;
+			bool InCleanup = false;
+			bool InCreate = false; // Natural padding39; actual creating scope, never role authority.
+		};
+		static_assert(sizeof(FNativeCreatingEntry1) == 40 && alignof(FNativeCreatingEntry1) == 8);
+		FNativeCreatingEntry1 NativeCreating;
+		// Published before the actual factory; child reads this stable word ONLY.
+		// Retained through true no-child/join and all later snapshot users.
+		const FNativeOwnerServiceChildSnapshot* NativeChildSnapshot = nullptr;
+		static_assert(offsetof(FNativeCreatingEntry1, InCreate) == 39);
+		static_assert(sizeof(FNativeCreatingEntry1) + sizeof(const FNativeOwnerServiceChildSnapshot*) == 48);
+#endif
+		virtual bool Init() override;
 		virtual uint32 Run() override;
 		virtual void Stop() override;
 		virtual FSingleThreadRunnable* GetSingleThreadInterface() override { return this; }
@@ -216,6 +323,11 @@ namespace VaRest::WebSocket::Lws
 		bool bSslInitialized = false;
 		TArray<ANSICHAR> ProxyUtf8;
 		FServiceCounters Counters;
+#if WITH_DEV_AUTOMATION_TESTS
+		uint64 PressurePassForTests = 0;
+		TArray<PressureTesting::FPassFence> PressureFencesForTests;
+		void CompletePressureFencesForTests(bool bShutdown = false);
+#endif
 	};
 
 	/** Any thread: Text as NUL-terminated UTF-8 in Out, for the char* fields libwebsockets keeps */

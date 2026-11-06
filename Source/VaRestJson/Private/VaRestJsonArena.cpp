@@ -34,7 +34,7 @@ namespace VaRest::Json
 
 	void* FArena::Allocate(SIZE_T Size, SIZE_T Alignment)
 	{
-		check(FMath::IsPowerOfTwo(Alignment));
+		check(Alignment != 0 && FMath::IsPowerOfTwo(Alignment));
 
 		if (Cursor)
 		{

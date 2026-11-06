@@ -102,6 +102,9 @@ struct VARESTHTTP_API FVaRestBearerRefreshConfig
 	/** Refresh this many seconds before a known expiry (spec 4.2: 30) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VaRest|Http", meta = (ClampMin = "0"))
 	float RefreshLeadSeconds = 30.f;
+
+	/** Native trace metadata only; it never imports the referenced endpoint's request policies. */
+	FName TraceEndpoint;
 };
 
 /** Spec 4.2: a client's session, as FVaRestClient::GetSession copies it out. Game thread. */

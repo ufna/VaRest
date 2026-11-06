@@ -1,6 +1,7 @@
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 
 #include "VaRestTracePoints.h"
+#include "VaRestNativeScope.h"
 
 #include "Tasks/Task.h"
 #include "UObject/Class.h"
@@ -48,13 +49,14 @@ namespace VaRest::Http::TracePointsPrivate
 		Out.CacheLookup = Ex.CacheLookup;
 		Out.bCacheLookupPending = Ex.bCacheLookupPending;
 		if (Ex.bQueueWhenOffline) Out.Flags |= EVaRestTraceRequestFlags::QueueWhenOffline;
-		Out.ScopeId = FVaRestTrace::ProcessScopeId;
+		Out.ScopeId = Cfg.ScopeId;
 		Out.ClientId = Ex.ClientId;
 		Out.Verb = Redactor.ScrubText(Ex.Verb);
 		// A request that failed before Resolve finished has no URL: the base and the raw path say what it was
 		Out.Url = Redactor.RedactUrl(Ex.Url.IsEmpty() ? JoinUrl(Cfg.BaseUrl, Ex.RawPath) : Ex.Url);
 		Out.PathTemplate = Redactor.RedactUrl(Ex.PathTemplate);
 		Out.Tag = Ex.Tag;
+		Out.Endpoint = Ex.Endpoint;
 		Out.Priority = Ex.Priority;
 		if (Ex.bIdempotent)
 		{
@@ -272,10 +274,20 @@ void VaRest::Http::TracePoints::AttemptEnded(FExchangeState& Ex, const FVaRestTr
 
 void VaRest::Http::TracePoints::Completed(FExchangeState& Ex, const FFinish& Finish)
 {
+	Completed(Ex, Finish, nullptr); // ordinary handler is selected at its original point AFTER the excerpt callout
+}
+
+void VaRest::Http::TracePoints::Completed(FExchangeState& Ex, const FFinish& Finish, const IResultHandler* ActualHandler)
+{
+	const auto ManagedControl = Ex.Managed.Control;
+	if (ManagedControl && ManagedControl->IsStopped())
+		return;
 	// Task 21 review M-1: before Completed, so the record has nothing pending when it completes (Inspector 2.3's sealing):
 	// the last attempt's decode excerpt, announced and never handed to the decode task -- a custom Outer stage replaced the
 	// 2xx, or a Cancel() (a sink's OnEvent at that AttemptEnded) finished the request first
 	Excerpts::ResolveDiscarded(Ex);
+	if (ManagedControl && ManagedControl->IsStopped())
+		return; // nested excerpt clock or sink can reenter Stop before this normal Completed bridge
 	if (FVaRestTrace::Detail() == EVaRestTraceDetail::None)
 	{
 		return;
@@ -318,7 +330,10 @@ void VaRest::Http::TracePoints::Completed(FExchangeState& Ex, const FFinish& Fin
 		Payload.Error.Code = Redactor.ScrubText(Finish.Error.Code);
 		Payload.Error.Message = Redactor.ScrubText(Finish.Error.Message);
 	}
-	Payload.ResultType = Ex.Handler.IsValid() ? Ex.Handler->GetResultType() : NAME_None;
+	const IResultHandler* Handler = ActualHandler ? ActualHandler : Ex.Handler.Get();
+	Payload.ResultType = Handler ? Handler->GetResultType() : NAME_None;
+	if (ManagedControl && ManagedControl->IsStopped())
+		return;
 	Payload.DecodeStartAt = Finish.DecodeStartAt;
 	Payload.DecodeEndAt = Finish.DecodeEndAt;
 	const TArray<FVaRestJsonError>& Warnings = Finish.Response.DecodeWarnings;
@@ -340,7 +355,10 @@ void VaRest::Http::TracePoints::Completed(FExchangeState& Ex, const FFinish& Fin
 	Payload.Envelope.Message = Redactor.ScrubText(Payload.Envelope.Message);
 	// M4a final review C-I-1: links a request a park ended unsent to refresh #R (Inspector 2.3's back-link table)
 	Payload.AuthRefreshId = Ex.ParkRefreshId;
-	FVaRestTrace::Emit(EVaRestTraceKind::Completed, Ex.Config->Clock->Now(), FVaRestTracePayload(TInPlaceType<FVaRestTraceCompleted>(), MoveTemp(Payload)));
+	const double At = Ex.Config->Clock->Now();
+	if (ManagedControl && ManagedControl->IsStopped())
+		return; // exact original clock has returned; never emit normal completion after it stopped this operation
+	FVaRestTrace::Emit(EVaRestTraceKind::Completed, At, FVaRestTracePayload(TInPlaceType<FVaRestTraceCompleted>(), MoveTemp(Payload)));
 }
 
 void VaRest::Http::TracePoints::Client(uint64 ClientId, const FClientConfig& Config, bool bCreated)
@@ -355,7 +373,7 @@ void VaRest::Http::TracePoints::Client(uint64 ClientId, const FClientConfig& Con
 	FVaRestTraceClient Payload;
 	Payload.bCreated = bCreated;
 	Payload.ClientId = ClientId;
-	Payload.ScopeId = FVaRestTrace::ProcessScopeId;
+	Payload.ScopeId = Config.ScopeId;
 	// Built here, on the thread the state dies on: the task below carries plain data, no reference into the configuration
 	Payload.DisplayName = DisplayNameOf(Config);
 	const double Time = Config.Clock.IsValid() ? Config.Clock->Now() : 0.0;
@@ -367,14 +385,16 @@ void VaRest::Http::TracePoints::ContributeSnapshot(FVaRestTraceSnapshot& Snapsho
 	using namespace TracePointsPrivate;
 	// No mask check: a sink being added asked for this snapshot
 	LLM_SCOPE_BYTAG(VaRest_Trace);
-	// Review M-9: ForEachLive releases its pins from a later game-thread task, so a client listed here that loses its last
-	// other reference meanwhile dies after AddSink added the sink, and its Client{Destroyed} reaches it
+	// Managed snapshot pins live on AddSink's synchronous attachment stack through OnAttached/publication; ordinary
+	// client pins keep their original later-GT release. A last managed owner never needs an uncounted cleanup task.
 	FClientState::ForEachLive([&Snapshot](FClientState& State)
 	{
 		const TSharedRef<const FClientConfig, ESPMode::ThreadSafe> Current = State.GetConfig();
+		if (Current->ScopeLifetime.IsValid() && !Current->ScopeLifetime->IsOpen())
+			return; // retained closed-scope shells are not active clients in a late snapshot
 		FVaRestTraceClient& Entry = Snapshot.Clients.AddDefaulted_GetRef();
 		Entry.ClientId = State.GetClientId();
-		Entry.ScopeId = FVaRestTrace::ProcessScopeId;
+		Entry.ScopeId = State.GetScopeId();
 		Entry.DisplayName = DisplayNameOf(*Current);
 		State.ForEachInFlight([&Snapshot](FExchangeState& Ex)
 		{
@@ -413,7 +433,7 @@ void VaRest::Http::TracePoints::Marker(const FClientState& Client, EVaRestTraceM
 	const TSharedRef<const FClientConfig, ESPMode::ThreadSafe> Current = Client.GetConfig();
 	FVaRestTraceMarker Payload;
 	Payload.Kind = Kind;
-	Payload.ScopeId = FVaRestTrace::ProcessScopeId;
+	Payload.ScopeId = Client.GetScopeId();
 	Payload.ClientId = Client.GetClientId();
 	Payload.CauseRequestId = CauseRequestId;
 	Payload.Text = Client.GetRedactor()->ScrubText(Text);

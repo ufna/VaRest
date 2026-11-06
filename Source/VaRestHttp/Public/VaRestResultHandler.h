@@ -15,6 +15,7 @@
 
 namespace VaRest::Http
 {
+	enum class EResultCompletionPolicy : uint8 { Immediate, LaterFrame };
 	/** A response on its way to the callbacks: built on the game thread, decoded on a background task, delivered on the game thread (spec 1) */
 	struct FFinish
 	{
@@ -50,6 +51,8 @@ namespace VaRest::Http
 		 * fails (plan decision 9) and keeps EnvelopeBody as its error body
 		 */
 		bool bEnvelopeDataMissing = false;
+		/** Dynamic input or parse node/work refusal; ordinary classification stays unchanged. */
+		bool bLogicalDecodeBudgetRefused = false;
 		FVaRestJson EnvelopeBody;
 		/** The request's effective log level: the decode task's one line (a void predicate it could not check, spec review M-13) */
 		EVaRestLogLevel LogLevel = EVaRestLogLevel::None;
@@ -61,12 +64,13 @@ namespace VaRest::Http
 		TSharedPtr<const FVaRestRedactor, ESPMode::ThreadSafe> LogRedactor;
 		/**
 		 * IN-14: the decode task excerpts the body before parsing it -- the attempt (0 = no), the redactor (the request's,
-		 * taken on the game thread: immutable, any thread may use it) and the cap
+		 * taken on the game thread: immutable, any thread may use it) and the text/binary caps
 		 */
 		int32 ExcerptAttempt = 0;
 		uint64 ExcerptDispatchId = 0;
 		TSharedPtr<const FVaRestRedactor, ESPMode::ThreadSafe> ExcerptRedactor;
 		int32 ExcerptCap = 0;
+		int32 ExcerptBinaryCap = 0;
 	};
 
 	/** The typed half of a request: one result type's decode and callbacks (TResultHandler<T>) */
@@ -83,12 +87,30 @@ namespace VaRest::Http
 		virtual bool DecodesJson() const = 0;
 		/** Spec 3.4 / plan decision 9: FVaRestJson and struct results unwrap; void ones check the predicate; raw ones are left alone */
 		virtual bool AppliesEnvelope() const = 0;
+		/** Ordinary compile-time handlers retain their existing timing/delivery and zero/unlimited input defaults. */
+		virtual bool RequiresGameThreadDelivery() const { return false; }
+		virtual EResultCompletionPolicy GetCompletionPolicy() const { return EResultCompletionPolicy::Immediate; }
+		/** LaterFrame handlers use a slot reserved at activation. Failure leaves Kernel with its caller. */
+		virtual bool DeferCompletionOnGT(TUniqueFunction<void()>&) { return false; }
+		virtual int64 GetDynamicMaxInputBytes() const { return 0; }
+		/** GT capture only; a dynamic handler installs finite parse node/work limits before immutable parsing. */
+		virtual void ConfigureParseOptions(FVaRestJsonParseOptions&) const {}
+		virtual bool ValidateConfiguration(FString&) const { return true; }
+		virtual FString GetConfigurationFailureCode() const { return {}; }
+		/** GT precharge before any dynamic parse/retained frame work; ordinary handlers do not change Finish. */
+		virtual bool PrepareDecodeOnGT(FFinish&) { return true; }
 		/**
 		 * A 2xx response into the typed value; a failure sets Finish.Error (Kind Decode, or Kind Server from the envelope). A
 		 * background task when DecodesBody(), or for a void result whose envelope has a predicate and a body to judge; else
 		 * the game thread.
 		 */
 		virtual void Decode(FFinish& Finish) = 0;
+		/** Managed GT finalization seam. Dynamic carriers finalize before internal terminal acceptance, never in Deliver. */
+		virtual void Finalize(FFinish&) {}
+		/** Last native metadata/generation resample after finalizer/clock/cleanup callouts, before terminal selection. */
+		virtual void ValidateTerminalOnGT(FFinish&) {}
+		/** Managed GT rejection cleanup, before the final cancellation/owner sample and terminal acceptance marker. */
+		virtual void DiscardValue() {}
 		/** OnSuccess or OnError, then OnComplete. The game thread, or a background task with OnHttpThread(). */
 		virtual void Deliver(FFinish& Finish) = 0;
 		virtual bool WantsProgress() const = 0;
@@ -229,6 +251,8 @@ namespace VaRest::Http
 				Struct->DestroyStruct(Storage);
 			}
 		}
+
+		virtual void DiscardValue() override { Value.Reset(); }
 
 		virtual void Deliver(FFinish& Finish) override
 		{

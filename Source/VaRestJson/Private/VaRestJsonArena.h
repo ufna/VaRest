@@ -39,6 +39,7 @@ namespace VaRest::Json
 		FArena(const FArena&) = delete;
 		FArena& operator=(const FArena&) = delete;
 
+		/** Alignment must be a nonzero power of two. */
 		void* Allocate(SIZE_T Size, SIZE_T Alignment);
 
 		/** Uninitialised storage for Count trivially destructible T; nullptr when Count is 0 */

@@ -22,7 +22,7 @@ class VAREST_API UVaRestLibrary : public UBlueprintFunctionLibrary
 	// Data Accessors
 public:
 	/** Direct access to the plugin settings */
-	UFUNCTION(BlueprintPure, Category = "VaRest|Common")
+	UFUNCTION(BlueprintPure, Category = "VaRest|Common", meta=(DeprecatedFunction, DeprecationMessage="Use v2 VaRestUtilityLibrary.GetHttpSettings (v2 settings).", BlueprintInternalUseOnly="true"))
 	static UVaRestSettings* GetVaRestSettings();
 
 	//////////////////////////////////////////////////////////////////////////
@@ -30,7 +30,7 @@ public:
 
 public:
 	/** Applies percent-encoding to text */
-	UFUNCTION(BlueprintPure, Category = "VaRest|Utility")
+	UFUNCTION(BlueprintPure, Category = "VaRest|Utility", meta=(DeprecatedFunction, DeprecationMessage="Use v2 VaRestUtilityLibrary.PercentEncode.", BlueprintInternalUseOnly="true"))
 	static FString PercentEncode(const FString& Source);
 
 	/**
@@ -39,7 +39,7 @@ public:
 	 * @param Source	The string data to convert
 	 * @return			A string that encodes the binary data in a way that can be safely transmitted via various Internet protocols
 	 */
-	UFUNCTION(BlueprintPure, Category = "VaRest|Utility", meta = (DisplayName = "Base64 Encode"))
+	UFUNCTION(BlueprintPure, Category = "VaRest|Utility", meta = (DisplayName = "Base64 Encode", DeprecatedFunction, DeprecationMessage="Use v2 VaRestUtilityLibrary.Base64Encode.", BlueprintInternalUseOnly="true"))
 	static FString Base64Encode(const FString& Source);
 
 	/**
@@ -49,7 +49,7 @@ public:
 	 * @param Dest		The out buffer that will be filled with the decoded data
 	 * @return			True if the buffer was decoded, false if it failed to decode
 	 */
-	UFUNCTION(BlueprintPure, Category = "VaRest|Utility", meta = (DisplayName = "Base64 Decode"))
+	UFUNCTION(BlueprintPure, Category = "VaRest|Utility", meta = (DisplayName = "Base64 Decode", DeprecatedFunction, DeprecationMessage="Use v2 VaRestUtilityLibrary.Base64Decode.", BlueprintInternalUseOnly="true"))
 	static bool Base64Decode(const FString& Source, FString& Dest);
 
 	/**
@@ -58,7 +58,7 @@ public:
 	 * @param Dara		The data to convert
 	 * @return			A string that encodes the binary data in a way that can be safely transmitted via various Internet protocols
 	 */
-	UFUNCTION(BlueprintPure, Category = "VaRest|Utility", meta = (DisplayName = "Base64 Encode Data"))
+	UFUNCTION(BlueprintPure, Category = "VaRest|Utility", meta = (DisplayName = "Base64 Encode Data", DeprecatedFunction, DeprecationMessage="Use v2 VaRestUtilityLibrary.Base64EncodeData.", BlueprintInternalUseOnly="true"))
 	static bool Base64EncodeData(const TArray<uint8>& Data, FString& Dest);
 
 	/**
@@ -68,7 +68,7 @@ public:
 	 * @param Dest		The out buffer that will be filled with the decoded data
 	 * @return			True if the buffer was decoded, false if it failed to decode
 	 */
-	UFUNCTION(BlueprintPure, Category = "VaRest|Utility", meta = (DisplayName = "Base64 Decode Data"))
+	UFUNCTION(BlueprintPure, Category = "VaRest|Utility", meta = (DisplayName = "Base64 Decode Data", DeprecatedFunction, DeprecationMessage="Use v2 VaRestUtilityLibrary.Base64DecodeData.", BlueprintInternalUseOnly="true"))
 	static bool Base64DecodeData(const FString& Source, TArray<uint8>& Dest);
 
 	/**
@@ -76,25 +76,25 @@ public:
 	 *
 	 * @param String	Hex representation of the hash (32 lower-case hex digits)
 	 */
-	UFUNCTION(BlueprintPure, Category = "VaRest|Utility", meta = (DisplayName = "String to MD5"))
+	UFUNCTION(BlueprintPure, Category = "VaRest|Utility", meta = (DisplayName = "String to MD5", DeprecatedFunction, DeprecationMessage="Use v2 MD5 (UTF-8).", BlueprintInternalUseOnly="true"))
 	static FString StringToMd5(const FString& StringToHash);
 
 	/**
 	 * Helper to perform the SHA1 hash operation on string.
 	 */
-	UFUNCTION(BlueprintPure, Category = "VaRest|Utility", meta = (DisplayName = "String to SHA1"))
+	UFUNCTION(BlueprintPure, Category = "VaRest|Utility", meta = (DisplayName = "String to SHA1", DeprecatedFunction, DeprecationMessage="Use v2 SHA1 (UTF-8).", BlueprintInternalUseOnly="true"))
 	static FString StringToSha1(const FString& StringToHash);
 
 	/**
 	 * Helper method to convert a status code from HTTP to an enum for easier readability
 	 */
-	UFUNCTION(BlueprintPure, Category = "VaRest|Utility", meta = (DisplayName = "HTTP Status Int To Enum"))
+	UFUNCTION(BlueprintPure, Category = "VaRest|Utility", meta = (DisplayName = "HTTP Status Int To Enum", DeprecatedFunction, DeprecationMessage="Use v2 v2 response Status (int), with Switch on Int.", BlueprintInternalUseOnly="true"))
 	static FORCEINLINE EVaRestHttpStatusCode::Type HTTPStatusIntToEnum(int32 StatusCode) { return (EVaRestHttpStatusCode::Type)StatusCode; }
 
 	/**
 	 * Get the plugin's version
 	 */
-	UFUNCTION(BlueprintPure, Category = "VaRest|Utility", meta = (DisplayName = "Get VaRest Version"))
+	UFUNCTION(BlueprintPure, Category = "VaRest|Utility", meta = (DisplayName = "Get VaRest Version", DeprecatedFunction, DeprecationMessage="Use v2 VaRestUtilityLibrary.GetVaRestVersion.", BlueprintInternalUseOnly="true"))
 	static FString GetVaRestVersion();
 
 	//////////////////////////////////////////////////////////////////////////
@@ -104,6 +104,6 @@ public:
 	/**
 	 * Get the URL that was used when loading this World
 	 */
-	UFUNCTION(BlueprintPure, Category = "VaRest|Utility", meta = (WorldContext = "WorldContextObject"))
+	UFUNCTION(BlueprintPure, Category = "VaRest|Utility", meta = (WorldContext = "WorldContextObject", DeprecatedFunction, DeprecationMessage="Use v2 VaRestUtilityLibrary.GetWorldUrl (FVaRestWorldUrl).", BlueprintInternalUseOnly="true"))
 	static FVaRestURL GetWorldURL(UObject* WorldContextObject);
 };

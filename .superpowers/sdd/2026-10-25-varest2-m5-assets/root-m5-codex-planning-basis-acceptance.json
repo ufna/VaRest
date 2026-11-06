@@ -1,0 +1,296 @@
+{
+  "status": "accepted-planning-basis-pending-whole-I1-reconciliation",
+  "root_decision": "ACCEPT C0/I0/M0 for bounded plan correction and integrated planning basis; no M5 source or tracked freeze activation",
+  "pins": {
+    "m5-plan-codex-candidate.md": "353690747424fcedd35acd857690c40f0694190a95b84e522a8b78f6355b5777",
+    "m5-plan-codex-report.md": "e9093ccb226c86bf5477058cbb556cf4af1f21f016c2542f501e7cc5afa936c6",
+    "m5-plan-codex-scoped-review.md": "982fa1ce08e8f5b0a7b2d3f050be6dd46b18f92b60cd7ea3c3f9cbc9f7dd2ae7",
+    "m5-plan-codex-independent-review.md": "9f2dd358bf4ba0990c62f82b0f7fdd4e0ac7b5432963d9934d8898d3be31b47c",
+    "m5-plan-codex-candidate-reviewed-v1.md": "f981082ed331f8ffc0be38fc49c3a634cdb5679c252b37cde675995e38821302",
+    "m5-plan-codex-report-reviewed-v1.md": "8d66f08a168a54f6721eeb87c190733e32abb043852243bde8f97eb9f092a405",
+    "root-m5-scoped-correction-ruling.md": "d8c0f4d1a6f62f606242c607dc396471d50ea850c7667459b3aa7672e79b2ea6"
+  },
+  "read_evidence": {
+    "prior_reviewed_candidate": "all1208 lines and prior100-line report FULL-read before scoped correction",
+    "current_candidate": "all28 revised changed spans FULL-read; unchanged spans byte-equal to prior fully read basis",
+    "current_report": "all148 lines FULL-read in bounded outputs",
+    "independent_reviews": "complete98-line review and scoped64-line review FULL-read"
+  },
+  "scoped_spans": {
+    "candidate": [
+      {
+        "op": "replace",
+        "old_start": 7,
+        "old_end": 7,
+        "new_start": 7,
+        "new_end": 7
+      },
+      {
+        "op": "insert",
+        "old_start": 23,
+        "old_end": 22,
+        "new_start": 23,
+        "new_end": 24
+      },
+      {
+        "op": "insert",
+        "old_start": 39,
+        "old_end": 38,
+        "new_start": 41,
+        "new_end": 41
+      },
+      {
+        "op": "replace",
+        "old_start": 117,
+        "old_end": 117,
+        "new_start": 120,
+        "new_end": 120
+      },
+      {
+        "op": "replace",
+        "old_start": 177,
+        "old_end": 177,
+        "new_start": 180,
+        "new_end": 180
+      },
+      {
+        "op": "replace",
+        "old_start": 208,
+        "old_end": 209,
+        "new_start": 211,
+        "new_end": 212
+      },
+      {
+        "op": "replace",
+        "old_start": 330,
+        "old_end": 330,
+        "new_start": 333,
+        "new_end": 333
+      },
+      {
+        "op": "replace",
+        "old_start": 334,
+        "old_end": 334,
+        "new_start": 337,
+        "new_end": 337
+      },
+      {
+        "op": "replace",
+        "old_start": 400,
+        "old_end": 400,
+        "new_start": 403,
+        "new_end": 403
+      },
+      {
+        "op": "replace",
+        "old_start": 412,
+        "old_end": 412,
+        "new_start": 415,
+        "new_end": 415
+      },
+      {
+        "op": "replace",
+        "old_start": 418,
+        "old_end": 418,
+        "new_start": 421,
+        "new_end": 421
+      },
+      {
+        "op": "insert",
+        "old_start": 421,
+        "old_end": 420,
+        "new_start": 424,
+        "new_end": 431
+      },
+      {
+        "op": "replace",
+        "old_start": 450,
+        "old_end": 450,
+        "new_start": 461,
+        "new_end": 461
+      },
+      {
+        "op": "replace",
+        "old_start": 575,
+        "old_end": 575,
+        "new_start": 586,
+        "new_end": 586
+      },
+      {
+        "op": "replace",
+        "old_start": 885,
+        "old_end": 885,
+        "new_start": 896,
+        "new_end": 896
+      },
+      {
+        "op": "replace",
+        "old_start": 897,
+        "old_end": 897,
+        "new_start": 908,
+        "new_end": 908
+      },
+      {
+        "op": "replace",
+        "old_start": 915,
+        "old_end": 915,
+        "new_start": 926,
+        "new_end": 926
+      },
+      {
+        "op": "replace",
+        "old_start": 948,
+        "old_end": 948,
+        "new_start": 959,
+        "new_end": 959
+      },
+      {
+        "op": "replace",
+        "old_start": 955,
+        "old_end": 955,
+        "new_start": 966,
+        "new_end": 966
+      },
+      {
+        "op": "replace",
+        "old_start": 1056,
+        "old_end": 1056,
+        "new_start": 1067,
+        "new_end": 1067
+      },
+      {
+        "op": "replace",
+        "old_start": 1109,
+        "old_end": 1109,
+        "new_start": 1120,
+        "new_end": 1120
+      },
+      {
+        "op": "replace",
+        "old_start": 1118,
+        "old_end": 1118,
+        "new_start": 1129,
+        "new_end": 1129
+      },
+      {
+        "op": "insert",
+        "old_start": 1120,
+        "old_end": 1119,
+        "new_start": 1131,
+        "new_end": 1134
+      },
+      {
+        "op": "replace",
+        "old_start": 1123,
+        "old_end": 1123,
+        "new_start": 1138,
+        "new_end": 1138
+      },
+      {
+        "op": "replace",
+        "old_start": 1161,
+        "old_end": 1161,
+        "new_start": 1176,
+        "new_end": 1176
+      },
+      {
+        "op": "replace",
+        "old_start": 1175,
+        "old_end": 1175,
+        "new_start": 1190,
+        "new_end": 1190
+      },
+      {
+        "op": "replace",
+        "old_start": 1194,
+        "old_end": 1194,
+        "new_start": 1209,
+        "new_end": 1216
+      },
+      {
+        "op": "replace",
+        "old_start": 1202,
+        "old_end": 1202,
+        "new_start": 1224,
+        "new_end": 1224
+      }
+    ],
+    "report": [
+      {
+        "op": "replace",
+        "old_start": 3,
+        "old_end": 3,
+        "new_start": 3,
+        "new_end": 3
+      },
+      {
+        "op": "replace",
+        "old_start": 7,
+        "old_end": 7,
+        "new_start": 7,
+        "new_end": 7
+      },
+      {
+        "op": "insert",
+        "old_start": 23,
+        "old_end": 22,
+        "new_start": 23,
+        "new_end": 26
+      },
+      {
+        "op": "replace",
+        "old_start": 49,
+        "old_end": 49,
+        "new_start": 53,
+        "new_end": 53
+      },
+      {
+        "op": "replace",
+        "old_start": 51,
+        "old_end": 51,
+        "new_start": 55,
+        "new_end": 55
+      },
+      {
+        "op": "replace",
+        "old_start": 63,
+        "old_end": 63,
+        "new_start": 67,
+        "new_end": 67
+      },
+      {
+        "op": "replace",
+        "old_start": 82,
+        "old_end": 82,
+        "new_start": 86,
+        "new_end": 130
+      },
+      {
+        "op": "replace",
+        "old_start": 86,
+        "old_end": 87,
+        "new_start": 134,
+        "new_end": 135
+      },
+      {
+        "op": "replace",
+        "old_start": 96,
+        "old_end": 96,
+        "new_start": 144,
+        "new_end": 144
+      },
+      {
+        "op": "replace",
+        "old_start": 100,
+        "old_end": 100,
+        "new_start": 148,
+        "new_end": 148
+      }
+    ]
+  },
+  "remaining_gates": [
+    "fresh actually accepted whole-I1 reconciliation BEFORE tracked freeze/source",
+    "all implementation/native/UI/BP/cook/platform/review qualification gates remain open"
+  ],
+  "authority": "sole Root Codex; Kimi complete and released; no remote operation"
+}

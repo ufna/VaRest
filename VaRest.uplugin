@@ -10,6 +10,9 @@
 	"Category" : "Network",
 	"DocsURL": "https://bit.ly/VaRest-Docs",
 	"MarketplaceURL" : "com.epicgames.launcher://ue/marketplace/content/e47be161e7a24e928560290abd5dcc4f",
+	"Plugins": [
+		{ "Name": "DataValidation", "Enabled": true, "TargetAllowList": [ "Editor" ] }
+	],
 	"Modules" :
 	[
 		{
@@ -25,6 +28,12 @@
 			"PlatformAllowList" : [ "Win64", "Mac", "Linux", "Android", "IOS" ]
 		},
 		{
+			"Name" : "VaRestNativeOwner",
+			"Type" : "Runtime",
+			"LoadingPhase" : "None",
+			"PlatformAllowList" : [ "Linux" ]
+		},
+		{
 			"Name" : "VaRestWebSocket",
 			"Type" : "Runtime",
 			"LoadingPhase" : "Default",
@@ -37,6 +46,12 @@
 			"PlatformAllowList" : [ "Win64", "Mac", "Linux", "Android", "IOS" ]
 		},
 		{
+			"Name" : "VaRestSocketIO",
+			"Type" : "Runtime",
+			"LoadingPhase" : "Default",
+			"PlatformAllowList" : [ "Win64", "Mac", "Linux", "Android", "IOS" ]
+		},
+		{
 			"Name" : "VaRest",
 			"Type" : "Runtime",
 			"LoadingPhase": "PreDefault"
@@ -44,6 +59,22 @@
 		{
 			"Name": "VaRestEditor",
 			"Type": "UncookedOnly"
+		},
+		{
+			"Name": "VaRestEditorTools",
+			"Type": "Editor",
+			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "VaRestOpenApi",
+			"Type": "Editor",
+			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "VaRestInspectorUI",
+			"Type": "DeveloperTool",
+			"LoadingPhase": "Default",
+			"PlatformAllowList": [ "Win64", "Mac", "Linux" ]
 		},
 		{
 			"Name" : "VaRestTests",

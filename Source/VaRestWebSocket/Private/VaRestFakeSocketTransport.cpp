@@ -45,10 +45,18 @@ public:
 	virtual bool Send(FVaRestSocketFrame&& Frame) override { return Attempt->OnSend(MoveTemp(Frame)); }
 	virtual void Close(int32 Code, FStringView Reason) override { Attempt->OnClose(Code, Reason); }
 	virtual void Consumed(int64 Bytes) override { Attempt->OnConsumed(Bytes); }
+	virtual void ConsumedMessages(int64 Bytes, int32 Messages) override { Attempt->OnConsumed(Bytes); Attempt->Link->PendingInboundMessages.fetch_sub(Messages, std::memory_order_relaxed); }
 	// Relaxed: counts (VaRestSocketLink.h)
 	virtual int64 GetBufferedAmount() const override { return FMath::Max<int64>(Attempt->Link->BufferedBytes.load(std::memory_order_relaxed), 0); }
 	virtual int64 GetPendingInboundBytes() const override { return Attempt->Link->PendingInboundBytes.load(std::memory_order_relaxed); }
 	virtual bool HasEnded() const override { return Attempt->HasEnded(); }
+	virtual bool SetIdleDeadline(double Seconds) override
+	{
+		check(IsInGameThread());
+		if (!FMath::IsFinite(Seconds) || Seconds < 0 || Attempt->HasEnded() || Attempt->WasReleased() || Attempt->bCloseRequested) return false;
+		Attempt->IdleDeadlineSeconds = Seconds;
+		return true;
+	}
 
 private:
 	TSharedRef<FVaRestFakeSocketAttempt, ESPMode::ThreadSafe> Attempt;

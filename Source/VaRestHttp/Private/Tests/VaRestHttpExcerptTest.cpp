@@ -587,6 +587,63 @@ bool FVaRestHttpExcerptBacklogTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("... and dropping it counts it out"), VaRest::Http::Excerpts::PendingBytes(), static_cast<int64>(0));
 	return true;
 }
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpExcerptBinaryCaptureTest, "VaRest.Http.Trace.ExcerptBinaryCapture",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+bool FVaRestHttpExcerptBinaryCaptureTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::Http::Testing;
+	using namespace VaRest::Http::ExcerptTestPrivate;
+	FTestRig Rig;
+	FScopedTraceRecorder Scoped(EVaRestTraceDetail::Metadata | EVaRestTraceDetail::Bodies, 1);
+	Scoped.Recorder->Detail.BinaryCap = 8; Scoped.Recorder->Detail.FrameCap = 8; FVaRestTrace::RefreshDetail();
+	const TArray<uint8> Raw{0, 0xff, 0x89, 1, 2, 3, 4, 5, 6, 7};
+	Rig.Fake->Enqueue(FVaRestFakeResponse::Bytes(200, Raw));
+	auto Outcome = MakeOutcome<TArray<uint8>>();
+	const uint64 Id = Observe(Rig.Client.Post<TArray<uint8>>(TEXT("/binary-capture")).Body(TConstArrayView<uint8>(Raw)), Outcome).Send().GetId();
+	if (!TestTrue(TEXT("owned binary request reaches terminal state"), Rig.Wait(Outcome) && Rig.Drain())) return false;
+	FlushRedactionPipe();
+	TestTrue(TEXT("application still receives the complete original binary body"), Outcome->Value.IsSet() && Outcome->Value.GetValue() == Raw);
+	for (const auto Owner : {EVaRestTraceExcerptOwner::Request, EVaRestTraceExcerptOwner::Response})
+	{
+		const auto Found = Find(Scoped.Recorder->ExcerptsOf(Id), Owner);
+		TestTrue(TEXT("request and response producer apply the independent binary cap"), Found.IsSet() && Found->Excerpt.bBinaryCaptured && Found->Excerpt.bTruncated
+			&& Found->Excerpt.Bytes && *Found->Excerpt.Bytes == TArray<uint8>{0, 0xff, 0x89, 1, 2, 3, 4, 5});
+	}
+	const char Json[] = "{\"answer\":7}";
+	Rig.Fake->Enqueue(FVaRestFakeResponse::Bytes(200, TArray<uint8>(reinterpret_cast<const uint8*>(Json), sizeof(Json)-1)));
+	auto Decoded = MakeOutcome<FVaRestJson>();
+	const uint64 DecodedId = Observe(Rig.Client.Get<FVaRestJson>(TEXT("/decode-binary-type")), Decoded).Send().GetId();
+	if (!TestTrue(TEXT("decode task completes before its owned barriers are drained"), Rig.Wait(Decoded) && Rig.Drain())) return false;
+	FlushRedactionPipe();
+	const auto BeforeParse = Find(Scoped.Recorder->ExcerptsOf(DecodedId), EVaRestTraceExcerptOwner::Response);
+	TestTrue(TEXT("decode snapshot carries the independent cap before owned parsing"), BeforeParse.IsSet() && BeforeParse->Excerpt.bBinaryCaptured && BeforeParse->Excerpt.Bytes && BeforeParse->Excerpt.Bytes->Num() == 8);
+	TestTrue(TEXT("binary tracing preserves the JSON decoder's MIME refusal"), Decoded->ErrorCalls.load() == 1 && Decoded->SuccessCalls.load() == 0
+		&& Decoded->Error.Kind == EVaRestErrorKind::Decode && Decoded->Error.Message.Contains(TEXT("application/octet-stream")));
+	TestTrue(TEXT("MIME refusal preserves the original diagnostic and response bytes"), Decoded->Error.RawBody == TEXT("{\"answer\":7}")
+		&& Decoded->Response.Body.Num() == sizeof(Json)-1 && FMemory::Memcmp(Decoded->Response.Body.GetData(), Json, sizeof(Json)-1) == 0);
+	Rig.Fake->Enqueue(FVaRestFakeResponse::Bytes(200, TArray<uint8>(reinterpret_cast<const uint8*>(Json), sizeof(Json)-1), TEXTVIEW("application/json")));
+	auto ValidJson = MakeOutcome<FVaRestJson>();
+	const uint64 JsonId = Observe(Rig.Client.Get<FVaRestJson>(TEXT("/proper-json-control")), ValidJson).Send().GetId();
+	if (!TestTrue(TEXT("proper JSON reaches terminal before owned barriers"), Rig.Wait(ValidJson) && Rig.Drain())) return false;
+	FlushRedactionPipe();
+	const auto JsonExcerpt = Find(Scoped.Recorder->ExcerptsOf(JsonId), EVaRestTraceExcerptOwner::Response);
+	TestTrue(TEXT("binary cap does not replace the JSON producer's text cap"), JsonExcerpt.IsSet() && JsonExcerpt->Excerpt.Kind == EVaRestExcerptKind::Json
+		&& !JsonExcerpt->Excerpt.bBinaryCaptured && JsonExcerpt->Excerpt.bTruncated);
+	TestTrue(TEXT("proper JSON still decodes completely beyond its trace cap"), ValidJson->SuccessCalls.load() == 1 && ValidJson->Value.IsSet()
+		&& ValidJson->Value->Get(TEXT("answer")).AsInt() == 7);
+	FVaRestTraceSocketFrame Frame; Frame.SocketId = 771; Frame.AttemptId = 1; Frame.FrameId = 772;
+	Frame.Dir = EVaRestTraceSocketDirection::Out; Frame.Kind = EVaRestTraceSocketFrameKind::Binary;
+	auto Capture = FVaRestTrace::PrepareSocketFrame(0, MoveTemp(Frame), Raw, MakeShared<const FVaRestRedactor, ESPMode::ThreadSafe>());
+	Capture.Publish(); FlushRedactionPipe();
+	bool FrameCaptured = false;
+	for (const auto& E : Scoped.Recorder->ExcerptsOf(0)) if (E.Owner == EVaRestTraceExcerptOwner::Frame && E.FrameId == 772)
+		FrameCaptured = E.Excerpt.bBinaryCaptured && E.Excerpt.Bytes && E.Excerpt.Bytes->Num() == 8 && E.Excerpt.bTruncated;
+	TestTrue(TEXT("outbound frame producer captures an oversized binary prefix"), FrameCaptured);
+	TestEqual(TEXT("owned producer admissions retire"), VaRest::Http::Excerpts::PendingBytes(), int64(0));
+	TestTrue(TEXT("only excerpts may be emitted off GTK"), Scoped.Recorder->OnlyExcerptsOffGameThread());
+	return true;
+}
 #endif // VAREST_WITH_TRACE_EXCERPTS
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestHttpExcerptNeedBodiesTest, "VaRest.Http.Trace.ExcerptsNeedBodies",
