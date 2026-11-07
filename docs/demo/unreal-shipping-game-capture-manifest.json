@@ -68,5 +68,87 @@
     "same_handler_AST_as_actual_server": true,
     "only_module_docstring_updated": true
   },
-  "limits": "Finite actual typedHTTP/visible Shipping/native exit; standard norhithread diagnostic loose stage. Not normal release package/defaultRHI/WS-DNS-TLS-lifetime/ABI/platform/performance/wholeGoal acceptance."
+  "limits": "Finite actual typedHTTP/visible Shipping/native exit; standard norhithread diagnostic loose stage. Not normal release package/defaultRHI/WS-DNS-TLS-lifetime/ABI/platform/performance/wholeGoal acceptance.",
+  "packaged_shipping": {
+    "actual_role": "SDK-generated HostProject Linux Shipping / full normal BuildCookRun PAK+IoStore",
+    "source_version": 341,
+    "code_version": 340,
+    "raw_png": {
+      "path": "/w/Unreal/VaRest-recovery/takeover-01441-20261107/stock-normal-packaged-game-visual-001/screenshots/01-packaged-shipping-game-typed-http.png",
+      "sha256": "83a233e3d18ae4d026550469ca23b45bbe3b83c49e15830923033b5b6561ea8c",
+      "bytes": 153489,
+      "width": 1440,
+      "height": 900,
+      "pixels_unchanged": true
+    },
+    "actual_game_result": {
+      "path": "/w/Unreal/VaRest-recovery/takeover-01441-20261107/stock-normal-packaged-game-visual-001/result.json",
+      "sha256": "9b85e51dd4d44cf46b9dce1b44d29b8ac7dc8adbc2533fe8f2fbcaef8c2ef086",
+      "bytes": 1774,
+      "LF": 52
+    },
+    "native_build_result": {
+      "path": "/w/Unreal/VaRest-recovery/takeover-01441-20261107/stock-content-hybrid-shipping-build-001/native-result.json",
+      "sha256": "c25e69a225f614e0f383109ede83e8d1c245681e2eb04a877d8e15c656f3a3a1",
+      "bytes": 759,
+      "LF": 22
+    },
+    "package_result": {
+      "path": "/w/Unreal/VaRest-recovery/takeover-01441-20261107/stock-normal-buildcookrun-package-003/result.json",
+      "sha256": "eb1ced14d9faac4df84d4b710cab8db26666f65a05017e33dac18ccb3c5d3e42",
+      "bytes": 1921,
+      "LF": 30
+    },
+    "process": {
+      "pid": 3182850,
+      "actual_window": {
+        "id": 2097243,
+        "hex": "0x20005b",
+        "title": "HostProject  ",
+        "x": 80,
+        "y": 50,
+        "width": 1440,
+        "height": 900
+      },
+      "capture_exit_code": 0,
+      "exit_code": 0,
+      "forced": false,
+      "elapsed_seconds": 13.59479910999653
+    },
+    "preserved": 74528,
+    "http": [
+      {
+        "method": "GET",
+        "path": "/profile",
+        "status": 200,
+        "response_bytes": 80,
+        "response_sha256": "a9c5b84b13f4d4cade36ad81b5cca9bcd07b557e0b4cda402eb573eddc18334c"
+      },
+      {
+        "method": "POST",
+        "path": "/matches",
+        "status": 201,
+        "response_bytes": 77,
+        "response_sha256": "adb6681445e56869a70ea92826b984c02cebd3bd60f3ba6760bdbbb7778b0dd3",
+        "consumed_fixed_demo_fields": {
+          "map": "Alex Demo",
+          "maxPlayers": 27,
+          "ranked": true
+        },
+        "request_sha256": "a454b5449f6121fe932859c1344d8c200b40bf8eb8f9c2970313acd833aa9816"
+      }
+    ],
+    "root_visual_readback": {
+      "path": "/w/Unreal/VaRest-recovery/takeover-01441-20261107/stock-normal-packaged-game-Root-readback-001/report.md",
+      "sha256": "72fdccfe1eb2416485bdb1937eb0adda19f4a83b8b1f439be8f93f40008ccfa5",
+      "bytes": 4480,
+      "LF": 19
+    },
+    "map_config": "Ordinary NEW Config/Linux/LinuxEngine.ini38431a5b in recovery DEMO project only; existing SDK/Engine/Target config unchanged; no CLI map override",
+    "stage_archive_pairs": 22,
+    "engine_source_modified": false,
+    "handwritten_host_target_or_game_module": false,
+    "SDK_generated_temporary_target_module": true,
+    "limits": "Finite actual ordinary packaged game/typedHTTP/original visible frame/unforced exit. Normal -norhithread retained; defaultRHI, WS/DNS/proxy/TLS/code-storage lifetime/Game private binding, Socket.IO external interop, platform/performance/release and whole Goal remain open."
+  }
 }

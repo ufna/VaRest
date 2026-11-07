@@ -1,5 +1,13 @@
 # VaRest 2.0 release program ledger (controller-level; per-plan ledgers live in sibling dirs)
 
+## Latest finite delivery result — Source342, 2026-11-08
+
+Source341/code340 now has an actual ordinary SDK-generated consuming-project Shipping build:949 natural actions,2168 products, exit0/3189.475s/all72314 preservation guards. Native resultc25e69a2 and independent ELF/debug readback74284d1e bind genuine Game receipt e3ee6d4a, executablec070ca16 and common BuildIDd676c5ef47a5f72ad4bc64993cd3989c2c70aeb9. NativeProjects generated the six temporary target/module files; Root wrote no special Host/Target/game module or Engine source.
+
+Full standard UAT package003 completed Cook/Stage/PAK+IoStore/Package/Archive0/60.004s/all74484; actual44 products have22 identical stage/archive pairs. Actual packaged game1 loads the ordinary demo-project Linux GameDefaultMap, performs typed GET200→POST201 Alex Demo/27/true and exits naturally0/13.594799s/all74528. Root viewed the full original PNG83a233e3/153489B/1440x900 with all seven text rows visible. Closed readback72fdccfe/4480B19LF and readpins8d029810 bind honest whole/mechanical/bounded extents. Gallery14 adds that raw frame and preserves all13 earlier images byte-identically; Source342 changes documentation only, all831 Source files remain code340.
+
+Existing SDK DefaultEngine.ini remains unchanged; only a NEW ordinary recovery DEMO Config/Linux/LinuxEngine.ini38431a5b/164B selects the startup map. Shipping CLI map selection is genuinely disabled; no Target override or Engine edit. The earlier O_EXCL preflight STOP and successful package002 remain separate immutable records. Normal -norhithread remains explicit. DefaultRHI27.1, private LWS consumer binding/Game eligibility, DNS/proxy/TLS/code-storage lifetime, external Socket.IO interoperability, other platform/performance/release gates and the broader Goal remain OPEN. This finite packaged-game result is not whole-release acceptance. Earlier chronological states below remain history.
+
 ## Controlling owner boundary — 2026-11-07 (supersedes Host5 execution plans below)
 
 Owner requires delivery strictly within plugin capabilities in an ordinary game. **No Engine/Launch patch, custom editor or mandatory special Host/game-module integration.** Editor tooling may live in the plugin's Editor modules. The known Host5 integration is rolled back; both11-action Editor and1411-action/12PCH Game proposals are withdrawn, with no C++ action executed. Historical Host5 contract/review/graph entries below do not authorize that architecture. See [plugin-only delivery boundary](2026-11-07-plugin-only-delivery-boundary.md).

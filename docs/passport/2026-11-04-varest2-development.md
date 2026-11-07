@@ -1,5 +1,13 @@
 # VaRest 2.0 development passport — 2026-11-04
 
+## Source342 — ordinary packaged Shipping game verified, 2026-11-08
+
+Source341/code340 passed the actual SDK-generated HostProject Shipping949 build0/3189.475s/all2168products/all72314guards. Genuine project receipt e3ee6d4a and ELF c070ca16/debug155def5c share independently read BuildIDd676c5ef47a5f72ad4bc64993cd3989c2c70aeb9. No Engine source/Host/manual Target/game-module change; the six temporary target/module files came from NativeProjects. Standard UAT package003 passed Cook/Stage/PAK+IoStore/Package/Archive0/60.004s/all74484 and all22 stage/archive counterpart pairs match.
+
+Actual packaged game1 performed typed GET/profile200→POST/matches201, server-validated Alex Demo/27/true, then unforced native0/13.594799s/all74528. Root manually viewed original1440x900 PNG83a233e3/153489B with all7 text rows; gallery14 adds it without changing any13 prior image bytes. Actual runtime9b85e51d/1774B52LF and finite readback72fdccfe/4480B19LF retain exact evidence and honest extents. Source342 changes documentation only; all831 Source files remain code340.
+
+Only a NEW ordinary recovery DEMO Config/Linux/LinuxEngine.ini38431a5b/164B sets GameDefaultMap; existing SDK config, Engine and Target definitions remain unchanged. Shipping CLI map override is disabled, not waived. The normal -norhithread argument remains explicit; defaultRHI27.1, WS/DNS/proxy/TLS/code-storage lifetime, private LWS consumer/Game binding, Socket.IO external interop, platform/performance/release and the whole Goal remain OPEN. This is finite ordinary packaged-game delivery evidence, not complete M7/release acceptance. Historical progress below is preserved.
+
 ## Owner boundary — 2026-11-07
 
 Delivery is an ordinary game plugin on an unchanged supported engine. Engine/Launch patches, a custom editor and mandatory Host/game-module code are not product requirements. The known Host5 experiment is rolled back; its11-action Editor and1411/12PCH Game build proposals were never executed and are withdrawn. Historical rows below do not override this boundary. [Authoritative decision](../../.superpowers/sdd/2026-11-07-plugin-only-delivery-boundary.md).

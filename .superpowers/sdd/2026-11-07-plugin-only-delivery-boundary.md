@@ -1,5 +1,13 @@
 # Plugin-only delivery boundary — owner correction, 2026-11-07
 
+## Current ordinary-game evidence — Source342, 2026-11-08
+
+Actual SDK-generated HostProject Linux Shipping949 completes0/3189.475s/2168products/all72314; genuine receipt e3ee6d4a and ELF c070ca16 use an unchanged Engine. NativeProjects generated the ordinary temporary target/module6 under Intermediate/Source; they are not Root handwritten Host5/Target integration. Standard UAT Cook/Stage/PAK+IoStore/Package/Archive003 completes0/60.004s/all74484. All44 outputs independently rehash and22 stage/archive pairs match.
+
+The actual packaged game exits naturally0/13.594799s/all74528 after genuine typed GET/profile200→POST/matches201 Alex Demo/27/true. Full original PNG83a233e3/153489B was manually viewed: all7 rows are visible. Root readback72fdccfe/4480B19LF preserves limits; gallery14 contains raw pixels and all13 older frames unchanged. Source342 is documentation only; code remains340/831Source. A NEW ordinary DEMO-project Config/Linux/LinuxEngine.ini supplies GameDefaultMap because Shipping ignores CLI map; the existing SDK DefaultEngine.ini, Engine config and Target/build definitions remain unchanged.
+
+This closes the finite ordinary generated-project/package/runtime route, not the Goal or release. Standard -norhithread/defaultRHI27.1, plugin-owned WS/DNS/proxy/TLS/module lifetime, private LWS Game binding, Socket.IO interop and further platform/performance/full-release gates remain separate OPEN obligations. No old Host5 proof, whole-Init/Tick assertion, custom editor or sourceH/provider/runtime acceptance is revived. Earlier observations below are chronological history.
+
 Owner: «все должно быть строго в рамках возможностей плагина внутри игры».
 
 VaRest 2.0 is delivered as a plugin for an ordinary consuming game using an unchanged supported Unreal Engine. No Engine/Launch/Core/ModuleManager/Loop source patch, special editor executable or mandatory custom game module/Target.cs is part of the delivery architecture. Editor-only plugin modules for API assets, OpenAPI import, Blueprint tooling and Inspector remain plugin features. Compiling the plugin and provisioning the standard source-engine SDK are separate operations; the owner's subsequent SDK-build authorization below does not permit Engine source changes.

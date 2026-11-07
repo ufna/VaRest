@@ -1,10 +1,10 @@
 # Первый просмотр VaRest 2.0
 
-Текущий проект использует неизменённый source engine и обычные модули плагина. Штатные Editor, UnrealGame Development и Shipping собраны; новая визуальная сцена также фактически проверена в Shipping. В проекте только стандартный `.uproject` и плагин: собственный игровой модуль, `Target.cs` или правки Engine не нужны. Штатная сборка и OpenAPI-проверки11/0 прошли; отдельная регрессия1/0 вызывает настоящий Save-валидатор до и после повторного импорта.
+Текущий проект использует неизменённый source engine и обычные модули плагина. Штатные Editor, UnrealGame Development и Shipping собраны; обычная потребляющая Shipping-игра HostProject прошла все949 действий сборки, стандартную упаковку BuildCookRun PAK/IoStore и настоящий запуск. Ручной игровой модуль, `Target.cs` или правки Engine не нужны: временные целевые файлы проекта создаёт сам SDK при включении плагина. OpenAPI-проверки11/0 прошли; отдельная регрессия1/0 вызывает настоящий Save-валидатор до и после повторного импорта.
 
 Northwind из [документа съёмки](../examples/first-look/NorthwindGameApi.json) уже импортирован в `/Game/FirstLook/DA_NorthwindGameApi`: API, четыре структуры и два enum сохранены на диск. Проверка `-Check` в новом процессе загрузила их и вернула отсутствие изменений. В отдельном настоящем Editor ассет открыт и сохранён кнопкой Save: ошибок типов нет, остаются предупреждения о добавлении API в Settings.Apis. Окно ассета и Editor закрылись штатно, код выхода 0. Это проверено с обычным параметром движка `-norhithread`; прежний сбой стандартного Vulkan/RHI-режима остаётся открытым. Ранее повреждённый демо-ассет сохранён отдельно и автоматически не мигрируется.
 
-[Тринадцать настоящих скриншотов в одном офлайн HTML](../demo/unreal-editor-gallery.html). Первый — обычная Shipping-игра: `Alex Demo`, HTTP200, реальный ID матча, `Players:27`, HTTP201. Реальный GET дал типизированный PlayerProfile, его поля стали телом POST; отдельный сервер проверил `Alex Demo/27/true`. Процесс сам завершился с кодом0 за13,397с. В сцене обычные камера, TextRender и Directional Light; нет PrintString/Shipping debug override, своего Host/Target или правок движка. Старые чёрные кадры не добавлялись как успешные.
+[Четырнадцать настоящих скриншотов в одном офлайн HTML](../demo/unreal-editor-gallery.html). Первый — уже упакованная Shipping-игра: `Alex Demo`, HTTP200, ID из настоящего ответа демо-сервера, `Players:27`, HTTP201. Реальный GET дал типизированный PlayerProfile, его поля стали телом POST; отдельный сервер проверил `Alex Demo/27/true`. Процесс сам завершился с кодом0 за13,595с, все74528 проверок сохранности файлов прошли. В сцене обычные камера, TextRender и Directional Light; нет PrintString/Shipping debug override, своего Host/Target или правок движка. Прежний успешный loose-stage Shipping-кадр сохранён вторым, старые чёрные кадры не добавлялись как успешные.
 
 Northwind/Save и девять исторических интерфейсов Editor остаются в той же галерее; прежний Development-кадр с PrintString сохранён отдельно. Это разные фактические проверки, а не все интерфейсы в Shipping.
 
@@ -36,16 +36,15 @@ python3 /w/Unreal/VaRest/docs/examples/first-look/demo-typed-http-server.py \
 Во втором терминале на машине с графическим сеансом:
 
 ```bash
-/w/Unreal/VaRest-recovery/takeover-01441-20261107/first-look-shipping-visual-buildgraph-stage-004/stage/Engine/Binaries/Linux/UnrealGame-Linux-Shipping \
-  /w/Unreal/VaRest-recovery/takeover-01441-20261107/first-look-shipping-visual-buildgraph-stage-004/stage/HostProject/HostProject.uproject \
+/w/Unreal/VaRest-recovery/takeover-01441-20261107/stock-normal-buildcookrun-package-003/archive/Linux/HostProject/Binaries/Linux/HostProject-Linux-Shipping \
   -game -norhithread -windowed -ResX=1440 -ResY=900
 ```
 
-Ожидается экран из первого кадра галереи: Profile Alex Demo, HTTP profile200, Match ID, Players27, HTTP match201. Игра сама закроется примерно через10с после ответа; сервер останавливается Ctrl+C. В автоматической проверке использовался изолированный loopback, настоящий Shipping ELF и исходные пиксели окна. Код обработчиков сервера в репозитории совпадает с использованным сервером; отдельно изменён только текст docstring.
+Ожидается экран из первого кадра галереи: Profile Alex Demo, HTTP profile200, Match ID, Players27, HTTP match201. Игра сама закроется примерно через10с после ответа; сервер останавливается Ctrl+C. В автоматической проверке запускалась stage-копия этого пакета с настоящими PAK/IoStore; все22 пары файлов stage/archive побайтно одинаковы. Использовались изолированный loopback, настоящий Shipping ELF и исходные пиксели окна. Код обработчиков сервера в репозитории совпадает с использованным сервером; отдельно изменён только текст docstring.
 
-Shipping штатно игнорирует карту из командной строки. Нужная `GameDefaultMap=/Game/VaRestFirstLookShipping005/FirstLookAuto` уже задана **только в этой отдельной копии stage**. Для длительного ручного просмотра используйте карту FirstLook в Editor либо свою копию stage с обычной GameDefaultMap на FirstLook. Исходный проект и Engine config агентом не менялись.
+Shipping штатно игнорирует карту из командной строки. Нужная `GameDefaultMap=/Game/VaRestFirstLookShipping005/FirstLookAuto` задана обычным новым `Config/Linux/LinuxEngine.ini` **только в отдельном демопроекте** и вошла в пакет при штатной упаковке. Существующий SDK DefaultEngine.ini, Engine config, Target и исходники плагина при этом не менялись. Для длительного ручного просмотра используйте карту FirstLook в Editor.
 
-Это диагностический loose stage из штатных SDK BuildGraph Stage/Copy и настоящего project receipt. Он подтверждает реальный игровой пример, но не завершает обычную BuildCookRun/релизную упаковку. Штатная автоматическая генерация временной цели проверяется отдельно; ручной игровой C++-модуль и Target.cs для примера не создавались. Нет fake receipt/readiness/installed/precompiled файлов.
+Это результат обычного BuildCookRun: Cook, Stage, PAK/IoStore, Package и Archive завершились0 за60,004с, все74484 входа сохранились. Настоящий Game receipt получен сборкой949, временные целевые файлы созданы самим UnrealBuildTool. Нет fake receipt/readiness/installed/precompiled файлов. Прежний diagnostic loose stage сохранён как отдельный проверенный результат. Эта конечная игровая проверка не закрывает defaultRHI, WS/DNS/lifetime, остальные платформы или полный релизный набор.
 
 VaRest включается явно через Plugins UI либо `VaRest: Enabled=true` в `.uproject`; демопроект уже содержит такую запись. Копирование папки само по себе больше не активирует плагин. Development-сцена002 и её успешная отдельная игровая регрессия1/0 сохранены как предыдущая проверка.
 
