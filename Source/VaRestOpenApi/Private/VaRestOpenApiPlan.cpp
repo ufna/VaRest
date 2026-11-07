@@ -10,6 +10,49 @@ TArray<FString> ReservedTypeNames(const FVaRestOpenApiPlanOptions& Options)
 {
 	auto Names=Options.ExistingTypeNames;for (const auto& Definition:Options.ExistingDefinitions) Names.Add(Definition.Value);return Names;
 }
+FString SeparateDefinitionId(const FString& Id,bool bEnum)
+{
+	return SemanticId(Id,TEXT("definition"),bEnum ? TEXT("enum") : TEXT("struct"));
+}
+bool SeparateInlineDefinitions(FVaRestOpenApiPlan& Plan)
+{
+	// An inline declaration used to inherit its owning field/parameter ID. All merge
+	// maps require globally unique item IDs, including across these different kinds.
+	// Finalize only actual collisions: existing noncolliding identities stay exact.
+	FStringSet Items;bool Unique=true;
+	const auto Reserve=[&](const FString& Id) { if (Items.Contains(Id)) Unique=false;Items.Add(Id); };
+	for (const auto& Struct:Plan.Structs) for (const auto& Field:Struct.Fields) Reserve(Field.Id);
+	for (const auto& Endpoint:Plan.Endpoints) { Reserve(Endpoint.Id);for (const auto& Param:Endpoint.Parameters) Reserve(Param.Id); }
+	for (const auto& Environment:Plan.Environments) Reserve(Environment.Id);
+	for (const TCHAR* Id:{TEXT("auth"),TEXT("envelope"),TEXT("defaults")}) Reserve(Id);
+	if (!Unique) return false;
+	const FStringSet Owned=Items;FStringSet Definitions;
+	for (const auto& Struct:Plan.Structs) { if (Definitions.Contains(Struct.Id)) return false;Definitions.Add(Struct.Id);Items.Add(Struct.Id); }
+	for (const auto& Enum:Plan.Enums) { if (Definitions.Contains(Enum.Id)) return false;Definitions.Add(Enum.Id);Items.Add(Enum.Id); }
+	TStringMap<FString> Remapped;
+	const auto Remap=[&](const FString& Id,bool bEnum)
+	{
+		if (!Owned.Contains(Id)) return true;
+		const FString NewId=SeparateDefinitionId(Id,bEnum);
+		if (Items.Contains(NewId)) return false;
+		Items.Add(NewId);Remapped.Add(Id,NewId);return true;
+	};
+	for (const auto& Struct:Plan.Structs) if (!Remap(Struct.Id,false)) return false;
+	for (const auto& Enum:Plan.Enums) if (!Remap(Enum.Id,true)) return false;
+	const auto FixType=[&](FVaRestOpenApiPlannedType& Type) { if (const auto* Id=Remapped.Find(Type.DefinitionId)) Type.DefinitionId=*Id; };
+	for (auto& Struct:Plan.Structs)
+	{
+		if (const auto* Id=Remapped.Find(Struct.Id)) Struct.Id=*Id;
+		for (auto& Field:Struct.Fields) FixType(Field.Type);
+	}
+	for (auto& Enum:Plan.Enums) if (const auto* Id=Remapped.Find(Enum.Id)) Enum.Id=*Id;
+	for (auto& Endpoint:Plan.Endpoints)
+	{
+		FixType(Endpoint.RequestType);FixType(Endpoint.ResponseType);FixType(Endpoint.ErrorType);
+		for (auto& Param:Endpoint.Parameters) FixType(Param.Type);
+	}
+	return true;
+}
 }
 FPlanner::FPlanner(const FVaRestOpenApiAnalysis& Analysis,const FVaRestOpenApiPlanOptions& InOptions)
 	: Model(Analysis.Model),Options(InOptions),Names(ReservedTypeNames(InOptions))
@@ -65,6 +108,10 @@ FPlanner::FPlanner(const FVaRestOpenApiAnalysis& Analysis,const FVaRestOpenApiPl
 FString FPlanner::AllocateTypeName(const FString& Id,const FString& Hint,bool bEnum)
 {
 	for (const auto& Existing:Options.ExistingDefinitions) if (Equal(Existing.Key,Id)) return Existing.Value;
+	// Planning still traverses the original containment IDs. A previously finalized
+	// colliding declaration must retain its real asset name on the next reimport.
+	const FString Separated=SeparateDefinitionId(Id,bEnum);
+	for (const auto& Existing:Options.ExistingDefinitions) if (Equal(Existing.Key,Separated)) return Existing.Value;
 	// Query the exact same sanitizer with an empty allocator; do not consume the real allocation twice.
 	FVaRestOpenApiNameAllocator Baseline;const FString Candidate=Baseline.AllocateType(Hint,bEnum,Options.TypePrefix);
 	const FString Allocated=Names.AllocateType(Hint,bEnum,Options.TypePrefix);
@@ -133,6 +180,11 @@ FVaRestOpenApiPlan FPlanner::Run()
 	Environments();Authentication();Endpoints();
 	DetectEnvelope(); // error-path detection also runs when automatic data unwrapping is disabled
 	Defaults();
+	if (!SeparateInlineDefinitions(Plan))
+	{
+		Issue({Model.RootDocument,{}},TEXT("OA-PLAN-IDENTITY"),TEXT("The selected declarations have conflicting item identities; no assets can be applied."),EVaRestOpenApiSeverity::Error);
+		Plan.bValid=false;
+	}
 	if (Plan.Structs.Num()+Plan.Enums.Num()>300) Issue({Model.RootDocument,{}},TEXT("OA-SCALE"),TEXT("More than 300 types are selected; reduce the tag/operation selection if editor apply cost is excessive."),EVaRestOpenApiSeverity::Info);
 	return MoveTemp(Plan);
 }

@@ -4,9 +4,24 @@
 
 namespace VaRest::OpenApi
 {
-namespace { constexpr int32 MaxStateBytes=256*1024*1024; }
+namespace
+{
+constexpr int32 MaxStateBytes=256*1024*1024;
+bool UniqueItemIds(const FVaRestJson& Json)
+{
+	FStringSet Seen;
+	for (const auto& Item:Json[TEXT("items")].Elements())
+	{
+		const FString Id=Item[TEXT("id")].AsString();
+		if (Seen.Contains(Id)) return false;
+		Seen.Add(Id);
+	}
+	return true;
+}
+}
 bool EncodeState(const FVaRestJson& Json,FVaRestApiImportState& State)
 {
+	if (!UniqueItemIds(Json)) return false;
 	TArray<uint8> Bytes;auto Written=Json.TryToUtf8(Bytes);if (Written.HasError() || Bytes.Num()>MaxStateBytes) return false;
 	int64 Capacity=0;if (!FCompression::CompressMemoryBound(NAME_Zlib,Capacity,static_cast<int64>(Bytes.Num())) || Capacity>MAX_int32-8) return false;
 	TArray<uint8> Blob;Blob.SetNumUninitialized(static_cast<int32>(Capacity)+8);
@@ -21,6 +36,6 @@ TOptional<FVaRestJson> DecodeState(const FVaRestApiImportState& State)
 	uint32 Size=0;for (int32 Index=0;Index<4;++Index) Size|=static_cast<uint32>(Blob[4+Index])<<(Index*8);
 	if (Size==0 || Size>MaxStateBytes) return {};TArray<uint8> Bytes;Bytes.SetNumUninitialized(Size);
 	if (!FCompression::UncompressMemory(NAME_Zlib,Bytes.GetData(),static_cast<int64>(Size),Blob.GetData()+8,static_cast<int64>(Blob.Num()-8))) return {};
-	auto Parsed=FVaRestJson::ParseOwned(MoveTemp(Bytes));if (Parsed.HasError() || !Parsed.GetValue().IsObject()) return {};return Parsed.StealValue();
+	auto Parsed=FVaRestJson::ParseOwned(MoveTemp(Bytes));if (Parsed.HasError() || !Parsed.GetValue().IsObject() || !UniqueItemIds(Parsed.GetValue())) return {};return Parsed.StealValue();
 }
 }

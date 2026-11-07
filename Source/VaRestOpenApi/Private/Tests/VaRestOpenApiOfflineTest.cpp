@@ -10,6 +10,7 @@
 #include "AssetImportTask.h"
 #include "CoreGlobals.h"
 #include "Misc/CommandLine.h"
+#include "Misc/Base64.h"
 #include "Misc/Parse.h"
 #include "VaRestOpenApiImportDialog.h"
 #include "VaRestOpenApiApplyPrivate.h"
@@ -1026,6 +1027,137 @@ bool FVaRestOpenApiHeadlessFactoryTest::RunTest(const FString& Parameters)
  TestTrue(TEXT("candidate evidence was not applied as runtime unwrapping"),Api->Envelope.DataPath.IsEmpty() && SavedPlan[TEXT("envelope")][TEXT("dataPath")].AsString().IsEmpty() && SavedPlan[TEXT("envelope")][TEXT("wrapped")].AsInt()==0);
  TestTrue(TEXT("real factory records a local file source"),State.GetValue()[TEXT("source")][TEXT("kind")].AsString()==TEXT("file") && State.GetValue()[TEXT("source")][TEXT("documents")].IsArray() && State.GetValue()[TEXT("source")][TEXT("documents")].Num()>0);
  AddInfo(TEXT("FactoryHeadless fixture checks native selected-plan/preload memory only; -nowrite disables config persistence, and Engine cache custody ends with this dedicated process."));
+ return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestOpenApiInlineIdentityTest,"VaRest.OpenApi.Offline.InlineIdentity",
+ EAutomationTestFlags::EditorContext|EAutomationTestFlags::EngineFilter)
+bool FVaRestOpenApiInlineIdentityTest::RunTest(const FString& Parameters)
+{
+ using namespace VaRestOpenApiOfflineTest;
+ using namespace VaRest::OpenApi;
+ const TCHAR* Document=TEXT(R"json({
+  "openapi":"3.0.3","info":{"title":"Inline identities","version":"1"},
+  "servers":[{"url":"https://identities.invalid"}],
+  "paths":{"/payload":{"get":{"operationId":"readPayload",
+   "parameters":[{"name":"mode","in":"query","schema":{"type":"string","enum":["brief","full"]}}],
+   "responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Payload"}}}}}}}},
+  "components":{"schemas":{"Payload":{"type":"object","properties":{
+   "state":{"type":"string","enum":["ready","waiting"]},
+   "details":{"type":"object","properties":{"label":{"type":"string"}}},
+   "entries":{"type":"array","items":{"type":"object","properties":{"value":{"type":"integer","format":"int32"}}}}
+  }}}}
+ })json");
+ const auto Analysis=FVaRestOpenApiLoader::Analyze(TEXT("/VaRestOpenApiQualification/identities.json"),Bytes(Document));
+ FVaRestOpenApiPlanOptions PlanOptions;
+ const auto Plan=FVaRestOpenApiPlanner::Build(Analysis,PlanOptions);
+ if (!TestTrue(TEXT("real inline fixture plans"),Plan.bValid) || !NoErrors(*this,Plan.Issues,TEXT("inline plan")) ||
+  !TestEqual(TEXT("both inline property and parameter enums generated"),Plan.Enums.Num(),2) ||
+  !TestEqual(TEXT("named root, inline object and array element generated"),Plan.Structs.Num(),3)) return false;
+ // Assert the public representation, not a reconstruction of the planner's ID algorithm.
+ const auto Desired=FVaRestOpenApiMerge::Desired(Plan,{});
+ FStringSet ItemIds;bool Unique=true;
+ for (const auto& Item:Desired) { Unique=Unique && !ItemIds.Contains(Item.Id);ItemIds.Add(Item.Id); }
+ if (!TestTrue(TEXT("every actual merge item has a globally distinct identity"),Unique)) return false;
+ const FString Folder=TEXT("/Game/__VaRestInlineIdentity_")+FGuid::NewGuid().ToString(EGuidFormats::Digits);
+ FOwnedAssets Owned;
+ TStrongObjectPtr<UPackage> Package(CreatePackage(*(Folder/TEXT("Api"))));
+ FVaRestOpenApiApplyOptions Options;Options.Parent=Package.Get();Options.ApiName=TEXT("Api");Options.TypesFolder=Folder/TEXT("Types");
+ Options.bRegisterAssets=false;Options.bAddToSettings=false;
+ const auto Applied=FVaRestOpenApiApplier::Apply(Plan,Options);Owned.Keep(Applied);
+ if (!NoErrors(*this,Applied.Issues,TEXT("inline apply")) || !TestNotNull(TEXT("actual inline API"),Applied.Api)) return false;
+ auto* Api=Applied.Api;
+ const auto State=DecodeState(Api->ImportState);
+ if (!TestTrue(TEXT("new actual import state is readable"),State.IsSet())) return false;
+ const auto Captured=FVaRestOpenApiMerge::Capture(Api,State.GetValue());
+ int32 Definitions=0;
+ for (const auto& Item:Captured)
+ {
+  if (!TestTrue(TEXT("every emitted item resolves to real native state"),Item.bPresent)) return false;
+  if (Item.Kind==TEXT("enum") || Item.Kind==TEXT("struct"))
+  {
+   ++Definitions;
+   if (!TestNotNull(TEXT("type targets are real object paths, never field GUIDs"),LoadObject<UField>(nullptr,*Item.Target))) return false;
+  }
+ }
+ if (!TestEqual(TEXT("all five generated declarations captured"),Definitions,5)) return false;
+ const auto EndpointId=Api->Endpoints[0].Id;auto* ResponseType=Api->Endpoints[0].ResponseType.Type.Get();
+ const auto OriginalState=Api->ImportState;
+ if (!TestTrue(TEXT("actual reimport seeds finalized identities"),FVaRestOpenApiReimporter::SeedOptions(Api,PlanOptions))) return false;
+ const auto Again=FVaRestOpenApiPlanner::Build(Analysis,PlanOptions);
+ if (!TestTrue(TEXT("actual replan retains all IDs and allocated names"),Again.ToJson().Equals(Plan.ToJson()))) return false;
+ FVaRestOpenApiMergeOptions Automated;Automated.bAutomated=true;
+ auto Preview=FVaRestOpenApiReimporter::Preview(Api,Again,Automated);
+ if (!TestTrue(TEXT("inline reimport preview valid"),Preview.bValid) || !NoErrors(*this,Preview.Issues,TEXT("inline preview"))) return false;
+ const auto Noop=FVaRestOpenApiReimporter::Apply(Api,Again,Preview,Options);
+ if (!NoErrors(*this,Noop.Issues,TEXT("inline no-op")) || !TestTrue(TEXT("same inline import is a genuine no-op"),Noop.Api==Api && Noop.bNoChanges)) return false;
+ TestTrue(TEXT("no-op preserves exact manifest"),Api->ImportState.Blob==OriginalState.Blob);
+ TestEqual(TEXT("no-op retains endpoint GUID"),Api->Endpoints[0].Id,EndpointId);
+ TestEqual(TEXT("no-op retains native response type"),Api->Endpoints[0].ResponseType.Type.Get(),ResponseType);
+ auto Duplicate=State.GetValue().Clone();auto DuplicateItems=Duplicate[TEXT("items")].Clone();DuplicateItems.Add(DuplicateItems.At(0).Clone());Duplicate.Set(TEXT("items"),DuplicateItems);
+ auto Destination=OriginalState;
+ TestFalse(TEXT("ambiguous state cannot be published"),EncodeState(Duplicate,Destination));
+ TestTrue(TEXT("refused publication leaves caller state unchanged"),Destination.Blob==OriginalState.Blob && Destination.Importer==OriginalState.Importer && Destination.Version==OriginalState.Version);
+ // Actual pre-fix VOA1 blob from the graphical Northwind import (package SHA64c68947,
+ // decoded JSON SHA56e166e6): two inline enum IDs collide with owning fields. This
+ // genuine older packet tests decode separately, without using the new encoder.
+ FVaRestApiImportState Legacy;Legacy.Importer=TEXT("VaRestOpenApi");Legacy.Version=1;
+ if (!TestTrue(TEXT("actual historical fixture decodes base64"),FBase64::Decode(TEXT(
+  "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"
+ ),Legacy.Blob))) return false;
+ TestFalse(TEXT("old ambiguous manifest is refused before item maps are constructed"),DecodeState(Legacy).IsSet());
+ Api->ImportState=Legacy;Package->SetDirtyFlag(false);
+ FVaRestOpenApiPlanOptions RefusedOptions;
+ TestFalse(TEXT("old ambiguous reimport cannot seed a replacement graph"),FVaRestOpenApiReimporter::SeedOptions(Api,RefusedOptions));
+ TestTrue(TEXT("refusal does not rewrite legacy metadata"),Api->ImportState.Blob==Legacy.Blob);
+ TestEqual(TEXT("refusal retains endpoint GUID"),Api->Endpoints[0].Id,EndpointId);
+ TestEqual(TEXT("refusal retains native response object"),Api->Endpoints[0].ResponseType.Type.Get(),ResponseType);
+ TestFalse(TEXT("refusal does not dirty the existing package"),Package->IsDirty());
+ Api->ImportState=OriginalState;
  return true;
 }
 #endif
