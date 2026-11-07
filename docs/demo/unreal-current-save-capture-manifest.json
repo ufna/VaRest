@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "date": "2026-11-07",
+  "capture": "Actual unchanged PNGs from current code332 Unreal Editor, source334 docs only",
+  "engine": "Stock existing Unreal Engine5.8.1; no Engine/Launch/Host patch or custom Target/Game module",
+  "project": "/w/Unreal/VaRest-recovery/takeover-01441-20261107/stock-plugin-editor-graph-002/HostProject/HostProject.uproject",
+  "renderer_mode": "Supported -norhithread; does not close previous default Vulkan/RHI failures",
+  "gui_result": {
+    "path": "/w/Unreal/VaRest-recovery/takeover-01441-20261107/unreal-current-save-exit-control-005/result.json",
+    "sha256": "284c8a85a4d0ca0335187fd868ba9b749f66576e97a1c6c7794e9b906a0e3b9e"
+  },
+  "actual_save": "SavePackage and native Save validation, settings enrollment warnings only",
+  "actual_exit_code": 0,
+  "timeout_or_forced": false,
+  "guards": 2208,
+  "guard_failures": 0,
+  "images": [
+    {
+      "source": "/w/Unreal/VaRest-recovery/takeover-01441-20261107/unreal-current-save-exit-control-005/screenshots/04-northwind-before-save.png",
+      "sha256": "ed37d8f1d9ddc7cad161d62fa7c960af4ab56c38846d8e3e979afacab253ca6c",
+      "bytes": 56331,
+      "width": 1780,
+      "height": 780,
+      "article_id": "current-api"
+    },
+    {
+      "source": "/w/Unreal/VaRest-recovery/takeover-01441-20261107/unreal-current-save-exit-control-005/screenshots/06-save-validation-messages.png",
+      "sha256": "9fb530a11650e1edba9c05118c8e7ea344ef968f76e4fdc0b717f1b409e1a4e8",
+      "bytes": 57594,
+      "width": 1006,
+      "height": 606,
+      "article_id": "current-save"
+    }
+  ],
+  "limits": "No PIE, live WS/SIO, default-renderer exit, Game or release acceptance"
+}
