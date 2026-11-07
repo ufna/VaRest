@@ -5,6 +5,12 @@
 #include "VaRestOpenApiApply.h"
 #include "VaRestOpenApiReimport.h"
 #include "VaRestOpenApiImportOptions.h"
+#include "VaRestOpenApiFactory.h"
+#include "VaRestHttpSettings.h"
+#include "AssetImportTask.h"
+#include "CoreGlobals.h"
+#include "Misc/CommandLine.h"
+#include "Misc/Parse.h"
 #include "VaRestOpenApiImportDialog.h"
 #include "VaRestOpenApiApplyPrivate.h"
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -908,6 +914,118 @@ bool FVaRestOpenApiReimportNoticesOfflineTest::RunTest(const FString& Parameters
  TestTrue(TEXT("preview warnings never rewrite persisted ownership or endpoint identity"),Api->ImportState.Blob==OriginalState.Blob && Api->Endpoints[0].Id==Endpoint);
  TestTrue(TEXT("preview never replaces the DataTable row struct or populates/resets rows"),Table->GetRowStruct()==Struct && Table->GetRowMap().IsEmpty());
  for (const auto& Object:Owned.Objects) TestFalse(TEXT("notice-only previews do not dirty owned assets"),Object->GetOutermost()->IsDirty());
+ return true;
+}
+
+IMPLEMENT_COMPLEX_AUTOMATION_TEST(FVaRestOpenApiHeadlessFactoryTest,"VaRest.OpenApi.Offline.FactoryHeadless",
+ EAutomationTestFlags::EditorContext|EAutomationTestFlags::EngineFilter)
+void FVaRestOpenApiHeadlessFactoryTest::GetTests(TArray<FString>& Names,TArray<FString>& Commands) const
+{
+ if (FCommandLine::IsInitialized() && FParse::Param(FCommandLine::Get(),TEXT("VaRestOpenApiFactoryFixture")) && FParse::Param(FCommandLine::Get(),TEXT("nowrite")))
+ {
+  Names.Add(TEXT("SelectedPlan")); Commands.Add(TEXT("SelectedPlan"));
+ }
+}
+bool FVaRestOpenApiHeadlessFactoryTest::RunTest(const FString& Parameters)
+{
+ using namespace VaRestOpenApiOfflineTest;using namespace VaRest::OpenApi;
+ if (!FCommandLine::IsInitialized() || !FParse::Param(FCommandLine::Get(),TEXT("VaRestOpenApiFactoryFixture")) ||
+  !FParse::Param(FCommandLine::Get(),TEXT("nowrite")) || !Parameters.Equals(TEXT("SelectedPlan"),ESearchCase::CaseSensitive))
+ {
+  AddError(TEXT("FactoryHeadless.SelectedPlan requires its dedicated fresh-process -VaRestOpenApiFactoryFixture -nowrite invocation")); return false;
+ }
+ if (!TestTrue(TEXT("public factory fixture runs on the actual game thread"),IsInGameThread())) return false;
+ auto* Settings=GetMutableDefault<UVaRestHttpSettings>();
+ FString ConfigFilename=FPaths::ConvertRelativePathToFull(Settings->GetDefaultConfigFilename());
+ FString ConfigRoot=FPaths::ConvertRelativePathToFull(FPaths::ProjectConfigDir());
+ FPaths::NormalizeFilename(ConfigFilename); FPaths::NormalizeDirectoryName(ConfigRoot);
+ if (!TestTrue(TEXT("default config path has no unresolved parent traversal"),FPaths::CollapseRelativeDirectories(ConfigFilename)) ||
+  !TestTrue(TEXT("project config root has no unresolved parent traversal"),FPaths::CollapseRelativeDirectories(ConfigRoot)) ||
+  !TestTrue(TEXT("actual settings default is inside this test host's Config directory"),ConfigFilename.StartsWith(ConfigRoot+TEXT("/"),ESearchCase::CaseSensitive)) ||
+  !TestEqual(TEXT("fixture affects only the actual Engine default config declaration"),FPaths::GetCleanFilename(ConfigFilename),FString(TEXT("DefaultEngine.ini")))) return false;
+ AddInfo(TEXT("FactoryHeadlessFixture DefaultConfig=")+ConfigFilename+TEXT(" EngineDestination=")+GEngineIni);
+ FOwnedAssets Owned; // Must outlive the settings restore guard below.
+ const auto OriginalApis=Settings->Apis;
+ ON_SCOPE_EXIT { Settings->Apis=OriginalApis; TestTrue(TEXT("factory preload memory is restored before owned asset cleanup"),Settings->Apis==OriginalApis); };
+ // The real factory flush/reload is allowed only in this dedicated -nowrite process.
+ // Cache custody ends at process exit; this guard does not claim an unchanged config cache.
+ const FString Directory=FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir()/TEXT("VaRestOpenApiQualification")/FGuid::NewGuid().ToString(EGuidFormats::Digits));
+ const FString Filename=Directory/TEXT("factory-headless.json");
+ if (!TestFalse(TEXT("factory fixture never overwrites an existing source"),IFileManager::Get().FileExists(*Filename)) ||
+  !TestTrue(TEXT("create only the owned factory source directory"),IFileManager::Get().MakeDirectory(*Directory,true))) return false;
+ ON_SCOPE_EXIT { IFileManager::Get().Delete(*Filename,false,true); IFileManager::Get().DeleteDirectory(*Directory,false,false); };
+ auto Schemas=FVaRestJson::Object()
+  .Set(TEXT("State"),FVaRestJson::Object().Set(TEXT("type"),TEXT("string")).Set(TEXT("enum"),FVaRestJson::Array().Add(TEXT("waiting")).Add(TEXT("ready"))))
+  .Set(TEXT("Pet"),FVaRestJson::Object().Set(TEXT("type"),TEXT("object")).Set(TEXT("properties"),FVaRestJson::Object()
+   .Set(TEXT("id"),FVaRestJson::Object().Set(TEXT("type"),TEXT("integer")).Set(TEXT("format"),TEXT("int64")))
+   .Set(TEXT("state"),FVaRestJson::Object().Set(TEXT("$ref"),TEXT("#/components/schemas/State")))))
+  .Set(TEXT("Envelope"),FVaRestJson::Object().Set(TEXT("type"),TEXT("object")).Set(TEXT("required"),FVaRestJson::Array().Add(TEXT("ok")))
+   .Set(TEXT("properties"),FVaRestJson::Object().Set(TEXT("data"),FVaRestJson::Object().Set(TEXT("$ref"),TEXT("#/components/schemas/Pet")))
+    .Set(TEXT("ok"),FVaRestJson::Object().Set(TEXT("type"),TEXT("boolean")))))
+  .Set(TEXT("Unused"),PropertySchema(TEXT("mustNotBeGenerated")));
+ auto Paths=FVaRestJson::Object();
+ for (int32 Index=0;Index<4;++Index)
+ {
+  const FString Id=Index<3 ? TEXT("selected")+FString::FromInt(Index) : FString(TEXT("unselected"));
+  const FString Ref=Index<3 ? TEXT("#/components/schemas/Envelope") : TEXT("#/components/schemas/Unused");
+  const auto Operation=FVaRestJson::Object().Set(TEXT("operationId"),Id)
+   .Set(TEXT("responses"),FVaRestJson::Object().Set(TEXT("200"),SchemaResponse(FVaRestJson::Object().Set(TEXT("$ref"),Ref))));
+  Paths.Set(TEXT("/")+Id,FVaRestJson::Object().Set(TEXT("get"),Operation));
+ }
+ const auto Document=FVaRestJson::Object().Set(TEXT("openapi"),TEXT("3.0.3"))
+  .Set(TEXT("info"),FVaRestJson::Object().Set(TEXT("title"),TEXT("Headless factory")).Set(TEXT("version"),TEXT("1")))
+  .Set(TEXT("servers"),FVaRestJson::Array().Add(FVaRestJson::Object().Set(TEXT("url"),TEXT("https://factory-headless.invalid"))))
+  .Set(TEXT("paths"),Paths).Set(TEXT("components"),FVaRestJson::Object().Set(TEXT("schemas"),Schemas));
+ if (!TestTrue(TEXT("write the actual local JSON factory input"),FFileHelper::SaveStringToFile(Document.ToString(),*Filename))) return false;
+ TStrongObjectPtr<UVaRestOpenApiImportOptions> Options(NewObject<UVaRestOpenApiImportOptions>());
+ if (!TestTrue(TEXT("explicit task options do not inherit user config"),Options->FromJson(FVaRestJson::Object()))) return false;
+ Options->bImportAllOperations=false;Options->SelectedOperations={TEXT("selected0"),TEXT("selected1"),TEXT("selected2")};
+ Options->bIncludeNewOperations=false;Options->bUnwrapEnvelope=false;
+ const auto OriginalOptions=Options->ToJson();
+ const FString Folder=TEXT("/Game/__VaRestHeadlessFactory_")+FGuid::NewGuid().ToString(EGuidFormats::Digits);
+ TStrongObjectPtr<UPackage> Package(CreatePackage(*(Folder/TEXT("FactoryApi"))));
+ TStrongObjectPtr<UVaRestOpenApiFactory> Factory(NewObject<UVaRestOpenApiFactory>());
+ TStrongObjectPtr<UAssetImportTask> Task(NewObject<UAssetImportTask>());
+ Task->Filename=Filename;Task->DestinationPath=Folder;Task->DestinationName=TEXT("FactoryApi");Task->Options=Options.Get();Task->Factory=Factory.Get();
+ Task->bAutomated=true;Task->bSave=false;Task->bAsync=false;Task->bReplaceExisting=false;Task->bReplaceExistingSettings=false;
+ Factory->SetAssetImportTask(Task.Get());
+ if (!TestTrue(TEXT("real import task and public factory admit the automated branch before any import"),Task->bAutomated && Factory->IsAutomatedImport())) return false;
+ UFactory* PublicFactory=Factory.Get();bool Cancelled=true;
+ UObject* Imported=PublicFactory->FactoryCreateFile(UVaRestApi::StaticClass(),Package.Get(),TEXT("FactoryApi"),RF_Public|RF_Standalone|RF_Transactional,Filename,nullptr,nullptr,Cancelled);
+ auto* Api=Cast<UVaRestApi>(Imported);Owned.Api=Api;
+ if (Imported) Owned.Objects.Emplace(Imported);
+ const auto& Additional=PublicFactory->GetAdditionalImportedObjects();for (auto* Object:Additional) if (Object) Owned.Objects.Emplace(Object);
+ if (!TestNotNull(TEXT("public automated factory returns the actual API"),Api) || !TestFalse(TEXT("real automated import was not cancelled"),Cancelled)) return false;
+ TestTrue(TEXT("factory duplicated task options instead of modifying them"),Options->ToJson().Equals(OriginalOptions));
+ TestTrue(TEXT("real factory intentionally registers its API in preload memory"),Settings->Apis.Contains(TSoftObjectPtr<UVaRestApi>(Api)));
+ TestEqual(TEXT("only the owned new API was added to preload memory"),Settings->Apis.Num(),OriginalApis.Num()+1);
+ if (!TestEqual(TEXT("actual API contains only the three selected operations"),Api->Endpoints.Num(),3) ||
+  !TestEqual(TEXT("factory exposes its actual generated two structs and enum"),Additional.Num(),3)) return false;
+ TestEqual(TEXT("factory uses the per-API default type folder"),Api->TypesFolder,Folder/TEXT("FactoryApi_Types"));
+ int32 Structs=0,Enums=0;
+ for (auto* Object:Additional)
+ {
+  if (!TestNotNull(TEXT("each factory additional object is real"),Object)) return false;
+  Structs+=Object->IsA<UUserDefinedStruct>();Enums+=Object->IsA<UUserDefinedEnum>();
+  if (const auto* Struct=Cast<UUserDefinedStruct>(Object)) TestEqual(TEXT("actual factory struct is compiled"),Struct->Status,UDSS_UpToDate);
+  TestTrue(TEXT("actual API owns rules for every returned native type"),Api->JsonTypes.ContainsByPredicate([&](const auto& Rules) { return Rules.Type.Get()==Object; }));
+  TestEqual(TEXT("actual generated package is in the API's recorded folder"),FPackageName::GetLongPackagePath(Object->GetOutermost()->GetName()),Api->TypesFolder);
+ }
+ TestEqual(TEXT("actual native compiled struct count"),Structs,2);TestEqual(TEXT("actual native enum count"),Enums,1);
+ for (int32 Index=0;Index<3;++Index)
+  TestTrue(TEXT("each selected route survives the real factory"),Api->Endpoints.ContainsByPredicate([&](const auto& Endpoint) { return Endpoint.Path==TEXT("/selected")+FString::FromInt(Index); }));
+ TestFalse(TEXT("unselected route is absent from the actual API"),Api->Endpoints.ContainsByPredicate([](const auto& Endpoint) { return Endpoint.Path==TEXT("/unselected"); }));
+ const auto State=DecodeState(Api->ImportState);
+ if (!TestTrue(TEXT("factory produced readable actual ImportState"),State.IsSet())) return false;
+ const auto SavedPlan=State.GetValue()[TEXT("plan")],SavedOptions=State.GetValue()[TEXT("options")];
+ TestTrue(TEXT("serialized selected plan matches actual native object counts"),SavedPlan[TEXT("endpoints")].Num()==3 && SavedPlan[TEXT("structs")].Num()==2 && SavedPlan[TEXT("enums")].Num()==1);
+ TestTrue(TEXT("factory stores the explicit partial selection without auto-including new operations"),!SavedOptions[TEXT("allOperations")].AsBool() && SavedOptions[TEXT("operations")].Num()==3 && !SavedOptions[TEXT("includeNewOperations")].AsBool());
+ TestEqual(TEXT("factory analyzed all four real declared operations"),SavedOptions[TEXT("knownOperations")].Num(),4);
+ TestTrue(TEXT("factory stores disabled unwrapping while retaining the real selected candidate"),!SavedOptions[TEXT("unwrapEnvelope")].AsBool() &&
+  SavedPlan[TEXT("envelopeCandidate")][TEXT("dataPath")].AsString()==TEXT("data") && SavedPlan[TEXT("envelopeCandidate")][TEXT("wrapped")].AsInt()==3 && SavedPlan[TEXT("envelopeCandidate")][TEXT("considered")].AsInt()==3);
+ TestTrue(TEXT("candidate evidence was not applied as runtime unwrapping"),Api->Envelope.DataPath.IsEmpty() && SavedPlan[TEXT("envelope")][TEXT("dataPath")].AsString().IsEmpty() && SavedPlan[TEXT("envelope")][TEXT("wrapped")].AsInt()==0);
+ TestTrue(TEXT("real factory records a local file source"),State.GetValue()[TEXT("source")][TEXT("kind")].AsString()==TEXT("file") && State.GetValue()[TEXT("source")][TEXT("documents")].IsArray() && State.GetValue()[TEXT("source")][TEXT("documents")].Num()>0);
+ AddInfo(TEXT("FactoryHeadless fixture checks native selected-plan/preload memory only; -nowrite disables config persistence, and Engine cache custody ends with this dedicated process."));
  return true;
 }
 #endif
