@@ -1,6 +1,8 @@
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 
 using UnrealBuildTool;
+using System;
+using System.IO;
 
 // WebSocket spec 1.1: VaRest's own WebSocket transport on the libwebsockets 3.0 the engine bundles (ruling R1), and from W2
 // on the socket, its stages and its Blueprint surface. Dependencies mirror the engine's WebSockets module
@@ -40,14 +42,21 @@ public class VaRestWebSocket : ModuleRules
 
 		// The engine's own link of libwebsockets (WebSockets.Build.cs:118; ModuleRules.cs:1601-1607 makes them private
 		// dependencies): static OpenSSL, libwebsockets and zlib, one copy per module in modular builds (spec 1.2)
-		// Only the separately reviewed Linux x64 Editor Development modular proof uses the private archive.
+		// Existing Editor and exact named Host Game profiles select the private archive; H remains separate.
 		// Architecture is the public SingleArchitecture getter: a multi-architecture target fails closed.
-		bool bPrivateLwsProof = Target.Platform == UnrealTargetPlatform.Linux
+        bool bNativeHostProfile = Target.Name == "VaRestHost" && Target.Type == TargetType.Game
+            && Target.Platform == UnrealTargetPlatform.Linux && Target.Configuration == UnrealTargetConfiguration.Development
+            && Target.ProjectFile != null
+            && String.Equals(Path.GetFullPath(Target.ProjectFile.FullName), "/w/Unreal/VaRestHost/VaRestHost.uproject", StringComparison.Ordinal);
+        if (bNativeHostProfile && (Target.Architectures.bIsMultiArch || Target.Architecture != UnrealArch.X64
+            || Target.LinkType != TargetLinkType.Modular || Target.bMergeModules))
+            throw new BuildException("VaRestHost native frame profile requires single x64 Linux Development modular, non-merged source.");
+		bool bPrivateLwsProof = (Target.Platform == UnrealTargetPlatform.Linux
 			&& Target.Architecture == UnrealArch.X64
 			&& Target.Type == TargetType.Editor
 			&& Target.Configuration == UnrealTargetConfiguration.Development
 			&& Target.LinkType == TargetLinkType.Modular
-			&& !Target.bMergeModules;
+			&& !Target.bMergeModules) || bNativeHostProfile;
 		PrivateDefinitions.Add("VAREST_USE_PRIVATE_LWS3=" + (bPrivateLwsProof ? "1" : "0"));
 		if (bPrivateLwsProof)
 		{

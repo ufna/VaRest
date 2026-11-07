@@ -1,0 +1,702 @@
+--- a/Host/Source/VaRestHost.Target.cs
++++ b/Host/Source/VaRestHost.Target.cs
+@@ -1,4 +1,6 @@
+ using UnrealBuildTool;
++using System;
++using System.IO;
+ 
+ public class VaRestHostTarget : TargetRules
+ {
+@@ -9,6 +11,18 @@
+ 		IncludeOrderVersion = EngineIncludeOrderVersion.Unreal5_8;
+ 		ExtraModuleNames.Add("VaRestHost");
+ 
++        // Narrow existing Game target only. This is build selection, not H authority.
++        bool bNativeHostProfile = Name == "VaRestHost" && Type == TargetType.Game
++            && Platform == UnrealTargetPlatform.Linux && Configuration == UnrealTargetConfiguration.Development
++            && ProjectFile != null
++            && String.Equals(Path.GetFullPath(ProjectFile.FullName), "/w/Unreal/VaRestHost/VaRestHost.uproject", StringComparison.Ordinal);
++        if (bNativeHostProfile)
++        {
++            if (Architectures.bIsMultiArch || Architecture != UnrealArch.X64 || bMergeModules)
++                throw new BuildException("VaRestHost native frame profile requires single x64, non-merged Linux Development.");
++            LinkType = TargetLinkType.Modular;
++        }
++
+ 		// Test host, not a product: keep logging in Shipping so packaged runs can be read.
+ 		if (Configuration == UnrealTargetConfiguration.Shipping)
+ 		{
+--- a/Host/Source/VaRestHost/VaRestHost.Build.cs
++++ b/Host/Source/VaRestHost/VaRestHost.Build.cs
+@@ -1,4 +1,6 @@
+ using UnrealBuildTool;
++using System;
++using System.IO;
+ 
+ public class VaRestHost : ModuleRules
+ {
+@@ -6,5 +8,20 @@
+ 	{
+ 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
+ 		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine" });
++
++        bool bNativeHostProfile = Target.Name == "VaRestHost" && Target.Type == TargetType.Game
++            && Target.Platform == UnrealTargetPlatform.Linux && Target.Configuration == UnrealTargetConfiguration.Development
++            && Target.ProjectFile != null
++            && String.Equals(Path.GetFullPath(Target.ProjectFile.FullName), "/w/Unreal/VaRestHost/VaRestHost.uproject", StringComparison.Ordinal);
++        if (bNativeHostProfile && (Target.Architectures.bIsMultiArch || Target.Architecture != UnrealArch.X64
++            || Target.LinkType != TargetLinkType.Modular || Target.bMergeModules))
++            throw new BuildException("VaRestHost native frame profile requires single x64 Linux Development modular, non-merged source.");
++        PrivateDefinitions.Add("VAREST_HOST_NATIVE_FRAME1=" + (bNativeHostProfile ? "1" : "0"));
++        if (bNativeHostProfile)
++        {
++            PublicDependencyModuleNames.Add("VaRestWebSocket");
++            // Project -> Engine header access ONLY. No Launch link import.
++            PrivateIncludePathModuleNames.Add("Launch");
++        }
+ 	}
+ }
+--- a/Host/Source/VaRestHost/VaRestHost.cpp
++++ b/Host/Source/VaRestHost/VaRestHost.cpp
+@@ -1,3 +1,79 @@
+ #include "Modules/ModuleManager.h"
+ 
++#if defined(VAREST_HOST_NATIVE_FRAME1) && VAREST_HOST_NATIVE_FRAME1
++#include "LaunchVaRestHostControl1.h"
++#include "VaRestNativeOwnerHostSession.h"
++#include "CoreGlobals.h"
++#include "HAL/PlatformProcess.h"
++#include "HAL/PlatformTLS.h"
++#include "Misc/CommandLine.h"
++#include "Misc/Fork.h"
++
++class FVaRestHostModule final : public IVaRestLaunchHostControl1
++{
++public:
++    virtual void StartupModule() override
++    {
++        // Even mode OFF owns this ordinary metadata/control-block allocation.
++        // No WS lookup/default/service/native invocation occurs in Startup.
++        NativeSession = MakeShared<FVaRestNativeOwnerHostSession1, ESPMode::ThreadSafe>();
++    }
++    virtual TSharedPtr<void, ESPMode::ThreadSafe> CopySessionOwner1() const override
++    {
++        if (ControlStatus1() != 0) return {}; // BEFORE any member/refcount access.
++        return TSharedPtr<void, ESPMode::ThreadSafe>(NativeSession);
++    }
++    virtual FVaRestLaunchHostStep1 StartAfterEngineInit1() override
++    {
++        const int32 Role = ControlStatus1();
++        if (Role != 0) return {16, 1, 2, Role}; // LOCAL no-call refusal, no history write.
++        if (!NativeSession.IsValid()) return {16, 1, 2, 7};
++        const FVaRestNativeOwnerHostStep1 Raw = NativeSession->StartAfterEngineInit1();
++        return {Raw.Size, Raw.Version, Raw.Outcome, Raw.ActualStatus};
++    }
++    virtual FVaRestLaunchHostStep1 FrameAfterEngineTick1() override
++    {
++        const int32 Role = ControlStatus1();
++        if (Role != 0) return {16, 1, 2, Role};
++        if (!NativeSession.IsValid()) return {16, 1, 2, 7};
++        const FVaRestNativeOwnerHostStep1 Raw = NativeSession->FrameAfterEngineTick1();
++        return {Raw.Size, Raw.Version, Raw.Outcome, Raw.ActualStatus};
++    }
++    virtual FVaRestLaunchHostStep1 RequestFinish1() override
++    {
++        const int32 Role = ControlStatus1();
++        if (Role != 0) return {16, 1, 2, Role};
++        if (!NativeSession.IsValid()) return {16, 1, 2, 7};
++        const FVaRestNativeOwnerHostStep1 Raw = NativeSession->RequestFinish1();
++        return {Raw.Size, Raw.Version, Raw.Outcome, Raw.ActualStatus};
++    }
++    virtual FVaRestLaunchHostStep1 AdvanceFinish1() override
++    {
++        const int32 Role = ControlStatus1();
++        if (Role != 0) return {16, 1, 2, Role};
++        if (!NativeSession.IsValid()) return {16, 1, 2, 7};
++        const FVaRestNativeOwnerHostStep1 Raw = NativeSession->AdvanceFinish1();
++        return {Raw.Size, Raw.Version, Raw.Outcome, Raw.ActualStatus};
++    }
++    // Qualified Launch source checks role and owns the SAME live Session before
++    // EVERY query; replacement/re-Startup/unload/foreign entry remain excluded H.
++    // These are actual histories, never guessed false/true or exit permission.
++    virtual bool IsFinishRequested1() const override { return NativeSession->IsFinishRequested1(); }
++    virtual bool HasAttemptedStart1() const override { return NativeSession->HasAttemptedStart1(); }
++private:
++    static int32 ControlStatus1()
++    {
++        if (!GIsGameThreadIdInitialized || FPlatformTLS::GetCurrentThreadId() != GGameThreadId || !IsInGameThread()) return 5;
++        if (!FCommandLine::IsInitialized() || !FPlatformProcess::SupportsMultithreading() || FForkProcessHelper::IsForkRequested()
++            || FForkProcessHelper::IsForkedChildProcess() || FForkProcessHelper::IsForkedMultithreadInstance()) return 15;
++        return 0;
++    }
++    // Shutdown/destruction cannot veto ModuleManager. Qualified source MUST
++    // dominate unload before it reaches this member with unresolved duty.
++    TSharedPtr<FVaRestNativeOwnerHostSession1, ESPMode::ThreadSafe> NativeSession;
++};
++
++IMPLEMENT_PRIMARY_GAME_MODULE(FVaRestHostModule, VaRestHost, "VaRestHost");
++#else
+ IMPLEMENT_PRIMARY_GAME_MODULE(FDefaultGameModuleImpl, VaRestHost, "VaRestHost");
++#endif
+--- a/Host/Source/VaRestHost/Private/VaRestNativeOwnerHostSession.h
++++ b/Host/Source/VaRestHost/Private/VaRestNativeOwnerHostSession.h
+@@ -0,0 +1,53 @@
++// Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
++#pragma once
++
++#if defined(VAREST_HOST_NATIVE_FRAME1) && VAREST_HOST_NATIVE_FRAME1
++#include "CoreTypes.h"
++#include "Templates/SharedPointer.h"
++#include "VaRestNativeOwnerHost1.h"
++
++class IVaRestSocketTransport;
++
++// Target-private ordinary C++ boundary. A shared object owns no DLL/Core/O pin.
++// Only the actual initialized physical GT owns these fields. Launch's lexical
++// interval and all H/code/provider/return premises must precede native Start.
++class VARESTHOST_API FVaRestNativeOwnerHostSession1 final
++{
++public:
++    FVaRestNativeOwnerHostSession1();
++    ~FVaRestNativeOwnerHostSession1();
++    FVaRestNativeOwnerHostSession1(const FVaRestNativeOwnerHostSession1&) = delete;
++    FVaRestNativeOwnerHostSession1& operator=(const FVaRestNativeOwnerHostSession1&) = delete;
++
++    FVaRestNativeOwnerHostStep1 StartAfterEngineInit1();
++    FVaRestNativeOwnerHostStep1 FrameAfterEngineTick1();
++    FVaRestNativeOwnerHostStep1 RequestFinish1();
++    FVaRestNativeOwnerHostStep1 AdvanceFinish1();
++    // GT-only source history, never H/no-owner/exit permission. Launch has
++    // already checked the physical GT and real nonfork mode before acquiring.
++    bool IsFinishRequested1() const;
++    bool HasAttemptedStart1() const;
++
++private:
++    enum class EPhase : uint8 { Unattempted, Starting, Active, FinishRequested, Finishing, WsCompleteGlobalUnestablished, Retained };
++    enum class EOperation : uint8 { None, Bind, Start, Frame, Finish, Advance };
++    static int32 ControlStatus1();
++    static FVaRestNativeOwnerHostStep1 LocalStep1(EVaRestNativeOwnerHostOutcome1 Outcome, int32 Status);
++    FVaRestNativeOwnerHostStep1 Observe1(EOperation Source, FVaRestNativeOwnerHostStep1 Result);
++    FVaRestNativeOwnerHostStep1 RetainedStep1() const;
++    void SetFinishPhase1(const FVaRestNativeOwnerHostStep1& Result);
++
++    EPhase Phase = EPhase::Unattempted;
++    EOperation Operation = EOperation::None;
++    EOperation TerminalOperation = EOperation::None;
++    bool bStartDispatched = false;
++    bool bStopRequested = false;
++    bool bStopCutInProgress = false;
++    bool bFirstFinishReturned = false;
++    bool bTerminalObserved = false;
++    FVaRestNativeOwnerHostStep1 Terminal = {16, 1, static_cast<uint32>(EVaRestNativeOwnerHostOutcome1::Retained), 7};
++    IVaRestNativeOwnerHost1* WebSocket = nullptr;
++    TSharedPtr<IVaRestSocketTransport, ESPMode::ThreadSafe> Transport;
++};
++
++#endif
+--- a/Host/Source/VaRestHost/Private/VaRestNativeOwnerHostSession.cpp
++++ b/Host/Source/VaRestHost/Private/VaRestNativeOwnerHostSession.cpp
+@@ -0,0 +1,214 @@
++// Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
++#include "VaRestNativeOwnerHostSession.h"
++
++#if defined(VAREST_HOST_NATIVE_FRAME1) && VAREST_HOST_NATIVE_FRAME1
++#include "CoreGlobals.h"
++#include "HAL/PlatformProcess.h"
++#include "HAL/PlatformTLS.h"
++#include "Misc/CommandLine.h"
++#include "Misc/Fork.h"
++#include "Modules/ModuleManager.h"
++#include "VaRestSocketTransport.h"
++
++namespace VaRestHostSessionPrivate
++{
++// Existing Host/ABI status spellings, used as LOCAL refusals only. No producer
++// header/import or native result/call counter is created by this application.
++constexpr int32 Busy = 2, WrongThread = 5, Unestablished = 7, Stale = 11, Fork = 15, NoResult = 17;
++constexpr int32 ObservedReleaseUncertain = 19;
++}
++
++FVaRestNativeOwnerHostSession1::FVaRestNativeOwnerHostSession1() = default;
++// No auto-ack/cleanup. Qualified source must never destroy an unresolved graph;
++// returning early from a destructor would not preserve its members anyway.
++FVaRestNativeOwnerHostSession1::~FVaRestNativeOwnerHostSession1() = default;
++
++int32 FVaRestNativeOwnerHostSession1::ControlStatus1()
++{
++    if (!GIsGameThreadIdInitialized || FPlatformTLS::GetCurrentThreadId() != GGameThreadId || !IsInGameThread())
++        return VaRestHostSessionPrivate::WrongThread;
++    // Exact existing real-mode predicate, including initialization BEFORE the
++    // SupportsMultithreading/fork queries. No task-tag/early-default substitute.
++    if (!FCommandLine::IsInitialized() || !FPlatformProcess::SupportsMultithreading() || FForkProcessHelper::IsForkRequested()
++        || FForkProcessHelper::IsForkedChildProcess() || FForkProcessHelper::IsForkedMultithreadInstance())
++        return VaRestHostSessionPrivate::Fork;
++    return 0;
++}
++
++FVaRestNativeOwnerHostStep1 FVaRestNativeOwnerHostSession1::LocalStep1(EVaRestNativeOwnerHostOutcome1 Outcome, int32 Status)
++{
++    return {16, 1, static_cast<uint32>(Outcome), Status};
++}
++
++FVaRestNativeOwnerHostStep1 FVaRestNativeOwnerHostSession1::RetainedStep1() const
++{
++    const bool HasTerminal = bTerminalObserved && TerminalOperation != EOperation::None;
++    const int32 Status = HasTerminal && Terminal.ActualStatus != 0 ? Terminal.ActualStatus : VaRestHostSessionPrivate::Unestablished;
++    return LocalStep1(EVaRestNativeOwnerHostOutcome1::Retained, Status);
++}
++
++FVaRestNativeOwnerHostStep1 FVaRestNativeOwnerHostSession1::Observe1(EOperation Source, FVaRestNativeOwnerHostStep1 Result)
++{
++    const bool Valid = Result.Size == 16 && Result.Version == 1
++        && Result.Outcome <= static_cast<uint32>(EVaRestNativeOwnerHostOutcome1::Retained)
++        && (Result.Outcome != static_cast<uint32>(EVaRestNativeOwnerHostOutcome1::Complete) || Result.ActualStatus == 0);
++    if (!Valid) {
++        bStopRequested = true;
++        if (!bTerminalObserved) {
++            Terminal = LocalStep1(EVaRestNativeOwnerHostOutcome1::Retained, VaRestHostSessionPrivate::Unestablished);
++            TerminalOperation = Source; bTerminalObserved = true;
++        }
++        return RetainedStep1();
++    }
++    const bool TerminalResult = Result.Outcome == static_cast<uint32>(EVaRestNativeOwnerHostOutcome1::Refused)
++        || Result.Outcome == static_cast<uint32>(EVaRestNativeOwnerHostOutcome1::Retained)
++        || Result.ActualStatus == VaRestHostSessionPrivate::ObservedReleaseUncertain;
++    if (TerminalResult) {
++        bStopRequested = true;
++        if (!bTerminalObserved || (Result.ActualStatus == VaRestHostSessionPrivate::ObservedReleaseUncertain
++            && Terminal.ActualStatus != VaRestHostSessionPrivate::ObservedReleaseUncertain)) {
++            Terminal = Result; TerminalOperation = Source; bTerminalObserved = true;
++        }
++    }
++    // Actual observed19 is sticky Host history, not a new native call/result.
++    if (bTerminalObserved && Terminal.ActualStatus == VaRestHostSessionPrivate::ObservedReleaseUncertain)
++        return RetainedStep1();
++    return Result;
++}
++
++bool FVaRestNativeOwnerHostSession1::IsFinishRequested1() const
++{
++    return bStopRequested || Phase != EPhase::Active;
++}
++
++bool FVaRestNativeOwnerHostSession1::HasAttemptedStart1() const
++{
++    return bStartDispatched;
++}
++
++FVaRestNativeOwnerHostStep1 FVaRestNativeOwnerHostSession1::StartAfterEngineInit1()
++{
++    const int32 Role = ControlStatus1();
++    if (Role != 0) {
++        const FVaRestNativeOwnerHostStep1 Refusal = LocalStep1(EVaRestNativeOwnerHostOutcome1::Refused, Role);
++        return Role == VaRestHostSessionPrivate::WrongThread ? Refusal : Observe1(EOperation::Start, Refusal);
++    }
++    if (Phase != EPhase::Unattempted || Operation != EOperation::None)
++        return bTerminalObserved ? RetainedStep1() : LocalStep1(EVaRestNativeOwnerHostOutcome1::Refused, VaRestHostSessionPrivate::Stale);
++    Operation = EOperation::Bind;
++    // Only an already normally loaded exact revision2 module is eligible. No
++    // load/cast/name can establish provenance; that remains an actual H premise.
++    WebSocket = FModuleManager::GetModulePtr<IVaRestNativeOwnerHost1>(TEXT("VaRestWebSocket"));
++    if (!WebSocket) {
++        Operation = EOperation::None; Phase = EPhase::Retained; bStopRequested = true;
++        return Observe1(EOperation::Bind, LocalStep1(EVaRestNativeOwnerHostOutcome1::Refused, VaRestHostSessionPrivate::Unestablished));
++    }
++    Transport = VaRest::WebSocket::GetDefaultTransport(); // SAME DefaultSlot, no Service/context/thread construction.
++    Operation = EOperation::None;
++    if (bStopRequested) {
++        Phase = EPhase::Retained;
++        return Observe1(EOperation::Bind, LocalStep1(EVaRestNativeOwnerHostOutcome1::Refused, VaRestHostSessionPrivate::Stale));
++    }
++    const TSharedPtr<IVaRestSocketTransport, ESPMode::ThreadSafe> HeldTransport = Transport;
++    (void)HeldTransport; // Actual graph pin through the WHOLE WS return.
++    Phase = EPhase::Starting; Operation = EOperation::Start;
++    bStartDispatched = true; // Real call-boundary history BEFORE possible reentrant stop.
++    const FVaRestNativeOwnerHostStep1 Raw = WebSocket->StartNativeOwnerSession1();
++    Operation = EOperation::None;
++    const FVaRestNativeOwnerHostStep1 Result = Observe1(EOperation::Start, Raw);
++    if (!bStopRequested && Result.Outcome == static_cast<uint32>(EVaRestNativeOwnerHostOutcome1::Complete) && Result.ActualStatus == 0)
++        Phase = EPhase::Active;
++    else { bStopRequested = true; Phase = EPhase::FinishRequested; }
++    return Result;
++}
++
++FVaRestNativeOwnerHostStep1 FVaRestNativeOwnerHostSession1::FrameAfterEngineTick1()
++{
++    const int32 Role = ControlStatus1();
++    if (Role != 0) {
++        const FVaRestNativeOwnerHostStep1 Refusal = LocalStep1(EVaRestNativeOwnerHostOutcome1::Refused, Role);
++        return Role == VaRestHostSessionPrivate::WrongThread ? Refusal : Observe1(EOperation::Frame, Refusal);
++    }
++    if (Operation != EOperation::None)
++        return bTerminalObserved ? RetainedStep1() : LocalStep1(EVaRestNativeOwnerHostOutcome1::Refused, VaRestHostSessionPrivate::Busy);
++    if (Phase != EPhase::Active || bStopRequested || !WebSocket || !Transport.IsValid())
++        return bTerminalObserved ? RetainedStep1() : LocalStep1(EVaRestNativeOwnerHostOutcome1::Refused, VaRestHostSessionPrivate::Stale);
++    const TSharedPtr<IVaRestSocketTransport, ESPMode::ThreadSafe> HeldTransport = Transport;
++    (void)HeldTransport;
++    Operation = EOperation::Frame;
++    const FVaRestNativeOwnerHostStep1 Raw = WebSocket->PumpNativeOwnerSession1();
++    Operation = EOperation::None;
++    const FVaRestNativeOwnerHostStep1 Result = Observe1(EOperation::Frame, Raw);
++    if (bStopRequested) Phase = EPhase::FinishRequested;
++    return Result; // Existing WS Enter/one poll/Leave has FULLY returned.
++}
++
++void FVaRestNativeOwnerHostSession1::SetFinishPhase1(const FVaRestNativeOwnerHostStep1& Result)
++{
++    if (Result.ActualStatus == VaRestHostSessionPrivate::ObservedReleaseUncertain
++        || Result.Outcome == static_cast<uint32>(EVaRestNativeOwnerHostOutcome1::Retained)
++        || Result.Outcome == static_cast<uint32>(EVaRestNativeOwnerHostOutcome1::Refused))
++        Phase = EPhase::Retained;
++    else if (Result.Outcome == static_cast<uint32>(EVaRestNativeOwnerHostOutcome1::Complete) && Result.ActualStatus == 0)
++        Phase = EPhase::WsCompleteGlobalUnestablished;
++    else Phase = EPhase::Finishing;
++}
++
++FVaRestNativeOwnerHostStep1 FVaRestNativeOwnerHostSession1::RequestFinish1()
++{
++    const int32 Role = ControlStatus1();
++    if (Role != 0) {
++        const FVaRestNativeOwnerHostStep1 Refusal = LocalStep1(EVaRestNativeOwnerHostOutcome1::Refused, Role);
++        return Role == VaRestHostSessionPrivate::WrongThread ? Refusal : Observe1(EOperation::Finish, Refusal);
++    }
++    bStopRequested = true;
++    if (!bStartDispatched || !WebSocket)
++        return bTerminalObserved ? RetainedStep1() : LocalStep1(EVaRestNativeOwnerHostOutcome1::Refused, VaRestHostSessionPrivate::NoResult);
++    if (Operation != EOperation::None) {
++        if (Operation == EOperation::Start && !bStopCutInProgress) {
++            bStopCutInProgress = true;
++            const TSharedPtr<IVaRestSocketTransport, ESPMode::ThreadSafe> HeldTransport = Transport;
++            (void)HeldTransport;
++            // In the genuine WS InEntry/InCreate interval this executes the
++            // existing Shutdown/permit cut BEFORE its BUSY return. This nested
++            // stop-cut is NOT first-join completion; outer control still finishes.
++            const FVaRestNativeOwnerHostStep1 Cut = WebSocket->FinishNativeOwnerSession1();
++            bStopCutInProgress = false;
++            return Observe1(EOperation::Finish, Cut);
++        }
++        return bTerminalObserved ? RetainedStep1() : LocalStep1(EVaRestNativeOwnerHostOutcome1::Pending, VaRestHostSessionPrivate::Busy);
++    }
++    if (bFirstFinishReturned) return AdvanceFinish1();
++    const TSharedPtr<IVaRestSocketTransport, ESPMode::ThreadSafe> HeldTransport = Transport;
++    (void)HeldTransport;
++    Phase = EPhase::Finishing; Operation = EOperation::Finish;
++    const FVaRestNativeOwnerHostStep1 Raw = WebSocket->FinishNativeOwnerSession1();
++    Operation = EOperation::None; bFirstFinishReturned = true;
++    const FVaRestNativeOwnerHostStep1 Result = Observe1(EOperation::Finish, Raw);
++    SetFinishPhase1(Result);
++    return Result;
++}
++
++FVaRestNativeOwnerHostStep1 FVaRestNativeOwnerHostSession1::AdvanceFinish1()
++{
++    const int32 Role = ControlStatus1();
++    if (Role != 0) {
++        const FVaRestNativeOwnerHostStep1 Refusal = LocalStep1(EVaRestNativeOwnerHostOutcome1::Refused, Role);
++        return Role == VaRestHostSessionPrivate::WrongThread ? Refusal : Observe1(EOperation::Advance, Refusal);
++    }
++    if (!bStartDispatched || !bStopRequested || !WebSocket)
++        return LocalStep1(EVaRestNativeOwnerHostOutcome1::Refused, VaRestHostSessionPrivate::NoResult);
++    if (Operation != EOperation::None || !bFirstFinishReturned)
++        return bTerminalObserved ? RetainedStep1() : LocalStep1(EVaRestNativeOwnerHostOutcome1::Pending, VaRestHostSessionPrivate::Busy);
++    if (Phase == EPhase::WsCompleteGlobalUnestablished || Phase == EPhase::Retained)
++        return RetainedStep1(); // NO further WS calls; global duty is NOT discharged.
++    const TSharedPtr<IVaRestSocketTransport, ESPMode::ThreadSafe> HeldTransport = Transport;
++    (void)HeldTransport;
++    Operation = EOperation::Advance;
++    const FVaRestNativeOwnerHostStep1 Raw = WebSocket->AdvanceNativeOwnerFinish1();
++    Operation = EOperation::None;
++    const FVaRestNativeOwnerHostStep1 Result = Observe1(EOperation::Advance, Raw);
++    SetFinishPhase1(Result);
++    return Result; // Actual WS predicates alone exclude a first/repeated Kill.
++}
++#endif
+--- a/Engine/Source/Runtime/Launch/Private/Launch.cpp
++++ b/Engine/Source/Runtime/Launch/Private/Launch.cpp
+@@ -14,6 +14,12 @@
+ #include "Misc/EngineVersion.h"
+ #include "Misc/ScopedSlowTask.h"
+ #include "Misc/TrackedActivity.h"
++#if defined(VAREST_HOST_NATIVE_FRAME1) && VAREST_HOST_NATIVE_FRAME1
++#include "LaunchVaRestHostControl1.h"
++#include "HAL/PlatformProcess.h"
++#include "HAL/PlatformTLS.h"
++#include "Misc/Fork.h"
++#endif
+ #if WITH_EDITOR
+ 	#include "UnrealEdGlobals.h"
+ #endif
+@@ -22,6 +28,18 @@
+ #endif
+ 
+ IMPLEMENT_MODULE(FDefaultModuleImpl, Launch);
++
++#if defined(VAREST_HOST_NATIVE_FRAME1) && VAREST_HOST_NATIVE_FRAME1
++// Physical role admission precedes lookup/copy and EVERY GT-only history query,
++// including the cleanup backstop. It cannot authenticate module/code lifetime.
++static int32 VaRestLaunchHostControlStatus1()
++{
++    if (!GIsGameThreadIdInitialized || FPlatformTLS::GetCurrentThreadId() != GGameThreadId || !IsInGameThread()) return 5;
++    if (!FCommandLine::IsInitialized() || !FPlatformProcess::SupportsMultithreading() || FForkProcessHelper::IsForkRequested()
++        || FForkProcessHelper::IsForkedChildProcess() || FForkProcessHelper::IsForkedMultithreadInstance()) return 15;
++    return 0;
++}
++#endif
+ 
+ #if PLATFORM_WINDOWS || PLATFORM_MAC || PLATFORM_UNIX || PLATFORM_USE_GENERIC_LAUNCH_IMPLEMENTATION
+ 
+@@ -120,6 +138,48 @@
+ 	// Super early init code. DO NOT MOVE THIS ANYWHERE ELSE!
+ 	FCoreDelegates::GetPreMainInitDelegate().Broadcast();
+ 
++#if defined(VAREST_HOST_NATIVE_FRAME1) && VAREST_HOST_NATIVE_FRAME1
++    // Declared BEFORE the guard: this real owner outlives its normal-return backstop.
++    TSharedPtr<void, ESPMode::ThreadSafe> NativeSessionOwner;
++    IVaRestLaunchHostControl1* NativeHost = nullptr; // Borrowed, SAME protected module throughout.
++    struct EngineLoopCleanupGuard
++    {
++        TSharedPtr<void, ESPMode::ThreadSafe>& SessionOwner;
++        IVaRestLaunchHostControl1*& Host;
++        EngineLoopCleanupGuard(TSharedPtr<void, ESPMode::ThreadSafe>& InOwner, IVaRestLaunchHostControl1*& InHost)
++            : SessionOwner(InOwner), Host(InHost) {}
++        ~EngineLoopCleanupGuard()
++        {
++            if (!GUELibraryOverrideSettings.bIsEmbedded)
++            {
++                if (SessionOwner.IsValid())
++                {
++                    // Unknown role/association never becomes false issued-call
++                    // history. Retain without querying/dereferencing the Host.
++                    if (!Host || VaRestLaunchHostControlStatus1() != 0)
++                    {
++                        for (;;) FPlatformProcess::SleepNoStats(0.02f);
++                    }
++                    if (Host->HasAttemptedStart1())
++                    {
++                        // Normal-return backstop, not a signal/direct-Exit hook.
++                        // NEVER return with issued or uncertain native duty.
++                        (void)Host->RequestFinish1();
++                        for (;;)
++                        {
++                            if (VaRestLaunchHostControlStatus1() == 0) (void)Host->AdvanceFinish1();
++                            FPlatformProcess::SleepNoStats(0.02f);
++                        }
++                    }
++                }
++                // No issued Host start duty. Release our metadata/transport ref
++                // while Host/WS/Core still live, BEFORE ordinary EngineExit.
++                SessionOwner.Reset();
++                EngineExit();
++            }
++        }
++    } CleanupGuard(NativeSessionOwner, NativeHost);
++#else
+ 	// make sure GEngineLoop::Exit() is always called.
+ 	struct EngineLoopCleanupGuard 
+ 	{ 
+@@ -134,6 +194,8 @@
+ 		}
+ 	} CleanupGuard;
+ 
++#endif
++
+ 	// Set up minidump filename. We cannot do this directly inside main as we use an FString that requires 
+ 	// destruction and main uses SEH.
+ 	// These names will be updated as soon as the Filemanager is set up so we can write to the log file.
+@@ -183,6 +245,60 @@
+ 
+ 	FTrackedActivity::GetEngineActivity().Update(TEXT("Ticking loop"), FTrackedActivity::ELight::Green);
+ 
++#if defined(VAREST_HOST_NATIVE_FRAME1) && VAREST_HOST_NATIVE_FRAME1
++    // Code selection ONLY. Root must not invoke this mode before H/provider,
++    // entry/ABI/frame and all code/full-return premises have actually qualified.
++    if (FParse::Param(CmdLine, TEXT("VaRestNativeOwnerHost1")))
++    {
++        // Reject embedding BEFORE lookup/copy, binding, default lookup or Start.
++        if (GUELibraryOverrideSettings.bIsEmbedded || ErrorLevel != 0 || IsEngineExitRequested())
++            return ErrorLevel != 0 ? ErrorLevel : 1;
++        if (VaRestLaunchHostControlStatus1() != 0) return 1;
++        // Already normally loaded exact module only. This static cast/name does
++        // NOT establish class/vtable/provider/H/code/same-instance premises.
++        NativeHost = FModuleManager::GetModulePtr<IVaRestLaunchHostControl1>(TEXT("VaRestHost"));
++        if (!NativeHost) return 1;
++        NativeSessionOwner = NativeHost->CopySessionOwner1();
++        if (!NativeSessionOwner.IsValid()) return 1;
++        // From HERE the actual lexical loop/retention scope already encloses
++        // every future frame/finish and normal-return path, BEFORE Start.
++        const FVaRestLaunchHostStep1 Started = NativeHost->StartAfterEngineInit1();
++        if (VaRestLaunchHostControlStatus1() != 0)
++        {
++            for (;;) FPlatformProcess::SleepNoStats(0.02f); // Preserve possible issued duty, no history query.
++        }
++        if (!NativeHost->HasAttemptedStart1()) return 1;
++        bool bClosing = Started.Outcome != 0 || Started.ActualStatus != 0;
++        bool bFinishEdgeIssued = false;
++        for (;;)
++        {
++            if (VaRestLaunchHostControlStatus1() != 0)
++            {
++                for (;;) FPlatformProcess::SleepNoStats(0.02f); // No role-loss bool sentinel or teardown.
++            }
++            if (!bClosing && !NativeHost->IsFinishRequested1() && !IsEngineExitRequested())
++            {
++                EngineTick();
++                const FVaRestLaunchHostStep1 Frame = NativeHost->FrameAfterEngineTick1(); // EXACTLY once after WHOLE Tick return.
++                if (Frame.Outcome != 0 && Frame.Outcome != 1) bClosing = true;
++            }
++            else
++            {
++                bClosing = true; // Actual closing selection; never re-enter active Tick.
++                if (!bFinishEdgeIssued)
++                {
++                    bFinishEdgeIssued = true;
++                    (void)NativeHost->RequestFinish1();
++                }
++                else (void)NativeHost->AdvanceFinish1();
++                // WS Complete is NOT producer/DNS/O/process-exit clearance.
++                // Retain the real graph; no RequestExit/reset/teardown here.
++                FPlatformProcess::SleepNoStats(0.02f);
++            }
++        }
++    }
++#endif
++
+ 	// Don't tick if we're running an embedded engine - we rely on the outer
+ 	// application ticking us instead.
+ 	if (!GUELibraryOverrideSettings.bIsEmbedded)
+--- a/Engine/Source/Runtime/Launch/Launch.Build.cs
++++ b/Engine/Source/Runtime/Launch/Launch.Build.cs
+@@ -25,6 +25,15 @@
+ 	public Launch(ReadOnlyTargetRules Target) : base(Target)
+ 	{
+ 		bRequiresPlatformSDK = true;
++
++        bool bNativeHostProfile = Target.Name == "VaRestHost" && Target.Type == TargetType.Game
++            && Target.Platform == UnrealTargetPlatform.Linux && Target.Configuration == UnrealTargetConfiguration.Development
++            && Target.ProjectFile != null
++            && String.Equals(Path.GetFullPath(Target.ProjectFile.FullName), "/w/Unreal/VaRestHost/VaRestHost.uproject", StringComparison.Ordinal);
++        if (bNativeHostProfile && (Target.Architectures.bIsMultiArch || Target.Architecture != UnrealArch.X64
++            || Target.LinkType != TargetLinkType.Modular || Target.bMergeModules))
++            throw new BuildException("VaRestHost native frame profile requires single x64 Linux Development modular, non-merged source.");
++        PrivateDefinitions.Add("VAREST_HOST_NATIVE_FRAME1=" + (bNativeHostProfile ? "1" : "0"));
+ 
+ 		PrivateIncludePathModuleNames.AddRange(new string[] {
+ 				"AutomationController",
+--- a/Plugin/Source/VaRestWebSocket/VaRestWebSocket.Build.cs
++++ b/Plugin/Source/VaRestWebSocket/VaRestWebSocket.Build.cs
+@@ -1,6 +1,8 @@
+ // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
+ 
+ using UnrealBuildTool;
++using System;
++using System.IO;
+ 
+ // WebSocket spec 1.1: VaRest's own WebSocket transport on the libwebsockets 3.0 the engine bundles (ruling R1), and from W2
+ // on the socket, its stages and its Blueprint surface. Dependencies mirror the engine's WebSockets module
+@@ -40,14 +42,21 @@
+ 
+ 		// The engine's own link of libwebsockets (WebSockets.Build.cs:118; ModuleRules.cs:1601-1607 makes them private
+ 		// dependencies): static OpenSSL, libwebsockets and zlib, one copy per module in modular builds (spec 1.2)
+-		// Only the separately reviewed Linux x64 Editor Development modular proof uses the private archive.
++		// Existing Editor and exact named Host Game profiles select the private archive; H remains separate.
+ 		// Architecture is the public SingleArchitecture getter: a multi-architecture target fails closed.
+-		bool bPrivateLwsProof = Target.Platform == UnrealTargetPlatform.Linux
++        bool bNativeHostProfile = Target.Name == "VaRestHost" && Target.Type == TargetType.Game
++            && Target.Platform == UnrealTargetPlatform.Linux && Target.Configuration == UnrealTargetConfiguration.Development
++            && Target.ProjectFile != null
++            && String.Equals(Path.GetFullPath(Target.ProjectFile.FullName), "/w/Unreal/VaRestHost/VaRestHost.uproject", StringComparison.Ordinal);
++        if (bNativeHostProfile && (Target.Architectures.bIsMultiArch || Target.Architecture != UnrealArch.X64
++            || Target.LinkType != TargetLinkType.Modular || Target.bMergeModules))
++            throw new BuildException("VaRestHost native frame profile requires single x64 Linux Development modular, non-merged source.");
++		bool bPrivateLwsProof = (Target.Platform == UnrealTargetPlatform.Linux
+ 			&& Target.Architecture == UnrealArch.X64
+ 			&& Target.Type == TargetType.Editor
+ 			&& Target.Configuration == UnrealTargetConfiguration.Development
+ 			&& Target.LinkType == TargetLinkType.Modular
+-			&& !Target.bMergeModules;
++			&& !Target.bMergeModules) || bNativeHostProfile;
+ 		PrivateDefinitions.Add("VAREST_USE_PRIVATE_LWS3=" + (bPrivateLwsProof ? "1" : "0"));
+ 		if (bPrivateLwsProof)
+ 		{
+--- a/Plugin/Source/ThirdParty/VaRestPrivateLws/VaRestPrivateLws.Build.cs
++++ b/Plugin/Source/ThirdParty/VaRestPrivateLws/VaRestPrivateLws.Build.cs
+@@ -2,6 +2,7 @@
+ 
+ using UnrealBuildTool;
+ using System.IO;
++using System;
+ 
+ // External archive input only. UBT never compiles or downloads this dependency.
+ public class VaRestPrivateLws : ModuleRules
+@@ -9,15 +10,19 @@
+ 	public VaRestPrivateLws(ReadOnlyTargetRules Target) : base(Target)
+ 	{
+ 		Type = ModuleType.External;
+-		if (Target.Platform != UnrealTargetPlatform.Linux
+-			|| Target.Architecture != UnrealArch.X64
+-			|| Target.Type != TargetType.Editor
+-			|| Target.Configuration != UnrealTargetConfiguration.Development
+-			|| Target.LinkType != TargetLinkType.Modular
+-			|| Target.bMergeModules)
+-		{
+-			throw new BuildException("VaRestPrivateLws is qualified only for Linux x64 Editor Development modular, non-merged source builds.");
+-		}
++        bool bNativeHostProfile = Target.Name == "VaRestHost" && Target.Type == TargetType.Game
++            && Target.Platform == UnrealTargetPlatform.Linux && Target.Configuration == UnrealTargetConfiguration.Development
++            && Target.ProjectFile != null
++            && String.Equals(Path.GetFullPath(Target.ProjectFile.FullName), "/w/Unreal/VaRestHost/VaRestHost.uproject", StringComparison.Ordinal);
++        if (bNativeHostProfile && (Target.Architectures.bIsMultiArch || Target.Architecture != UnrealArch.X64
++            || Target.LinkType != TargetLinkType.Modular || Target.bMergeModules))
++            throw new BuildException("VaRestHost native frame profile requires single x64 Linux Development modular, non-merged source.");
++        bool bEditorProfile = Target.Platform == UnrealTargetPlatform.Linux
++            && !Target.Architectures.bIsMultiArch && Target.Architecture == UnrealArch.X64
++            && Target.Type == TargetType.Editor && Target.Configuration == UnrealTargetConfiguration.Development
++            && Target.LinkType == TargetLinkType.Modular && !Target.bMergeModules;
++        if (!bEditorProfile && !bNativeHostProfile)
++            throw new BuildException("VaRestPrivateLws selects only Linux x64 Editor or exact VaRestHost Game Development modular, non-merged source profiles.");
+ 		if (bUsePrecompiled)
+ 		{
+ 			throw new BuildException("A precompiled private LWS module/package is not part of this proof.");
+--- a/Engine/Source/Runtime/Launch/Public/LaunchVaRestHostControl1.h
++++ b/Engine/Source/Runtime/Launch/Public/LaunchVaRestHostControl1.h
+@@ -0,0 +1,40 @@
++// Copyright Epic Games, Inc. All Rights Reserved.
++#pragma once
++
++#if defined(VAREST_HOST_NATIVE_FRAME1) && VAREST_HOST_NATIVE_FRAME1
++#include "CoreTypes.h"
++#include "Modules/ModuleManager.h"
++#include "Templates/SharedPointer.h"
++
++// Ordinary Engine-owned control result, NOT the native producer or WS ABI.
++// Outcome spellings: Complete=0, Pending=1, Refused=2, Retained=3.
++// Neither this result nor an opaque owner certifies H, code lifetime or exit.
++struct FVaRestLaunchHostStep1
++{
++    uint32 Size;
++    uint32 Version;
++    uint32 Outcome;
++    int32 ActualStatus;
++};
++static_assert(sizeof(FVaRestLaunchHostStep1) == 16);
++static_assert(alignof(FVaRestLaunchHostStep1) == 4);
++
++// One inheritance chain preserves FDefaultGameModuleImpl's game-module role.
++// The already normally loaded exact module/class/vtable/code interval must be
++// qualified BEFORE GetModulePtr's static cast or any virtual dispatch.
++class IVaRestLaunchHostControl1 : public FDefaultGameModuleImpl
++{
++public:
++    // Same concrete Startup-created Session/controller; ownership only.
++    // Never dereference/cast/adopt this void pointer or pass it as authority.
++    virtual TSharedPtr<void, ESPMode::ThreadSafe> CopySessionOwner1() const = 0;
++    virtual FVaRestLaunchHostStep1 StartAfterEngineInit1() = 0;
++    virtual FVaRestLaunchHostStep1 FrameAfterEngineTick1() = 0;
++    virtual FVaRestLaunchHostStep1 RequestFinish1() = 0;
++    virtual FVaRestLaunchHostStep1 AdvanceFinish1() = 0;
++    // Strict physical-GT/real-mode/same-live-owner PRECONDITIONS, including
++    // cleanup queries. No unsupported-role/missing-owner bool sentinel exists.
++    virtual bool IsFinishRequested1() const = 0;
++    virtual bool HasAttemptedStart1() const = 0;
++};
++#endif
