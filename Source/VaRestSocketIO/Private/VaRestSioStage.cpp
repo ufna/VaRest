@@ -624,6 +624,8 @@ EVaRestSocketStageResult FVaRestSioStage::OnInbound(const FVaRestSocketMessage& 
 			Row->bRecoveryAttempted = false;
 		}
 		Row->Pid = Pid; Row->Sid = Message.Data().Get(TEXT("sid")).AsString(); Row->State = EVaRestSioNamespaceState::Connected; Row->bEverConnected = true;
+		// A completed namespace connect starts a fresh auth cycle; upgrade retries before this point keep their one-refresh bound.
+		Row->bRefreshSpent = false; Row->Refusal.Reset(); Row->RefusalEvent = {};
 		auto Info = Impl->Open; Info.PublicId = Row->Sid; Info.bRecovered = Row->bRecovered;
 		Impl->Log(FString::Printf(TEXT("namespace %s connected sid=%s recovered=%d"), *Row->Name, *Row->Sid, Row->bRecovered));
 		Context.ChannelUp(Row->Name, MoveTemp(Info)); return EVaRestSocketStageResult::Consumed;

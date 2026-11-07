@@ -27,7 +27,7 @@ namespace CustomAuthPrivate
 bool RoundTrips(const FString& Text)
 {
 	const FTCHARToUTF8 Utf8(*Text,Text.Len());
-	const FString Back=FString::ConstructFromPtrSize(Utf8.Get(),Utf8.Length());
+	const FString Back=FString::ConstructFromPtrSize(reinterpret_cast<const UTF8CHAR*>(Utf8.Get()),Utf8.Length());
 	return Text.Len()==Back.Len() && (Text.IsEmpty() || FMemory::Memcmp(*Text,*Back,Text.Len()*sizeof(TCHAR))==0);
 }
 bool PlainIdentity(const FString& Text)

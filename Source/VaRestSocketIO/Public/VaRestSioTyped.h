@@ -3,6 +3,7 @@
 
 #include "VaRestSioSocket.h"
 #include "VaRestSioLog.h"
+#include "Misc/Base64.h"
 #include "UObject/GCObject.h"
 #include "UObject/StrongObjectPtr.h"
 #include "UObject/StructOnScope.h"
@@ -117,6 +118,18 @@ template <typename T> bool Read(const FVaRestJson& Json, T& Value, const FVaRest
 				const auto& Attachments = Event.GetNativeMessage().Attachments;
 				if (!Attachments.IsValidIndex(Id.GetValue()) || !Attachments[Id.GetValue()]) return Issue(Report, true, Path, TEXTVIEW("invalid Socket.IO attachment placeholder"));
 				Value = *Attachments[Id.GetValue()]; return true;
+			}
+			if (Json.IsString())
+			{
+				const auto Encoded = Json.AsUtf8View(); // Counted: an embedded NUL is invalid data, not an end marker.
+				const int64 MaxDecodedBytes = ((int64(Encoded.Len()) + 3) / 4) * 3;
+				if (MaxDecodedBytes >= MAX_int32 || (Options.MaxOutputBytes > 0 && MaxDecodedBytes > Options.MaxOutputBytes))
+				{ Report.bBudgetExceeded = true; return Issue(Report, true, Path, TEXTVIEW("Socket.IO argument materialization exceeds its byte budget")); }
+				TArray<uint8> Decoded;
+				Decoded.SetNumUninitialized(FBase64::GetDecodedDataSize(Encoded.GetData(), Encoded.Len()));
+				if (!FBase64::Decode(Encoded.GetData(), Encoded.Len(), Decoded.GetData()))
+					return Issue(Report, Options.bStrict, Path, TEXTVIEW("expected Socket.IO base64 bytes; kept their default"));
+				Value = MoveTemp(Decoded); return true; // A failed decoder must never expose a partial prefix.
 			}
 		}
 		if (!Json.IsArray()) return Issue(Report, Options.bStrict, Path, TEXTVIEW("expected a Socket.IO array argument; kept its default"));

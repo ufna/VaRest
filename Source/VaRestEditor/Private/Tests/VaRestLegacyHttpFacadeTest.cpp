@@ -34,6 +34,7 @@ void UVaRestLegacyHttpTestProbe::CallCompleted(UVaRestRequestJSON* Request)
 #include "Misc/AutomationTest.h"
 #include "UObject/GarbageCollection.h"
 #include "UObject/StrongObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
 
 namespace VaRestLegacyHttpFacadeTest
 {
@@ -46,18 +47,21 @@ public:
  TMap<uint64,FVaRestTraceExcerpt> RequestBodies;
  uint64 LastStarted=0;
  uint64 LastCompletedFrame=0;
+ TMap<uint64,int32> CompletionCounts;
+ TMap<uint64,EVaRestTraceOutcome> Outcomes;
+ TFunction<void(const FVaRestTraceStarted&)> StartedCallout;
  virtual FVaRestTraceDetailSettings GetDetail() const override { FVaRestTraceDetailSettings D; D.Flags=EVaRestTraceDetail::Metadata|EVaRestTraceDetail::Bodies; D.BodyCap=1024; D.BinaryCap=16; return D; }
  virtual void OnAttached(const FVaRestTraceSnapshot&) override {}
  virtual void OnEvent(const FVaRestTraceEvent& Event) override
  {
   if (Event.Kind==EVaRestTraceKind::Started)
   {
-   const auto& S=Event.Payload.Get<FVaRestTraceStarted>(); if (S.Url.Contains(Root)) { Started.Add(S.RequestId); LastStarted=S.RequestId; }
+   const auto& S=Event.Payload.Get<FVaRestTraceStarted>(); if (S.Url.Contains(Root)) { Started.Add(S.RequestId); LastStarted=S.RequestId; if (StartedCallout) StartedCallout(S); }
   }
   else if (Event.Kind==EVaRestTraceKind::Completed)
   {
    const auto& C=Event.Payload.Get<FVaRestTraceCompleted>();
-   if (Started.Contains(C.RequestId)) { Completed.Add(C.RequestId); LastCompletedFrame=GFrameCounter; }
+   if (Started.Contains(C.RequestId)) { Completed.Add(C.RequestId); ++CompletionCounts.FindOrAdd(C.RequestId); Outcomes.Add(C.RequestId,C.Outcome); LastCompletedFrame=GFrameCounter; }
   }
   else if (Event.Kind==EVaRestTraceKind::Excerpt)
   {
@@ -72,6 +76,10 @@ public:
  explicit FRun(FAutomationTestBase& InTest):Test(InTest) {}
  virtual ~FRun() override
  {
+  StopCallURLCapture();
+  if (CallOwner) CallOwner->Deinitialize();
+  for (const auto& Call:OwnedCalls) if (auto* Pending=Call.Get()) Pending->Cancel();
+  CallOwner.Reset();
   if (auto* Pending=Weak.Get()) Pending->Cancel();
   Request.Reset(); Probe.Reset();
   if (bAttached) FVaRestTrace::RemoveSink(Observer.ToSharedRef());
@@ -86,8 +94,9 @@ public:
  virtual bool Update() override
  {
   if (!Probe && !Initialize()) return true;
-  if (Case==8) return true;
+  if (Case==10) return true;
   if (!bStarted) return BeginCase();
+  if (Case>=8) return UpdateCallURLRetirementCase();
   if (FPlatformTime::Seconds()-StartedAt>30) { Test.AddError(FString::Printf(TEXT("legacy HTTP owned terminal barrier timed out at case %d: starts=%d completed=%d"),Case,Observer->Started.Num(),Observer->Completed.Num())); return true; }
   if (Observer->Started.Num()!=ExpectedStarts || Observer->Completed.Num()!=ExpectedStarts || GFrameCounter<=Observer->LastCompletedFrame) return false;
   if ((Case==0 || Case==3 || Case==4) && !Observer->RequestBodies.Contains(CurrentRequestId)) return false;
@@ -195,6 +204,7 @@ private:
  }
  bool BeginCase()
  {
+  if (Case>=8) return BeginCallURLRetirementCase();
   StartedAt=FPlatformTime::Seconds(); BeforeComplete=Probe->Completes;
   ExpectedStarts=Observer->Started.Num()+(Case==2 ? 2 : Case==7 ? 65 : 1); bStarted=true;
   Test.AddInfo(FString::Printf(TEXT("LegacyHttpCase %d"),Case));
@@ -236,6 +246,139 @@ private:
   }
   return false;
  }
+ // Public construction observation only; the SAME owner remains strong across GC.
+ // No request strong pin or reflected/private RequestMap inspection is an oracle.
+ void StopCallURLCapture()
+ {
+  if (Observer) Observer->StartedCallout={};
+  if (ConstructionHandle.IsValid())
+  {
+   FCoreUObjectDelegates::OnObjectConstructed.Remove(ConstructionHandle); ConstructionHandle.Reset();
+  }
+ }
+ bool PendingCallIsObserved(int32 Index,const FString& Url)
+ {
+  if (!Test.TestEqual(TEXT("CallURL constructs exactly the owned public requests"),OwnedCalls.Num(),Index+1)) return false;
+  auto* Pending=OwnedCalls[Index].Get();
+  if (!Test.TestNotNull(TEXT("public construction signal captured the actual CallURL request"),Pending)) return false;
+  return Test.TestEqual(TEXT("captured CallURL has the submitted URL"),Pending->GetURL(),Url)
+   && Test.TestEqual(TEXT("actual CallURL is pending before delivery"),Pending->GetStatus(),EVaRestRequestStatus::Processing)
+   && Test.TestFalse(TEXT("CallURL request is not rooted"),Pending->IsRooted())
+   && Test.TestTrue(TEXT("pending CallURL has the owner's real completion handler"),Pending->OnStaticRequestComplete.IsBoundToObject(CallOwner.Get()))
+   && Test.TestTrue(TEXT("pending CallURL has the owner's real failure handler"),Pending->OnStaticRequestFail.IsBoundToObject(CallOwner.Get()));
+ }
+ FVaRestCallDelegate OwnedCallCallback()
+ {
+  FVaRestCallDelegate Callback; Callback.BindDynamic(Probe.Get(),&UVaRestLegacyHttpTestProbe::CallCompleted); return Callback;
+ }
+ void AssertCallOwnerHandlersDisabled()
+ {
+  for (const auto& Call:OwnedCalls)
+  {
+   auto* Pending=Call.Get();
+   if (!Test.TestNotNull(TEXT("retired request remains inspectable before controlled GC"),Pending)) { bOwnedSetupValid=false; continue; }
+   bOwnedSetupValid&=Test.TestFalse(TEXT("retirement removes actual owner completion handler"),Pending->OnStaticRequestComplete.IsBoundToObject(CallOwner.Get()));
+   bOwnedSetupValid&=Test.TestFalse(TEXT("retirement removes actual owner failure handler"),Pending->OnStaticRequestFail.IsBoundToObject(CallOwner.Get()));
+   bOwnedSetupValid&=Test.TestEqual(TEXT("retired CallURL has canceled legacy status"),Pending->GetStatus(),EVaRestRequestStatus::Failed);
+  }
+ }
+ bool BeginCallURLRetirementCase()
+ {
+  StartedAt=FPlatformTime::Seconds(); BeforeComplete=Probe->Completes;
+  BeforeCallComplete=Probe->CallCompletions; BeforeStaticComplete=Counts->Complete; BeforeStaticFail=Counts->Fail;
+  ExpectedStarts=Observer->Started.Num()+(Case==8 ? 1 : 2); bStarted=true;
+  bOwnedSetupValid=true; bNestedDeinitialized=false; Probe->bFanout=false;
+  OwnedCallRoot=Root+(Case==8 ? TEXT("/owned-cancel") : TEXT("/owned-deinit"));
+  // Use a test-owned REAL subsystem with its proper Engine outer, preserving
+  // the registered singleton used by the original fanout and subsequent tests.
+  CallOwner.Reset(NewObject<UVaRestSubsystem>(GEngine));
+  ConstructionHandle=FCoreUObjectDelegates::OnObjectConstructed.AddLambda([this](UObject* Object)
+  {
+   if (!IsInGameThread() || !CallOwner || Object->GetOuter()!=CallOwner.Get()) return;
+   if (auto* Made=Cast<UVaRestRequestJSON>(Object))
+   {
+    OwnedCalls.Add(Made);
+    Made->OnRequestComplete.AddDynamic(Probe.Get(),&UVaRestLegacyHttpTestProbe::Completed);
+    Made->OnRequestFail.AddDynamic(Probe.Get(),&UVaRestLegacyHttpTestProbe::Failed);
+    Made->OnStaticRequestComplete.AddLambda([C=Counts](UVaRestRequestJSON*) { ++C->Complete; C->bOnGT&=IsInGameThread(); });
+    Made->OnStaticRequestFail.AddLambda([C=Counts](UVaRestRequestJSON*) { ++C->Fail; C->bOnGT&=IsInGameThread(); });
+   }
+  });
+  Observer->StartedCallout=[this](const FVaRestTraceStarted& Started)
+  {
+   if (!Started.Url.StartsWith(OwnedCallRoot)) return;
+   OwnedCallIds.Add(Started.RequestId);
+   if (Case!=9 || Started.Url!=OwnedCallRoot+TEXT("/second") || bNestedDeinitialized) return;
+   // Genuine reentry while the second public CallURL/Send stack is still live.
+   bNestedDeinitialized=true;
+   bOwnedSetupValid&=Test.TestEqual(TEXT("two actual CallURL objects exist before nested teardown"),OwnedCalls.Num(),2);
+   bOwnedSetupValid&=Test.TestEqual(TEXT("neither owned call delivered before nested teardown"),Probe->CallCompletions,BeforeCallComplete);
+   CallOwner->Deinitialize();
+   AssertCallOwnerHandlersDisabled();
+   // Explicit stale PUBLIC notification injection, not a simulated HTTP result.
+   for (const auto& Call:OwnedCalls) if (auto* Pending=Call.Get()) CallOwner->OnCallComplete(Pending);
+   CallOwner->CallURL(OwnedCallRoot+TEXT("/reentrant-after-deinit"),EVaRestRequestVerb::GET,EVaRestRequestContentType::json,nullptr,OwnedCallCallback());
+   bOwnedSetupValid&=Test.TestEqual(TEXT("closing rejects CallURL reentry during the original Send stack"),OwnedCalls.Num(),2);
+  };
+  Test.AddInfo(FString::Printf(TEXT("LegacyHttpCase %d: public CallURL %s"),Case,Case==8 ? TEXT("silent cancel") : TEXT("nested owner teardown")));
+  const FString FirstUrl=OwnedCallRoot+TEXT("/first");
+  CallOwner->CallURL(FirstUrl,EVaRestRequestVerb::GET,EVaRestRequestContentType::json,nullptr,OwnedCallCallback());
+  if (!PendingCallIsObserved(0,FirstUrl)) return true;
+  Test.TestEqual(TEXT("owned mock has no inline result delivery"),Probe->CallCompletions,BeforeCallComplete);
+  // No target strong pin crosses GC: actual Hub/map ownership retains it.
+  CollectGarbage(RF_NoFlags);
+  if (!Test.TestTrue(TEXT("actual pending CallURL survives GC under its live owner"),OwnedCalls[0].IsValid())) return true;
+  if (Case==8)
+  {
+   OwnedCalls[0].Get()->Cancel();
+   AssertCallOwnerHandlersDisabled();
+   if (auto* Canceled=OwnedCalls[0].Get())
+   {
+    Test.TestEqual(TEXT("explicit CallURL cancel clears response code"),Canceled->GetResponseCode(),-1);
+    Test.TestTrue(TEXT("explicit CallURL cancel clears response bytes"),Canceled->GetResponseContent().IsEmpty());
+   }
+  }
+  else
+  {
+   CallOwner->CallURL(OwnedCallRoot+TEXT("/second"),EVaRestRequestVerb::GET,EVaRestRequestContentType::json,nullptr,OwnedCallCallback());
+   bOwnedSetupValid&=Test.TestTrue(TEXT("actual second Started trace reentered Deinitialize"),bNestedDeinitialized);
+   AssertCallOwnerHandlersDisabled();
+   const int32 CreatedBefore=OwnedCalls.Num();
+   CallOwner->CallURL(OwnedCallRoot+TEXT("/after-deinit"),EVaRestRequestVerb::GET,EVaRestRequestContentType::json,nullptr,OwnedCallCallback());
+   bOwnedSetupValid&=Test.TestEqual(TEXT("deinitialized owner rejects later CallURL before creating a request"),OwnedCalls.Num(),CreatedBefore);
+   CallOwner->Deinitialize(); // Actual repeated teardown is silent/idempotent.
+  }
+  return !bOwnedSetupValid;
+ }
+ bool UpdateCallURLRetirementCase()
+ {
+  if (FPlatformTime::Seconds()-StartedAt>30)
+  {
+   Test.AddError(FString::Printf(TEXT("CallURL retirement owned terminal barrier timed out at case %d: starts=%d completed=%d"),Case,Observer->Started.Num(),Observer->Completed.Num())); return true;
+  }
+  const int32 OwnedCount=Case==8 ? 1 : 2;
+  if (!Test.TestEqual(TEXT("closing admitted no extra traced request"),Observer->Started.Num(),ExpectedStarts)
+   || !Test.TestEqual(TEXT("one Started trace per owned CallURL"),OwnedCallIds.Num(),OwnedCount)) return true;
+  for (uint64 Id:OwnedCallIds) if (!Observer->Completed.Contains(Id)) return false;
+  if (GFrameCounter<=Observer->LastCompletedFrame) return false;
+  for (uint64 Id:OwnedCallIds)
+  {
+   Test.TestEqual(TEXT("each real canceled CallURL reaches exactly one core terminal"),Observer->CompletionCounts.FindRef(Id),1);
+   Test.TestEqual(TEXT("actual core CallURL terminal is cancellation"),Observer->Outcomes.FindChecked(Id),EVaRestTraceOutcome::Canceled);
+  }
+  Test.TestEqual(TEXT("CallURL retirement never invokes the user callback"),Probe->CallCompletions,BeforeCallComplete);
+  Test.TestEqual(TEXT("CallURL retirement never emits a legacy dynamic complete"),Probe->Completes,BeforeComplete);
+  Test.TestEqual(TEXT("CallURL retirement never emits a legacy dynamic failure"),Probe->Failures,0);
+  Test.TestEqual(TEXT("CallURL retirement never emits a static completion"),Counts->Complete,BeforeStaticComplete);
+  Test.TestEqual(TEXT("CallURL retirement never emits a static failure"),Counts->Fail,BeforeStaticFail);
+  Test.TestTrue(TEXT("owned observations and callbacks stay on GT"),Probe->bOnGT && Counts->bOnGT);
+  // Keep the SAME owner strong: losing it cannot hide a leaked reflected map pin.
+  Test.TestNotNull(TEXT("same owner remains strong across the release oracle"),CallOwner.Get());
+  CollectGarbage(RF_NoFlags);
+  for (const auto& Call:OwnedCalls) Test.TestFalse(TEXT("silent retirement releases each request while its owner is alive"),Call.IsValid());
+  StopCallURLCapture(); CallOwner->Deinitialize(); CallOwner.Reset(); OwnedCalls.Empty(); OwnedCallIds.Empty();
+  ++Case; bStarted=false; return false;
+ }
  FAutomationTestBase& Test;
  TStrongObjectPtr<UVaRestLegacyHttpTestProbe> Probe;
  TStrongObjectPtr<UVaRestRequestJSON> Request;
@@ -251,6 +394,13 @@ private:
  int32 Case=0,BeforeComplete=0,ExpectedStarts=0;
  double StartedAt=0;
  bool bStarted=false,bAttached=false;
+ TStrongObjectPtr<UVaRestSubsystem> CallOwner;
+ TArray<TWeakObjectPtr<UVaRestRequestJSON>> OwnedCalls;
+ TArray<uint64> OwnedCallIds;
+ FDelegateHandle ConstructionHandle;
+ FString OwnedCallRoot;
+ int32 BeforeCallComplete=0,BeforeStaticComplete=0,BeforeStaticFail=0;
+ bool bOwnedSetupValid=true,bNestedDeinitialized=false;
 };
 }
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestLegacyHttpFacadeTest,"VaRest.Compat.Legacy.HttpFacade",

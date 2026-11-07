@@ -537,3 +537,20 @@ The reviewed Host5/Launch contractba10c715 is adopted, including honest mode-OFF
 All825 Source files remain306. Fresh normal243 builds7 plugin Compile and5 plugin Link actions successfully in28.09s;1348 preservation checks pass. The matching no-build run passes6/0 in19.45s: four legacy JSON cases including new counted-key/copy-isolation coverage, the eight-case engine-mock HTTP facade with shared-root mutation assertions, and API AssetValidation including UserAgent rejection/positive controls. All928 preservation records pass;674 known warning lines including automation replays remain. No Engine/Host/PCH-creation action occurs.
 
 This validates those Linux Editor behaviors. Real pending CallURL teardown, acknowledged-work cross-process M5 queue recovery, Host5/sourceH/global-exit/full-stack, production/cooked/platform and full-release qualification remain open. Goal continues.
+
+
+### Source308 - new lifecycle/restart regressions ready for matching build
+
+Two reviewed existing Editor test files now add genuine pending CallURL cancellation/owner teardown checks and a separate-process acknowledged-work queue recovery fixture. Both whole-file independent reviews are C0/I0/M0; all823 other Source files carry. These new bodies remain unbuilt/unrun. Code306/normal243 six-pass evidence remains scoped to its earlier test bodies. Producer/Consumer must run individually in fresh processes; failed evidence is retained. Host5 implementation and whole native/platform/release qualification remain open.
+
+
+### Source309 - pending CallURL lifecycle proven; restart fixture precondition corrected
+
+Source308/normal244 actual tests pass2/0: ten native-engine-mock HTTP facade cases and the existing persistence scenario group,928 preservation checks. This includes real pending cancellation/reentrant local-owner Deinitialize, terminal silence and weak collection while the owner remains alive. The separate producer fails before any queue admission because a numbered-name lookup was incorrectly tested with IsNone; its empty root is preserved. One reviewed fixture correction now probes unsuffixed pool strings while retaining full numbered production inputs. It remains unbuilt/unrun; no successful restart claim follows.
+
+Host5 source is peer-reviewed but unapplied; remaining OpenAPI functional corrections precede SDK integration. Whole M5/M6/native/platform/release qualification remains open.
+
+
+### Source310 - invalid client refusal cleanup correction
+
+A real producer attempt on code309/normal245 exposed an invalid-native-state assertion during failed API-client cleanup, before any queued work. The empty owned root is preserved. Three reviewed CPP successors now guard subscription removal with real state, add public rejection/healthy-client lifecycle regression and log the restart API validation before admission. All822 other Source files carry. Fresh246 build and actual tests/diagnosis remain pending; restart success is unestablished. OpenAPI/Socket.IO functional fixes and Host5/native/platform qualification continue.

@@ -3,6 +3,7 @@
 #if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
 #include "VaRestActionAuthTestTypes.h"
 #include "VaRestApi.h"
+#include "VaRestAuth.h"
 #include "VaRestApiClient.h"
 #include "VaRestHub.h"
 #include "VaRestRequestLibrary.h"
@@ -167,5 +168,59 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonRefreshOwnerRetirementTest,"VaRest.A
 bool FVaRestJsonRefreshOwnerRetirementTest::RunTest(const FString& Parameters)
 {
 	ADD_LATENT_AUTOMATION_COMMAND(VaRest::Http::Editor::JsonRefreshTest::FRun(*this,true)); return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestCustomAuthUnicodeAdapterTest,"VaRest.Api.Actions.Auth.UnicodeAdapter",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FVaRestCustomAuthUnicodeAdapterTest::RunTest(const FString& Parameters)
+{
+	TStrongObjectPtr<UVaRestActionAuthTestConfig> Config(NewObject<UVaRestActionAuthTestConfig>());
+	auto Native=Config->CreateAuth();
+	if (!TestTrue(TEXT("real public custom-auth adapter exists"),Native.IsValid())) return false;
+	const TCHAR UnicodeUnits[]={TCHAR(0x00d6),TCHAR(0x0416),TCHAR(0xd83d),TCHAR(0xde80)};
+	const FString Unicode=FString::ConstructFromPtrSize(UnicodeUnits,UE_ARRAY_COUNT(UnicodeUnits));
+	const TCHAR SurrogateUnits[]={TCHAR(0xd800)};
+	const FString InvalidUnicode=FString::ConstructFromPtrSize(SurrogateUnits,UE_ARRAY_COUNT(SurrogateUnits));
+	const auto Check=[&](const FString& Token,const FString& QueryName,const FString& QueryValue,bool Expected)
+	{
+		FVaRestHeaders Headers; Headers.Set(TEXT("X-Keep"),TEXT("unchanged"));
+		TArray<TPair<FString,FString>> Query; Query.Emplace(QueryName,QueryValue);
+		FVaRestSessionData Session; Session.AccessToken=Token;
+		FVaRestAuthTarget Target(Headers,Query,Session);
+		TestEqual(TEXT("actual custom adapter accepts only valid configured text"),Native->Apply(Target),Expected);
+		TestEqualSensitive(TEXT("unrelated header survives adapter admission/refusal"),Headers.Get(TEXT("X-Keep")),FString(TEXT("unchanged")));
+		TestEqual(TEXT("query count stays exact"),Query.Num(),1);
+		if (Query.Num()==1)
+		{
+			TestEqualSensitive(TEXT("query name is preserved exactly"),Query[0].Key,QueryName);
+			TestEqualSensitive(TEXT("query value is preserved exactly"),Query[0].Value,QueryValue);
+		}
+		if (Expected)
+		{
+			TestTrue(TEXT("valid text has no adapter configuration error"),Target.ConfigError.IsEmpty());
+			TestEqualSensitive(TEXT("real reflected provider header preserves complete Unicode"),Headers.Get(TEXT("Authorization")),FString(TEXT("Bearer "))+Token);
+		}
+		else
+		{
+			TestFalse(TEXT("malformed text produces a real adapter error"),Target.ConfigError.IsEmpty());
+			TestFalse(TEXT("refused reflected edits are not partially published"),Headers.Find(TEXT("Authorization"))!=nullptr);
+		}
+	};
+	Check(TEXT("plain-token"),TEXT("key"),TEXT("value"),true);
+	Check(Unicode,TEXT("key"),TEXT("value"),true);
+	Check(TEXT("plain-token"),FString(TEXT("key-"))+Unicode,FString(TEXT("value-"))+Unicode,true);
+	Check(InvalidUnicode,TEXT("key"),TEXT("value"),false);
+	Check(TEXT("plain-token"),FString(TEXT("key-"))+InvalidUnicode,TEXT("value"),false);
+	Check(TEXT("plain-token"),TEXT("key"),FString(TEXT("value-"))+InvalidUnicode,false);
+	Check(TEXT("bad\r\nheader"),TEXT("key"),TEXT("value"),false);
+	const TCHAR NullUnits[]={TEXT('a'),TCHAR(0),TEXT('b')};
+	Check(FString::ConstructFromPtrSize(NullUnits,UE_ARRAY_COUNT(NullUnits)),TEXT("key"),TEXT("value"),false);
+	Config->RetireOnGT();
+	FVaRestHeaders Headers; TArray<TPair<FString,FString>> Query; FVaRestSessionData Session; Session.AccessToken=Unicode;
+	FVaRestAuthTarget Target(Headers,Query,Session);
+	TestFalse(TEXT("retired real adapter remains unavailable"),Native->Apply(Target));
+	TestFalse(TEXT("retired adapter publishes no authorization header"),Headers.Find(TEXT("Authorization"))!=nullptr);
+	Native.Reset(); Config.Reset();
+	return true;
 }
 #endif

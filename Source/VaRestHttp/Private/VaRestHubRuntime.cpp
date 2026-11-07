@@ -14,7 +14,7 @@ bool FHubRuntime::ValidatePartition(FStringView Text,bool bAllowEmpty,FString& E
 	for (TCHAR Character:Text) if (Character<0x20 || Character==0x7f) { Error=TEXT("InvalidStoragePartition"); return false; }
 	const FString Original(Text);
 	const FTCHARToUTF8 Utf8(*Original);
-	const FString RoundTrip=FString::ConstructFromPtrSize(Utf8.Get(),Utf8.Length());
+	const FString RoundTrip=FString::ConstructFromPtrSize(reinterpret_cast<const UTF8CHAR*>(Utf8.Get()),Utf8.Length());
 	if (Original.Len()!=RoundTrip.Len() || (!Original.IsEmpty() && FMemory::Memcmp(*Original,*RoundTrip,Original.Len()*sizeof(TCHAR))!=0))
 		{ Error=TEXT("InvalidStoragePartitionEncoding"); return false; }
 	return true;
@@ -41,7 +41,7 @@ bool FHubRuntime::QueueName(FStringView ApiPath,FStringView StorageProfile,FStri
 			}
 		}
 		const FTCHARToUTF8 Utf8(*Text);
-		const FString RoundTrip=FString::ConstructFromPtrSize(Utf8.Get(),Utf8.Length());
+		const FString RoundTrip=FString::ConstructFromPtrSize(reinterpret_cast<const UTF8CHAR*>(Utf8.Get()),Utf8.Length());
 		if (Text.Len()!=RoundTrip.Len() || (!Text.IsEmpty() && FMemory::Memcmp(*Text,*RoundTrip,Text.Len()*sizeof(TCHAR))!=0))
 			{ Error=TEXT("InvalidStoragePartitionEncoding"); return false; }
 		Result+=FString::Printf(TEXT("%d:"),Utf8.Length()); Result+=Text;

@@ -249,9 +249,15 @@ void UVaRestApiClient::DetachOnGT()
 	if (bDetached) return;
 	bDetached=true;
 	auto Client=MoveTemp(Native);
-	Client.OnSessionChanged().Remove(SessionChangedHandle); Client.OnSessionExpired().Remove(SessionExpiredHandle);
-	Client.OnQueuedResult().Remove(QueuedHandle);
-	if (const auto State=VaRest::Http::FClientAccess::State(Client)) State->PrimaryError.Remove(ErrorHandle);
+	// Initialization can refuse before any native state is published. Only an
+	// actual state owns these subscriptions; invalid-client getters are not a
+	// cleanup surface (OnQueuedResult asserts and the session getters use Never).
+	if (const auto State=VaRest::Http::FClientAccess::State(Client))
+	{
+		State->OnSessionChanged().Remove(SessionChangedHandle); State->OnSessionExpired().Remove(SessionExpiredHandle);
+		State->QueuedResult.Remove(QueuedHandle);
+		State->PrimaryError.Remove(ErrorHandle);
+	}
 	VaRest::Http::FClientAccess::CloseManagedAdmission(Client);
 	if (Auth) Auth->RetireOnGT();
 	VaRest::Http::FClientAccess::RetireManaged(Client);
