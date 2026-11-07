@@ -429,4 +429,36 @@ bool FVaRestJsonRulesPublicationTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestJsonRulesTransactionStateTest, "VaRest.Json.Rules.TransactionState",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestJsonRulesTransactionStateTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRestJsonRulesTest;
+	FOwner Owner;
+	TestFalse(TEXT("no registry transaction before registration"), FVaRestJsonRules::IsChangingOnGameThread());
+	int32 ChangingCalls=0, ChangedCalls=0;
+	const auto ChangingHandle=FVaRestJsonRules::OnRulesChanging().AddLambda([&] {
+		++ChangingCalls;
+		TestTrue(TEXT("before-publication callbacks are inside the actual transaction"), FVaRestJsonRules::IsChangingOnGameThread());
+		TestFalse(TEXT("notification cannot interleave another owner publication"),
+			FVaRestJsonRules::RegisterTypesFolder(Owner.Get(), TEXT("/Game/VaRestTransactionReentry")));
+	});
+	const auto ChangedHandle=FVaRestJsonRules::OnRulesChanged().AddLambda([&] {
+		++ChangedCalls;
+		TestTrue(TEXT("after-publication callbacks still belong to that transaction"), FVaRestJsonRules::IsChangingOnGameThread());
+	});
+	TestTrue(TEXT("real field publication succeeds"), FVaRestJsonRules::RegisterFields(Owner.Get(), FVaRestJsonTestRules::StaticStruct(), Fields()));
+	TestEqual(TEXT("one actual pre-publication notification"), ChangingCalls, 1);
+	TestEqual(TEXT("one actual post-publication notification"), ChangedCalls, 1);
+	TestFalse(TEXT("completed call is ready without a frame advance"), FVaRestJsonRules::IsChangingOnGameThread());
+	FVaRestJsonRules::UnregisterOwner(Owner.Get());
+	TestEqual(TEXT("unregister also notifies before publication"), ChangingCalls, 2);
+	TestEqual(TEXT("unregister also notifies after publication"), ChangedCalls, 2);
+	TestFalse(TEXT("completed unregister leaves no transaction"), FVaRestJsonRules::IsChangingOnGameThread());
+	FVaRestJsonRules::OnRulesChanging().Remove(ChangingHandle);
+	FVaRestJsonRules::OnRulesChanged().Remove(ChangedHandle);
+	return true;
+}
+
 #endif

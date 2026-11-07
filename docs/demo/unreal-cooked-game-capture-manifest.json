@@ -1,0 +1,70 @@
+{
+  "schema": 1,
+  "date": "2026-11-07",
+  "source_version": 337,
+  "capture": "Actual unaltered window PNG from stock UnrealGame Linux Development, not Editor or mockup",
+  "image": {
+    "source": "/w/Unreal/VaRest-recovery/takeover-01441-20261107/first-look-cooked-game-visual-002/screenshots/01-cooked-game-typed-http.png",
+    "article_id": "cooked-game",
+    "bytes": 4013,
+    "sha256": "01211b735391edb0607d3a72e308399633e4847388e5f8ab5420d18a6c315cb5",
+    "LF": 13,
+    "width": 1440,
+    "height": 900
+  },
+  "game_result": {
+    "path": "/w/Unreal/VaRest-recovery/takeover-01441-20261107/first-look-cooked-game-visual-002/result.json",
+    "bytes": 1320,
+    "sha256": "28721cf8128daf578c6ebb10cf04585f0dcfe098ca05af0ad4eb83a481fffe0f",
+    "LF": 42
+  },
+  "actual_http": [
+    {
+      "method": "GET",
+      "path": "/profile",
+      "status": 200,
+      "response_bytes": 80,
+      "response_sha256": "a9c5b84b13f4d4cade36ad81b5cca9bcd07b557e0b4cda402eb573eddc18334c"
+    }
+  ],
+  "actual_blueprint_lines": [
+    "[2026.11.07-18.27.50:984][  1]LogBlueprintUserMessages: [VaRestFirstLookActor] VAREST_FIRST_LOOK_SUCCESS Alex Demo"
+  ],
+  "process": {
+    "pid": 2573010,
+    "actual_window": {
+      "id": 2097243,
+      "hex": "0x20005b",
+      "title": "HostProject (64-bit Development SF_VULKAN_SM5) ",
+      "x": 80,
+      "y": 50,
+      "width": 1440,
+      "height": 900
+    },
+    "capture_exit_code": 0,
+    "exit_code": 0,
+    "forced": false,
+    "elapsed_seconds": 48.873108811996644
+  },
+  "guards": 40210,
+  "guard_failures": [],
+  "project": "/w/Unreal/VaRest-recovery/takeover-01441-20261107/stock-plugin-editor-graph-002/HostProject/HostProject.uproject",
+  "cooked_map": "/Game/VaRestFirstLook002/FirstLook",
+  "game_elf": {
+    "bytes": 308300128,
+    "sha256": "f514956925ac11a38077bef4dda8eee04cf612325174748be6bb004fe4aa0f09"
+  },
+  "game_regression": {
+    "path": "/w/Unreal/VaRest-recovery/takeover-01441-20261107/cooked-rule-publication-game-regression-003/result.json",
+    "actual_pass": 1,
+    "actual_fail": 0,
+    "exit_code": 0
+  },
+  "editor_regression": {
+    "path": "/w/Unreal/VaRest-recovery/takeover-01441-20261107/cooked-rule-publication-editor-regression-001/result.json",
+    "actual_pass": 15,
+    "actual_fail": 0,
+    "exit_code": 0
+  },
+  "limits": "Finite real typed HTTP/Blueprint cooked Development proof. Empty level, no live WS/SIO/Shipping/full lifecycle/ABI/platform/performance/release acceptance. Supported norhithread does not resolve prior default-RHI crash. SDK BuildGraph loose stage is not proper BuildCookRun release packaging qualification."
+}

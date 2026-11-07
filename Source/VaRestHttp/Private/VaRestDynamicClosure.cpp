@@ -117,9 +117,26 @@ struct FDynamicTypeRuntimeData
 		check(IsInGameThread());
 		SettleSchema=Schema; SettleFrame=GFrameCounter; bSettlePending=true;
 	}
+	void SettleForAdmissionOnGT()
+	{
+		check(IsInGameThread());
+#if !WITH_EDITOR
+		// Cooked Game may load its API in the first map, before any EndFrame. RulesChanged
+		// schedules this only after publication, but the registry remains changing throughout
+		// both notifications. Admit only on a later call outside that real transaction.
+		// Editor compilation/reinstancing still requires its existing later-frame barrier.
+		if (!bStopped && !bExhausted && bMutating && bSettlePending && SettleSchema==Schema &&
+			!FVaRestJsonRules::IsChangingOnGameThread())
+		{
+			bSettlePending=false;
+			bMutating=false;
+		}
+#endif
+	}
 	bool Available() const
 	{
 		return !bStopped && !bMutating && !bExhausted && bEditorHooksAvailable &&
+			!FVaRestJsonRules::IsChangingOnGameThread() && // independent of multicast observer order
 			(!WITH_EDITOR || (CurrentEditorBindings && CurrentEditorBindings()));
 	}
 	bool Track(const TSharedRef<FDynamicTypedState,ESPMode::ThreadSafe>& State)
@@ -285,6 +302,7 @@ TSharedPtr<FDynamicTypedState,ESPMode::ThreadSafe> FDynamicTypedState::CreateOnG
 	check(IsInGameThread());
 	using namespace DynamicClosurePrivate;
 	auto* Runtime=Active;
+	if (Runtime) Runtime->SettleForAdmissionOnGT();
 	if (Code) *Code=TEXT("DynamicTypeUnavailable");
 	if (!Runtime || !Runtime->Available())
 	{

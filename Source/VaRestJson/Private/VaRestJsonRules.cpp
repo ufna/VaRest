@@ -438,6 +438,12 @@ uint64 FVaRestJsonRules::GetDefaultGeneration()
 	return Registry().Generation;
 }
 
+bool FVaRestJsonRules::IsChangingOnGameThread()
+{
+	check(IsInGameThread());
+	return VaRest::Json::RulesPrivate::Registry().bChanging;
+}
+
 FVaRestJsonRules::FRulesChanged& FVaRestJsonRules::OnRulesChanging()
 {
 	return VaRest::Json::RulesPrivate::Registry().Changing;

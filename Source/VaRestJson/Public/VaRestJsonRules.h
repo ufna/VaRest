@@ -132,6 +132,8 @@ struct VARESTJSON_API FVaRestJsonRules
 	static TSharedRef<const FVaRestJsonRuleSnapshot, ESPMode::ThreadSafe> DefaultSnapshot();
 	static uint64 GetGeneration(const UObject* Owner);
 	static uint64 GetDefaultGeneration();
+	/** GT only: true throughout both publication notifications, before the registration call returns. */
+	static bool IsChangingOnGameThread();
 	static FRulesChanged& OnRulesChanging();
 	static FRulesChanged& OnRulesChanged();
 };
