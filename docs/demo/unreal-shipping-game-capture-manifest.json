@@ -1,0 +1,72 @@
+{
+  "schema": 1,
+  "actual_role": "UnrealGame Linux Shipping",
+  "source_version": 340,
+  "fixture_sha256": "2b38cc92b2ba7e49115b1de5a4366d3b2fcf5f3f30bde901c4d504ae20035a21",
+  "engine_source_modified": false,
+  "custom_host_target_or_game_cpp_module": false,
+  "raw_png": {
+    "path": "/w/Unreal/VaRest-recovery/takeover-01441-20261107/first-look-shipping-game-visual-004/screenshots/01-shipping-game-typed-http.png",
+    "sha256": "e703b7983e5bf3676db5bb916b16ee2a1db2c3a910ca10ba639a1e52bf6238a4",
+    "bytes": 154272,
+    "width": 1440,
+    "height": 900,
+    "pixels_unchanged": true
+  },
+  "actual_result": {
+    "path": "/w/Unreal/VaRest-recovery/takeover-01441-20261107/first-look-shipping-game-visual-004/result.json",
+    "sha256": "7e78e3ff9e795f25552ef0357d7ef86084912b56da411832faf03fcbe869f7e5",
+    "bytes": 1733,
+    "process": {
+      "pid": 1592626,
+      "actual_window": {
+        "id": 2097243,
+        "hex": "0x20005b",
+        "title": "HostProject  ",
+        "x": 80,
+        "y": 50,
+        "width": 1440,
+        "height": 900
+      },
+      "capture_exit_code": 0,
+      "exit_code": 0,
+      "forced": false,
+      "elapsed_seconds": 13.396880173007958
+    },
+    "preserved": 68218,
+    "preservation_failures": []
+  },
+  "http": [
+    {
+      "method": "GET",
+      "path": "/profile",
+      "status": 200,
+      "response_bytes": 80,
+      "response_sha256": "a9c5b84b13f4d4cade36ad81b5cca9bcd07b557e0b4cda402eb573eddc18334c"
+    },
+    {
+      "method": "POST",
+      "path": "/matches",
+      "status": 201,
+      "response_bytes": 77,
+      "response_sha256": "adb6681445e56869a70ea92826b984c02cebd3bd60f3ba6760bdbbb7778b0dd3",
+      "consumed_fixed_demo_fields": {
+        "map": "Alex Demo",
+        "maxPlayers": 27,
+        "ranked": true
+      },
+      "request_sha256": "a454b5449f6121fe932859c1344d8c200b40bf8eb8f9c2970313acd833aa9816"
+    }
+  ],
+  "root_visual_readback": {
+    "path": "/w/Unreal/VaRest-recovery/takeover-01441-20261107/first-look-shipping-visible-readback-001/report.md",
+    "sha256": "f56c8a10bf661f710ee0347b2be64fa6d922d89a3be5bab7c72206a0dc6dce42"
+  },
+  "repro_server": {
+    "path": "docs/examples/first-look/demo-typed-http-server.py",
+    "sha256": "2c12f524f0e0f21d86fa9964b468be8848a7a2fae446d3d7a7522ac46875f6b9",
+    "same_handler_AST_as_actual_server": true,
+    "only_module_docstring_updated": true
+  },
+  "limits": "Finite actual typedHTTP/visible Shipping/native exit; standard norhithread diagnostic loose stage. Not normal release package/defaultRHI/WS-DNS-TLS-lifetime/ABI/platform/performance/wholeGoal acceptance."
+}
