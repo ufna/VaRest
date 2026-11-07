@@ -1,5 +1,9 @@
 # VaRest 2.0 development passport — 2026-11-04
 
+## Owner boundary — 2026-11-07
+
+Delivery is an ordinary game plugin on an unchanged supported engine. Engine/Launch patches, a custom editor and mandatory Host/game-module code are not product requirements. The known Host5 experiment is rolled back; its11-action Editor and1411/12PCH Game build proposals were never executed and are withdrawn. Historical rows below do not override this boundary. [Authoritative decision](../../.superpowers/sdd/2026-11-07-plugin-only-delivery-boundary.md).
+
 This implementation/qualification inventory is not release acceptance. Version is `2.0.0-dev`; product features precede the test/benchmark pass.
 
 ## Implementation inventory
@@ -699,3 +703,12 @@ After delivering the real gallery/checkpoint328, Root extracted the actual saved
 Exactly three Source files now implement a bounded correction: finalize only actual definition/item ID collisions into a separate typed domain after defaults, update all field/parameter/request/response/error references, retain actual item/native GUID/noncolliding identities, and reuse previously finalized names on replan. State encode/decode reject ambiguous duplicate item IDs before reimport maps; already-damaged legacy states are refused unchanged, NOT auto-migrated or silently recreated. Actual InlineIdentity native regression is authored with nested/object/array/query enum coverage, real apply/capture/no-op identity preservation and the genuine3760B pre-fix blob. Existing ten tests retain their assertions.
 
 Full3forward/inverse patch reconstruction and actual raw fixture joins PASS, all825 Source identities checked with822 unaffected. Independent Source review, compiler/UHT/native automation and graphical save recheck remain PENDING/UNRUN; current Source329 UNBUILT, executable normal251/code319 retained. VaRest-ajz.27.2/T-j40snf remain in progress, exit SIGSEGV27.1 OPEN, legacy recovery remains explicit. No SDK/Graph/native/runtime action occurred, no Host5 Engine/PCH grant or feature/release acceptance inferred. Root user-facing gallery nine raw captures9c491d35 remains available unchanged.
+
+
+### Source330 — owner plugin-only boundary; Host5 experiment retired and restored
+
+Owner explicitly requires all delivery within plugin capabilities inside an ordinary game. Root stopped the prepared build lanes before any C++ action and archived/restored known Host5 changes:7 exact before files,3 own added files removed, receipt afad67a9/7787B202LF. Both affected Launch files equal Engine Git HEAD, checked through exact read-only file blobs. All823 other plugin Source files, including OpenAPI329 source3, and normal251 SDK/library/meta identities remain intact. Plugin Source/descriptor contains no removed Host-control/header/session integration references. No SDK binary/cache/generated/mtime repair occurred.
+
+The11-action Editor graph4a28ac62 exported successfully0/6.031s/all1242guards and its97 actual closed recipes/complete nested linker responses d4b67855 plus role audit980c8e98 are historical/unexecuted. They still demanded Launch/Host compile and are NOT a plugin-only build permit. The1411/12PCH modular Game proposal is also withdrawn. No permission is pending for either retired lane. The unchanged consuming Host and stock-engine public plugin APIs replace that delivery assumption; stronger incompatible native-owner contracts remain explicit unresolved design issues, not silently satisfied gates.
+
+A finite no-Python UI control003 separately crashed-11 in NVIDIA615.78.08/Vulkan fence/swapchain/present before the intended exit check. All1238 guards PASS/timeoutfalse/stockEditor empty; it does not identify the original FSimpleAssetEditor failure as Python/plugin. No blind replay follows. Existing screenshot gallery remains a historical actual result. OpenAPI correction329 and its authored regression are still UNBUILT/UNRUN, now to be qualified through an ordinary plugin-only graph. Full release Goal remains incomplete under the controlling boundary above.
