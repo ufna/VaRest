@@ -100,6 +100,8 @@ struct VARESTOPENAPI_API FVaRestOpenApiPlan
 	FString DefaultEnvironment;
 	FVaRestOpenApiPlannedAuth Auth;
 	FVaRestOpenApiPlannedEnvelope Envelope;
+	/** Detection only: selected-plan evidence even when automatic unwrapping is disabled. Never applied as runtime envelope. */
+	FVaRestOpenApiPlannedEnvelope EnvelopeCandidate;
 	TArray<FVaRestOpenApiIssue> Issues;
 	/** Native data only; stable array order and key spelling for tooling/golden comparisons. */
 	FVaRestJson ToJson() const;

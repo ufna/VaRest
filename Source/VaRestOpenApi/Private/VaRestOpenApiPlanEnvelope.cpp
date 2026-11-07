@@ -25,7 +25,7 @@ void FPlanner::DetectEnvelope()
 		FView View;View.Use=Media->Schema;View.Endpoint=Index;FStringSet Visiting;Flatten(View.Use,View.Fields,View.Required,Visiting);
 		if (!View.Fields.IsEmpty()) ViewIndices[Index]=SuccessViews.Add(MoveTemp(View));
 	}
-	Plan.Envelope.ConsideredOperations=SuccessViews.Num();
+	Plan.Envelope.ConsideredOperations=SuccessViews.Num();Plan.EnvelopeCandidate.ConsideredOperations=SuccessViews.Num();
 	const FView* Representative=nullptr;FString ChosenKey;TArray<FString> ChosenMeta;int32 BestCount=0;
 	for (const TCHAR* Key:{TEXT("data"),TEXT("result"),TEXT("payload")})
 	{
@@ -45,6 +45,7 @@ void FPlanner::DetectEnvelope()
 		if (MetaNames.Num()>6 || Wrapped.Num()<=BestCount) continue;
 		BestCount=Wrapped.Num();ChosenKey=Key;ChosenMeta=MoveTemp(MetaNames);Representative=Wrapped[Winner];
 	}
+	if (BestCount>0) { Plan.EnvelopeCandidate.DataPath=ChosenKey;Plan.EnvelopeCandidate.WrappedOperations=BestCount; }
 	if (BestCount>0 && Options.bDetectEnvelope)
 	{
 		Plan.Envelope.DataPath=ChosenKey;Plan.Envelope.WrappedOperations=BestCount;

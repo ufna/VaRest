@@ -18,7 +18,8 @@ FVaRestJson FPlanner::Canonical(const FVaRestJson& Value) const
 	if (Value.IsObject())
 	{
 		auto Out=FVaRestJson::Object();TArray<FString> Keys;FStringSet Seen;
-		for (const auto& Member:Value.Members()) if (!Annotation(Member.GetKey()) && !Seen.Contains(Member.GetKey())) { Seen.Add(Member.GetKey());Keys.Add(Member.GetKey()); }
+		// Expand removes schema-node annotations; these keys may be real property names or default data.
+		for (const auto& Member:Value.Members()) if (!Seen.Contains(Member.GetKey())) { Seen.Add(Member.GetKey());Keys.Add(Member.GetKey()); }
 		Keys.Sort(LessKey);for (const auto& Key:Keys) Out.Set(Key,Canonical(Value.Get(Key)));return Out;
 	}
 	if (Value.IsArray()) { auto Out=FVaRestJson::Array();for (const auto& Item:Value.Elements()) Out.Add(Canonical(Item));return Out; }

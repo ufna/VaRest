@@ -4,6 +4,13 @@
 #include "VaRestOpenApiPlan.h"
 #include "VaRestOpenApiApply.h"
 #include "VaRestOpenApiReimport.h"
+#include "VaRestOpenApiImportOptions.h"
+#include "VaRestOpenApiImportDialog.h"
+#include "VaRestOpenApiApplyPrivate.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "Engine/DataTable.h"
+#include "Async/Async.h"
+#include "VaRestOpenApiSource.h"
 #include "VaRestOpenApiUrlPolicy.h"
 #include "VaRestApi.h"
 #include "VaRestJsonRules.h"
@@ -17,6 +24,7 @@
 #include "Misc/FileHelper.h"
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
+#include "Misc/ScopeExit.h"
 #include "HAL/FileManager.h"
 #include "UObject/SavePackage.h"
 #include "UObject/GarbageCollection.h"
@@ -415,4 +423,491 @@ bool FVaRestOpenApiPersistenceOfflineTest::RunTest(const FString& Parameters)
  return true;
 }
 
+namespace VaRestOpenApiOfflineTest
+{
+FVaRestJson SchemaResponse(const FVaRestJson& Schema)
+{
+ return FVaRestJson::Object().Set(TEXT("description"),TEXT("payload"))
+  .Set(TEXT("content"),FVaRestJson::Object().Set(TEXT("application/json"),FVaRestJson::Object().Set(TEXT("schema"),Schema)));
+}
+FVaRestJson PropertySchema(const FString& Name,bool bInteger=false)
+{
+ auto Value=FVaRestJson::Object().Set(TEXT("type"),bInteger ? TEXT("integer") : TEXT("string"));
+ if (bInteger) Value.Set(TEXT("format"),TEXT("int32"));
+ return FVaRestJson::Object().Set(TEXT("type"),TEXT("object")).Set(TEXT("properties"),FVaRestJson::Object().Set(Name,Value));
+}
+FVaRestOpenApiPlan ShapePlan(const FVaRestJson& A,const FVaRestJson& B,bool bErrors,const FVaRestJson& Schemas={})
+{
+ auto Responses=FVaRestJson::Object();
+ if (bErrors) Responses.Set(TEXT("200"),SchemaResponse(FVaRestJson::Object().Set(TEXT("type"),TEXT("string"))))
+  .Set(TEXT("400"),SchemaResponse(A)).Set(TEXT("404"),SchemaResponse(B));
+ else Responses.Set(TEXT("200"),SchemaResponse(A)).Set(TEXT("201"),SchemaResponse(B));
+ auto Operation=FVaRestJson::Object().Set(TEXT("operationId"),TEXT("shapeCase")).Set(TEXT("responses"),Responses);
+ auto Document=FVaRestJson::Object().Set(TEXT("openapi"),TEXT("3.0.3"))
+  .Set(TEXT("info"),FVaRestJson::Object().Set(TEXT("title"),TEXT("Shapes")).Set(TEXT("version"),TEXT("1")))
+  .Set(TEXT("servers"),FVaRestJson::Array(FVaRestJson::Object().Set(TEXT("url"),TEXT("https://shapes.invalid"))))
+  .Set(TEXT("paths"),FVaRestJson::Object().Set(TEXT("/shape"),FVaRestJson::Object().Set(TEXT("get"),Operation)));
+ if (Schemas.IsObject()) Document.Set(TEXT("components"),FVaRestJson::Object().Set(TEXT("schemas"),Schemas));
+ FVaRestOpenApiPlanOptions Options; Options.bDetectEnvelope=false;
+ return FVaRestOpenApiPlanner::Build(FVaRestOpenApiLoader::Analyze(TEXT("/VaRestOpenApiQualification/shapes.json"),Bytes(Document.ToString())),Options);
+}
+bool CheckShapes(FAutomationTestBase& Test,const FVaRestJson& A,const FVaRestJson& B,bool bDifferent,const FVaRestJson& Schemas={})
+{
+ for (const bool bErrors:{false,true})
+ {
+  const auto Plan=ShapePlan(A,B,bErrors,Schemas);
+  if (!Test.TestTrue(TEXT("real shape source produces a valid public plan"),Plan.bValid) || !NoErrors(Test,Plan.Issues,TEXT("shape plan"))
+   || !Test.TestEqual(TEXT("shape fixture has one actual endpoint"),Plan.Endpoints.Num(),1)) return false;
+  const auto& Endpoint=Plan.Endpoints[0];
+  if (bErrors)
+  {
+   Test.TestEqual(TEXT("error shape ambiguity has the actual public issue"),Has(Plan.Issues,TEXT("OA-RESP-ERRORS")),bDifferent);
+   Test.TestEqual(TEXT("only equivalent errors retain a typed error output"),Endpoint.ErrorType.Kind,bDifferent ? EVaRestOpenApiValueKind::None : EVaRestOpenApiValueKind::Struct);
+  }
+  else
+  {
+   Test.TestEqual(TEXT("success shape ambiguity has the actual public issue"),Has(Plan.Issues,TEXT("OA-RESP-MULTI2XX")),bDifferent);
+   Test.TestEqual(TEXT("actual success mixed-shape flag"),Endpoint.bMixedSuccessShapes,bDifferent);
+   Test.TestEqual(TEXT("only equivalent success bodies retain a typed output"),Endpoint.ResponseType.Kind,bDifferent ? EVaRestOpenApiValueKind::Json : EVaRestOpenApiValueKind::Struct);
+  }
+ }
+ return true;
+}
+FString ParameterDocument(bool bRequired,const TCHAR* Default,const TCHAR* Path)
+{
+ auto Param=FVaRestJson::Object().Set(TEXT("name"),TEXT("q")).Set(TEXT("in"),TEXT("query")).Set(TEXT("required"),bRequired)
+  .Set(TEXT("schema"),FVaRestJson::Object().Set(TEXT("type"),TEXT("string")).Set(TEXT("default"),Default));
+ auto Operation=FVaRestJson::Object().Set(TEXT("operationId"),TEXT("lookup"))
+  .Set(TEXT("parameters"),FVaRestJson::Array(Param))
+  .Set(TEXT("responses"),FVaRestJson::Object().Set(TEXT("200"),SchemaResponse(FVaRestJson::Object().Set(TEXT("type"),TEXT("string")))));
+ return FVaRestJson::Object().Set(TEXT("openapi"),TEXT("3.0.3"))
+  .Set(TEXT("info"),FVaRestJson::Object().Set(TEXT("title"),TEXT("Requiredness")).Set(TEXT("version"),TEXT("1")))
+  .Set(TEXT("servers"),FVaRestJson::Array(FVaRestJson::Object().Set(TEXT("url"),TEXT("https://requiredness.invalid"))))
+  .Set(TEXT("paths"),FVaRestJson::Object().Set(Path,FVaRestJson::Object().Set(TEXT("get"),Operation))).ToString();
+}
+bool RequirednessCase(FAutomationTestBase& Test,bool bAllowBreaking)
+{
+ FOwnedAssets Owned;
+ const FString Root=TEXT("/VaRestOpenApiQualification/requiredness.json");
+ FVaRestOpenApiPlanOptions PlanOptions; PlanOptions.ApiName=TEXT("RequirednessFixture"); PlanOptions.bDetectEnvelope=false;
+ const auto InitialPlan=FVaRestOpenApiPlanner::Build(FVaRestOpenApiLoader::Analyze(Root,Bytes(ParameterDocument(false,TEXT("original"),TEXT("/lookup")))),PlanOptions);
+ if (!Test.TestTrue(TEXT("optional parameter source plan"),InitialPlan.bValid) || !NoErrors(Test,InitialPlan.Issues,TEXT("optional plan"))
+  || !Test.TestEqual(TEXT("optional plan endpoint"),InitialPlan.Endpoints.Num(),1)
+  || !Test.TestEqual(TEXT("optional plan parameter"),InitialPlan.Endpoints[0].Parameters.Num(),1)) return false;
+ const FString Folder=TEXT("/Game/__VaRestRequiredness_")+FGuid::NewGuid().ToString(EGuidFormats::Digits);
+ TStrongObjectPtr<UPackage> Package(CreatePackage(*(Folder/TEXT("Api"))));
+ FVaRestOpenApiApplyOptions Options; Options.Parent=Package.Get(); Options.ApiName=TEXT("Api"); Options.TypesFolder=Folder/TEXT("Types");
+ Options.bRegisterAssets=false; Options.bAddToSettings=false;
+ const auto Initial=FVaRestOpenApiApplier::Apply(InitialPlan,Options); Owned.Keep(Initial);
+ if (!NoErrors(Test,Initial.Issues,TEXT("optional apply")) || !Test.TestNotNull(TEXT("actual optional API asset"),Initial.Api)) return false;
+ auto* Api=Initial.Api;
+ if (!Test.TestEqual(TEXT("one actual optional endpoint"),Api->Endpoints.Num(),1)
+  || !Test.TestEqual(TEXT("one actual optional parameter"),Api->Endpoints[0].Params.Num(),1)) return false;
+ const FGuid EndpointId=Api->Endpoints[0].Id; const FName Pin=Api->Endpoints[0].Params[0].PinName;
+ const FString OriginalDefault=Api->Endpoints[0].Params[0].Default;
+ const FVaRestTypeRef OriginalType=Api->Endpoints[0].Params[0].Type;
+ Test.TestFalse(TEXT("initial imported parameter is optional"),Api->Endpoints[0].Params[0].bRequired);
+ Test.TestEqual(TEXT("initial imported parameter is String"),OriginalType.Kind,EVaRestTypeKind::String);
+ Test.TestEqual(TEXT("initial default is the real planned native literal"),OriginalDefault,InitialPlan.Endpoints[0].Parameters[0].DefaultText);
+ if (!Test.TestTrue(TEXT("seed actual endpoint identity before changed route"),FVaRestOpenApiReimporter::SeedOptions(Api,PlanOptions))) return false;
+ const auto RequiredPlan=FVaRestOpenApiPlanner::Build(FVaRestOpenApiLoader::Analyze(Root,Bytes(ParameterDocument(true,TEXT("upstream"),TEXT("/lookup-v2")))),PlanOptions);
+ if (!Test.TestTrue(TEXT("required parameter source plan"),RequiredPlan.bValid) || !NoErrors(Test,RequiredPlan.Issues,TEXT("required plan"))
+  || !Test.TestEqual(TEXT("required plan endpoint"),RequiredPlan.Endpoints.Num(),1)
+  || !Test.TestEqual(TEXT("required plan parameter"),RequiredPlan.Endpoints[0].Parameters.Num(),1)) return false;
+ const FString ParamId=RequiredPlan.Endpoints[0].Parameters[0].Id;
+ FVaRestOpenApiMergeOptions Automated; Automated.bAutomated=true;
+ auto Deferred=FVaRestOpenApiReimporter::Preview(Api,RequiredPlan,Automated);
+ if (!Test.TestTrue(TEXT("actual automated requiredness preview"),Deferred.bValid) || !NoErrors(Test,Deferred.Issues,TEXT("deferred preview"))) return false;
+ const auto Find=[&](const FVaRestOpenApiReimportPreview& Preview,const FString& Id,const TCHAR* Property) {
+  return Preview.Merge.Changes.FindByPredicate([&](const auto& Row) { return Row.Id==Id && Row.Property==Property; });
+ };
+ const auto* Required=Find(Deferred,ParamId,TEXT("required"));
+ if (!Test.TestNotNull(TEXT("existing requiredness change is present"),Required)) return false;
+ Test.TestTrue(TEXT("optional to required is breaking and deferred automatically"),Required->bBreaking && Required->bDeferred && !Required->bApply);
+ const auto* Default=Find(Deferred,ParamId,TEXT("defaultText"));
+ const auto* Path=Find(Deferred,RequiredPlan.Endpoints[0].Id,TEXT("path"));
+ Test.TestTrue(TEXT("blocked endpoint also defers parameter default companion"),Default && Default->bDeferred && !Default->bApply);
+ Test.TestTrue(TEXT("blocked endpoint also defers runtime route companion"),Path && Path->bDeferred && !Path->bApply);
+ const auto Held=FVaRestOpenApiReimporter::Apply(Api,RequiredPlan,Deferred,Options); Owned.Keep(Held);
+ if (!NoErrors(Test,Held.Issues,TEXT("deferred apply")) || !Test.TestEqual(TEXT("deferred apply keeps the actual asset"),Held.Api,Api)
+  || !Test.TestEqual(TEXT("deferred apply retains one endpoint"),Api->Endpoints.Num(),1)
+  || !Test.TestEqual(TEXT("deferred apply retains one parameter"),Api->Endpoints[0].Params.Num(),1)) return false;
+ Test.TestFalse(TEXT("automated refused upgrade leaves the actual parameter optional"),Api->Endpoints[0].Params[0].bRequired);
+ Test.TestEqual(TEXT("automated refused upgrade preserves native default"),Api->Endpoints[0].Params[0].Default,OriginalDefault);
+ Test.TestEqual(TEXT("automated refused upgrade preserves route"),Api->Endpoints[0].Path,FString(TEXT("/lookup")));
+ Test.TestEqual(TEXT("automated refused upgrade preserves parameter type"),Api->Endpoints[0].Params[0].Type.Kind,OriginalType.Kind);
+ Test.TestEqual(TEXT("automated refused upgrade preserves parameter container"),Api->Endpoints[0].Params[0].Type.Container,OriginalType.Container);
+ Test.TestEqual(TEXT("automated refused upgrade preserves parameter type object"),Api->Endpoints[0].Params[0].Type.Type.Get(),OriginalType.Type.Get());
+ Test.TestEqual(TEXT("automated refused upgrade preserves JSON-value mode"),Api->Endpoints[0].Params[0].Type.bJsonValue,OriginalType.bJsonValue);
+ Test.TestEqual(TEXT("automated refused upgrade preserves parameter pin"),Api->Endpoints[0].Params[0].PinName,Pin);
+ Test.TestEqual(TEXT("automated refused upgrade preserves endpoint GUID"),Api->Endpoints[0].Id,EndpointId);
+ auto Again=FVaRestOpenApiReimporter::Preview(Api,RequiredPlan,Automated);
+ if (!Test.TestTrue(TEXT("deferred base supports a later real preview"),Again.bValid)) return false;
+ const auto* StillRequired=Find(Again,ParamId,TEXT("required"));
+ Test.TestTrue(TEXT("deferred requiredness remains pending on repeated automated preview"),StillRequired && StillRequired->bBreaking && StillRequired->bDeferred);
+ FVaRestOpenApiMergeOptions Allowed; Allowed.bAutomated=bAllowBreaking; Allowed.bAllowBreaking=bAllowBreaking;
+ auto Accepted=FVaRestOpenApiReimporter::Preview(Api,RequiredPlan,Allowed);
+ if (!Test.TestTrue(TEXT("actual allowed-policy preview"),Accepted.bValid) || !NoErrors(Test,Accepted.Issues,TEXT("allowed preview"))) return false;
+ const auto* AcceptedRequired=Find(Accepted,ParamId,TEXT("required"));
+ Test.TestTrue(bAllowBreaking ? TEXT("AllowBreaking admits existing requiredness upgrade") : TEXT("interactive policy admits existing requiredness upgrade"),
+  AcceptedRequired && AcceptedRequired->bBreaking && AcceptedRequired->bApply && !AcceptedRequired->bDeferred);
+ const auto Changed=FVaRestOpenApiReimporter::Apply(Api,RequiredPlan,Accepted,Options); Owned.Keep(Changed);
+ if (!NoErrors(Test,Changed.Issues,TEXT("allowed apply")) || !Test.TestEqual(TEXT("allowed apply keeps asset identity"),Changed.Api,Api)
+  || !Test.TestEqual(TEXT("allowed apply retains one endpoint"),Api->Endpoints.Num(),1)
+  || !Test.TestEqual(TEXT("allowed apply retains one parameter"),Api->Endpoints[0].Params.Num(),1)) return false;
+ Test.TestTrue(TEXT("allowed upgrade actually sets requiredness"),Api->Endpoints[0].Params[0].bRequired);
+ Test.TestEqual(TEXT("allowed upgrade applies native default companion"),Api->Endpoints[0].Params[0].Default,RequiredPlan.Endpoints[0].Parameters[0].DefaultText);
+ Test.TestEqual(TEXT("allowed upgrade applies route companion"),Api->Endpoints[0].Path,FString(TEXT("/lookup-v2")));
+ Test.TestEqual(TEXT("allowed upgrade preserves type"),Api->Endpoints[0].Params[0].Type.Kind,OriginalType.Kind);
+ Test.TestEqual(TEXT("allowed upgrade preserves container"),Api->Endpoints[0].Params[0].Type.Container,OriginalType.Container);
+ Test.TestEqual(TEXT("allowed upgrade preserves type object"),Api->Endpoints[0].Params[0].Type.Type.Get(),OriginalType.Type.Get());
+ Test.TestEqual(TEXT("allowed upgrade preserves JSON-value mode"),Api->Endpoints[0].Params[0].Type.bJsonValue,OriginalType.bJsonValue);
+ Test.TestEqual(TEXT("allowed upgrade preserves pin"),Api->Endpoints[0].Params[0].PinName,Pin);
+ Test.TestEqual(TEXT("allowed upgrade preserves endpoint GUID"),Api->Endpoints[0].Id,EndpointId);
+ if (!Test.TestTrue(TEXT("seed before required-to-optional relaxation"),FVaRestOpenApiReimporter::SeedOptions(Api,PlanOptions))) return false;
+ const auto RelaxedPlan=FVaRestOpenApiPlanner::Build(FVaRestOpenApiLoader::Analyze(Root,Bytes(ParameterDocument(false,TEXT("relaxed"),TEXT("/lookup-v2")))),PlanOptions);
+ if (!Test.TestTrue(TEXT("relaxed parameter plan"),RelaxedPlan.bValid) || !NoErrors(Test,RelaxedPlan.Issues,TEXT("relaxed plan"))
+  || !Test.TestEqual(TEXT("relaxed plan endpoint"),RelaxedPlan.Endpoints.Num(),1)
+  || !Test.TestEqual(TEXT("relaxed plan parameter"),RelaxedPlan.Endpoints[0].Parameters.Num(),1)) return false;
+ auto Relaxed=FVaRestOpenApiReimporter::Preview(Api,RelaxedPlan,Automated);
+ if (!Test.TestTrue(TEXT("actual automated relaxation preview"),Relaxed.bValid) || !NoErrors(Test,Relaxed.Issues,TEXT("relaxed preview"))) return false;
+ const auto* Relax=Find(Relaxed,ParamId,TEXT("required"));
+ Test.TestTrue(TEXT("required to optional is nonbreaking and automatically applied"),Relax && !Relax->bBreaking && Relax->bApply && !Relax->bDeferred);
+ const auto RelaxedResult=FVaRestOpenApiReimporter::Apply(Api,RelaxedPlan,Relaxed,Options); Owned.Keep(RelaxedResult);
+ if (!NoErrors(Test,RelaxedResult.Issues,TEXT("relaxed apply")) || !Test.TestEqual(TEXT("relaxation keeps asset identity"),RelaxedResult.Api,Api)
+  || !Test.TestEqual(TEXT("relaxed apply retains one endpoint"),Api->Endpoints.Num(),1)
+  || !Test.TestEqual(TEXT("relaxed apply retains one parameter"),Api->Endpoints[0].Params.Num(),1)) return false;
+ Test.TestFalse(TEXT("real relaxed parameter becomes optional"),Api->Endpoints[0].Params[0].bRequired);
+ Test.TestEqual(TEXT("relaxation applies nonblocked default"),Api->Endpoints[0].Params[0].Default,RelaxedPlan.Endpoints[0].Parameters[0].DefaultText);
+ Test.TestEqual(TEXT("relaxation preserves endpoint GUID"),Api->Endpoints[0].Id,EndpointId);
+ return true;
+}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestOpenApiShapesOfflineTest,"VaRest.OpenApi.Offline.ShapeEquivalence",
+ EAutomationTestFlags::EditorContext|EAutomationTestFlags::EngineFilter)
+bool FVaRestOpenApiShapesOfflineTest::RunTest(const FString& Parameters)
+{
+ using namespace VaRestOpenApiOfflineTest;
+ for (const FString& Name:TArray<FString>{TEXT("description"),TEXT("example"),TEXT("examples")})
+ {
+  if (!CheckShapes(*this,PropertySchema(Name),PropertySchema(Name,true),true)) return false;
+  auto A=PropertySchema(TEXT("code"),true).Set(TEXT("default"),FVaRestJson::Object().Set(Name,1));
+  auto B=PropertySchema(TEXT("code"),true).Set(TEXT("default"),FVaRestJson::Object().Set(Name,2));
+  if (!CheckShapes(*this,A,B,true)) return false;
+ }
+ auto A=PropertySchema(TEXT("description")).Set(TEXT("description"),TEXT("root before"))
+  .Set(TEXT("example"),FVaRestJson::Object().Set(TEXT("description"),TEXT("before"))).Set(TEXT("examples"),FVaRestJson::Array(TEXT("before")));
+ auto B=PropertySchema(TEXT("description")).Set(TEXT("description"),TEXT("root after"))
+  .Set(TEXT("example"),FVaRestJson::Object().Set(TEXT("description"),TEXT("after"))).Set(TEXT("examples"),FVaRestJson::Array(TEXT("after")));
+ A[TEXT("properties")][TEXT("description")].Set(TEXT("description"),TEXT("child before")).Set(TEXT("example"),TEXT("before")).Set(TEXT("examples"),FVaRestJson::Array(TEXT("before")));
+ B[TEXT("properties")][TEXT("description")].Set(TEXT("description"),TEXT("child after")).Set(TEXT("example"),TEXT("after")).Set(TEXT("examples"),FVaRestJson::Array(TEXT("after")));
+ if (!CheckShapes(*this,A,B,false)) return false;
+ const auto Schemas=FVaRestJson::Object().Set(TEXT("Shared"),PropertySchema(TEXT("description")));
+ auto RefA=FVaRestJson::Object().Set(TEXT("$ref"),TEXT("#/components/schemas/Shared")).Set(TEXT("description"),TEXT("reference before"))
+  .Set(TEXT("example"),FVaRestJson::Object().Set(TEXT("description"),TEXT("before"))).Set(TEXT("examples"),FVaRestJson::Array(TEXT("before")));
+ auto RefB=FVaRestJson::Object().Set(TEXT("$ref"),TEXT("#/components/schemas/Shared")).Set(TEXT("description"),TEXT("reference after"))
+  .Set(TEXT("example"),FVaRestJson::Object().Set(TEXT("description"),TEXT("after"))).Set(TEXT("examples"),FVaRestJson::Array(TEXT("after")));
+ return CheckShapes(*this,RefA,RefB,false,Schemas);
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestOpenApiRequirednessOfflineTest,"VaRest.OpenApi.Offline.Requiredness",
+ EAutomationTestFlags::EditorContext|EAutomationTestFlags::EngineFilter)
+bool FVaRestOpenApiRequirednessOfflineTest::RunTest(const FString& Parameters)
+{
+ return VaRestOpenApiOfflineTest::RequirednessCase(*this,true) && VaRestOpenApiOfflineTest::RequirednessCase(*this,false);
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestOpenApiSourceNoopOfflineTest,"VaRest.OpenApi.Offline.SourceNoop",
+ EAutomationTestFlags::EditorContext|EAutomationTestFlags::EngineFilter)
+bool FVaRestOpenApiSourceNoopOfflineTest::RunTest(const FString& Parameters)
+{
+ using namespace VaRestOpenApiOfflineTest;
+ using namespace VaRest::OpenApi;
+ FOwnedAssets Owned;
+ const FString Directory=FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir()/TEXT("VaRestOpenApiQualification")/FGuid::NewGuid().ToString(EGuidFormats::Digits));
+ const FString Filename=Directory/TEXT("source-noop.json");
+ if (!TestFalse(TEXT("source fixture never overwrites a preexisting file"),IFileManager::Get().FileExists(*Filename)) ||
+  !TestTrue(TEXT("create owned source fixture directory"),IFileManager::Get().MakeDirectory(*Directory,true))) return false;
+ ON_SCOPE_EXIT { IFileManager::Get().Delete(*Filename,false,true); IFileManager::Get().DeleteDirectory(*Directory,false,false); };
+ if (!TestTrue(TEXT("write actual initial source file"),FFileHelper::SaveStringToFile(Source,*Filename))) return false;
+ const auto Loaded=AnalyzeLocalFile(Filename,false);
+ if (!TestTrue(TEXT("real source reader accepts fixture"),Loaded.Analysis.bDocumentValid) || !NoErrors(*this,Loaded.Analysis.Issues,TEXT("source load"))) return false;
+ TStrongObjectPtr<UVaRestOpenApiImportOptions> ImportOptions(NewObject<UVaRestOpenApiImportOptions>());
+ if (!TestTrue(TEXT("fixture options are independent of user config"),ImportOptions->FromJson(FVaRestJson::Object()))) return false;
+ ImportOptions->bImportAllOperations=false; ImportOptions->bIncludeNewOperations=false;
+ ImportOptions->SelectedOperations={TEXT("GET /pets/{id}")};
+ const FString Folder=TEXT("/Game/__VaRestSourceNoop_")+FGuid::NewGuid().ToString(EGuidFormats::Digits);
+ TStrongObjectPtr<UPackage> Package(CreatePackage(*(Folder/TEXT("Api"))));
+ FVaRestOpenApiApplyOptions Options; Options.Parent=Package.Get(); Options.ApiName=TEXT("Api"); Options.TypesFolder=Folder/TEXT("StoredTypes");
+ Options.bRegisterAssets=false; Options.bAddToSettings=false; Options.Source=Loaded.Source;
+ Options.Options=ImportOptions->ToJson().Set(TEXT("knownOperations"),OperationRecords(Loaded.Analysis));
+ auto PlanOptions=ImportOptions->PlanOptions(TEXT("Api"));
+ const auto Plan=FVaRestOpenApiPlanner::Build(Loaded.Analysis,PlanOptions);
+ const auto Applied=FVaRestOpenApiApplier::Apply(Plan,Options); Owned.Keep(Applied);
+ if (!NoErrors(*this,Applied.Issues,TEXT("source initial apply")) || !TestNotNull(TEXT("actual source-backed API"),Applied.Api)) return false;
+ auto* Api=Applied.Api;
+ if (!TestEqual(TEXT("one selected initial endpoint"),Api->Endpoints.Num(),1) ||
+  !TestEqual(TEXT("fixture creates real struct and enum packages"),Applied.AdditionalObjects.Num(),2)) return false;
+ const FGuid EndpointId=Api->Endpoints[0].Id;
+ TArray<TPair<UPackage*,uint32>> PackageFlags;
+ for (const auto& Object:Owned.Objects) if (Object.IsValid())
+ {
+  auto* ObjectPackage=Object->GetOutermost(); ObjectPackage->SetDirtyFlag(false);
+  PackageFlags.Emplace(ObjectPackage,uint32(ObjectPackage->GetPackageFlags()));
+ }
+ const FVaRestApiImportState InitialState=Api->ImportState;
+ const FString Extra=FString(Source).Replace(TEXT("\"paths\":{"),TEXT("\"paths\":{\"/ignored\":{\"get\":{\"operationId\":\"ignored\",\"responses\":{\"200\":{\"description\":\"ok\"}}}},"));
+ const auto ExtraLoaded=FVaRestOpenApiLoader::Analyze(Filename,Bytes(Extra));
+ if (!TestTrue(TEXT("ignored operation addition is genuinely valid"),ExtraLoaded.bDocumentValid) ||
+  !TestEqual(TEXT("upstream now has two real operations"),ExtraLoaded.Model.Operations.Num(),2) ||
+  !TestTrue(TEXT("write source containing only an unselected operation addition"),FFileHelper::SaveStringToFile(Extra,*Filename))) return false;
+ const auto Unchanged=[&]()
+ {
+  TestEqual(TEXT("no-op preserves importer identity"),Api->ImportState.Importer,InitialState.Importer);
+  TestEqual(TEXT("no-op preserves manifest version"),Api->ImportState.Version,InitialState.Version);
+  TestTrue(TEXT("no-op preserves every manifest byte including source hash and known operations"),Api->ImportState.Blob==InitialState.Blob);
+  for (const auto& Entry:PackageFlags)
+  {
+   TestFalse(TEXT("no-op leaves every generated package clean"),Entry.Key->IsDirty());
+   TestEqual(TEXT("no-op preserves all generated package flags"),uint32(Entry.Key->GetPackageFlags()),Entry.Value);
+  }
+ };
+ const auto Checked=FVaRestOpenApiReimporter::FromSource(Api,true,false,true);
+ if (!NoErrors(*this,Checked.Issues,TEXT("source check")) || !TestTrue(TEXT("actual source Check reports no drift"),Checked.Api==Api && Checked.bNoChanges)) return false;
+ Unchanged();
+ for (int32 Pass=0;Pass<2;++Pass)
+ {
+  const auto Noop=FVaRestOpenApiReimporter::FromSource(Api,true);
+  if (!NoErrors(*this,Noop.Issues,TEXT("source no-op")) || !TestTrue(TEXT("actual source Apply remains a no-op"),Noop.Api==Api && Noop.bNoChanges)) return false;
+  TestTrue(TEXT("source no-op reports no changed packages or new assets"),Noop.ChangedPackages.IsEmpty() && Noop.AdditionalObjects.IsEmpty()); Unchanged();
+ }
+ // An explicit metadata option edit must still commit through the public Apply path.
+ if (!TestTrue(TEXT("seed current identities for explicit option control"),FVaRestOpenApiReimporter::SeedOptions(Api,PlanOptions))) return false;
+ const auto SamePlan=FVaRestOpenApiPlanner::Build(ExtraLoaded,PlanOptions);
+ FVaRestOpenApiMergeOptions Automated; Automated.bAutomated=true;
+ auto OptionPreview=FVaRestOpenApiReimporter::Preview(Api,SamePlan,Automated);
+ if (!TestTrue(TEXT("explicit option control starts from a valid preview"),OptionPreview.bValid) ||
+  !TestFalse(TEXT("explicit option control has no content writes"),OptionPreview.Merge.HasWrites()) ||
+  !TestTrue(TEXT("explicit option control has no base changes"),FVaRestOpenApiMerge::ItemsJson(OptionPreview.Merge.NextBase(OptionPreview.Base,OptionPreview.Theirs)).Equals(OptionPreview.Manifest[TEXT("items")]))) return false;
+ auto ExplicitOptions=Options; ExplicitOptions.Options=Options.Options.Clone().Set(TEXT("allowOutside"),true);
+ const auto OptionChanged=FVaRestOpenApiReimporter::Apply(Api,SamePlan,OptionPreview,ExplicitOptions); Owned.Keep(OptionChanged);
+ if (!NoErrors(*this,OptionChanged.Issues,TEXT("explicit option apply")) || !TestTrue(TEXT("explicit option edit is a real commit"),OptionChanged.Api==Api && !OptionChanged.bNoChanges)) return false;
+ TestTrue(TEXT("explicit option edit changes actual import state"),Api->ImportState.Blob!=InitialState.Blob);
+ TestTrue(TEXT("explicit option edit dirties the actual API package"),Package->IsDirty());
+ const auto OptionState=Api->ImportState;
+ const auto AfterOption=FVaRestOpenApiReimporter::FromSource(Api,true);
+ if (!NoErrors(*this,AfterOption.Issues,TEXT("source after option edit")) || !TestTrue(TEXT("source wrapper respects committed options without discovery churn"),AfterOption.Api==Api && AfterOption.bNoChanges)) return false;
+ TestTrue(TEXT("option control state survives the next source no-op"),Api->ImportState.Blob==OptionState.Blob);
+ const FString Content=Extra.Replace(TEXT("Original summary"),TEXT("Selected source update"));
+ if (!TestTrue(TEXT("write a genuine selected operation update"),FFileHelper::SaveStringToFile(Content,*Filename))) return false;
+ const auto Changed=FVaRestOpenApiReimporter::FromSource(Api,true); Owned.Keep(Changed);
+ if (!NoErrors(*this,Changed.Issues,TEXT("selected source update")) || !TestTrue(TEXT("selected content update still commits"),Changed.Api==Api && !Changed.bNoChanges) ||
+  !TestEqual(TEXT("unselected operation remains unimported"),Api->Endpoints.Num(),1)) return false;
+ TestEqual(TEXT("real selected source description updates"),Api->Endpoints[0].Description,FString(TEXT("Selected source update")));
+ TestEqual(TEXT("source update preserves actual endpoint GUID"),Api->Endpoints[0].Id,EndpointId);
+ TestTrue(TEXT("real content update advances import state"),Api->ImportState.Blob!=OptionState.Blob);
+ return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestOpenApiTypeFoldersOfflineTest,"VaRest.OpenApi.Offline.TypeFolders",
+ EAutomationTestFlags::EditorContext|EAutomationTestFlags::EngineFilter)
+bool FVaRestOpenApiTypeFoldersOfflineTest::RunTest(const FString& Parameters)
+{
+ using namespace VaRestOpenApiOfflineTest;
+ const FString Root=TEXT("/VaRestOpenApiQualification/folders.json");
+ for (int32 Mode=0;Mode<3;++Mode)
+ {
+  FOwnedAssets Owned;
+  const FString Folder=TEXT("/Game/__VaRestTypeFolders_")+FGuid::NewGuid().ToString(EGuidFormats::Digits);
+  TStrongObjectPtr<UPackage> Package(CreatePackage(*(Folder/TEXT("Pets"))));
+  FVaRestOpenApiPlanOptions PlanOptions; PlanOptions.ApiName=TEXT("Pets");
+  const auto Plan=FVaRestOpenApiPlanner::Build(FVaRestOpenApiLoader::Analyze(Root,Bytes(Source)),PlanOptions);
+  FVaRestOpenApiApplyOptions Options; Options.Parent=Package.Get(); Options.ApiName=TEXT("Pets");
+  Options.bRegisterAssets=false; Options.bAddToSettings=false;
+  if (Mode!=0) Options.TypesFolder=Folder/(Mode==1 ? TEXT("ExplicitTypes") : TEXT("Types"));
+  const FString InitialFolder=Mode==0 ? Folder/TEXT("Pets_Types") : Options.TypesFolder;
+  const auto Applied=FVaRestOpenApiApplier::Apply(Plan,Options); Owned.Keep(Applied);
+  if (!NoErrors(*this,Applied.Issues,TEXT("folder initial apply")) || !TestNotNull(TEXT("folder fixture actual API"),Applied.Api) ||
+   !TestEqual(TEXT("folder fixture creates both real type assets"),Applied.AdditionalObjects.Num(),2)) return false;
+  auto* Api=Applied.Api;
+  TestEqual(TEXT("default or explicit actual folder is stored on the API"),Api->TypesFolder,InitialFolder);
+  TArray<TPair<UObject*,FString>> ExistingPaths;
+  for (auto* Object:Applied.AdditionalObjects)
+  {
+   TestEqual(TEXT("each actual initial type lives in the chosen folder"),FPackageName::GetLongPackagePath(Object->GetOutermost()->GetName()),InitialFolder);
+   ExistingPaths.Emplace(Object,Object->GetPathName());
+  }
+  // Legacy assets without recorded folder metadata get a fallback for NEW types only.
+  // Existing objects retain their original package paths, including the old shared Types folder.
+  if (Mode==2) Api->TypesFolder.Reset();
+  const FString Expected=Mode==2 ? Folder/TEXT("Pets_Types") : InitialFolder;
+  if (!TestTrue(TEXT("seed actual existing type identities"),FVaRestOpenApiReimporter::SeedOptions(Api,PlanOptions))) return false;
+  const FString Updated=FString(Source).Replace(TEXT("\"status\":{\"$ref\":\"#/components/schemas/Status\"}"),
+   TEXT("\"status\":{\"$ref\":\"#/components/schemas/Status\"},\"details\":{\"type\":\"object\",\"properties\":{\"count\":{\"type\":\"integer\",\"format\":\"int32\"}}}"));
+  const auto NewPlan=FVaRestOpenApiPlanner::Build(FVaRestOpenApiLoader::Analyze(Root,Bytes(Updated)),PlanOptions);
+  FVaRestOpenApiMergeOptions Automated; Automated.bAutomated=true;
+  auto Preview=FVaRestOpenApiReimporter::Preview(Api,NewPlan,Automated);
+  auto ReimportOptions=Options; ReimportOptions.TypesFolder.Reset(); // use stored folder, not the initial explicit argument
+  const auto Changed=FVaRestOpenApiReimporter::Apply(Api,NewPlan,Preview,ReimportOptions); Owned.Keep(Changed);
+  if (!NoErrors(*this,Changed.Issues,TEXT("folder reimport")) || !TestTrue(TEXT("new referenced type is genuinely created"),Changed.Api==Api && !Changed.AdditionalObjects.IsEmpty())) return false;
+  for (auto* Object:Changed.AdditionalObjects) TestEqual(TEXT("new reimport types use the stored explicit/default or legacy fallback folder"),FPackageName::GetLongPackagePath(Object->GetOutermost()->GetName()),Expected);
+  for (const auto& Entry:ExistingPaths) TestEqual(TEXT("reimport never relocates an existing generated type"),Entry.Key->GetPathName(),Entry.Value);
+  TestEqual(TEXT("stored folder metadata is preserved, including honest legacy absence"),Api->TypesFolder,Mode==2 ? FString() : InitialFolder);
+ }
+ return true;
+}
+
+namespace VaRestOpenApiOfflineTest
+{
+FVaRestOpenApiPlan NoticePlan(const FVaRestJson& Document,FVaRestOpenApiPlanOptions Options={})
+{
+ auto Analysis=FVaRestOpenApiLoader::Analyze(TEXT("/VaRestOpenApiQualification/notices.json"),Bytes(Document.ToString()));
+ // Only plain owned analysis/options enter the same real planner used by import. No test/UObject/registry closure.
+ return Async(EAsyncExecution::ThreadPool,[Analysis=MoveTemp(Analysis),Options=MoveTemp(Options)]() { return FVaRestOpenApiPlanner::Build(Analysis,Options); }).Get();
+}
+FVaRestJson NoticeDocument(const FString& Name,const FString& EnumName,bool Integer,const FVaRestJson& Default)
+{
+ auto Properties=FVaRestJson::Object().Set(TEXT("payload"),FVaRestJson::Object().Set(TEXT("type"),Integer ? TEXT("integer") : TEXT("string")))
+  .Set(TEXT("metadata"),FVaRestJson::Object().Set(TEXT("type"),TEXT("object")).Set(TEXT("additionalProperties"),FVaRestJson::Object().Set(TEXT("type"),TEXT("integer"))).Set(TEXT("default"),Default))
+  .Set(TEXT("state"),FVaRestJson::Object().Set(TEXT("$ref"),TEXT("#/components/schemas/")+EnumName));
+ auto Schemas=FVaRestJson::Object().Set(Name,FVaRestJson::Object().Set(TEXT("type"),TEXT("object")).Set(TEXT("properties"),Properties))
+  .Set(EnumName,FVaRestJson::Object().Set(TEXT("type"),TEXT("string")).Set(TEXT("enum"),FVaRestJson::Array().Add(TEXT("first")).Add(TEXT("second"))));
+ auto Operation=FVaRestJson::Object().Set(TEXT("operationId"),TEXT("notice"))
+  .Set(TEXT("responses"),FVaRestJson::Object().Set(TEXT("200"),SchemaResponse(FVaRestJson::Object().Set(TEXT("$ref"),TEXT("#/components/schemas/")+Name))));
+ return FVaRestJson::Object().Set(TEXT("openapi"),TEXT("3.0.3"))
+  .Set(TEXT("info"),FVaRestJson::Object().Set(TEXT("title"),TEXT("Notices")).Set(TEXT("version"),TEXT("1")))
+  .Set(TEXT("servers"),FVaRestJson::Array().Add(FVaRestJson::Object().Set(TEXT("url"),TEXT("https://notices.invalid"))))
+  .Set(TEXT("paths"),FVaRestJson::Object().Set(TEXT("/notice"),FVaRestJson::Object().Set(TEXT("get"),Operation)))
+  .Set(TEXT("components"),FVaRestJson::Object().Set(TEXT("schemas"),Schemas));
+}
+}
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestOpenApiPlanNoticesOfflineTest,"VaRest.OpenApi.Offline.PlanNotices",
+ EAutomationTestFlags::EditorContext|EAutomationTestFlags::EngineFilter)
+bool FVaRestOpenApiPlanNoticesOfflineTest::RunTest(const FString& Parameters)
+{
+ using namespace VaRestOpenApiOfflineTest;using namespace VaRest::OpenApi;
+ auto Paths=FVaRestJson::Object();
+ for (int32 Index=0;Index<4;++Index)
+ {
+  auto Properties=Index<3 ? FVaRestJson::Object().Set(TEXT("data"),PropertySchema(TEXT("value")))
+   .Set(TEXT("ok"),FVaRestJson::Object().Set(TEXT("type"),TEXT("boolean"))) : FVaRestJson::Object().Set(TEXT("plain"),FVaRestJson::Object().Set(TEXT("type"),TEXT("string")));
+  auto Schema=FVaRestJson::Object().Set(TEXT("type"),TEXT("object")).Set(TEXT("properties"),Properties);
+  if (Index<3) Schema.Set(TEXT("required"),FVaRestJson::Array().Add(TEXT("ok")));
+  auto Operation=FVaRestJson::Object().Set(TEXT("operationId"),TEXT("selected")+FString::FromInt(Index))
+   .Set(TEXT("responses"),FVaRestJson::Object().Set(TEXT("200"),SchemaResponse(Schema)));
+  Paths.Set(TEXT("/selected")+FString::FromInt(Index),FVaRestJson::Object().Set(TEXT("get"),Operation));
+ }
+ auto Document=FVaRestJson::Object().Set(TEXT("openapi"),TEXT("3.0.3")).Set(TEXT("info"),FVaRestJson::Object().Set(TEXT("title"),TEXT("Envelope evidence")).Set(TEXT("version"),TEXT("1")))
+  .Set(TEXT("servers"),FVaRestJson::Array().Add(FVaRestJson::Object().Set(TEXT("url"),TEXT("https://notices.invalid")))).Set(TEXT("paths"),Paths);
+ FVaRestOpenApiPlanOptions Options;Options.bDetectEnvelope=false;
+ const auto Detected=NoticePlan(Document,Options);
+ if (!TestTrue(TEXT("actual selected envelope plan is valid"),Detected.bValid) || !NoErrors(*this,Detected.Issues,TEXT("detected plan"))) return false;
+ TestEqual(TEXT("unchecked unwrapping still records the real candidate key"),Detected.EnvelopeCandidate.DataPath,FString(TEXT("data")));
+ TestEqual(TEXT("real wrapped count"),Detected.EnvelopeCandidate.WrappedOperations,3);
+ TestEqual(TEXT("real considered count"),Detected.EnvelopeCandidate.ConsideredOperations,4);
+ TestTrue(TEXT("candidate does not silently apply unwrapping"),Detected.Envelope.DataPath.IsEmpty() && Detected.Envelope.WrappedOperations==0);
+ const auto Evidence=Detected.ToJson()[TEXT("envelopeCandidate")];
+ TestTrue(TEXT("public plain plan JSON retains candidate evidence separately"),Evidence[TEXT("dataPath")].AsString()==TEXT("data") && Evidence[TEXT("wrapped")].AsInt()==3 && Evidence[TEXT("considered")].AsInt()==4);
+ Options.bDetectEnvelope=true;const auto AppliedEnvelope=NoticePlan(Document,Options);
+ TestTrue(TEXT("enabled plan applies the same real detector result"),AppliedEnvelope.Envelope.DataPath==TEXT("data") && AppliedEnvelope.Envelope.WrappedOperations==3 && AppliedEnvelope.Envelope.ConsideredOperations==4);
+ Options.bSelectAllOperations=false;Options.SelectedOperations={TEXT("selected0"),TEXT("selected1")};
+ const auto Subset=NoticePlan(Document,Options);
+ TestTrue(TEXT("replanning selection recomputes detector counts instead of using a stale whole-document result"),Subset.Endpoints.Num()==2 && Subset.EnvelopeCandidate.ConsideredOperations==2 && Subset.EnvelopeCandidate.WrappedOperations==0 && Subset.EnvelopeCandidate.DataPath.IsEmpty() && Subset.Envelope.DataPath.IsEmpty());
+
+ auto CollisionDocument=NoticeDocument(TEXT("pet_owner"),TEXT("State"),false,FVaRestJson::Object());
+ auto CollisionSchemas=CollisionDocument[TEXT("components")][TEXT("schemas")].Clone().Set(TEXT("petOwner"),PropertySchema(TEXT("other")));
+ CollisionDocument.Set(TEXT("components"),FVaRestJson::Object().Set(TEXT("schemas"),CollisionSchemas));
+ FVaRestOpenApiPlanOptions CollisionOptions;CollisionOptions.bGenerateUnreferencedSchemas=true;
+ const auto Collision=NoticePlan(CollisionDocument,CollisionOptions);
+ TestTrue(TEXT("source-order generated collision is reported without fabricating a registry shadow"),Has(Collision.Issues,TEXT("OA-NAME-COLLISION")) && !Has(Collision.Issues,TEXT("OA-NAME-SHADOW")));
+ TestTrue(TEXT("actual allocator retains the original unsuffixed and next source-order name"),Collision.Structs.ContainsByPredicate([](const auto& Row) { return Row.AssetName==TEXT("S_PetOwner"); }) && Collision.Structs.ContainsByPredicate([](const auto& Row) { return Row.AssetName==TEXT("S_PetOwner_2"); }));
+
+ FOwnedAssets Owned;FVaRestOpenApiPlanOptions OriginalOptions;
+ const auto Original=FVaRestOpenApiPlanner::Build(FVaRestOpenApiLoader::Analyze(TEXT("/VaRestOpenApiQualification/root.json"),Bytes(Source)),OriginalOptions);
+ const FString Folder=TEXT("/Game/__VaRestPlanNotices_")+FGuid::NewGuid().ToString(EGuidFormats::Digits);
+ TStrongObjectPtr<UPackage> Package(CreatePackage(*(Folder/TEXT("Api"))));
+ FVaRestOpenApiApplyOptions Apply;Apply.Parent=Package.Get();Apply.ApiName=TEXT("Api");Apply.TypesFolder=Folder/TEXT("Types");Apply.bRegisterAssets=false;Apply.bAddToSettings=false;
+ const auto Created=FVaRestOpenApiApplier::Apply(Original,Apply);Owned.Keep(Created);
+ if (!NoErrors(*this,Created.Issues,TEXT("notice fixture apply")) || !TestNotNull(TEXT("actual notice API"),Created.Api)) return false;
+ TArray<UObject*> Registered;
+ ON_SCOPE_EXIT { for (auto* Object:Registered) FAssetRegistryModule::AssetDeleted(Object); };
+ for (auto* Object:Created.AdditionalObjects) if (Object && (Object->IsA<UUserDefinedStruct>() || Object->IsA<UUserDefinedEnum>()))
+ { FAssetRegistryModule::AssetCreated(Object);Registered.Add(Object); }
+ if (!TestEqual(TEXT("owned registry fixture has one real struct and enum"),Registered.Num(),2)) return false;
+ const auto Names=SnapshotExistingTypeNames();
+ for (auto* Object:Registered) TestTrue(TEXT("GT registry snapshot contains the actual existing type"),Names.ContainsByPredicate([&](const FString& Name) { return Name.Equals(Object->GetName(),ESearchCase::IgnoreCase); }));
+ FVaRestOpenApiPlanOptions ShadowOptions;ShadowOptions.ExistingTypeNames=Names;
+ auto Analysis=FVaRestOpenApiLoader::Analyze(TEXT("/VaRestOpenApiQualification/root.json"),Bytes(Source));
+ const auto Shadow=Async(EAsyncExecution::ThreadPool,[Analysis,ShadowOptions]() { return FVaRestOpenApiPlanner::Build(Analysis,ShadowOptions); }).Get();
+ TestTrue(TEXT("real project-name reservation reports collision and shadow"),Has(Shadow.Issues,TEXT("OA-NAME-COLLISION")) && Has(Shadow.Issues,TEXT("OA-NAME-SHADOW")));
+ for (const auto& Issue:Shadow.Issues)
+ {
+  if (Issue.Code==TEXT("OA-NAME-COLLISION")) TestEqual(TEXT("collision is informational"),Issue.Severity,EVaRestOpenApiSeverity::Info);
+  if (Issue.Code==TEXT("OA-NAME-SHADOW")) TestTrue(TEXT("shadow warns and suggests a real prefix option"),Issue.Severity==EVaRestOpenApiSeverity::Warning && Issue.Message.Contains(TEXT("Type prefix")));
+ }
+ if (!TestTrue(TEXT("seed actual retained type identities"),FVaRestOpenApiReimporter::SeedOptions(Created.Api,ShadowOptions))) return false;
+ const auto Retained=FVaRestOpenApiPlanner::Build(Analysis,ShadowOptions);
+ for (const auto& Type:Original.Structs) TestTrue(TEXT("existing definition identity keeps its actual name despite registry reservations"),Retained.Structs.ContainsByPredicate([&](const auto& Row) { return Row.Id==Type.Id && Row.AssetName==Type.AssetName; }));
+ for (const auto& Type:Original.Enums) TestTrue(TEXT("existing enum identity keeps its actual name"),Retained.Enums.ContainsByPredicate([&](const auto& Row) { return Row.Id==Type.Id && Row.AssetName==Type.AssetName; }));
+ TestFalse(TEXT("retained definitions are not newly reported as shadows"),Has(Retained.Issues,TEXT("OA-NAME-SHADOW")));
+ return true;
+}
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestOpenApiReimportNoticesOfflineTest,"VaRest.OpenApi.Offline.ReimportNotices",
+ EAutomationTestFlags::EditorContext|EAutomationTestFlags::EngineFilter)
+bool FVaRestOpenApiReimportNoticesOfflineTest::RunTest(const FString& Parameters)
+{
+ using namespace VaRestOpenApiOfflineTest;using namespace VaRest::OpenApi;
+ const auto Defaults=FVaRestJson::Object().Set(TEXT("id"),1).Set(TEXT("name"),2).Set(TEXT("location"),3).Set(TEXT("description"),4);
+ const auto Before=NoticePlan(NoticeDocument(TEXT("Before"),TEXT("StateBefore"),false,Defaults));
+ FOwnedAssets Owned;const FString Folder=TEXT("/Game/__VaRestReimportNotices_")+FGuid::NewGuid().ToString(EGuidFormats::Digits);
+ TStrongObjectPtr<UPackage> Package(CreatePackage(*(Folder/TEXT("Api"))));
+ FVaRestOpenApiApplyOptions Apply;Apply.Parent=Package.Get();Apply.ApiName=TEXT("Api");Apply.TypesFolder=Folder/TEXT("Types");Apply.bRegisterAssets=false;Apply.bAddToSettings=false;
+ const auto Created=FVaRestOpenApiApplier::Apply(Before,Apply);Owned.Keep(Created);
+ if (!NoErrors(*this,Created.Issues,TEXT("reimport notices apply")) || !TestNotNull(TEXT("real persisted notice API"),Created.Api) || !TestEqual(TEXT("notice endpoint count"),Created.Api->Endpoints.Num(),1)) return false;
+ auto* Api=Created.Api;auto* Struct=Cast<UUserDefinedStruct>(Api->Endpoints[0].ResponseType.Type.Get());
+ if (!TestNotNull(TEXT("actual generated row struct"),Struct)) return false;
+ const auto OriginalState=Api->ImportState;const FGuid Endpoint=Api->Endpoints[0].Id;
+ FVaRestOpenApiPlanOptions PlanOptions;if (!TestTrue(TEXT("seed persisted actual reimport identities"),FVaRestOpenApiReimporter::SeedOptions(Api,PlanOptions))) return false;
+ const auto Renamed=NoticePlan(NoticeDocument(TEXT("After"),TEXT("StateBefore"),false,Defaults),PlanOptions);
+ auto Preview=FVaRestOpenApiReimporter::Preview(Api,Renamed);
+ if (!TestTrue(TEXT("actual renamed-source preview is valid"),Preview.bValid) || !NoErrors(*this,Preview.Issues,TEXT("rename preview"))) return false;
+ TestTrue(TEXT("equal recorded struct shape gives informational possible-rename notice"),Has(Preview.Issues,TEXT("OA-REIMPORT-MAYBERENAME")));
+ for (const auto& Issue:Preview.Issues) if (Issue.Code==TEXT("OA-REIMPORT-MAYBERENAME")) TestEqual(TEXT("possible rename never demands or performs adoption"),Issue.Severity,EVaRestOpenApiSeverity::Info);
+ TestTrue(TEXT("rename hint retains distinct removed and added identities"),Preview.Merge.Changes.ContainsByPredicate([](const auto& Row) { return Row.Kind==TEXT("struct") && Row.Change==EVaRestOpenApiChange::Removed; }) && Preview.Merge.Changes.ContainsByPredicate([](const auto& Row) { return Row.Kind==TEXT("struct") && Row.Change==EVaRestOpenApiChange::Added; }));
+ const auto EnumRenamed=NoticePlan(NoticeDocument(TEXT("Before"),TEXT("StateAfter"),false,Defaults),PlanOptions);
+ const auto EnumPreview=FVaRestOpenApiReimporter::Preview(Api,EnumRenamed);
+ TestTrue(TEXT("equal persisted enum wire shape is also a possible rename"),Has(EnumPreview.Issues,TEXT("OA-REIMPORT-MAYBERENAME")));
+ for (const TCHAR* Key:{TEXT("id"),TEXT("name"),TEXT("location"),TEXT("description")})
+ {
+  const auto Different=Defaults.Clone().Set(Key,99);
+  const auto ChangedDefault=NoticePlan(NoticeDocument(TEXT("After"),TEXT("StateBefore"),false,Different),PlanOptions);
+  const auto ChangedPreview=FVaRestOpenApiReimporter::Preview(Api,ChangedDefault);
+  TestFalse(FString::Printf(TEXT("actual default data key '%s' is never stripped as comparison metadata"),Key),Has(ChangedPreview.Issues,TEXT("OA-REIMPORT-MAYBERENAME")));
+ }
+ // An incomplete persisted comparison record is not permission to infer equality or transfer identity.
+ auto Historical=Preview.Manifest.Clone();auto StoredPlan=Historical[TEXT("plan")].Clone();auto Rows=StoredPlan[TEXT("structs")].Clone();
+ if (!TestTrue(TEXT("real persisted manifest includes its original struct plan"),Rows.IsArray() && Rows.Num()>0)) return false;
+ auto Missing=Rows.At(0).Clone();Missing.Remove(TEXT("fields"));Rows.SetAt(0,Missing);StoredPlan.Set(TEXT("structs"),Rows);Historical.Set(TEXT("plan"),StoredPlan);
+ { ON_SCOPE_EXIT { Api->ImportState=OriginalState; };
+  if (!TestTrue(TEXT("encode an owned incomplete comparison-history fixture"),EncodeState(Historical,Api->ImportState))) return false;
+  const auto Limited=FVaRestOpenApiReimporter::Preview(Api,Renamed);
+  TestTrue(TEXT("incomplete historical comparison is explained"),Has(Limited.Issues,TEXT("OA-REIMPORT-RENAMEUNAVAILABLE")));
+  TestFalse(TEXT("missing historical fields never establish a rename"),Has(Limited.Issues,TEXT("OA-REIMPORT-MAYBERENAME")));
+ }
+ TStrongObjectPtr<UPackage> TablePackage(CreatePackage(*(Folder/TEXT("Rows"))));
+ auto* Table=NewObject<UDataTable>(TablePackage.Get(),TEXT("Rows"),RF_Public|RF_Standalone);Table->RowStruct=Struct;Owned.Objects.Emplace(Table);
+ for (const auto& Object:Owned.Objects) Object->GetOutermost()->SetDirtyFlag(false);
+ const auto Broken=NoticePlan(NoticeDocument(TEXT("Before"),TEXT("StateBefore"),true,Defaults),PlanOptions);
+ const auto Breaking=FVaRestOpenApiReimporter::Preview(Api,Broken);
+ TestTrue(TEXT("actual upstream field type change is breaking"),Breaking.Merge.Changes.ContainsByPredicate([](const auto& Row) { return Row.Kind==TEXT("field") && Row.Property==TEXT("type") && Row.bBreaking; }));
+ TestTrue(TEXT("actual live DataTable row-struct reference produces a preview warning"),Breaking.Issues.ContainsByPredicate([&](const auto& Issue) { return Issue.Code==TEXT("OA-REIMPORT-DATATABLE") && Issue.Severity==EVaRestOpenApiSeverity::Warning && Issue.AssetPath==Table->GetPathName(); }));
+ const auto Ordinary=FVaRestOpenApiReimporter::Preview(Api,Before);
+ TestFalse(TEXT("unchanged row type has no DataTable breaking warning"),Has(Ordinary.Issues,TEXT("OA-REIMPORT-DATATABLE")));
+ TestTrue(TEXT("selected preview includes real plan counts/envelope notice for the dialog"),Has(Breaking.Issues,TEXT("OA-PLAN-PREVIEW")));
+ TestTrue(TEXT("preview warnings never rewrite persisted ownership or endpoint identity"),Api->ImportState.Blob==OriginalState.Blob && Api->Endpoints[0].Id==Endpoint);
+ TestTrue(TEXT("preview never replaces the DataTable row struct or populates/resets rows"),Table->GetRowStruct()==Struct && Table->GetRowMap().IsEmpty());
+ for (const auto& Object:Owned.Objects) TestFalse(TEXT("notice-only previews do not dirty owned assets"),Object->GetOutermost()->IsDirty());
+ return true;
+}
 #endif

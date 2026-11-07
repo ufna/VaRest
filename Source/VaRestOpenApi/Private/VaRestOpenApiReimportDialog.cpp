@@ -7,6 +7,8 @@
 #include "Widgets/Input/SCheckBox.h"
 #include "Widgets/Input/SSearchBox.h"
 #include "Widgets/SBoxPanel.h"
+#include "Widgets/Layout/SBox.h"
+#include "Widgets/Layout/SScrollBox.h"
 #include "Widgets/SWindow.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/Views/STreeView.h"
@@ -26,6 +28,13 @@ FString ValuePreview(const FVaRestJson& Value) { return (Value.IsString() ? Valu
 bool ShowReimportPreview(FVaRestOpenApiReimportPreview& Preview,const FVaRestOpenApiAnalysis&,UVaRestOpenApiImportOptions&,bool& bChangeOptions)
 {
 	bChangeOptions=false;if (!FSlateApplication::IsInitialized()) return false;
+	FString Diagnostics;
+	for (const auto& Issue:Preview.Issues)
+	{
+		const TCHAR* Severity=Issue.Severity==EVaRestOpenApiSeverity::Error ? TEXT("Error") : Issue.Severity==EVaRestOpenApiSeverity::Warning ? TEXT("Warning") : TEXT("Info");
+		Diagnostics+=FString(Severity)+TEXT(" · ")+Issue.Code+TEXT(" · ")+Issue.Message+TEXT("\n");
+		if (!Issue.AssetPath.IsEmpty()) Diagnostics+=Issue.AssetPath+TEXT("\n");
+	}
 	bool Accepted=false,ShowSuppressed=false;FString Search;TArray<FReimportRow> Roots;TSharedPtr<STreeView<FReimportRow>> Tree;TSharedPtr<SWindow> Window;
 	const auto Label=[&](const FVaRestOpenApiPropertyChange& Change)
 	{
@@ -61,6 +70,11 @@ bool ShowReimportPreview(FVaRestOpenApiReimportPreview& Preview,const FVaRestOpe
 	[
 		SNew(SVerticalBox)
 		+SVerticalBox::Slot().AutoHeight().Padding(12)[SNew(STextBlock).Text(NSLOCTEXT("VaRestOpenApi","MergeHelp","Conflicts keep your edits. Tick a conflict to take upstream. Untick a restore to suppress it."))]
+		+SVerticalBox::Slot().AutoHeight().Padding(8)
+		[
+			SNew(SBox).MaxDesiredHeight(180).Visibility(Diagnostics.IsEmpty() ? EVisibility::Collapsed : EVisibility::Visible)
+			[SNew(SScrollBox)+SScrollBox::Slot()[SNew(STextBlock).AutoWrapText(true).Text(FText::FromString(Diagnostics))]]
+		]
 		+SVerticalBox::Slot().AutoHeight().Padding(8)[SNew(SSearchBox).OnTextChanged_Lambda([&](const FText& Text) { Search=Text.ToString();Rebuild(); })]
 		+SVerticalBox::Slot().AutoHeight().Padding(8)[SNew(SCheckBox).OnCheckStateChanged_Lambda([&](ECheckBoxState State) { ShowSuppressed=State==ECheckBoxState::Checked;Rebuild(); })[SNew(STextBlock).Text(NSLOCTEXT("VaRestOpenApi","ShowSuppressed","Show suppressed"))]]
 		+SVerticalBox::Slot().FillHeight(1).Padding(8)

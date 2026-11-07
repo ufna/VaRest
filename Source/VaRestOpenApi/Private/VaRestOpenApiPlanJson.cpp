@@ -72,6 +72,9 @@ FVaRestJson FVaRestOpenApiPlan::ToJson() const
 	Root.Set(TEXT("envelope"),FVaRestJson::Object().Set(TEXT("dataPath"),Envelope.DataPath).Set(TEXT("successPath"),Envelope.SuccessPath)
 		.Set(TEXT("errorMessagePath"),Envelope.ErrorMessagePath).Set(TEXT("errorCodePath"),Envelope.ErrorCodePath).Set(TEXT("parseErrorBodies"),Envelope.bParseErrorBodies)
 		.Set(TEXT("wrapped"),Envelope.WrappedOperations).Set(TEXT("considered"),Envelope.ConsideredOperations));
+	// Preview evidence is distinct from the runtime envelope and is not an identity/adoption directive.
+	Root.Set(TEXT("envelopeCandidate"),FVaRestJson::Object().Set(TEXT("dataPath"),EnvelopeCandidate.DataPath)
+		.Set(TEXT("wrapped"),EnvelopeCandidate.WrappedOperations).Set(TEXT("considered"),EnvelopeCandidate.ConsideredOperations));
 	auto IssueRows=FVaRestJson::Array();
 	static constexpr const TCHAR* Severities[]={TEXT("Info"),TEXT("Warning"),TEXT("Error")};
 	for (const auto& Issue:Issues)

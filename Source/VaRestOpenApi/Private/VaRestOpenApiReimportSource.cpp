@@ -35,6 +35,8 @@ FVaRestOpenApiReimportResult FVaRestOpenApiReimporter::FromSource(UVaRestApi* Ap
 	if (!bUrl && !Equal(Kind,TEXT("file"))) { Fail(TEXT("OA-DOC-READ"),TEXT("The source must be a local document or an HTTP(S) URL."));return Result; }
 	const FString Filename=State.GetValue()[TEXT("source")][TEXT("location")].AsString();
 	TStrongObjectPtr<UVaRestOpenApiImportOptions> Options(NewObject<UVaRestOpenApiImportOptions>());Options->FromJson(State.GetValue()[TEXT("options")]);
+	// Compare user edits against decoded options, not legacy serialization defaults.
+	const auto InitialOptions=Options->ToJson();
 	FScopedSlowTask Progress(3,NSLOCTEXT("VaRestOpenApi","ReimportPlanning","Checking OpenAPI source"));if (!bAutomated) Progress.MakeDialog(true);
 	const auto Session=bUrl ? NewUrlSourceSession() : TSharedPtr<FUrlSourceSession,ESPMode::ThreadSafe>();
 	for (;;)
@@ -42,7 +44,7 @@ FVaRestOpenApiReimportResult FVaRestOpenApiReimporter::FromSource(UVaRestApi* Ap
 		const bool AllowOutside=Options->bAllowReferencesOutsideSpecFolder;auto Loading=Async(EAsyncExecution::ThreadPool,[Filename,AllowOutside,Session]() { return Session ? AnalyzeUrlSource(Filename,Session.ToSharedRef()) : AnalyzeLocalFile(Filename,AllowOutside); });
 		bool Cancelled=false;auto Loaded=Session ? WaitUrlSource(Loading,Progress,Session.ToSharedRef(),Cancelled) : Wait(Loading,Progress,Cancelled);if (Cancelled) { Result.bCancelled=true;return Result; }
 		if (!Loaded.Analysis.bDocumentValid) { Result.Issues=MoveTemp(Loaded.Analysis.Issues);Report(Result.Issues,!bAutomated);return Result; }
-		auto Analysis=MakeShared<FVaRestOpenApiAnalysis>(MoveTemp(Loaded.Analysis));auto PlanOptions=Options->PlanOptions(Api->GetName());SeedOptions(Api,PlanOptions);
+		auto Analysis=MakeShared<FVaRestOpenApiAnalysis>(MoveTemp(Loaded.Analysis));auto PlanOptions=Options->PlanOptions(Api->GetName());SeedOptions(Api,PlanOptions);PlanOptions.ExistingTypeNames=SnapshotExistingTypeNames();
 		const auto OldKnown=State.GetValue()[TEXT("options")][TEXT("knownOperations")];
 		if (Options->bImportAllOperations && !Options->bIncludeNewOperations)
 		{
@@ -87,10 +89,16 @@ FVaRestOpenApiReimportResult FVaRestOpenApiReimporter::FromSource(UVaRestApi* Ap
 				Result.bCancelled=true;return Result;
 			}
 		}
-		auto StoredOptions=Options->ToJson().Set(TEXT("knownOperations"),OperationRecords(*Analysis));
-		if (!PlanOptions.bSelectAllOperations && (!Options->bImportAllOperations || PlanOptions.SelectedOperations.Num()!=Analysis->Model.Operations.Num()))
+		// Ignored source changes must not advance discovery/options or the stored source hash.
+		// Apply still owns stale-preview checks and real suppression/deferred metadata updates.
+		auto StoredOptions=State.GetValue()[TEXT("options")];
+		if (ContentChanged || !Options->ToJson().Equals(InitialOptions))
 		{
-			auto Selection=FVaRestJson::Array();for (const auto& Id:PlanOptions.SelectedOperations) Selection.Add(Id);StoredOptions.Set(TEXT("allOperations"),false).Set(TEXT("operations"),Selection);
+			StoredOptions=Options->ToJson().Set(TEXT("knownOperations"),OperationRecords(*Analysis));
+			if (!PlanOptions.bSelectAllOperations && (!Options->bImportAllOperations || PlanOptions.SelectedOperations.Num()!=Analysis->Model.Operations.Num()))
+			{
+				auto Selection=FVaRestJson::Array();for (const auto& Id:PlanOptions.SelectedOperations) Selection.Add(Id);StoredOptions.Set(TEXT("allOperations"),false).Set(TEXT("operations"),Selection);
+			}
 		}
 		FVaRestOpenApiApplyOptions ApplyOptions;ApplyOptions.Source=Loaded.Source;ApplyOptions.Options=StoredOptions;ApplyOptions.TypesFolder=Options->TypesFolder;ApplyOptions.IsCancelled=[&]() { return Progress.ShouldCancel(); };
 		Result=Apply(Api,Plan,Changes,ApplyOptions);Report(Result.Issues,!bAutomated);

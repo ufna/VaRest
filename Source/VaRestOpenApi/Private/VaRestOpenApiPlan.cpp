@@ -65,7 +65,15 @@ FPlanner::FPlanner(const FVaRestOpenApiAnalysis& Analysis,const FVaRestOpenApiPl
 FString FPlanner::AllocateTypeName(const FString& Id,const FString& Hint,bool bEnum)
 {
 	for (const auto& Existing:Options.ExistingDefinitions) if (Equal(Existing.Key,Id)) return Existing.Value;
-	return Names.AllocateType(Hint,bEnum,Options.TypePrefix);
+	// Query the exact same sanitizer with an empty allocator; do not consume the real allocation twice.
+	FVaRestOpenApiNameAllocator Baseline;const FString Candidate=Baseline.AllocateType(Hint,bEnum,Options.TypePrefix);
+	const FString Allocated=Names.AllocateType(Hint,bEnum,Options.TypePrefix);
+	FVaRestOpenApiLocation Location{Model.RootDocument,{}};
+	const auto* Source=DefinitionSources.Find(Id);if (const auto* Node=Schema(Source ? *Source : Id)) Location=Node->Location;
+	if (!Equal(Candidate,Allocated)) Issue(Location,TEXT("OA-NAME-COLLISION"),FString::Printf(TEXT("Type name '%s' is already reserved; allocated '%s' in source order."),*Candidate,*Allocated),EVaRestOpenApiSeverity::Info);
+	if (Options.ExistingTypeNames.ContainsByPredicate([&](const FString& Existing) { return Existing.Equals(Candidate,ESearchCase::IgnoreCase); }))
+		Issue(Location,TEXT("OA-NAME-SHADOW"),FString::Printf(TEXT("A project type already uses '%s'; this plan generates '%s'. Choose a Type prefix to distinguish generated types in type pickers."),*Candidate,*Allocated));
+	return Allocated;
 }
 void FPlanner::Issue(const FVaRestOpenApiLocation& Location,const TCHAR* Code,FString Message,EVaRestOpenApiSeverity Severity)
 {

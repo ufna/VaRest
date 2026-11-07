@@ -287,9 +287,13 @@ public:
 			if (!Initialize()) return true;
 		}
 		if (Clock) Clock->Advance(0);
+		// Later latent GT turn: inline fake completion has fully returned. Its retained managed clock view
+		// must end before native settlement can emit the queued replay result that this fixture awaits.
+		ReleaseCompletedCallClocks();
+		RecordProgress();
 		if (Phase!=EPhase::Setup && FPlatformTime::Seconds()-StartedAt>30)
 		{
-			Test.AddError(TEXT("restart fixture missed its actual load/ack/Flush/replay/scope-close barrier; retained evidence"));
+			Test.AddError(FString(TEXT("restart fixture missed its actual load/ack/Flush/replay/scope-close barrier; retained evidence: "))+LastProgress);
 			return true;
 		}
 		if (Phase==EPhase::Setup)
@@ -524,10 +528,61 @@ private:
 		if (!Test.TestFalse(TEXT("Flush callback is not inline"),Flushed->IsSet())) return Fail(TEXT("reentrant Flush callback"));
 		Phase=EPhase::Flushing; return false;
 	}
+	void ReleaseCompletedCallClocks()
+	{
+		if (!Fake) return;
+		for (int32 Index=0;Index<Fake->NumCalls();++Index)
+		{
+			const auto& Call=Fake->GetCall(Index);
+			if (Call.bCompleted && Call.Request.Clock.IsValid())
+			{
+				const bool bReleased=Fake->ReleaseCompletedClock(Index);
+				Test.TestTrue(TEXT("release only the completed fake call's actual retained clock view"),bReleased);
+				Test.AddInfo(FString::Printf(TEXT("DurableIdentityReleasedCompletedClock case=%d phase=%s call=%d released=%d"),Case,PhaseName(),Index,bReleased ? 1 : 0));
+			}
+		}
+	}
+	const TCHAR* PhaseName() const
+	{
+		switch (Phase)
+		{
+		case EPhase::Setup:return TEXT("Setup");
+		case EPhase::Loading:return TEXT("Loading");
+		case EPhase::Acknowledging:return TEXT("Acknowledging");
+		case EPhase::Replaying:return TEXT("Replaying");
+		case EPhase::Flushing:return TEXT("Flushing");
+		case EPhase::Closing:return TEXT("Closing");
+		default:return TEXT("Invalid");
+		}
+	}
+	void RecordProgress()
+	{
+		bool bLoaded=false;
+		const int64 Count=Client ? Client->GetQueuedCount(bLoaded) : 0;
+		const int32 QueueState=Client ? static_cast<int32>(Client->GetOfflineQueueState()) : -1;
+		const FString QueueError=Client ? Client->GetOfflineQueueError() : FString(TEXT("NoClient"));
+		int32 InFlight=0; bool bNative=false;
+		{
+			const FVaRestClient Native=Client ? Client->GetNativeClient() : FVaRestClient();
+			bNative=Native.IsValid(); InFlight=Native.GetInFlightCount();
+		} // no diagnostic alias survives the snapshot, Flush or scope-close wait
+		int32 Completed=0,RetainedClocks=0;
+		if (Fake) for (int32 Index=0;Index<Fake->NumCalls();++Index)
+		{
+			const auto& Call=Fake->GetCall(Index);
+			Completed+=Call.bCompleted ? 1 : 0; RetainedClocks+=Call.Request.Clock.IsValid() ? 1 : 0;
+		}
+		const TCHAR* Flush=!Flushed ? TEXT("None") : !Flushed->IsSet() ? TEXT("Pending") : Flushed->GetValue() ? TEXT("Succeeded") : TEXT("Failed");
+		const FString Snapshot=FString::Printf(TEXT("DurableIdentityProgress produce=%d case=%d record=%d phase=%s replay=%d queueState=%d loaded=%d count=%lld queueError=%s native=%d inFlight=%d fakeCalls=%d fakeInFlight=%d completed=%d retainedClocks=%d acks=%d completions=%d starts=%d replays=%d flush=%s scope=%llu scopeClosed=%d virtualTime=%.6f"),
+			bProduce ? 1 : 0,Case,RecordIndex,PhaseName(),bReplay ? 1 : 0,QueueState,bLoaded ? 1 : 0,static_cast<long long>(Count),*QueueError,bNative ? 1 : 0,InFlight,
+			Fake ? Fake->NumCalls() : 0,Fake ? Fake->NumInFlight() : 0,Completed,RetainedClocks,Observed ? Observed->Acknowledgements : 0,Observed ? Observed->Completions : 0,
+			Observed ? Observed->Starts.Num() : 0,Observed ? Observed->Replays.Num() : 0,Flush,static_cast<unsigned long long>(Observer ? Observer->ScopeId : 0),Observer && Observer->bClosed ? 1 : 0,Clock ? Clock->Now() : 0.0);
+		if (!Snapshot.Equals(LastProgress,ESearchCase::CaseSensitive)) { LastProgress=Snapshot; Test.AddInfo(Snapshot); }
+	}
 	bool Fail(const TCHAR* Message) { Test.AddError(Message); bFailed=true; BeginClose(); return false; }
 	void BeginClose()
 	{
-		if (Fake) for (int32 Index=0;Index<Fake->NumCalls();++Index) if (Fake->GetCall(Index).bCompleted) Fake->ReleaseCompletedClock(Index);
+		ReleaseCompletedCallClocks();
 		if (Hub) Hub->DeinitializeOnGT(); Phase=EPhase::Closing;
 	}
 	void ReleaseCase()
@@ -542,7 +597,7 @@ private:
 	int32 Case=0,RecordIndex=0;
 	double StartedAt=0;
 	EPhase Phase=EPhase::Setup;
-	FString Directory,Profile,Account,Namespace,ExpectedPath,Session;
+	FString Directory,Profile,Account,Namespace,ExpectedPath,Session,LastProgress;
 	FInternationalization::FCultureStateSnapshot SavedCulture;
 	FVaRestJson Receipt;
 	FVaRestRequestHandle Request;

@@ -2,6 +2,12 @@
 #include "VaRestOpenApiImportDialog.h"
 #include "VaRestOpenApiImportOptions.h"
 #include "VaRestOpenApiAnalysis.h"
+#include "VaRestOpenApiPlan.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "AssetRegistry/ARFilter.h"
+#include "AssetRegistry/AssetData.h"
+#include "Engine/UserDefinedEnum.h"
+#include "StructUtils/UserDefinedStruct.h"
 #include "Framework/Application/SlateApplication.h"
 #include "IDetailsView.h"
 #include "PropertyEditorModule.h"
@@ -11,6 +17,7 @@
 #include "Widgets/Input/SCheckBox.h"
 #include "Widgets/Input/SSearchBox.h"
 #include "Widgets/Layout/SBox.h"
+#include "Widgets/Layout/SScrollBox.h"
 #include "Widgets/Layout/SSplitter.h"
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/SWindow.h"
@@ -26,6 +33,50 @@ struct FOperationRow
 	FString Text,Identity;TArray<TSharedPtr<FOperationRow>> Children;bool bTag=false;
 };
 using FRow=TSharedPtr<FOperationRow>;
+}
+TArray<FString> SnapshotExistingTypeNames()
+{
+ check(IsInGameThread());TArray<FString> Names;
+ FARFilter Filter;Filter.ClassPaths={UUserDefinedStruct::StaticClass()->GetClassPathName(),UUserDefinedEnum::StaticClass()->GetClassPathName()};Filter.bRecursiveClasses=true;
+ TArray<FAssetData> Assets;FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get().GetAssets(Filter,Assets,false);
+ for (const auto& Asset:Assets) if (!Asset.PackageName.ToString().StartsWith(TEXT("/Engine/"),ESearchCase::CaseSensitive)) Names.AddUnique(Asset.AssetName.ToString());
+ Names.Sort();return Names;
+}
+EImportPlanReview ShowImportPlan(const FVaRestOpenApiPlan& Plan)
+{
+ check(IsInGameThread());if (!FSlateApplication::IsInitialized()) return EImportPlanReview::Cancel;
+ EImportPlanReview Result=EImportPlanReview::Cancel;TSharedPtr<SWindow> Window;
+ int32 Infos=0,Warnings=0,Errors=0;FString Diagnostics;
+ for (const auto& Issue:Plan.Issues)
+ {
+  const TCHAR* Severity=TEXT("Info");
+  if (Issue.Severity==EVaRestOpenApiSeverity::Error) { ++Errors;Severity=TEXT("Error"); }
+  else if (Issue.Severity==EVaRestOpenApiSeverity::Warning) { ++Warnings;Severity=TEXT("Warning"); } else ++Infos;
+  Diagnostics+=FString(Severity)+TEXT(" · ")+Issue.Code+TEXT(" · ")+Issue.Message+TEXT("\n");
+  if (!Issue.Document.IsEmpty() || !Issue.Pointer.IsEmpty()) Diagnostics+=Issue.Document+TEXT("#")+Issue.Pointer+TEXT("\n");
+  if (Issue.Line>0) Diagnostics+=FString::Printf(TEXT("Line %d, column %d\n"),Issue.Line,Issue.Column);
+ }
+ if (Diagnostics.IsEmpty()) Diagnostics=TEXT("No diagnostics in this selected plan.");
+ const auto& Candidate=Plan.EnvelopeCandidate;
+ const FString Applied=Plan.Envelope.DataPath.IsEmpty() ? TEXT("No response unwrapping will be applied.")
+  : FString::Printf(TEXT("Unwrap '%s' (%d of %d considered operations)."),*Plan.Envelope.DataPath,Plan.Envelope.WrappedOperations,Plan.Envelope.ConsideredOperations);
+ const FString Detection=Candidate.DataPath.IsEmpty() ? FString::Printf(TEXT("No common envelope detected across %d considered operations."),Candidate.ConsideredOperations)
+  : FString::Printf(TEXT("Detected candidate: '%s' (%d of %d considered operations). Change Unwrap envelope in options to change the applied plan."),*Candidate.DataPath,Candidate.WrappedOperations,Candidate.ConsideredOperations);
+ SAssignNew(Window,SWindow).Title(NSLOCTEXT("VaRestOpenApi","SelectedPlanTitle","Review selected OpenAPI plan")).ClientSize(FVector2D(950,650)).SupportsMaximize(true).SupportsMinimize(false)
+ [
+  SNew(SVerticalBox)
+  +SVerticalBox::Slot().AutoHeight().Padding(12)[SNew(STextBlock).Text(FText::FromString(FString::Printf(TEXT("Selected plan: %d endpoints · %d structs · %d enums\n%d errors · %d warnings · %d informational notices"),Plan.Endpoints.Num(),Plan.Structs.Num(),Plan.Enums.Num(),Errors,Warnings,Infos)))]
+  +SVerticalBox::Slot().AutoHeight().Padding(12,4)[SNew(STextBlock).AutoWrapText(true).Text(FText::FromString(Applied+TEXT("\n")+Detection))]
+  +SVerticalBox::Slot().FillHeight(1).Padding(12)[SNew(SScrollBox)+SScrollBox::Slot()[SNew(STextBlock).AutoWrapText(true).Text(FText::FromString(Diagnostics))]]
+  +SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right).Padding(12)
+  [
+   SNew(SHorizontalBox)
+   +SHorizontalBox::Slot().AutoWidth().Padding(4)[SNew(SButton).Text(NSLOCTEXT("VaRestOpenApi","BackToImportOptions","Back to options…")).OnClicked_Lambda([&]() { Result=EImportPlanReview::Back;Window->RequestDestroyWindow();return FReply::Handled(); })]
+   +SHorizontalBox::Slot().AutoWidth().Padding(4)[SNew(SButton).Text(NSLOCTEXT("VaRestOpenApi","CancelPlanReview","Cancel")).OnClicked_Lambda([&]() { Window->RequestDestroyWindow();return FReply::Handled(); })]
+   +SHorizontalBox::Slot().AutoWidth().Padding(4)[SNew(SButton).IsEnabled(Plan.bValid).Text(NSLOCTEXT("VaRestOpenApi","ConfirmSelectedImport","Import")).OnClicked_Lambda([&]() { Result=EImportPlanReview::Import;Window->RequestDestroyWindow();return FReply::Handled(); })]
+  ]
+ ];
+ FSlateApplication::Get().AddModalWindow(Window.ToSharedRef(),nullptr);return Result;
 }
 bool ShowImportOptions(const FVaRestOpenApiAnalysis& Analysis,UVaRestOpenApiImportOptions& Options,bool bDefaultIncludeNew)
 {
@@ -104,7 +155,7 @@ bool ShowImportOptions(const FVaRestOpenApiAnalysis& Analysis,UVaRestOpenApiImpo
 		[
 			SNew(SHorizontalBox)
 			+SHorizontalBox::Slot().AutoWidth().Padding(4)[SNew(SButton).Text(NSLOCTEXT("VaRestOpenApi","Cancel","Cancel")).OnClicked_Lambda([&]() { Window->RequestDestroyWindow();return FReply::Handled(); })]
-			+SHorizontalBox::Slot().AutoWidth().Padding(4)[SNew(SButton).Text(NSLOCTEXT("VaRestOpenApi","Apply","Import")).OnClicked_Lambda([&]() { Accepted=true;Window->RequestDestroyWindow();return FReply::Handled(); })]
+			+SHorizontalBox::Slot().AutoWidth().Padding(4)[SNew(SButton).Text(NSLOCTEXT("VaRestOpenApi","ReviewPlan","Review plan…")).OnClicked_Lambda([&]() { Accepted=true;Window->RequestDestroyWindow();return FReply::Handled(); })]
 		]
 	];
 	Refilter();FSlateApplication::Get().AddModalWindow(Window.ToSharedRef(),nullptr);

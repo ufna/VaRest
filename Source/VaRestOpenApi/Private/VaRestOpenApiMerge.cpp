@@ -7,7 +7,8 @@ namespace
 using namespace VaRest::OpenApi;
 bool Breaking(const FVaRestOpenApiMergeItem& Item,const FString& Property,const FVaRestJson& Before,const FVaRestJson& After)
 {
-	if (Equal(Item.Kind,TEXT("field")) || Equal(Item.Kind,TEXT("param"))) return Equal(Property,TEXT("type"));
+	if (Equal(Item.Kind,TEXT("field")) || Equal(Item.Kind,TEXT("param")))
+		return Equal(Property,TEXT("type")) || (Equal(Item.Kind,TEXT("param")) && Equal(Property,TEXT("required")) && !Before.AsBool() && After.AsBool());
 	if (Equal(Item.Kind,TEXT("endpoint"))) return Equal(Property,TEXT("requestType")) || Equal(Property,TEXT("responseType")) || Equal(Property,TEXT("errorType"));
 	return false;
 }

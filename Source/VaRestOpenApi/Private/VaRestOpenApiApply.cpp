@@ -47,7 +47,7 @@ FVaRestOpenApiApplyResult FApply::Run()
 	if (!Plan.bValid || !Options.Parent || !Options.Parent->IsA<UPackage>() || Options.ApiName.IsNone() || !FName::IsValidXName(Options.ApiName.ToString(),INVALID_OBJECTNAME_CHARACTERS) ||
 		FindObjectFast<UObject>(Options.Parent,Options.ApiName))
 	{ Issue(TEXT("OA-APPLY-TARGET"),TEXT("A valid plan and an unused primary asset name/package are required; use reimport for an existing API."),nullptr,EVaRestOpenApiSeverity::Error);return MoveTemp(Result); }
-	Folder=Options.TypesFolder.IsEmpty() ? FPackageName::GetLongPackagePath(Options.Parent->GetOutermost()->GetName())/TEXT("Types") : Options.TypesFolder;
+	Folder=Options.TypesFolder.IsEmpty() ? FPackageName::GetLongPackagePath(Options.Parent->GetOutermost()->GetName())/(Options.ApiName.ToString()+TEXT("_Types")) : Options.TypesFolder;
 	Folder.RemoveFromEnd(TEXT("/"));
 	if (Folder.Len()+81>=NAME_SIZE || !FPackageName::IsValidLongPackageName(Folder/TEXT("VaRestType")))
 	{ Issue(TEXT("OA-APPLY-TARGET"),TEXT("Types folder must be a writable mounted content path."),nullptr,EVaRestOpenApiSeverity::Error);return MoveTemp(Result); }

@@ -22,7 +22,7 @@ void FReimport::Prepare()
 {
 	Options.Parent=Api.GetOuter();Options.ApiName=Api.GetFName();Options.bAddToSettings=false;
 	Stage.Folder=Options.TypesFolder.IsEmpty() ? Api.TypesFolder : Options.TypesFolder;
-	if (Stage.Folder.IsEmpty()) Stage.Folder=FPackageName::GetLongPackagePath(Api.GetOutermost()->GetName())/TEXT("Types");Stage.Folder.RemoveFromEnd(TEXT("/"));
+	if (Stage.Folder.IsEmpty()) Stage.Folder=FPackageName::GetLongPackagePath(Api.GetOutermost()->GetName())/(Api.GetName()+TEXT("_Types"));Stage.Folder.RemoveFromEnd(TEXT("/"));
 	Stage.Result.Api=&Api;NewPlan.bValid=true;
 	for (const auto& Item:Preview.Mine)
 	{

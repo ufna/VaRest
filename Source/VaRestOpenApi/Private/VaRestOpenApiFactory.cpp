@@ -19,6 +19,7 @@
 
 namespace
 {
+struct FSelectedImportPlan { FVaRestOpenApiAnalysis Analysis;FVaRestOpenApiPlan Plan; };
 template <typename T> T WaitForPlan(TFuture<T>& Future,FScopedSlowTask& Progress,bool& Cancelled)
 {
 	while (!Future.IsReady()) { Progress.EnterProgressFrame(0);Cancelled=Cancelled || Progress.ShouldCancel();FPlatformProcess::SleepNoStats(.01f); }
@@ -56,22 +57,40 @@ UObject* UVaRestOpenApiFactory::CreateFromSource(UClass* InClass,UObject* InPare
 	const bool Automated=IsAutomatedImport();
 	FScopedSlowTask Progress(3,NSLOCTEXT("VaRestOpenApi","Planning","Reading and planning OpenAPI"));if (!Automated) Progress.MakeDialog(true);
 	const auto Session=bUrl ? NewUrlSourceSession() : TSharedPtr<FUrlSourceSession,ESPMode::ThreadSafe>();
-	FLocalSourceAnalysis Loaded;
+	FLocalSourceAnalysis Loaded;FVaRestOpenApiPlan Plan;FVaRestJson StoredOptions;
+	bool Reload=true,LoadedAllowOutside=false,DefaultIncludeNew=!(AssetImportTask && AssetImportTask->Options);
 	for (;;)
 	{
-		const bool AllowOutside=Options->bAllowReferencesOutsideSpecFolder;
-		auto Loading=Async(EAsyncExecution::ThreadPool,[Filename,AllowOutside,Session]() { return Session ? AnalyzeUrlSource(Filename,Session.ToSharedRef()) : AnalyzeLocalFile(Filename,AllowOutside); });
-		Loaded=Session ? WaitUrlSource(Loading,Progress,Session.ToSharedRef(),bOutOperationCanceled) : WaitForPlan(Loading,Progress,bOutOperationCanceled);if (bOutOperationCanceled) return nullptr;
-		if (!Loaded.Analysis.bDocumentValid) { Report(Loaded.Analysis.Issues,!Automated);return nullptr; }
+		if (Reload)
+		{
+			LoadedAllowOutside=Options->bAllowReferencesOutsideSpecFolder;
+			auto Loading=Async(EAsyncExecution::ThreadPool,[Filename,AllowOutside=LoadedAllowOutside,Session]() { return Session ? AnalyzeUrlSource(Filename,Session.ToSharedRef()) : AnalyzeLocalFile(Filename,AllowOutside); });
+			Loaded=Session ? WaitUrlSource(Loading,Progress,Session.ToSharedRef(),bOutOperationCanceled) : WaitForPlan(Loading,Progress,bOutOperationCanceled);if (bOutOperationCanceled) return nullptr;
+			if (!Loaded.Analysis.bDocumentValid) { Report(Loaded.Analysis.Issues,!Automated);return nullptr; }
+			if (!Automated && Loaded.Analysis.Model.Operations.Num()>150 && Options->SelectedOperations.IsEmpty()) Options->bImportAllOperations=false;
+			Reload=false;
+		}
+		if (!Automated)
+		{
+			if (!ShowImportOptions(Loaded.Analysis,*Options,DefaultIncludeNew)) { bOutOperationCanceled=true;return nullptr; }
+			DefaultIncludeNew=false;
+		}
+		if (!bUrl && LoadedAllowOutside!=Options->bAllowReferencesOutsideSpecFolder) { Reload=true;continue; }
+		const auto SelectedOptions=Options->ToJson();auto PlanOptions=Options->PlanOptions(InName.ToString());PlanOptions.ExistingTypeNames=SnapshotExistingTypeNames();
+		if (!Options->ToJson().Equals(SelectedOptions)) continue;
+		StoredOptions=SelectedOptions.Clone().Set(TEXT("knownOperations"),OperationRecords(Loaded.Analysis));
+		auto Planning=Async(EAsyncExecution::ThreadPool,[Analysis=MoveTemp(Loaded.Analysis),PlanOptions]() mutable {
+			FSelectedImportPlan Selected;Selected.Plan=FVaRestOpenApiPlanner::Build(Analysis,PlanOptions);Selected.Analysis=MoveTemp(Analysis);return Selected;
+		});
+		auto Selected=WaitForPlan(Planning,Progress,bOutOperationCanceled);if (bOutOperationCanceled) return nullptr;
+		Loaded.Analysis=MoveTemp(Selected.Analysis);Plan=MoveTemp(Selected.Plan);
+		if (!Options->ToJson().Equals(SelectedOptions)) continue;
 		if (Automated) break;
-		if (Loaded.Analysis.Model.Operations.Num()>150 && Options->SelectedOperations.IsEmpty()) Options->bImportAllOperations=false;
-		if (!ShowImportOptions(Loaded.Analysis,*Options,!(AssetImportTask && AssetImportTask->Options))) { bOutOperationCanceled=true;return nullptr; }
-		if (bUrl || AllowOutside==Options->bAllowReferencesOutsideSpecFolder) break; // URL confinement always applies
+		const auto Decision=ShowImportPlan(Plan);
+		if (Decision==EImportPlanReview::Cancel || Progress.ShouldCancel()) { bOutOperationCanceled=true;return nullptr; }
+		if (Decision==EImportPlanReview::Import && Options->ToJson().Equals(SelectedOptions)) break;
+		// The next options selection must build a NEW immutable worker plan; never apply the displayed old plan.
 	}
-	const auto PlanOptions=Options->PlanOptions(InName.ToString());
-	const auto StoredOptions=Options->ToJson().Set(TEXT("knownOperations"),OperationRecords(Loaded.Analysis));
-	auto Planning=Async(EAsyncExecution::ThreadPool,[Analysis=MoveTemp(Loaded.Analysis),PlanOptions]() { return FVaRestOpenApiPlanner::Build(Analysis,PlanOptions); });
-	auto Plan=WaitForPlan(Planning,Progress,bOutOperationCanceled);if (bOutOperationCanceled) return nullptr;
 	Progress.EnterProgressFrame(1,NSLOCTEXT("VaRestOpenApi","Applying","Creating API assets"));
 	FVaRestOpenApiApplyOptions Apply;Apply.Parent=InParent;Apply.ApiName=InName;Apply.Flags=Flags;Apply.TypesFolder=Options->TypesFolder;
 	Apply.bRegisterAssets=false;Apply.Source=Loaded.Source;Apply.Options=StoredOptions;Apply.IsCancelled=[&]() { return Progress.ShouldCancel(); };
