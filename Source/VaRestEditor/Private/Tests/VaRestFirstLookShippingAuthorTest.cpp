@@ -1,5 +1,5 @@
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
-// Unintegrated opt-in authoring candidate. Runtime output is ordinary Blueprint/components.
+// Opt-in authoring fixture. Runtime output uses ordinary Blueprint/components.
 #if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
 #include "K2Node_VaRestCallEndpoint.h"
 #include "VaRestApi.h"
@@ -8,6 +8,7 @@
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Camera/CameraComponent.h"
 #include "Components/SceneComponent.h"
+#include "Components/DirectionalLightComponent.h"
 #include "Components/TextRenderComponent.h"
 #include "EdGraphSchema_K2.h"
 #include "Engine/Blueprint.h"
@@ -139,9 +140,9 @@ bool FVaRestShippingVisualAuthorTest::RunTest(const FString& Parameters)
 {
     using namespace VaRestShippingVisualAuthor;
     if (!Dedicated() || Parameters!=TEXT("Northwind")) { AddError(TEXT("Dedicated sole nowrite authoring process required"));return false; }
-    const FString Folder=TEXT("/Game/VaRestFirstLookShipping004");
+    const FString Folder=TEXT("/Game/VaRestFirstLookShipping005");
     const FString BlueprintPath=Folder+TEXT("/BP_NorthwindVisual");
-    const FString OutputDir=FPaths::ProjectContentDir()/TEXT("VaRestFirstLookShipping004");
+    const FString OutputDir=FPaths::ProjectContentDir()/TEXT("VaRestFirstLookShipping005");
     if (IFileManager::Get().DirectoryExists(*OutputDir)) { AddError(TEXT("Output folder occupied; no overwrite"));return false; }
     for (const auto& Path:{BlueprintPath,Folder+TEXT("/FirstLook"),Folder+TEXT("/FirstLookAuto")})
         if (FPackageName::DoesPackageExist(Path) || FindPackage(nullptr,*Path)) { AddError(TEXT("Output package occupied"));return false; }
@@ -171,6 +172,12 @@ bool FVaRestShippingVisualAuthorTest::RunTest(const FString& Parameters)
     auto* Camera=Cast<UCameraComponent>(CameraNode->ComponentTemplate);
     if (!TestNotNull(TEXT("native camera template"),Camera)) return false;
     Camera->SetAutoActivate(true);Camera->SetFieldOfView(80.f);Camera->SetConstraintAspectRatio(false);
+    // The stock opaque TextRender material is DefaultLit. An empty scene needs
+    // an actual ordinary light; no debug viewmode/Shipping override is used.
+    auto* LightNode=SCS->CreateNode(UDirectionalLightComponent::StaticClass(),TEXT("DemoLight"));Root->AddChildNode(LightNode);
+    auto* Light=Cast<UDirectionalLightComponent>(LightNode->ComponentTemplate);
+    if (!TestNotNull(TEXT("ordinary runtime directional light"),Light)) return false;
+    Light->SetMobility(EComponentMobility::Movable);Light->SetIntensity(5.f);Light->SetCastShadows(false);
     auto AddText=[&](FName Name,const TCHAR* Initial,float Height,float Size,FColor Color) {
         auto* N=SCS->CreateNode(UTextRenderComponent::StaticClass(),Name);Root->AddChildNode(N);
         auto* T=Cast<UTextRenderComponent>(N->ComponentTemplate);if (!T) return false;
@@ -285,7 +292,7 @@ bool FVaRestShippingVisualAuthorTest::RunTest(const FString& Parameters)
         if (!TestTrue(TEXT("per-instance close setting survives normal reconstruction"),AutoProperty->GetPropertyValue_InContainer(Actor)==bAuto)) return false;
         Actor->SetActorLabel(TEXT("VaRest typed HTTP visual demo"),false);
         TArray<UTextRenderComponent*> Texts;Actor->GetComponents(Texts);
-        if (!TestTrue(TEXT("real camera and text runtime components"),Actor->FindComponentByClass<UCameraComponent>() && Texts.Num()==7)) return false;
+        if (!TestTrue(TEXT("real camera and text runtime components"),Actor->FindComponentByClass<UCameraComponent>() && Actor->FindComponentByClass<UDirectionalLightComponent>() && Texts.Num()==7)) return false;
         if (!UEditorLoadingAndSavingUtils::SaveMap(World,Folder+(bAuto ? TEXT("/FirstLookAuto"):TEXT("/FirstLook")))) return false;
     }
     AddInfo(TEXT("VAREST_SHIPPING_VISUAL_AUTHORED: normal Blueprint/camera/text; GET profile drives POST typed Body; actual runtime/Shipping proof remains UNRUN."));
