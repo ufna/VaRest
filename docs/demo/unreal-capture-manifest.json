@@ -1,0 +1,138 @@
+{
+  "schema": 1,
+  "date": "2026-11-07",
+  "capture": "Actual rendered Unreal Editor windows, raw PNG, not mockups",
+  "editor_baseline": "normal251/code319; current source code325 Game unbuilt",
+  "editor_pid": 500695,
+  "actual_http": [
+    200,
+    200,
+    404
+  ],
+  "actual_import_returned_objects": 7,
+  "validation": "OA-APPLY-TYPE two missing types on subsequent save; VaRest-ajz.27.2 open",
+  "exit": "Editor002 SIGSEGV-11/wrapper245; VaRest-ajz.27.1 open",
+  "final_guards": {
+    "count": 1235,
+    "failures": []
+  },
+  "images": [
+    {
+      "id": "inspector",
+      "category": "HTTP",
+      "title": "Inspector: реальные ответы",
+      "file": "07-inspector-body.png",
+      "sha256": "706d8011dded6c8e8293eded97fe8ad12a2ef1b0125778fd3e989bf02095ba84",
+      "bytes": 69225,
+      "width": 1800,
+      "height": 1050,
+      "raw_capture": true,
+      "pid": 500695,
+      "source": "/w/Unreal/VaRest-recovery/takeover-01441-20261107/unreal-ui-capture-002/screenshots/07-inspector-body.png"
+    },
+    {
+      "id": "api",
+      "category": "API",
+      "title": "API-ассет и окружения",
+      "file": "01-api-environment.png",
+      "sha256": "addbd0fe625f071212908c50e655d910f50f6c24a67f9933b892169deba24956",
+      "bytes": 84972,
+      "width": 1800,
+      "height": 1100,
+      "raw_capture": true,
+      "pid": 500695,
+      "source": "/w/Unreal/VaRest-recovery/takeover-01441-20261107/unreal-ui-capture-002/screenshots/01-api-environment.png"
+    },
+    {
+      "id": "import",
+      "category": "OpenAPI",
+      "title": "Выбор операций OpenAPI",
+      "file": "03-openapi-options.png",
+      "sha256": "69331b846f04872ebad350bbce4fd1d88d421159fa39f50a3cdf45ad958d4afa",
+      "bytes": 46477,
+      "width": 1006,
+      "height": 760,
+      "raw_capture": true,
+      "pid": 500695,
+      "source": "/w/Unreal/VaRest-recovery/takeover-01441-20261107/unreal-ui-capture-002/screenshots/03-openapi-options.png"
+    },
+    {
+      "id": "plan",
+      "category": "OpenAPI",
+      "title": "Проверка плана перед импортом",
+      "file": "04-openapi-review-plan.png",
+      "sha256": "c312aebabce042f7263d5ef2e32b58ebf6d72a3b31faee929fa1fb77159d025d",
+      "bytes": 128894,
+      "width": 956,
+      "height": 690,
+      "raw_capture": true,
+      "pid": 500695,
+      "source": "/w/Unreal/VaRest-recovery/takeover-01441-20261107/unreal-ui-capture-002/screenshots/04-openapi-review-plan.png"
+    },
+    {
+      "id": "structure",
+      "category": "OpenAPI",
+      "title": "Сгенерированная структура ответа",
+      "file": "08-imported-player-struct.png",
+      "sha256": "1a3045b708a81a917dc34329bcded4a77408e27a84d332a34362f2c8a652a8d0",
+      "bytes": 45765,
+      "width": 1800,
+      "height": 780,
+      "raw_capture": true,
+      "pid": 500695,
+      "source": "/w/Unreal/VaRest-recovery/takeover-01441-20261107/unreal-ui-capture-002/screenshots/08-imported-player-struct.png"
+    },
+    {
+      "id": "blueprint",
+      "category": "Blueprint",
+      "title": "Типизированный Call Endpoint",
+      "file": "05-http-blueprint.png",
+      "sha256": "5e89c0ceb4661e08211c2d710bc1dbb67398dbc63a4560e2bda7ddaaf6f5dff2",
+      "bytes": 168619,
+      "width": 1800,
+      "height": 780,
+      "raw_capture": true,
+      "pid": 500695,
+      "source": "/w/Unreal/VaRest-recovery/takeover-01441-20261107/unreal-ui-capture-002/screenshots/05-http-blueprint.png"
+    },
+    {
+      "id": "websocket",
+      "category": "Сокеты",
+      "title": "WebSocket: объявление сообщения",
+      "file": "06-websocket-messages.png",
+      "sha256": "65b44a90ab799d84065082f2f209350fc494cda7a6280677ad71b9e996249120",
+      "bytes": 68656,
+      "width": 1800,
+      "height": 780,
+      "raw_capture": true,
+      "pid": 500695,
+      "source": "/w/Unreal/VaRest-recovery/takeover-01441-20261107/unreal-ui-capture-002/screenshots/06-websocket-messages.png"
+    },
+    {
+      "id": "socketio",
+      "category": "Сокеты",
+      "title": "Socket.IO: namespace и событие",
+      "file": "07-socketio-chat-event.png",
+      "sha256": "6c5b25c3340cbcb77c00e51d2b5953496d4158e661a07f73cbf4666c24379c2e",
+      "bytes": 71742,
+      "width": 1800,
+      "height": 780,
+      "raw_capture": true,
+      "pid": 500695,
+      "source": "/w/Unreal/VaRest-recovery/takeover-01441-20261107/unreal-ui-capture-002/screenshots/07-socketio-chat-event.png"
+    },
+    {
+      "id": "settings",
+      "category": "Настройки",
+      "title": "Настройки захвата Inspector",
+      "file": "09-inspector-settings.png",
+      "sha256": "1c0257e1cf1817074dfe3ac4117c1eb900f6c586b36c05a2618981b673adc69f",
+      "bytes": 75304,
+      "width": 1800,
+      "height": 780,
+      "raw_capture": true,
+      "pid": 500695,
+      "source": "/w/Unreal/VaRest-recovery/takeover-01441-20261107/unreal-ui-capture-002/screenshots/09-inspector-settings.png"
+    }
+  ]
+}
