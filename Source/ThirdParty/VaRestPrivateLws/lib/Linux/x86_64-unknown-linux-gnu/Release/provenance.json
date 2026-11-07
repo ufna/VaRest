@@ -1,8 +1,8 @@
 {
   "schema": "VaRestPrivateLws.bundled-archive.v1",
   "archive": "libvarest_lws3_private.a",
-  "sha256": "52bc0175d0887c110f114173011cc52f929408c749d1bb39db767e236bc72b06",
-  "bytes": 2911814,
+  "sha256": "477acb2e3936cdac63fcf00ab58cde52ee35c40cdbd6ddc437d268df85f75dc4",
+  "bytes": 2998446,
   "platform": "Linux",
   "architecture": "x86_64-unknown-linux-gnu",
   "configuration": "Release",
@@ -12,173 +12,173 @@
     "commit": "eaa935a80adb38b5cc4d09ce06ec987b87dcddfa"
   },
   "compiler": "Unreal Linux SDK v26 clang 20.1.8 rockylinux8",
-  "source_recipe_revision": "007_SOURCE299_TO_SOURCE300_OUTPUT006_CURRENT32C_COLLECT_COMPILER_DIAGNOSTICS",
-  "source_recipe_sha256": "0664f58fdd041f60d0e7a0fc30993a0bf4d304bcfc747003cb35d0d2b5bd1b66",
-  "original_build_receipt_sha256": "39d5610dbd641f3868a632a637deb199b92c5b9a58af1ef2d0dd368ca6bab813",
+  "source_recipe_revision": "recipe007+external-C-symbol-labels-v1 actual32C",
+  "source_recipe_sha256": "c486df040de4c1d28140cedac07a1528dd8639ccdd0725d8fc9b8f6bdd1a93ed",
+  "original_build_receipt_sha256": "3e25170d282311cee1a62b80953cf3967adabae73b4aa59afd53128e76c9597e",
   "source300_receipt_sha256": "10c8a18336c898afb3e999bf5d53e9ef9f19524a9d94e92eccc5d3b29f7d331f",
-  "production": "Existing recipe007 output006 copied byte-for-byte; no new compilation or archive creation.",
-  "scope": "Current rules retain Linux x64 Editor Development modular/non-merged source-build selection and precompiled refusals. Relocation is not Game, platform, ABI, lifecycle or release qualification.",
-  "source_and_license": "Source/ThirdParty/VaRestPrivateLws/src, include, internal, LICENSE and NOTICE.txt remain supplied unchanged.",
+  "production": "Actual recovery32 C compiles+archiver33 commands0/21.355s/all45206 preserved.419 prefixed global definitions and188 real external imports. This record establishes the C archive only, not C++ consumer acceptance.",
+  "scope": "Existing rules retain Linux x64 Editor Development modular/non-merged source-build selection and precompiled refusals. C++ reference/definition/relocation/owning-Link and regressions require separate actual qualification; Game/platform/ABI/lifecycle/release not granted.",
+  "source_and_license": "Existing src/include/internal/LICENSE/NOTICE unchanged apart from new external-label header. Historical source300 receipt remains C-body ancestry only; new compiler-label plan and actual native receipt identify current archive.",
   "members": [
     {
       "name": "00_base64-decode.o",
-      "bytes": 15552,
-      "sha256": "22617a86a78567ef468baa608555eb0e7edc832d2bf01533fd68d7a13ce1913a"
+      "sha256": "caffe07fdbdfb1a65ef255930707f7b358aba975c5d78f09899b8c80ccd57c4d",
+      "bytes": 15896
     },
     {
       "name": "01_libwebsockets.o",
-      "bytes": 217352,
-      "sha256": "6df380b39a9bd42cb21b7ea79723a386fb84fa96fe2aaa80f5f7e9a9d7b0ec3c"
+      "sha256": "2dc3fdea41deff2f260310c7ba49c664c7f0cf8ddd3e6ba3b66deb82a51ca577",
+      "bytes": 228576
     },
     {
       "name": "02_service.o",
-      "bytes": 116000,
-      "sha256": "81dd4e2d22ac3fc393baea8aa14498b7563317c0415abdfb60f18de0e9d4d984"
+      "sha256": "0d010dbaac84cf113f8883b9a81d46905dc312af36e2160bd8d5591e29c10069",
+      "bytes": 121000
     },
     {
       "name": "03_pollfd.o",
-      "bytes": 86128,
-      "sha256": "4f5680d629bafd84db82f20864931492acfff7a4864b5bfa3a1c693053ec9f9e"
+      "sha256": "d6081b2f75325a294d76a0e298b57817b140d4c17a55289ac42219bd6f32281c",
+      "bytes": 88336
     },
     {
       "name": "04_output.o",
-      "bytes": 75024,
-      "sha256": "8688a800f9f519dcccc8abe9fc3c63e84229227e04d2b33ceae363198a95aece"
+      "sha256": "8d7cd361b3afdaa8f1692abdd826b645527cf197f3c594f34bc32ee9195e2a20",
+      "bytes": 76544
     },
     {
       "name": "05_context.o",
-      "bytes": 189984,
-      "sha256": "b4661b07980a2191ca7d343a06376787c242854934c99751b1b3c84759a4690a"
+      "sha256": "e843304aadf77b673a93c4cba987a897491c89ed8d4be53a46f0a199e40e503a",
+      "bytes": 197632
     },
     {
       "name": "06_alloc.o",
-      "bytes": 19008,
-      "sha256": "59e0c597b78212aba6b7d5815d2031ccc8d8635a04815c4fba92cc0a928c74e4"
+      "sha256": "8cc663fbb71f34015ef4e68f46bf712caed2c7f75fd613bc551a93193d30d927",
+      "bytes": 19792
     },
     {
       "name": "07_ops-pipe.o",
-      "bytes": 57792,
-      "sha256": "d5eb4bcdc389fbf75dbdeb0d0ce2c82d181a759709f702165b8f5c6bab038e78"
+      "sha256": "9cb57054cbe7d9996a2b96a3a3358b54b42205cefd454b6bfa2b81efa7c51735",
+      "bytes": 58344
     },
     {
       "name": "08_lws-ring.o",
-      "bytes": 17632,
-      "sha256": "986106550c9c0ce9ebeb27b1f10aef0d5d1fc911641f6e547be3bd2e7b7609bc"
+      "sha256": "9f9a1421c577490e998eb8ca7bdd3602c51c9eb8f67ae1226b97eadee60b22bf",
+      "bytes": 18792
     },
     {
       "name": "09_header.o",
-      "bytes": 101816,
-      "sha256": "ae61ad4c56f83120ebbd1d511351dec37df54fd197e345002d5e5ad002a0cf20"
+      "sha256": "3e791a4bbf95571c0a7a9ca41cc0f21c065561977c6fc488bc91f49eee758ea5",
+      "bytes": 103008
     },
     {
       "name": "10_parsers.o",
-      "bytes": 114576,
-      "sha256": "e7200dcaff9df9e52424c20b38084e50136a1263f75ea54d20dc620561cec149"
+      "sha256": "6ae22cfeed8db4819b5c7d0057b8b930b7e8dcd62fd5577859715b6205568b2b",
+      "bytes": 117336
     },
     {
       "name": "11_ops-h1.o",
-      "bytes": 74544,
-      "sha256": "d09f259028f2882508211834d7f83268e26716d5b3ed4702b23cfb3e67baaac0"
+      "sha256": "c14517bfc0ac36c7871399dc30f26d3d19e9f306580277940820076f1c60c776",
+      "bytes": 76328
     },
     {
       "name": "12_ops-ws.o",
-      "bytes": 110728,
-      "sha256": "c44ee3939bb5b3c38bf86a988cf65aa6a43fb220866134f2a06f778d927cb83b"
+      "sha256": "cbadc7c79ca7b98557ea3a0c8ad64bdf6e3666a3a184104884fc6a3a6d009d6a",
+      "bytes": 114736
     },
     {
       "name": "13_client-ws.o",
-      "bytes": 86024,
-      "sha256": "806205eb604f9253cfec49db00b7a5748d62160bdda85e78efa5f9f021c006e3"
+      "sha256": "e2ed2c887cc9fc6b43283c360797463ba96a5d7d65566d58b31801c886479744",
+      "bytes": 87728
     },
     {
       "name": "14_client-parser-ws.o",
-      "bytes": 70504,
-      "sha256": "53fb54cc0c855e6096d5553a2b5314ba437ca7285d3d0762665130905a060648"
+      "sha256": "836a808785df15b854698f524e7623a8022a546e02bb58eda057271476d83411",
+      "bytes": 71488
     },
     {
       "name": "15_server-ws.o",
-      "bytes": 81752,
-      "sha256": "9bad66a2c21f5b34023d94f4e01ba4f558c7b428d5d700a4fc2885aaf853cacb"
+      "sha256": "3697353d9775fe769e159316b4e0681d42f7f5a1c3a1c372f012353c3e67af3b",
+      "bytes": 83768
     },
     {
       "name": "16_ops-raw.o",
-      "bytes": 62152,
-      "sha256": "435a183ac33dcc1e174009d7db3e99428cf592974a38cf635e5ec037091af1ae"
+      "sha256": "137303654e84975eb86afac325ef15ee21f90e6b2ec79037756d48a3ea52873a",
+      "bytes": 62952
     },
     {
       "name": "17_client.o",
-      "bytes": 107888,
-      "sha256": "a9fa793ed46480a3e683c4e67164ab6df0d59bfd3e0855add42e9c224a446108"
+      "sha256": "ff6964caafb3b2b6ba830c4e52fc21ab0c7494da62074836881b0fd918fec550",
+      "bytes": 111672
     },
     {
       "name": "18_client-handshake.o",
-      "bytes": 152320,
-      "sha256": "7f0635f976733bda18ae8561d60665e99cfe1b60c7b10068d9b3233e9489bcf9"
+      "sha256": "56f0438b15089906aa9f4eed7bdca2e7d8b1f20381edc95795c658fb5fcfe6de",
+      "bytes": 156896
     },
     {
       "name": "19_ops-listen.o",
-      "bytes": 61008,
-      "sha256": "5e7adf41a54aa75b29c7ceafdbdd6a29dc933efd34aaf0b0589081ff6dded308"
+      "sha256": "2232ee92d88853a4165c071e3427d11f8c0f3d551422a372c92b0f1698af1811",
+      "bytes": 61704
     },
     {
       "name": "20_tls.o",
-      "bytes": 80832,
-      "sha256": "b2582ae02274a6eb096b86dbd231e6da054b0629022521e1aeaac5ba1a27ab0b"
+      "sha256": "ff852a03298cc803a48339af00ef1760481dc228011ff49be1f097d0196737a9",
+      "bytes": 82680
     },
     {
       "name": "21_ssl.o",
-      "bytes": 112776,
-      "sha256": "7a1350d217012fee1d47a5770fd0327c3fe1c0a8234fb726305dc7c84b4e92a1"
+      "sha256": "615ff29d607bc4791727e9c7b723694b03f94535d9f919fd5dbaea62b9cff8e5",
+      "bytes": 116728
     },
     {
       "name": "22_tls-server.o",
-      "bytes": 73608,
-      "sha256": "81de7fcf2ff3a0457e0d225db5dcfe53866aaa66c67324c4959ab7d85930e6da"
+      "sha256": "2658ad5d6caa34005ce7809226df3d57ceade081da42710396dbede3e2c86b19",
+      "bytes": 75128
     },
     {
       "name": "23_openssl-server.o",
-      "bytes": 85312,
-      "sha256": "d26d9754c2ee21b5ceb162d4afc6f78ded9de3f6b25f900e28fb2e98e6a9b02c"
+      "sha256": "26b01d8836cb51d2b8f4db4e256b1e8fbc5b4c2606ebded610cfe6a2603d7028",
+      "bytes": 86776
     },
     {
       "name": "24_tls-client.o",
-      "bytes": 61832,
-      "sha256": "bd9a463c8747fe0d6d1ad3be4d866408aa6dfa449e96a133fbbd2c62102a5e3c"
+      "sha256": "8237eea54d6230e544717db64ef6fa3168372a7955280511dae889a0f95a1bb7",
+      "bytes": 62752
     },
     {
       "name": "25_openssl-client.o",
-      "bytes": 123648,
-      "sha256": "7cf44e67473a0fbab5ff392bd62749ec853f723bb29276b71bac2e2e659f17f1"
+      "sha256": "14f9f9685baf5c201bcbc0568e494a6f1dc846dcb75b240b2360872212242807",
+      "bytes": 125864
     },
     {
       "name": "26_sha-1.o",
-      "bytes": 14672,
-      "sha256": "8f1f591c29fc5045a3a129fa2600b0148f86706b831cdf172d1ec727b1a39554"
+      "sha256": "2d962ea051df2bebf85cabd000ec674ac98ed34c6d405af6cb85beaefda72e3f",
+      "bytes": 14960
     },
     {
       "name": "27_lws-plat-unix.o",
-      "bytes": 130056,
-      "sha256": "7173abd4d74c8f75ce0a075e3ec65d72818a4c1c0847cbc63ad737710cd99709"
+      "sha256": "2e924dd6a4a4638fe6847d009238031c46403cb7aa4711fe36f994403b5647af",
+      "bytes": 135160
     },
     {
       "name": "28_server.o",
-      "bytes": 175792,
-      "sha256": "c50d6a1b52ff69cd87def86dcba41241a587d96d55b0159c43ba3500be5d3aa1"
+      "sha256": "219f1b6aa4a72c6c9376409550dd1238a2535b6792f5dbce3cb4861233ca5830",
+      "bytes": 181336
     },
     {
       "name": "29_lws-spa.o",
-      "bytes": 81576,
-      "sha256": "5a15072b19773fb538873494c6967d00032a317ff99f676358a9d46ad3ddb32c"
+      "sha256": "d13c1e3eca62f1bcd11027ce7826cf640cbeeefc9db5887e0f326a60eeef04a2",
+      "bytes": 82416
     },
     {
       "name": "30_poll.o",
-      "bytes": 51200,
-      "sha256": "a3e77e871bf741b22f1646a28fd5286c14e52fc3910b8caa4e8d94ed724e5e0a"
+      "sha256": "6d466e0113cc5a494d1876c900e954dade642eae6b235e2e35f1a5d4859a4451",
+      "bytes": 51280
     },
     {
       "name": "31_varest-custody.o",
-      "bytes": 89616,
-      "sha256": "3baccbac69ef54ceca4e13d88bdf4a2327711f2348b557759e3c63dce96e5ad1"
+      "sha256": "48a0a61b7885528ccf9df0688e6a29c3a3d0a044f640106476f1fdbfd692e985",
+      "bytes": 91024
     }
   ]
 }

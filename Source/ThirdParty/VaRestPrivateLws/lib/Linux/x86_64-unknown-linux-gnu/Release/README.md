@@ -1,19 +1,20 @@
-# Bundled private LWS archive
+# Private LWS external symbol namespace
 
-This directory carries the exact existing recipe007/output006 archive. It is a
-plugin dependency, rather than a build-cache artifact. Stock Unreal BuildPlugin
-copies Source and deletes the copied Intermediate tree; the rules therefore
-resolve this library from ModuleDirectory/lib.
+This bundle uses actual32C archive477acb2e. All33 compiler/archiver commands
+returned0; all419 definitions/internal references match varest_private3_ and
+all188 genuine external imports remain unchanged. Plan c486df04 and actual
+native result3e25170d identify this build; provenance.json lists32 real members.
+Historical source300 remains C-body ancestry, not this archive identity.
 
-provenance.json records the complete 32-member identity and original recipe.
-The modified library sources, selected headers/configuration, license and notice
-are supplied in this module. The archive was copied without modification or a
-new compiler invocation. It retains the original Linux SDK and provider binding;
-this relocation does not establish compatibility with another engine/toolchain.
+The header uses compiler external C labels, not token/field/type macros.
+VaRestLwsInclude includes it after the private/PCH guard and before private
+LWS declarations. Unsupported compiler capability refuses. Vendor source,
+configuration, upstream declarations, LICENSE and NOTICE remain supplied.
 
-The existing rules still select only Linux x64 Editor Development, modular and
-non-merged source builds and refuse the existing precompiled cases. Ordinary
-Game targets keep their previous dependency selection. Portable packaged/editor
-and Game qualification, other platforms, native-owner lifecycle and release
-acceptance remain open. No Engine, Launch or consuming-game source is required
-or changed by this relocation.
+Rules retain Linux x64 modular Editor Development/non-merged selection and
+precompiled refusals. Game and other configurations keep existing dependencies.
+This C archive/label record alone does not establish C++ consumer qualification:
+actual object/ELF references and definitions, relocation/owning-Link binding,
+new library identity and focused WS regressions require separate real evidence.
+No automatic DNS activation or old Host5/Profile2/full4608/field-layout/SDK/
+Engine/Target/game Source or release acceptance follows from these records.

@@ -33,5 +33,6 @@ public class VaRestPrivateLws : ModuleRules
 		PublicAdditionalLibraries.Add(Archive);
 		ExternalDependencies.Add(Path.Combine(IncludeRoot, "VaRestPrivateLws", "libwebsockets.h"));
 		ExternalDependencies.Add(Path.Combine(IncludeRoot, "VaRestPrivateLws", "lws_config.h"));
+		ExternalDependencies.Add(Path.Combine(IncludeRoot, "VaRestPrivateLws", "varest_external_names.h"));
 	}
 }

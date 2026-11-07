@@ -23,6 +23,7 @@ THIRD_PARTY_INCLUDES_START
 #if defined(LIBWEBSOCKET_H_3060898B846849FF9F88F5DB59B5950C)
 #error "An LWS header preceded the private VaRest LWS include; inspect the actual PCH/unity include closure."
 #endif
+#include "VaRestPrivateLws/varest_external_names.h"
 #include "VaRestPrivateLws/libwebsockets.h"
 #else
 #include "libwebsockets.h"
