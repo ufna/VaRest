@@ -3,6 +3,7 @@
 	"FriendlyName" : "VaRest",
 	"Version" : 200,
 	"VersionName" : "2.0.0-dev",
+	"EnabledByDefault" : false,
 	"CreatedBy" : "Vladimir Alyamkin",
 	"CreatedByURL" : "https://ufna.dev",
 	"EngineVersion" : "5.8.0",
