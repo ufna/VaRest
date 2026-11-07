@@ -139,9 +139,9 @@ bool FVaRestShippingVisualAuthorTest::RunTest(const FString& Parameters)
 {
     using namespace VaRestShippingVisualAuthor;
     if (!Dedicated() || Parameters!=TEXT("Northwind")) { AddError(TEXT("Dedicated sole nowrite authoring process required"));return false; }
-    const FString Folder=TEXT("/Game/VaRestFirstLookShipping003");
+    const FString Folder=TEXT("/Game/VaRestFirstLookShipping004");
     const FString BlueprintPath=Folder+TEXT("/BP_NorthwindVisual");
-    const FString OutputDir=FPaths::ProjectContentDir()/TEXT("VaRestFirstLookShipping003");
+    const FString OutputDir=FPaths::ProjectContentDir()/TEXT("VaRestFirstLookShipping004");
     if (IFileManager::Get().DirectoryExists(*OutputDir)) { AddError(TEXT("Output folder occupied; no overwrite"));return false; }
     for (const auto& Path:{BlueprintPath,Folder+TEXT("/FirstLook"),Folder+TEXT("/FirstLookAuto")})
         if (FPackageName::DoesPackageExist(Path) || FindPackage(nullptr,*Path)) { AddError(TEXT("Output package occupied"));return false; }
@@ -163,7 +163,8 @@ bool FVaRestShippingVisualAuthorTest::RunTest(const FString& Parameters)
     BP->SetFlags(RF_Public|RF_Standalone|RF_Transactional);
     FEdGraphPinType BoolType;BoolType.PinCategory=UEdGraphSchema_K2::PC_Boolean;
     if (!FBlueprintEditorUtils::AddMemberVariable(BP.Get(),TEXT("AutoCloseAfterDemo"),BoolType,TEXT("false"))) return false;
-    auto* SCS=BP->SimpleConstructionScript;
+    FBlueprintEditorUtils::SetBlueprintOnlyEditableFlag(BP.Get(),TEXT("AutoCloseAfterDemo"),false);
+    auto* SCS=BP->SimpleConstructionScript.Get();
     USCS_Node* Root=nullptr;SCS->GetSceneRootComponentTemplate(true,&Root);
     if (!Root) { Root=SCS->CreateNode(USceneComponent::StaticClass(),TEXT("DemoRoot"));SCS->AddNode(Root); }
     auto* CameraNode=SCS->CreateNode(UCameraComponent::StaticClass(),TEXT("DemoCamera"));Root->AddChildNode(CameraNode);
@@ -239,7 +240,13 @@ bool FVaRestShippingVisualAuthorTest::RunTest(const FString& Parameters)
     Exec=A.SetText(Exec,TEXT("MatchHttp"),A.Prefix(TEXT("HTTP match: "),Http(MatchCall)));
     Exec=A.SetText(Exec,TEXT("Status"),nullptr,TEXT("Completed: typed response -> typed request"));
     auto* Close=Node<UK2Node_IfThenElse>(Graph,A.X,0);Close->AllocateDefaultPins();
-    A.Wire(Exec,Close->GetExecPin());auto* Auto=A.Get(TEXT("AutoCloseAfterDemo"));A.Wire(A.Pin(Auto,TEXT("AutoCloseAfterDemo")),Close->GetConditionPin());
+    // Camera selection after the real async responses also survives ordinary
+    // controller startup camera management. This does not delay either request.
+    auto* ResultView=A.Fn(APlayerController::StaticClass()->FindFunctionByName(GET_FUNCTION_NAME_CHECKED(APlayerController,SetViewTargetWithBlend)));
+    A.Wire(PC ? PC->GetReturnValuePin():nullptr,A.Pin(ResultView,UEdGraphSchema_K2::PN_Self));
+    A.Wire(A.Pin(Self,UEdGraphSchema_K2::PN_Self),A.Pin(ResultView,TEXT("NewViewTarget")));
+    A.Wire(Exec,ResultView ? ResultView->GetExecPin():nullptr);
+    A.Wire(A.Pin(ResultView,UEdGraphSchema_K2::PN_Then),Close->GetExecPin());auto* Auto=A.Get(TEXT("AutoCloseAfterDemo"));A.Wire(A.Pin(Auto,TEXT("AutoCloseAfterDemo")),Close->GetConditionPin());
     auto* Delay=A.Fn(UKismetSystemLibrary::StaticClass()->FindFunctionByName(GET_FUNCTION_NAME_CHECKED(UKismetSystemLibrary,Delay)));
     if (auto* P=A.Pin(Delay,TEXT("Duration"))) P->DefaultValue=TEXT("10.0");
     auto* Quit=A.Fn(UKismetSystemLibrary::StaticClass()->FindFunctionByName(GET_FUNCTION_NAME_CHECKED(UKismetSystemLibrary,QuitGame)));
@@ -274,7 +281,9 @@ bool FVaRestShippingVisualAuthorTest::RunTest(const FString& Parameters)
         FActorSpawnParameters Spawn;Spawn.Name=TEXT("VaRestVisualDemoActor");Spawn.ObjectFlags=RF_Transactional;
         Spawn.SpawnCollisionHandlingOverride=ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
         auto* Actor=World->SpawnActor<AActor>(Class,FVector::ZeroVector,FRotator::ZeroRotator,Spawn);if (!Actor) return false;
-        AutoProperty->SetPropertyValue_InContainer(Actor,bAuto);Actor->SetActorLabel(TEXT("VaRest typed HTTP visual demo"),false);
+        AutoProperty->SetPropertyValue_InContainer(Actor,bAuto);Actor->RerunConstructionScripts();
+        if (!TestTrue(TEXT("per-instance close setting survives normal reconstruction"),AutoProperty->GetPropertyValue_InContainer(Actor)==bAuto)) return false;
+        Actor->SetActorLabel(TEXT("VaRest typed HTTP visual demo"),false);
         TArray<UTextRenderComponent*> Texts;Actor->GetComponents(Texts);
         if (!TestTrue(TEXT("real camera and text runtime components"),Actor->FindComponentByClass<UCameraComponent>() && Texts.Num()==7)) return false;
         if (!UEditorLoadingAndSavingUtils::SaveMap(World,Folder+(bAuto ? TEXT("/FirstLookAuto"):TEXT("/FirstLook")))) return false;
