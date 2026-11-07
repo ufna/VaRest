@@ -7,6 +7,14 @@
 #include "BlueprintNodeSpawner.h"
 #include "Modules/ModuleManager.h"
 
+void UK2Node_VaRestCallEndpoint::PreloadRequiredAssets()
+{
+	// Cold Blueprint regeneration can reach this node before the referenced API is serialized.
+	// Use the native K2 preload contract before endpoint/type lookup; do not force PostLoad.
+	PreloadObject(Api);
+	Super::PreloadRequiredAssets();
+}
+
 const FVaRestApiEndpoint* UK2Node_VaRestCallEndpoint::ResolveEndpoint() const { return Api ? (EndpointId.IsValid() ? Api->FindEndpoint(EndpointId) : Api->FindEndpoint(EndpointName)) : nullptr; }
 FVaRestTypeRef UK2Node_VaRestCallEndpoint::GetResponseType() const { const auto* Endpoint=ResolveEndpoint();return Endpoint ? Endpoint->ResponseType : FVaRestTypeRef(); }
 FVaRestTypeRef UK2Node_VaRestCallEndpoint::GetErrorType() const { const auto* Endpoint=ResolveEndpoint();return Endpoint ? Endpoint->ErrorType : FVaRestTypeRef(); }

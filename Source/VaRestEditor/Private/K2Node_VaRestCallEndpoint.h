@@ -16,6 +16,7 @@ public:
 	UFUNCTION() TArray<FString> GetEndpointNames() const;
 	virtual UVaRestApi* GetApi() const override { return Api; }
 	virtual bool IsEndpointNode() const override { return true; }
+	virtual void PreloadRequiredAssets() override;
 	virtual const FVaRestApiEndpoint* ResolveEndpoint() const override;
 	virtual FVaRestTypeRef GetResponseType() const override;
 	virtual FVaRestTypeRef GetErrorType() const override;
