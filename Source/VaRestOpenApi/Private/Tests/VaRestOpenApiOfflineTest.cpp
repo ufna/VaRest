@@ -11,6 +11,7 @@
 #include "CoreGlobals.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Base64.h"
+#include "Misc/DataValidation.h"
 #include "Misc/Parse.h"
 #include "VaRestOpenApiImportDialog.h"
 #include "VaRestOpenApiApplyPrivate.h"
@@ -1067,6 +1068,16 @@ bool FVaRestOpenApiInlineIdentityTest::RunTest(const FString& Parameters)
  const auto Applied=FVaRestOpenApiApplier::Apply(Plan,Options);Owned.Keep(Applied);
  if (!NoErrors(*this,Applied.Issues,TEXT("inline apply")) || !TestNotNull(TEXT("actual inline API"),Applied.Api)) return false;
  auto* Api=Applied.Api;
+ const auto ValidateForSave=[&](const TCHAR* Stage)
+ {
+  FDataValidationContext Validation(false,EDataValidationUsecase::Save,{});
+  const auto Result=Api->IsDataValid(Validation);
+  for (const auto& Issue:Validation.GetIssues()) if (Issue.Severity==EMessageSeverity::Error)
+   AddError(FString(Stage)+TEXT(": ")+Issue.Message.ToString());
+  return TestTrue(FString(Stage)+TEXT(" passes the actual Save-usecase asset validator"),Result==EDataValidationResult::Valid) &&
+   TestEqual(FString(Stage)+TEXT(" has no validation errors"),Validation.GetNumErrors(),0u);
+ };
+ if (!ValidateForSave(TEXT("fresh inline API"))) return false;
  const auto State=DecodeState(Api->ImportState);
  if (!TestTrue(TEXT("new actual import state is readable"),State.IsSet())) return false;
  const auto Captured=FVaRestOpenApiMerge::Capture(Api,State.GetValue());
@@ -1094,6 +1105,7 @@ bool FVaRestOpenApiInlineIdentityTest::RunTest(const FString& Parameters)
  TestTrue(TEXT("no-op preserves exact manifest"),Api->ImportState.Blob==OriginalState.Blob);
  TestEqual(TEXT("no-op retains endpoint GUID"),Api->Endpoints[0].Id,EndpointId);
  TestEqual(TEXT("no-op retains native response type"),Api->Endpoints[0].ResponseType.Type.Get(),ResponseType);
+ if (!ValidateForSave(TEXT("inline API after no-op reimport"))) return false;
  auto Duplicate=State.GetValue().Clone();auto DuplicateItems=Duplicate[TEXT("items")].Clone();DuplicateItems.Add(DuplicateItems.At(0).Clone());Duplicate.Set(TEXT("items"),DuplicateItems);
  auto Destination=OriginalState;
  TestFalse(TEXT("ambiguous state cannot be published"),EncodeState(Duplicate,Destination));

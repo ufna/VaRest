@@ -717,3 +717,10 @@ A finite no-Python UI control003 separately crashed-11 in NVIDIA615.78.08/Vulkan
 ### 2026-11-07 — Source331: plugin-contained private LWS dependency
 
 The actual stock BuildPlugin path discards copied Intermediate and packages Source. Private LWS now resolves its unchanged recipe007/output006 archive from its own Source/ThirdParty/lib directory, with full32-object provenance. Only path/diagnostic literals change in one existing rule; all target/precompiled guards and ordinary Game selection carry. The32 ELF64/x86-64 payloads and whole archive52bc0175/2911814B join the real prior build;824 unrelated Source and1236 existing guards remain exact. This is a plugin-only source packaging correction, UNBUILT/UNRUN, not portable package, Game, lifecycle or release acceptance. Engine/Host and normal251 products are preserved; the OpenAPI329 native/save regression remains pending.
+
+
+### 2026-11-07 — ordinary plugin build331 and OpenAPI11 pass
+
+Supported UBT foreign-plugin/UsePrecompiled mode builds all12 plugin libraries in a stock descriptor-only project without custom Engine/Host code. Fresh standard build35 succeeds0/170.057s/all2126 guards, using the actual project PCH and12 NativeOwner objects from an earlier failed Execute-mode scheduling attempt; all110 combined products and matching module BuildId are read back. That first49-action attempt is failed6 and retained, not relabeled success. Existing normal251 correctly bridges dependency files and is unaffected.
+
+New-binary OpenAPI offline checks pass11/0/54.922s/all2208 guards, including real InlineIdentity plus original ten cases. Source332 adds only direct actual Save-usecase IsDataValid assertions to that inline fixture, before and after no-op reimport; its compile/runtime are pending at this snapshot. Production code remains331. Normal engine/Host products are preserved; two refcount compiler warnings and runtime Wayland warnings remain visible. Factory SelectedPlan, GUI save/exit, Game/cooked/WS-DNS/platform and release gates remain separate.
