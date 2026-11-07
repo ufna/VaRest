@@ -4,7 +4,7 @@ Inspector captures VaRest HTTP requests, WebSocket connections and Socket.IO act
 
 ## Open and capture
 
-Open **Tools → Debug → VaRest Network Inspector** or run `VaRest.Inspector.Open`. Desktop Development games open their own window. Null rendering, unattended execution and unavailable Slate do not create a live panel.
+Open **Tools → VaRest Network Inspector** (the Debug section) or run `VaRest.Inspector.Open`. Desktop Development games open their own window. Null rendering, unattended execution and unavailable Slate do not create a live panel.
 
 **Record/Pause** changes capture, not network operations. **Clear** clears records/statistics and may reattach live work as partial records. **Preserve log** keeps closed PIE scopes across the next PIE session. The selector distinguishes game/editor scopes from process scope 0; unknown context stays unknown.
 

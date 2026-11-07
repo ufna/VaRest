@@ -1,0 +1,59 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "VaRest First Look",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8080"
+    }
+  ],
+  "paths": {
+    "/player.json": {
+      "get": {
+        "operationId": "GetDemoPlayer",
+        "summary": "Read the local demo player",
+        "tags": [
+          "FirstLook"
+        ],
+        "responses": {
+          "200": {
+            "description": "Local static JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DemoPlayer"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "DemoPlayer": {
+        "type": "object",
+        "required": [
+          "id",
+          "displayName",
+          "online"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "online": {
+            "type": "boolean"
+          }
+        }
+      }
+    }
+  }
+}

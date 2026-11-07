@@ -2,6 +2,8 @@
 
 This guide describes the development source. Native compilation and runtime qualification are tracked in the [development passport](../passport/2026-11-04-varest2-development.md).
 
+For a short manual Editor walkthrough and local example inputs, see [First look](first-look.md).
+
 ## JSON
 
 Use `VaRestJson` for `FVaRestJson` and struct conversion. A value holds its document alive. Copying a handle shares that document; `Clone()` creates an independent tree. Inserting a value from another document copies its contents. Missing/invalid values and JSON null are distinct.
