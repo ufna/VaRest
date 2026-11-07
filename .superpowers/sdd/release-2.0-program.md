@@ -1,5 +1,13 @@
 # VaRest 2.0 release program ledger (controller-level; per-plan ledgers live in sibling dirs)
 
+## Source344 — private LWS C++ binding and regression17 pass, 2026-11-08
+
+Source343/checkpoint22cd02f7 now passes the finite Linux x64 modular Editor Development consumer gate: ordinary3 WS Compile+owningLink0/55.383s/all77820 preserved, no Engine Compile/new PCH. Whole current object/ELF readback003 resolves all79 allocated code references/30 unique prefixed imports to exact LOCAL/HIDDEN definitions in the actual WS DSO, without Engine-LWS interposition. All3 new dependency records join3464 genuine pre-native identities/postonly0. Actual419-label C32 archive remains477acb2e;188 external SDK imports remain real.
+
+Actual existing Module/Service/Conn/Transport/TLS regression002 passes exactly17/0, process0/41.694s/all77834 preserved. Real LWS contexts/service threads/commands/wakeup/shutdown and in-memory X509 verification are covered; some Conn/flush cases use existing stand-in fixtures. No external WSS peer or blocked OS-DNS retirement is inferred.667 warnings remain. First run001 selected zero tests and exited255 because Root regex-escaped a literal Automation selector; that failed run stays immutable. The actual primary parser supports anchored literal names, used correctly in002; existing NoZenLocalFallback avoids offline local DDC.
+
+Finite Root reportcdac4e1b/4261B15LF and readpins713dca51/1143060B20010LF reauthenticate5002 named inputs, including all832 canonical and832 owned-shadow Source files. Bead54.3.3 closes only this consumer scope; HGS T-px1h2y is Review. Source344 changes only these3 progress documents; all832 Source files stay code343. Game private-copy eligibility, DNS/proxy/TLS/code+storage lifetime, defaultRHI27.1, external Socket.IO/platform/performance/full-release gates and the broader Goal stay OPEN. No Engine/Host/manual Target edit, old Host5/Profile2/full4608 activation or release acceptance. Source342 ordinary packaged Shipping proof remains its separate code340 observation.
+
 ## Latest finite delivery result — Source342, 2026-11-08
 
 Source341/code340 now has an actual ordinary SDK-generated consuming-project Shipping build:949 natural actions,2168 products, exit0/3189.475s/all72314 preservation guards. Native resultc25e69a2 and independent ELF/debug readback74284d1e bind genuine Game receipt e3ee6d4a, executablec070ca16 and common BuildIDd676c5ef47a5f72ad4bc64993cd3989c2c70aeb9. NativeProjects generated the six temporary target/module files; Root wrote no special Host/Target/game module or Engine source.
