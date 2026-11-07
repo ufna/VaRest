@@ -24,10 +24,10 @@ public class VaRestPrivateLws : ModuleRules
 		}
 		// This tranche supplies Release C objects only. Debug/DebugCRT targets never select it.
 		string IncludeRoot = Path.Combine(ModuleDirectory, "include", "Linux", "x86_64-unknown-linux-gnu");
-		string Archive = Path.Combine(PluginDirectory, "Intermediate", "VaRestPrivateLws", "Linux", "x86_64-unknown-linux-gnu", "Release", "006", "libvarest_lws3_private.a");
+		string Archive = Path.Combine(ModuleDirectory, "lib", "Linux", "x86_64-unknown-linux-gnu", "Release", "libvarest_lws3_private.a");
 		if (!File.Exists(Archive))
 		{
-			throw new BuildException("Missing reviewed private LWS archive: {0}. Root must build it before the fresh UBT graph; no SDK fallback.", Archive);
+			throw new BuildException("Missing bundled private LWS archive: {0}. Restore the matching VaRest Source/ThirdParty dependency; no SDK fallback.", Archive);
 		}
 		PublicSystemIncludePaths.Add(IncludeRoot);
 		PublicAdditionalLibraries.Add(Archive);

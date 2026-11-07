@@ -1,0 +1,184 @@
+{
+  "schema": "VaRestPrivateLws.bundled-archive.v1",
+  "archive": "libvarest_lws3_private.a",
+  "sha256": "52bc0175d0887c110f114173011cc52f929408c749d1bb39db767e236bc72b06",
+  "bytes": 2911814,
+  "platform": "Linux",
+  "architecture": "x86_64-unknown-linux-gnu",
+  "configuration": "Release",
+  "upstream": {
+    "project": "libwebsockets",
+    "version": "v3.0.0",
+    "commit": "eaa935a80adb38b5cc4d09ce06ec987b87dcddfa"
+  },
+  "compiler": "Unreal Linux SDK v26 clang 20.1.8 rockylinux8",
+  "source_recipe_revision": "007_SOURCE299_TO_SOURCE300_OUTPUT006_CURRENT32C_COLLECT_COMPILER_DIAGNOSTICS",
+  "source_recipe_sha256": "0664f58fdd041f60d0e7a0fc30993a0bf4d304bcfc747003cb35d0d2b5bd1b66",
+  "original_build_receipt_sha256": "39d5610dbd641f3868a632a637deb199b92c5b9a58af1ef2d0dd368ca6bab813",
+  "source300_receipt_sha256": "10c8a18336c898afb3e999bf5d53e9ef9f19524a9d94e92eccc5d3b29f7d331f",
+  "production": "Existing recipe007 output006 copied byte-for-byte; no new compilation or archive creation.",
+  "scope": "Current rules retain Linux x64 Editor Development modular/non-merged source-build selection and precompiled refusals. Relocation is not Game, platform, ABI, lifecycle or release qualification.",
+  "source_and_license": "Source/ThirdParty/VaRestPrivateLws/src, include, internal, LICENSE and NOTICE.txt remain supplied unchanged.",
+  "members": [
+    {
+      "name": "00_base64-decode.o",
+      "bytes": 15552,
+      "sha256": "22617a86a78567ef468baa608555eb0e7edc832d2bf01533fd68d7a13ce1913a"
+    },
+    {
+      "name": "01_libwebsockets.o",
+      "bytes": 217352,
+      "sha256": "6df380b39a9bd42cb21b7ea79723a386fb84fa96fe2aaa80f5f7e9a9d7b0ec3c"
+    },
+    {
+      "name": "02_service.o",
+      "bytes": 116000,
+      "sha256": "81dd4e2d22ac3fc393baea8aa14498b7563317c0415abdfb60f18de0e9d4d984"
+    },
+    {
+      "name": "03_pollfd.o",
+      "bytes": 86128,
+      "sha256": "4f5680d629bafd84db82f20864931492acfff7a4864b5bfa3a1c693053ec9f9e"
+    },
+    {
+      "name": "04_output.o",
+      "bytes": 75024,
+      "sha256": "8688a800f9f519dcccc8abe9fc3c63e84229227e04d2b33ceae363198a95aece"
+    },
+    {
+      "name": "05_context.o",
+      "bytes": 189984,
+      "sha256": "b4661b07980a2191ca7d343a06376787c242854934c99751b1b3c84759a4690a"
+    },
+    {
+      "name": "06_alloc.o",
+      "bytes": 19008,
+      "sha256": "59e0c597b78212aba6b7d5815d2031ccc8d8635a04815c4fba92cc0a928c74e4"
+    },
+    {
+      "name": "07_ops-pipe.o",
+      "bytes": 57792,
+      "sha256": "d5eb4bcdc389fbf75dbdeb0d0ce2c82d181a759709f702165b8f5c6bab038e78"
+    },
+    {
+      "name": "08_lws-ring.o",
+      "bytes": 17632,
+      "sha256": "986106550c9c0ce9ebeb27b1f10aef0d5d1fc911641f6e547be3bd2e7b7609bc"
+    },
+    {
+      "name": "09_header.o",
+      "bytes": 101816,
+      "sha256": "ae61ad4c56f83120ebbd1d511351dec37df54fd197e345002d5e5ad002a0cf20"
+    },
+    {
+      "name": "10_parsers.o",
+      "bytes": 114576,
+      "sha256": "e7200dcaff9df9e52424c20b38084e50136a1263f75ea54d20dc620561cec149"
+    },
+    {
+      "name": "11_ops-h1.o",
+      "bytes": 74544,
+      "sha256": "d09f259028f2882508211834d7f83268e26716d5b3ed4702b23cfb3e67baaac0"
+    },
+    {
+      "name": "12_ops-ws.o",
+      "bytes": 110728,
+      "sha256": "c44ee3939bb5b3c38bf86a988cf65aa6a43fb220866134f2a06f778d927cb83b"
+    },
+    {
+      "name": "13_client-ws.o",
+      "bytes": 86024,
+      "sha256": "806205eb604f9253cfec49db00b7a5748d62160bdda85e78efa5f9f021c006e3"
+    },
+    {
+      "name": "14_client-parser-ws.o",
+      "bytes": 70504,
+      "sha256": "53fb54cc0c855e6096d5553a2b5314ba437ca7285d3d0762665130905a060648"
+    },
+    {
+      "name": "15_server-ws.o",
+      "bytes": 81752,
+      "sha256": "9bad66a2c21f5b34023d94f4e01ba4f558c7b428d5d700a4fc2885aaf853cacb"
+    },
+    {
+      "name": "16_ops-raw.o",
+      "bytes": 62152,
+      "sha256": "435a183ac33dcc1e174009d7db3e99428cf592974a38cf635e5ec037091af1ae"
+    },
+    {
+      "name": "17_client.o",
+      "bytes": 107888,
+      "sha256": "a9fa793ed46480a3e683c4e67164ab6df0d59bfd3e0855add42e9c224a446108"
+    },
+    {
+      "name": "18_client-handshake.o",
+      "bytes": 152320,
+      "sha256": "7f0635f976733bda18ae8561d60665e99cfe1b60c7b10068d9b3233e9489bcf9"
+    },
+    {
+      "name": "19_ops-listen.o",
+      "bytes": 61008,
+      "sha256": "5e7adf41a54aa75b29c7ceafdbdd6a29dc933efd34aaf0b0589081ff6dded308"
+    },
+    {
+      "name": "20_tls.o",
+      "bytes": 80832,
+      "sha256": "b2582ae02274a6eb096b86dbd231e6da054b0629022521e1aeaac5ba1a27ab0b"
+    },
+    {
+      "name": "21_ssl.o",
+      "bytes": 112776,
+      "sha256": "7a1350d217012fee1d47a5770fd0327c3fe1c0a8234fb726305dc7c84b4e92a1"
+    },
+    {
+      "name": "22_tls-server.o",
+      "bytes": 73608,
+      "sha256": "81de7fcf2ff3a0457e0d225db5dcfe53866aaa66c67324c4959ab7d85930e6da"
+    },
+    {
+      "name": "23_openssl-server.o",
+      "bytes": 85312,
+      "sha256": "d26d9754c2ee21b5ceb162d4afc6f78ded9de3f6b25f900e28fb2e98e6a9b02c"
+    },
+    {
+      "name": "24_tls-client.o",
+      "bytes": 61832,
+      "sha256": "bd9a463c8747fe0d6d1ad3be4d866408aa6dfa449e96a133fbbd2c62102a5e3c"
+    },
+    {
+      "name": "25_openssl-client.o",
+      "bytes": 123648,
+      "sha256": "7cf44e67473a0fbab5ff392bd62749ec853f723bb29276b71bac2e2e659f17f1"
+    },
+    {
+      "name": "26_sha-1.o",
+      "bytes": 14672,
+      "sha256": "8f1f591c29fc5045a3a129fa2600b0148f86706b831cdf172d1ec727b1a39554"
+    },
+    {
+      "name": "27_lws-plat-unix.o",
+      "bytes": 130056,
+      "sha256": "7173abd4d74c8f75ce0a075e3ec65d72818a4c1c0847cbc63ad737710cd99709"
+    },
+    {
+      "name": "28_server.o",
+      "bytes": 175792,
+      "sha256": "c50d6a1b52ff69cd87def86dcba41241a587d96d55b0159c43ba3500be5d3aa1"
+    },
+    {
+      "name": "29_lws-spa.o",
+      "bytes": 81576,
+      "sha256": "5a15072b19773fb538873494c6967d00032a317ff99f676358a9d46ad3ddb32c"
+    },
+    {
+      "name": "30_poll.o",
+      "bytes": 51200,
+      "sha256": "a3e77e871bf741b22f1646a28fd5286c14e52fc3910b8caa4e8d94ed724e5e0a"
+    },
+    {
+      "name": "31_varest-custody.o",
+      "bytes": 89616,
+      "sha256": "3baccbac69ef54ceca4e13d88bdf4a2327711f2348b557759e3c63dce96e5ad1"
+    }
+  ]
+}
