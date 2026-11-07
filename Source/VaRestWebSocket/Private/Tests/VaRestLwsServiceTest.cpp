@@ -9,6 +9,7 @@
 #include "Misc/ScopeLock.h"
 #include "VaRestHttpTesting.h"
 #include "VaRestLwsService.h"
+#include "VaRestLwsCopyPolicy.h"
 
 #include <atomic>
 
@@ -336,26 +337,29 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestLwsServiceLogLevelTest, "VaRest.WebSocke
 bool FVaRestLwsServiceLogLevelTest::RunTest(const FString& Parameters)
 {
 	using namespace VaRest::WebSocket::Lws;
-#if IS_MONOLITHIC || UE_MERGED_MODULES
-	AddInfo(TEXT("a shared LWS copy: the level is the engine's when WebSockets is loaded (D30); checked in W1b's monolithic run"));
-#else
-	// Review M-6: through Start, the D30 rule's one caller (plan decision 16 as amended by review M-1: the first start that
-	// may apply it). An earlier start in this run may have applied it already, and the row still holds Start to it: nothing
-	// else in the module calls ApplyLogLevel, so without Start's call no start applies it and LWS's default, notices on,
-	// stays in this copy whatever ran before (VaRestTests' LWS is another copy [coexist.lws_symbol_owner])
-	AddExpectedMessagePlain(TEXT("libwebsockets("), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, -1);
-	const TSharedRef<FService, ESPMode::ThreadSafe> Service = MakeShared<FService, ESPMode::ThreadSafe>(FServiceOptions());
-	if (!TestTrue(TEXT("the service starts"), Service->Start()))
+	if constexpr (SharesEngineLws)
 	{
-		return false;
+		AddInfo(TEXT("a shared LWS copy: the level is the engine's when WebSockets is loaded (D30); checked in W1b's monolithic run"));
 	}
-	Service->Shutdown();
-	// D30 (spec 1.2): VaRest's own copy logs errors and warnings only [coexist.shared_lws_state] (lwsl_visible, libwebsockets.h:434-443)
-	TestTrue(TEXT("errors are visible"), lwsl_visible(LLL_ERR) != 0);
-	TestTrue(TEXT("warnings are visible"), lwsl_visible(LLL_WARN) != 0);
-	TestEqual(TEXT("notices are not (LWS's default has them, libwebsockets.h:413-414)"), lwsl_visible(LLL_NOTICE), 0);
-	TestEqual(TEXT("client lines are not"), lwsl_visible(LLL_CLIENT), 0);
-#endif
+	else
+	{
+		// Review M-6: through Start, the D30 rule's one caller (plan decision 16 as amended by review M-1: the first start that
+		// may apply it). An earlier start in this run may have applied it already, and the row still holds Start to it: nothing
+		// else in the module calls ApplyLogLevel, so without Start's call no start applies it and LWS's default, notices on,
+		// stays in this copy whatever ran before (VaRestTests' LWS is another copy [coexist.lws_symbol_owner])
+		AddExpectedMessagePlain(TEXT("libwebsockets("), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, -1);
+		const TSharedRef<FService, ESPMode::ThreadSafe> Service = MakeShared<FService, ESPMode::ThreadSafe>(FServiceOptions());
+		if (!TestTrue(TEXT("the service starts"), Service->Start()))
+		{
+			return false;
+		}
+		Service->Shutdown();
+		// D30 (spec 1.2): VaRest's own copy logs errors and warnings only [coexist.shared_lws_state] (lwsl_visible, libwebsockets.h:434-443)
+		TestTrue(TEXT("errors are visible"), lwsl_visible(LLL_ERR) != 0);
+		TestTrue(TEXT("warnings are visible"), lwsl_visible(LLL_WARN) != 0);
+		TestEqual(TEXT("notices are not (LWS's default has them, libwebsockets.h:413-414)"), lwsl_visible(LLL_NOTICE), 0);
+		TestEqual(TEXT("client lines are not"), lwsl_visible(LLL_CLIENT), 0);
+	}
 	return true;
 }
 
@@ -365,13 +369,19 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestLwsServiceStartupPolicyTest, "VaRest.Web
 bool FVaRestLwsServiceStartupPolicyTest::RunTest(const FString& Parameters)
 {
 	using namespace VaRest::WebSocket::Lws;
-	// Plan decision 8 (VaRest-rti)
+	// Plan decision 8 (VaRest-rti); private monolithic is an own copy too.
 	const auto Nothing = [](const TCHAR*) { return false; };
 	const auto WebSockets = [](const TCHAR* Name) { return FCString::Strcmp(Name, TEXT("WebSockets")) == 0; };
 	const auto Replay = [](const TCHAR* Name) { return FCString::Strcmp(Name, TEXT("HttpNetworkReplayStreaming")) == 0; };
 	const auto Server = [](const TCHAR* Name) { return FCString::Strcmp(Name, TEXT("WebSocketServer")) == 0; };
 	const auto Networking = [](const TCHAR* Name) { return FCString::Strcmp(Name, TEXT("WebSocketNetworking")) == 0; };
-	TestFalse(TEXT("a modular build: lazily, VaRest's copy is its own"), ShouldCreateAtStartup(false, WebSockets));
+#if defined(VAREST_USE_PRIVATE_LWS3) && VAREST_USE_PRIVATE_LWS3
+	TestFalse(TEXT("private labels select an own copy even in monolithic Game"), SharesEngineLws);
+	TestFalse(TEXT("an actual private copy stays lazy even when Engine WebSockets is linked"), ShouldCreateAtStartup(SharesEngineLws, WebSockets));
+#else
+	TestEqual(TEXT("legacy selection retains the actual monolithic/merged shared policy"), SharesEngineLws, bool(IS_MONOLITHIC || UE_MERGED_MODULES));
+#endif
+	TestFalse(TEXT("an own copy: lazily"), ShouldCreateAtStartup(false, WebSockets));
 	TestFalse(TEXT("a shared copy with no other LWS module: lazily"), ShouldCreateAtStartup(true, Nothing));
 	TestTrue(TEXT("a shared copy with WebSockets: at startup"), ShouldCreateAtStartup(true, WebSockets));
 	TestTrue(TEXT("... or with any other LWS module"), ShouldCreateAtStartup(true, Replay));

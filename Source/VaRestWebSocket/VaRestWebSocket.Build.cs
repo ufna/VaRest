@@ -40,20 +40,24 @@ public class VaRestWebSocket : ModuleRules
 
 		// The engine's own link of libwebsockets (WebSockets.Build.cs:118; ModuleRules.cs:1601-1607 makes them private
 		// dependencies): static OpenSSL, libwebsockets and zlib, one copy per module in modular builds (spec 1.2)
-		// Only the separately reviewed Linux x64 Editor Development modular proof uses the private archive.
-		// Architecture is the public SingleArchitecture getter: a multi-architecture target fails closed.
-		bool bPrivateLwsProof = Target.Platform == UnrealTargetPlatform.Linux
+		//419 external C labels isolate this archive from the Engine LWS copy even in monolithic Game.
+		// EditorDevelopment modular is qualified; ordinary Game Dev/Shipping qualification is a separate gate.
+		// Multi-architecture, merged, other platforms/configurations and precompiled WS remain outside this tranche.
+		bool bPrivateLws = Target.Platform == UnrealTargetPlatform.Linux
 			&& Target.Architecture == UnrealArch.X64
-			&& Target.Type == TargetType.Editor
-			&& Target.Configuration == UnrealTargetConfiguration.Development
-			&& Target.LinkType == TargetLinkType.Modular
-			&& !Target.bMergeModules;
-		PrivateDefinitions.Add("VAREST_USE_PRIVATE_LWS3=" + (bPrivateLwsProof ? "1" : "0"));
-		if (bPrivateLwsProof)
+			&& !Target.bMergeModules
+			&& ((Target.Type == TargetType.Editor
+				&& Target.Configuration == UnrealTargetConfiguration.Development
+				&& Target.LinkType == TargetLinkType.Modular)
+				|| (Target.Type == TargetType.Game
+					&& (Target.Configuration == UnrealTargetConfiguration.Development || Target.Configuration == UnrealTargetConfiguration.Shipping)
+					&& Target.LinkType == TargetLinkType.Monolithic));
+		PrivateDefinitions.Add("VAREST_USE_PRIVATE_LWS3=" + (bPrivateLws ? "1" : "0"));
+		if (bPrivateLws)
 		{
 			if (bUsePrecompiled)
 			{
-				throw new BuildException("VaRest private LWS proof requires a fresh source-built WS module; precompiled WS is not qualified.");
+				throw new BuildException("VaRest private LWS requires a fresh source-built WS module; precompiled WS is not qualified.");
 			}
 			PrivateDependencyModuleNames.Add("VaRestPrivateLws");
 			AddEngineThirdPartyPrivateStaticDependencies(Target, "OpenSSL", "zlib");

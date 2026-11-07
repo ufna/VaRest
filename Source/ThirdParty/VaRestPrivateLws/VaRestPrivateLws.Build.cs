@@ -9,14 +9,18 @@ public class VaRestPrivateLws : ModuleRules
 	public VaRestPrivateLws(ReadOnlyTargetRules Target) : base(Target)
 	{
 		Type = ModuleType.External;
-		if (Target.Platform != UnrealTargetPlatform.Linux
-			|| Target.Architecture != UnrealArch.X64
-			|| Target.Type != TargetType.Editor
-			|| Target.Configuration != UnrealTargetConfiguration.Development
-			|| Target.LinkType != TargetLinkType.Modular
-			|| Target.bMergeModules)
+		bool bSupported = Target.Platform == UnrealTargetPlatform.Linux
+			&& Target.Architecture == UnrealArch.X64
+			&& !Target.bMergeModules
+			&& ((Target.Type == TargetType.Editor
+				&& Target.Configuration == UnrealTargetConfiguration.Development
+				&& Target.LinkType == TargetLinkType.Modular)
+				|| (Target.Type == TargetType.Game
+					&& (Target.Configuration == UnrealTargetConfiguration.Development || Target.Configuration == UnrealTargetConfiguration.Shipping)
+					&& Target.LinkType == TargetLinkType.Monolithic));
+		if (!bSupported)
 		{
-			throw new BuildException("VaRestPrivateLws is qualified only for Linux x64 Editor Development modular, non-merged source builds.");
+			throw new BuildException("VaRestPrivateLws supports Linux x64 non-merged source builds: Editor Development modular or Game Development/Shipping monolithic; each requires its actual qualification.");
 		}
 		if (bUsePrecompiled)
 		{

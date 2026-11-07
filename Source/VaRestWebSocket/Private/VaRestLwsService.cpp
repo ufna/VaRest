@@ -1,6 +1,7 @@
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 
 #include "VaRestLwsService.h"
+#include "VaRestLwsCopyPolicy.h"
 
 #include "HAL/PlatformProcess.h"
 #include "HAL/PlatformTime.h"
@@ -81,10 +82,10 @@ void VaRest::WebSocket::Lws::ApplyLogLevel()
 	{
 		return;
 	}
-	// D30 (spec 1.2): VaRest's own LWS copy in modular builds, always; the one copy a monolithic or merged build shares, only
-	// while the engine's WebSockets module is not loaded. A WebSockets module that loads later sets its own level and emitter
-	// (LwsWebSocketsManager.cpp:174-176), and VaRest's lines then go to LogWebSockets: never both in one copy
-	constexpr bool bSharedCopy = IS_MONOLITHIC || UE_MERGED_MODULES;
+	// D30: private external labels select our own copy, including qualified monolithic Game. Otherwise the legacy
+	// monolithic/merged Engine copy is shared and its loaded WebSockets module owns the level/emitter.
+	// A later Engine module load must not change a namespaced private copy's level or expose its query text.
+	constexpr bool bSharedCopy = SharesEngineLws;
 	if (!bSharedCopy || !FModuleManager::Get().IsModuleLoaded(TEXT("WebSockets")))
 	{
 		lws_set_log_level(LLL_ERR | LLL_WARN, &VaRestLwsServicePrivate::EmitLwsLine);
@@ -1312,6 +1313,13 @@ bool VaRest::WebSocket::Lws::FService::Start()
 	{
 		Info.options |= LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT;
 	}
+#if defined(VAREST_USE_PRIVATE_LWS3) && VAREST_USE_PRIVATE_LWS3
+	// Private LWS has private ex-data indices. Its TLS client setup also checks this option BEFORE adopting
+	// provided_client_ssl_ctx (tls-client.c). A genuine FSslManager context in monolithic Game does not initialize
+	// those private globals. OpenSSL1.1.1 init is idempotent; LWS respects the supplied context's caller ownership.
+	// Keep the existing handshake-in-flight gate above before every context creation.
+	Info.options |= LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT;
+#endif
 	Context = lws_create_context(&Info);
 	Counters.ContextCreations.fetch_add(1);
 	if (!Context)

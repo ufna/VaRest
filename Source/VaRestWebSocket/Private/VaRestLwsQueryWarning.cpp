@@ -1,6 +1,7 @@
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 
 #include "VaRestSocketQueryWarning.h"
+#include "VaRestLwsCopyPolicy.h"
 #include "Misc/CoreMisc.h"
 #include "Misc/OutputDevice.h"
 #include "Modules/ModuleManager.h"
@@ -41,7 +42,7 @@ void VaRest::WebSocket::Lws::WarnForSharedQueryLogging(FStringView Path)
 {
 	check(IsInGameThread());
 #if !NO_LOGGING
-	constexpr bool bShared = IS_MONOLITHIC || UE_MERGED_MODULES;
+	constexpr bool bShared = SharesEngineLws;
 	if (!bShared) return;
 	const bool bEngineLoaded = FModuleManager::Get().IsModuleLoaded(TEXT("WebSockets"));
 	static FQueryWarningLatch Once;

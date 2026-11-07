@@ -1,6 +1,7 @@
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 
 #include "VaRestLwsTransport.h"
+#include "VaRestLwsCopyPolicy.h"
 #include <stdint.h>
 
 #include "Async/Async.h"
@@ -658,7 +659,7 @@ VaRest::WebSocket::Lws::FTransport& VaRest::WebSocket::Lws::GetDefault()
 
 void VaRest::WebSocket::Lws::OnModuleStartup()
 {
-	constexpr bool bSharedCopy = IS_MONOLITHIC || UE_MERGED_MODULES;
+	constexpr bool bSharedCopy = SharesEngineLws;
 	// In a monolithic or merged build, ModuleExists lists the statically linked modules (ModuleManager.cpp:325-345, through
 	// FindModules' statically linked branch, :283-322)
 	const auto IsLinked = [](const TCHAR* Name) { return FModuleManager::Get().ModuleExists(Name); };
