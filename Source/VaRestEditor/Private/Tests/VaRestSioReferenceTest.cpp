@@ -245,7 +245,7 @@ struct FCase : TSharedFromThis<FCase,ESPMode::ThreadSafe>
 		}
 		else if(Phase==2 && TerminalServer>0 && Socket.GetState()==EVaRestSocketState::Disconnected)
 		{
-			Test.TestEqual(TEXT("two cycles refresh exactly once each"),Refreshed,2);Test.TestEqual(TEXT("only repeated refusal after refresh is public terminal"),Refused,1);Test.TestEqual(TEXT("all three wire401 packets remain counted"),Socket.GetStats().ConnectErrors,int64(3));Test.TestEqual(TEXT("repeated refusal reports one terminal Server error"),TerminalServer,1);
+			Test.TestEqual(TEXT("two cycles refresh exactly once each"),Refreshed,2);Test.TestEqual(TEXT("only repeated refusal after refresh is public terminal"),Refused,1);Test.TestEqual(TEXT("all three wire401 packets remain counted"),Socket.GetStats().ConnectErrors,int64(3));Check(TerminalServer>0,TEXT("terminal refusal surfaces Server before disconnect"));
 			Other=FVaRestSio::Make(Hub.Get(),TEXT("InvalidNamespace"),Url(0,TEXTVIEW("/not-registered"))).NoReconnect().WithLogLevel(EVaRestLogLevel::None);
 			const auto W=Weak();Other.OnConnectError(nullptr,[W](const FVaRestError& E,const FVaRestSioConnectError&) { if(auto S=W.Pin();S && !S->Cleaned) { S->Check(E.Kind==EVaRestErrorKind::Config,TEXT("actual Invalid namespace is Config"));S->PendingControl=true; } });Other.Connect();++Phase;
 		}
