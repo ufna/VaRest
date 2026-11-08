@@ -259,9 +259,13 @@ bool FVaRestDnsOrderlyExitTest::RunTest(const FString& Parameters)
 		const bool bActual = SnapshotForTests(Late) == EStatus::Ready && Late.bClosed && Late.Occupied == 1 && Late.Unjoined == 1 && Late.BeforeResolverWaiting == 1
 			&& Late.Created == Created && Late.Joined == Joined && Late.ResolverCalls == Calls;
 		if (bActual)
+		{
 			UE_LOG(LogVaRestSocket, Display, TEXT("VAREST_PRIVATE_DNS_ORDERLY_EXIT_VERIFIED: actual pool closed, one unjoined pre-resolver child, no resolver/join completion claim"));
+		}
 		else
+		{
 			UE_LOG(LogVaRestSocket, Error, TEXT("VAREST_PRIVATE_DNS_ORDERLY_EXIT_REFUSED: late native state does not match the held-job contract"));
+		}
 	});
 	if (!TestTrue(TEXT("the actual late application-exit witness was registered"), Witness.IsValid())) return false;
 	const auto ExitTicker = FTSTicker::GetCoreTicker().AddTicker(TEXT("VaRestPrivateDnsOrderlyExitFixture"), 3.0f, [](float)
