@@ -88,7 +88,7 @@ struct FCase : TSharedFromThis<FCase,ESPMode::ThreadSafe>
 		if (!Test.TestTrue(TEXT("owned real Core Hub initializes"),Core->InitializeOnGT(nullptr,true,Error)) ||
 			!Test.TestTrue(TEXT("owned real Socket Hub initializes"),Hub->InitializeOnGT(Core.Get()))) return false;
 		Deadline=FPlatformTime::Seconds()+45;
-		Socket=FVaRestSio::Make(Hub.Get(),TEXT("Reference"),Url(Kind==ECase::Heartbeat ? 2:0)).NoReconnect().WithLogLevel(EVaRestLogLevel::Off);
+		Socket=FVaRestSio::Make(Hub.Get(),TEXT("Reference"),Url(Kind==ECase::Heartbeat ? 2:0)).NoReconnect().WithLogLevel(EVaRestLogLevel::None);
 		if (!Test.TestTrue(TEXT("public real-default-transport factory"),Socket.IsValid())) return false;
 		FVaRestSioLimits Limits;Limits.ReadyTimeout=1.5;
 		if (Kind==ECase::Heartbeat) { Limits.MaxMessageBytes=20*1024*1024;Limits.MaxPacketBytes=20*1024*1024; }
@@ -151,7 +151,7 @@ struct FCase : TSharedFromThis<FCase,ESPMode::ThreadSafe>
 		ClientView.Reset(Core->MakeClient(FString::Printf(TEXT("http://127.0.0.1:%d"),Port)));
 		if (!Test.TestNotNull(TEXT("real managed HTTP refresh client"),ClientView.Get())) return false;
 		Client=ClientView->GetNativeClient();FVaRestBearerRefreshConfig Config;Config.RefreshPath=TEXT("/token");
-		Client.WithAuth(FVaRestAuth::BearerRefresh(Config)).WithTimeout(4).WithLogLevel(EVaRestLogLevel::Off);
+		Client.WithAuth(FVaRestAuth::BearerRefresh(Config)).WithTimeout(4).WithLogLevel(EVaRestLogLevel::None);
 		Client.SetSession(TEXT("varest-public-sio-1"),TEXT("varest-public-sio-refresh"));
 		const auto W=Weak();SessionChanged=Client.OnSessionChanged().AddLambda([W](EVaRestSessionChange Change)
 		{ if (auto S=W.Pin();S && !S->Cleaned && Change==EVaRestSessionChange::Refreshed) ++S->Refreshed; });
@@ -242,7 +242,7 @@ struct FCase : TSharedFromThis<FCase,ESPMode::ThreadSafe>
 		else if(Phase==2 && TerminalServer>0 && Socket.GetState()==EVaRestSocketState::Disconnected)
 		{
 			Check(Refreshed==2 && Refused==3,TEXT("second cycle refreshes once then repeated middleware refusal is terminal"));
-			Other=FVaRestSio::Make(Hub.Get(),TEXT("InvalidNamespace"),Url(0,TEXTVIEW("/not-registered"))).NoReconnect().WithLogLevel(EVaRestLogLevel::Off);
+			Other=FVaRestSio::Make(Hub.Get(),TEXT("InvalidNamespace"),Url(0,TEXTVIEW("/not-registered"))).NoReconnect().WithLogLevel(EVaRestLogLevel::None);
 			const auto W=Weak();Other.OnConnectError(nullptr,[W](const FVaRestError& E,const FVaRestSioConnectError&) { if(auto S=W.Pin();S && !S->Cleaned) { S->Check(E.Kind==EVaRestErrorKind::Config,TEXT("actual Invalid namespace is Config"));S->PendingControl=true; } });Other.Connect();++Phase;
 		}
 		return Phase==3 && PendingControl;
@@ -261,7 +261,8 @@ struct FCase : TSharedFromThis<FCase,ESPMode::ThreadSafe>
 		{
 			Check(Socket.DefaultNamespace().IsConnected(),TEXT("oversized local refusal preserves connection"));Echo(Socket.DefaultNamespace());
 			Test.AddExpectedError(TEXT("Engine.IO maxPayload="),EAutomationExpectedErrorFlags::Contains,1);
-			Other=FVaRestSio::Make(Hub.Get(),TEXT("HighPayload"),Url(1)).NoReconnect().WithLogLevel(EVaRestLogLevel::Basic);
+			FVaRestSioLimits HighLimits;HighLimits.bOverrideFallbackPayloadLimit=Version==TEXT("4.4");
+			Other=FVaRestSio::Make(Hub.Get(),TEXT("HighPayload"),Url(1)).NoReconnect().WithLimits(HighLimits).WithLogLevel(EVaRestLogLevel::Basic);
 			Other.OnConnect([W](const FVaRestSioConnect&){if(auto S=W.Pin();S && !S->Cleaned) {S->PendingControl=true;S->Echo(S->Other.DefaultNamespace());}});Other.Connect();++Phase;
 		}
 		return Phase==2 && PendingControl && EchoAcks==2;
@@ -313,7 +314,7 @@ struct FCase : TSharedFromThis<FCase,ESPMode::ThreadSafe>
 			Check(UploadPongs>=1 && UploadPauses==8 && UploadElapsed>=600,TEXT("real heartbeat pongs interleave during measured TCP-throttled upload"));
 			Check(Connected==1 && Socket.DefaultNamespace().IsConnected(),TEXT("stall/upload preserve physical connection"));
 			FVaRestReconnectPolicy P;P.MaxAttempts=3;P.BaseDelay=.1;P.MaxDelay=.1;P.Jitter=EVaRestSocketJitter::Ratio;P.JitterRatio=0;
-			Other=FVaRestSio::Make(Hub.Get(),TEXT("WrongEnginePath"),Url()).WithPath(TEXT("/wrong-engine-path/")).WithReconnect(P).WithLogLevel(EVaRestLogLevel::Off);
+			Other=FVaRestSio::Make(Hub.Get(),TEXT("WrongEnginePath"),Url()).WithPath(TEXT("/wrong-engine-path/")).WithReconnect(P).WithLogLevel(EVaRestLogLevel::None);
 			Other.OnGaveUp(nullptr,[W](const FVaRestError& E,const FVaRestSocketClose& C){if(auto S=W.Pin();S && !S->Cleaned){S->Check(E.Kind==EVaRestErrorKind::Config && C.Attempt==3,TEXT("wrong Engine.IO path ends Config after exactly three real attempts"));S->WrongAttempts=C.Attempt;}});Other.Connect();++Phase;
 		}
 		return Phase==5 && WrongAttempts==3;
