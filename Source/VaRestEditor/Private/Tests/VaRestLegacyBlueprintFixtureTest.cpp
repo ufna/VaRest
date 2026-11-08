@@ -15,6 +15,8 @@
 #include "Kismet2/KismetEditorUtilities.h"
 #include "KismetCompiler.h"
 #include "Misc/AutomationTest.h"
+#include "Misc/CommandLine.h"
+#include "Misc/Parse.h"
 #include "Misc/CoreDelegates.h"
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
@@ -193,10 +195,35 @@ bool Build(FAutomationTestBase& Test,UBlueprint& BP)
 }
 }
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestLegacyTagGenerateTest,"VaRest.Compat.TagFixture.Generate",
- EAutomationTestFlags::EditorContext|EAutomationTestFlags::EngineFilter)
-bool FVaRestLegacyTagGenerateTest::RunTest(const FString& Parameters)
+// These are genuine two-process proofs, not two ordinary cases in one resident package process.
+namespace VaRestLegacyBlueprintFixtureTest
 {
+FString DedicatedPhase()
+{
+ FString Phase;
+ if (!FCommandLine::IsInitialized() || !FParse::Param(FCommandLine::Get(),TEXT("unattended")) || !FParse::Param(FCommandLine::Get(),TEXT("nowrite")) ||
+     !FParse::Value(FCommandLine::Get(),TEXT("VaRestLegacyTagFixturePhase="),Phase) ||
+     (!Phase.Equals(TEXT("Generate"),ESearchCase::CaseSensitive) && !Phase.Equals(TEXT("Load"),ESearchCase::CaseSensitive))) return {};
+ return Phase;
+}
+}
+IMPLEMENT_COMPLEX_AUTOMATION_TEST(FVaRestLegacyTagFixtureTest,"VaRest.Compat.TagFixture",
+ EAutomationTestFlags::EditorContext|EAutomationTestFlags::EngineFilter)
+void FVaRestLegacyTagFixtureTest::GetTests(TArray<FString>& Names,TArray<FString>& Commands) const
+{
+ const FString Phase=VaRestLegacyBlueprintFixtureTest::DedicatedPhase();
+ if (!Phase.IsEmpty()) { Names.Add(Phase);Commands.Add(Phase); }
+}
+bool FVaRestLegacyTagFixtureTest::RunTest(const FString& Parameters)
+{
+ const FString Phase=VaRestLegacyBlueprintFixtureTest::DedicatedPhase();
+ if (Phase.IsEmpty() || !Phase.Equals(Parameters,ESearchCase::CaseSensitive))
+ {
+  AddError(TEXT("TagFixture requires its exact fresh-process Generate or Load phase, -VaRestLegacyTagFixturePhase=Generate|Load -unattended -nowrite"));
+  return false;
+ }
+ if (Phase.Equals(TEXT("Generate"),ESearchCase::CaseSensitive))
+ {
  using namespace VaRestLegacyBlueprintFixtureTest;
  FMount Mount;
  if (!TestFalse(TEXT("never overwrite an existing fixture; inspect/load it instead"),IFileManager::Get().FileExists(*Mount.Filename()))) return false;
@@ -208,12 +235,9 @@ bool FVaRestLegacyTagGenerateTest::RunTest(const FString& Parameters)
  if (!TestTrue(TEXT("save actual serialized tag fixture"),UPackage::SavePackage(Package.Get(),BP.Get(),*Mount.Filename(),Args))) return false;
  AddInfo(TEXT("V1FixtureArtifact ")+Mount.Filename());
  return true;
-}
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestLegacyTagLoadTest,"VaRest.Compat.TagFixture.Load",
- EAutomationTestFlags::EditorContext|EAutomationTestFlags::EngineFilter)
-bool FVaRestLegacyTagLoadTest::RunTest(const FString& Parameters)
-{
+ }
+ if (Phase.Equals(TEXT("Load"),ESearchCase::CaseSensitive))
+ {
  using namespace VaRestLegacyBlueprintFixtureTest;
  FMount Mount;
  if (!TestTrue(TEXT("separate-process fixture artifact exists"),IFileManager::Get().FileExists(*Mount.Filename()))) return false;
@@ -224,5 +248,8 @@ bool FVaRestLegacyTagLoadTest::RunTest(const FString& Parameters)
  if (!TestNotNull(TEXT("loaded fixture blueprint"),BP.Get())) return false;
  AddInfo(TEXT("V1FixtureArtifact ")+Mount.Filename());
  return Validate(*this,*BP) && Compile(*this,*BP) && ExecuteCustomProjection(*this,*BP);
+ }
+ AddError(TEXT("unrecognized legacy tag fixture phase"));
+ return false;
 }
 #endif

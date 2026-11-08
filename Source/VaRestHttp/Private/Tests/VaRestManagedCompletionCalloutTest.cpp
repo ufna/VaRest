@@ -3,6 +3,7 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "Misc/AutomationTest.h"
+#include "Misc/ScopeExit.h"
 #include "VaRestManagedOperation.h"
 #include "VaRestNativeOwnershipFixture.h"
 
@@ -10,6 +11,7 @@ namespace VaRest::Http
 {
 struct FManagedCompletionTestAccess
 {
+	static bool IsPublished(const FClientState& State) { return State.bClientPublished; }
 	static void Complete(const FVaRestExchangeRef& Exchange, FFinish&& Finish)
 	{
 		Internals(*Exchange).State->Complete(Exchange, MoveTemp(Finish)); // REAL private caller entry, never a copied completion
@@ -132,7 +134,21 @@ bool FVaRestManagedCompletionCalloutTest::RunTest(const FString& Parameters)
 		FRecorder Trace;
 		if (!TestNotNull(TEXT("actual Control-owned unpublished operation store"), F.Store))
 			return false;
-		auto Input = FRequestSpecAccess::MakeNativeOwnershipPayload(FClientAccess::State(F.Rig.Client), {});
+		// The real managed kernel requires the SAME immutable client registration as its actual operation.
+		// Keep this a private unpublished state: no factory CommitClient or Created publication is claimed.
+		FClientConfig Initial(*FClientAccess::State(F.Rig.Client)->GetConfig());
+		Initial.ScopeLifetime = F.Scope;
+		const auto State = FClientState::Create(MoveTemp(Initial), F.Client.InitialRegistration(), false);
+		ON_SCOPE_EXIT { F.Control->StopInputsOnGT(); }; // before State's affine teardown, on every return
+		const auto& Registration = State->GetManagedLifetime();
+		const auto& Reserved = F.Client.InitialRegistration();
+		if (!TestTrue(TEXT("actual private state has the same complete native registration"), Registration.IsValid() &&
+			Registration.Control.Get() == F.Control.operator->() && Registration.Gate == F.Gate && Registration.Operations == F.Store &&
+			Registration.Client.Index == Reserved.Client.Index && Registration.Client.Generation == Reserved.Client.Generation) ||
+			!TestTrue(TEXT("the client reservation remains unpublished"), F.Client.IsValid()) ||
+			!TestFalse(TEXT("private completion fixture publishes no Created client"), FManagedCompletionTestAccess::IsPublished(State.Get())))
+			return false;
+		auto Input = FRequestSpecAccess::MakeNativeOwnershipPayload(State, {});
 		F.Sender = F.Control->AdoptInput(Input);
 		if (!TestTrue(TEXT("real gate admission"), F.Gate->TryAcquire(F.Work)) ||
 			!TestTrue(TEXT("real two-tail cell claim"), F.Store->TryClaim(F.Work, F.Sender, F.Claim, 2)))
@@ -141,13 +157,13 @@ bool FVaRestManagedCompletionCalloutTest::RunTest(const FString& Parameters)
 		if (!TestNotNull(TEXT("actual unique affine payload"), Owner))
 			return false;
 		auto Seen = MakeShared<FState, ESPMode::ThreadSafe>();
-		TSharedPtr<FClientConfig, ESPMode::ThreadSafe> Config = MakeShared<FClientConfig, ESPMode::ThreadSafe>(*FClientAccess::State(F.Rig.Client)->GetConfig());
+		TSharedPtr<FClientConfig, ESPMode::ThreadSafe> Config = MakeShared<FClientConfig, ESPMode::ThreadSafe>(*State->GetConfig());
 		Config->Clock = MakeShared<FClock, ESPMode::ThreadSafe>(Seen, F.Control, F.Rig.Clock);
 		Owner->SendConfig = Config;
 		Owner->Exchange = MakeShared<FVaRestExchange, ESPMode::ThreadSafe>();
 		auto& Ex = Internals(*Owner->Exchange);
 		Ex.Managed = Owner->Reference();
-		Ex.State = FClientAccess::State(F.Rig.Client);
+		Ex.State = State;
 		Ex.Config = Config;
 		Config.Reset(); // actual operation/config owners retain the ORIGINAL hook; no extra fixture clock keepalive
 		Ex.RequestId = FVaRestTrace::NewRequestId();

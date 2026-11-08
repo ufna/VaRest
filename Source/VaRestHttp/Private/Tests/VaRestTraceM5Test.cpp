@@ -2,6 +2,7 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
+#include "Curves/CurveFloat.h"
 #include "Misc/AutomationTest.h"
 #include "Misc/ScopeExit.h"
 #include "UObject/StrongObjectPtr.h"
@@ -202,7 +203,8 @@ bool FVaRestHttpM5RulesSnapshotTest::RunTest(const FString& Parameters)
 {
 	using namespace VaRest::Http::Testing;
 	FTestRig Rig;
-	TStrongObjectPtr<UObject> Owner(NewObject<UObject>());
+	TStrongObjectPtr<UObject> Owner(NewObject<UCurveFloat>());
+	if (!TestNotNull(TEXT("genuine concrete rules snapshot owner"), Owner.Get())) return false;
 	ON_SCOPE_EXIT
 	{
 		FVaRestJsonRules::UnregisterOwner(Owner.Get());
