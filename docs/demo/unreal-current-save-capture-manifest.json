@@ -32,5 +32,66 @@
       "article_id": "current-save"
     }
   ],
-  "limits": "No PIE, live WS/SIO, default-renderer exit, Game or release acceptance"
+  "limits": "No PIE, live WS/SIO, default-renderer exit, Game or release acceptance",
+  "current_default_rhi_api_left_open": {
+    "source_documentation_version": 370,
+    "code_version": 368,
+    "production_runtime_version": 350,
+    "role": "Current ordinary stock-default Editor API-left-open normal main Exit; prior fields remain genuine historical code332 Save context",
+    "raw_png": {
+      "path": "/home/ufna/VaRest-recovery/takeover-01441-20261108-sio/current-plugin-asset-default-rhi-control-002/screenshots/04-real-api-asset-left-open.png",
+      "bytes": 57436,
+      "sha256": "3423fa23c02e5b7e17fed593c94719bd49b04ec02728246a2c0e912126d1fd11",
+      "LF": 215,
+      "width": 1800,
+      "height": 780,
+      "raw_pixels_unchanged": true,
+      "whole_original_viewed": true,
+      "gallery_anchor": "current-default-rhi-api"
+    },
+    "actual_result": {
+      "path": "/home/ufna/VaRest-recovery/takeover-01441-20261108-sio/current-plugin-asset-default-rhi-control-002/result.json",
+      "bytes": 409,
+      "sha256": "c4b331253fa09d1c2e5990aa24e31a4486a01a414f6f8b97ebb508f2db287b9f",
+      "LF": 15,
+      "actual": {
+        "wrapper_exit_code": 0,
+        "editor_outcome": {
+          "exit_code": 0,
+          "elapsed_seconds": 343.6658765200118,
+          "timeout_or_forced": false
+        },
+        "complete_unforced_exit": true,
+        "preservation_count": 108183,
+        "preservation_failures": [],
+        "supervisor_seconds_including_final_guards": 409.5288184910023,
+        "default_RHI": true,
+        "plugin_present": true,
+        "original_late_asset_exit_bug_closed": false
+      }
+    },
+    "Root_readback": {
+      "path": "/home/ufna/VaRest-recovery/takeover-01441-20261108-sio/current-plugin-asset-default-rhi-Root-readback-002/report.md",
+      "bytes": 4043,
+      "sha256": "83307085d836aad066024797dce7450cc62794ec6897b721dcf8771483dfe683",
+      "LF": 6
+    },
+    "Root_ledger": {
+      "path": "/home/ufna/VaRest-recovery/takeover-01441-20261108-sio/current-plugin-asset-default-rhi-Root-readback-002/readpins.json",
+      "bytes": 41804,
+      "sha256": "aa7d825eaea22327f2e09420dc653526cabb9c1534bc7d4fd6696094d2a1d2c4",
+      "LF": 1190
+    },
+    "byte_count_clarification": {
+      "path": "/home/ufna/VaRest-recovery/takeover-01441-20261108-sio/current-plugin-asset-default-rhi-Root-result-tuple-clarification-001/clarification.json",
+      "bytes": 966,
+      "sha256": "3e6d2b0f5cb09db1d5c2be61bcb2a3394c0f05f52e704d6fedbe7f32101ad233",
+      "LF": 15
+    },
+    "limits": [
+      "One current real API window/defaultVulkan lifecycle; no exact old DA_DemoApi/Python replay or universal Engine/driver fix.",
+      "No Engine/Host/Target/customEditor/handwritten Game module or Source change; no Python/keepalive/server/renderer override.",
+      "Does not qualify packagedGame defaultRHI/physical unload/fork/provider/allocator/platform/performance/fullsuite/release; broader Goal active."
+    ]
+  }
 }
