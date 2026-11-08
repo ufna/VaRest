@@ -2,6 +2,7 @@
 
 #include "VaRestLwsService.h"
 #include "VaRestLwsCopyPolicy.h"
+#include "VaRestDnsNative.h"
 
 #include "HAL/PlatformProcess.h"
 #include "HAL/PlatformTime.h"
@@ -58,6 +59,13 @@ namespace VaRest::WebSocket::Lws::VaRestLwsServicePrivate
 	{
 		return FPlatformProcess::SupportsMultithreading() || FForkProcessHelper::IsForkedMultithreadInstance();
 	}
+}
+
+bool VaRest::WebSocket::Lws::PrivateDnsThreadsAllowedOnGT()
+{
+	check(IsInGameThread());
+	return FPlatformProcess::SupportsMultithreading()
+		&& (!FForkProcessHelper::IsForkRequested() || FForkProcessHelper::IsForkedMultithreadInstance());
 }
 
 void VaRest::WebSocket::Lws::Utf8Copy(const FString& Text, TArray<ANSICHAR>& Out)
@@ -1261,6 +1269,15 @@ bool VaRest::WebSocket::Lws::FService::Start()
 		UE_LOG(LogVaRestSocket, Error, TEXT("libwebsockets: no context is made while %d VaRest wss handshake(s) are in flight (VaRest-rti); WebSocket connections end with Shutdown"), InFlight);
 		return false;
 	}
+#if VAREST_HAS_PRIVATE_DNS
+	const Dns::EStatus DnsStart = Dns::InitializeOnGT(PrivateDnsThreadsAllowedOnGT());
+	if (DnsStart != Dns::EStatus::Ready && DnsStart != Dns::EStatus::Deferred)
+	{
+		bStartFailed = true;
+		UE_LOG(LogVaRestSocket, Error, TEXT("private DNS storage/code retention initialization refused (%u)"), static_cast<uint32>(DnsStart));
+		return false;
+	}
+#endif
 	LLM_SCOPE_BYTAG(VaRest_WebSocket);
 	// Plan decision 16 as amended (review M-1): the D30 rule runs at the first start that may apply it
 	ApplyLogLevel();
@@ -1272,6 +1289,9 @@ bool VaRest::WebSocket::Lws::FService::Start()
 	Protocols[0].rx_buffer_size = RxBufferBytes;
 
 	lws_context_creation_info Info = {};
+#if VAREST_HAS_PRIVATE_DNS
+	Info.varest_private3_numeric_only = 1; // No ordinary C-side resolver fallback, including missing/mismatched routes.
+#endif
 	Info.port = CONTEXT_PORT_NO_LISTEN;
 	Info.protocols = Protocols;
 	Info.uid = -1;
@@ -1287,7 +1307,11 @@ bool VaRest::WebSocket::Lws::FService::Start()
 	// Callback() finds this service through lws_context_user(lws_get_context(wsi)), also inside lws_create_context
 	Info.user = this;
 	// The engine's proxy setting, command line or ini (LwsWebSocketsManager.cpp:196-203; GenericPlatformHttp.cpp:640-651)
-	const FString Proxy = FPlatformHttp::GetConfiguredProxyAddress();
+	const FString Proxy =
+#if WITH_DEV_AUTOMATION_TESTS
+		Options.bOverrideProxyForTest ? Options.ProxyAddressForTest :
+#endif
+		FPlatformHttp::GetConfiguredProxyAddress();
 	if (!Proxy.IsEmpty())
 	{
 		Utf8Copy(Proxy, ProxyUtf8);
@@ -1585,6 +1609,9 @@ void VaRest::WebSocket::Lws::FService::Tick()
 void VaRest::WebSocket::Lws::FService::ServiceOnce(int32 WaitMs)
 {
 	lws_service(Context, WaitMs);
+#if VAREST_HAS_PRIVATE_DNS
+	(void)Dns::PollRetirement(); // Native join attempt only, outside every C callback.
+#endif
 	// Spec 2.1: VaRest's deadlines after each return, outside any callback, where a kill and a queued event are safe
 	CheckDeadlines(FPlatformTime::Seconds());
 	EraseDestroyed();

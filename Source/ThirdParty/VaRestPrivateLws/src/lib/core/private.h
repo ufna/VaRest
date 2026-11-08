@@ -767,6 +767,7 @@ struct lws_peer {
  */
 
 struct lws_context {
+	unsigned int varest_private3_numeric_only;
 	struct lws_vr_context1 vr; /* no registry/allocator installer */
 	time_t last_timeout_check_s;
 	time_t last_ws_ping_pong_check_s;
@@ -1012,6 +1013,8 @@ struct lws_buflist {
 
 
 struct lws {
+	struct varest_private3_tcp_route varest_private3_tcp_route;
+	unsigned int varest_private3_tcp_connected;
 	struct lws_vr_resource1 *vr_allocation; /* borrows exact external context slot */
  struct lws_vr_resource1 vr_fd;
  struct lws_vr_data1 vr_data;

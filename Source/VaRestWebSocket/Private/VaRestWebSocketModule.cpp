@@ -1,5 +1,7 @@
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 
+#include "Containers/Ticker.h"
+#include "VaRestDnsNative.h"
 #include "Misc/CoreDelegates.h"
 #include "Misc/Fork.h"
 #include "Modules/ModuleManager.h"
@@ -82,6 +84,21 @@ public:
 
 	virtual void StartupModule() override
 	{
+#if VAREST_HAS_PRIVATE_DNS
+		(void)VaRest::WebSocket::Dns::InitializeOnGT(VaRest::WebSocket::Lws::PrivateDnsThreadsAllowedOnGT());
+		DnsTicker = FTSTicker::GetCoreTicker().AddTicker(TEXT("VaRestPrivateDnsRetirement"), 0.05f, [](float)
+		{
+			if (IsInGameThread())
+			{
+				// A child may become multithread-ready only after the fork callback's frame.
+				if (FForkProcessHelper::IsForkRequested())
+					(void)VaRest::WebSocket::Dns::InitializeOnGT(VaRest::WebSocket::Lws::PrivateDnsThreadsAllowedOnGT());
+				(void)VaRest::WebSocket::Dns::PollRetirement();
+			}
+			return true;
+		});
+#endif
+
 		// Before any module shuts down (CoreDelegates.h:261-262); an automation run's Quit force-exits, so there neither this
 		// nor ShutdownModule runs (CLAUDE.md, VaRestHttpModule.cpp:24-26)
 		VaRest::WebSocket::StartSocketsOnGT();
@@ -89,6 +106,9 @@ public:
 		{
 			VaRest::WebSocket::StopSocketsOnGT();
 			VaRest::WebSocket::Lws::ShutdownDefault();
+#if VAREST_HAS_PRIVATE_DNS
+			VaRest::WebSocket::Dns::StopForModule();
+#endif
 		});
 		if (FForkProcessHelper::IsForkRequested())
 		{
@@ -104,10 +124,17 @@ public:
 		FCoreDelegates::OnEnginePreExit.Remove(PreExitHandle);
 		VaRest::WebSocket::StopSocketsOnGT();
 		VaRest::WebSocket::Lws::ShutdownDefault();
+#if VAREST_HAS_PRIVATE_DNS
+		FTSTicker::RemoveTicker(DnsTicker);
+		VaRest::WebSocket::Dns::StopForModule(); // Tryjoin only; unresolved POD/image reference deliberately remain process-owned.
+#endif
 	}
 	virtual bool SupportsDynamicReloading() override { return false; }
 
 private:
+#if VAREST_HAS_PRIVATE_DNS
+	FTSTicker::FDelegateHandle DnsTicker;
+#endif
 	FDelegateHandle PreExitHandle;
 	FDelegateHandle ForkHandle;
 };

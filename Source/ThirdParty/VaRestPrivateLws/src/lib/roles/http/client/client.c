@@ -709,6 +709,7 @@ lws_client_interpret_server_handshake(struct lws *wsi)
 	struct lws *w = lws_client_wsi_effective(wsi);
 	char *p, *q;
 	char new_path[300];
+	char varest_redirect3[64];
 
 	lws_client_stash_destroy(wsi);
 
@@ -782,6 +783,11 @@ lws_client_interpret_server_handshake(struct lws *wsi)
 		ah->http_response = n;
 
 	if (n == 301 || n == 302 || n == 303 || n == 307 || n == 308) {
+  if (wsi->context->varest_private3_numeric_only) {
+   lws_snprintf(varest_redirect3, sizeof(varest_redirect3), "HS: ws upgrade not 101, was %d", n);
+   cce = varest_redirect3; goto bail3;
+  }
+
 		p = lws_hdr_simple_ptr(wsi, WSI_TOKEN_HTTP_LOCATION);
 		if (!p) {
 			cce = "HS: Redirect code but no Location";

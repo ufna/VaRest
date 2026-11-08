@@ -37,6 +37,7 @@ extern "C" {
 #include <stdlib.h>
 
 #include "lws_config.h"
+#include "varest_numeric.h"
 
 /*
  * CARE: everything using cmake defines needs to be below here
@@ -2980,13 +2981,10 @@ struct lws_context_creation_info {
 	 *		for libuv.
 	 */
 
-	/* Add new things just above here ---^
-	 * This is part of the ABI, don't needlessly break compatibility
-	 *
-	 * The below is to ensure later library versions with new
-	 * members added above will see 0 (default) even if the app
-	 * was not built against the newer headers.
-	 */
+	/* Private same-source ABI: default context requires a fully copied numeric route. */
+	unsigned int varest_private3_numeric_only;
+
+	/* Existing trailing compatibility storage remains unused. */
 	struct lws_context **pcontext;
 	/**< CONTEXT: if non-NULL, at the end of context destroy processing,
 	 * the pointer pointed to by pcontext is written with NULL.  You can
@@ -3467,6 +3465,9 @@ struct lws_client_connect_info {
 	 * members added above will see 0 (default) even if the app
 	 * was not built against the newer headers.
 	 */
+	/* Copied into the WSI before its first possible callback. No borrowed job/list. */
+	const struct varest_private3_tcp_route *varest_private3_tcp_route;
+
 	const char *alpn;
 	/* NULL: allow lws default ALPN list, from vhost if present or from
 	 *       list of roles built into lws

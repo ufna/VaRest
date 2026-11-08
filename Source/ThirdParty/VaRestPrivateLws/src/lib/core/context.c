@@ -1141,6 +1141,7 @@ lws_create_context(const struct lws_context_creation_info *info)
 	context->token_limits = info->token_limits;
 
 	context->options = info->options;
+	context->varest_private3_numeric_only = !!info->varest_private3_numeric_only;
 
 	/*
 	 * set the context event loops ops struct

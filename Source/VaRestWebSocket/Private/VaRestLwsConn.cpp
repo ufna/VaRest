@@ -80,6 +80,9 @@ VaRest::WebSocket::Lws::FConn::FConn(uint64 InId, TSharedRef<FSocketLink, ESPMod
 
 VaRest::WebSocket::Lws::FConn::~FConn()
 {
+#if VAREST_HAS_PRIVATE_DNS
+	DiscardPrivateResolve();
+#endif
 	UncountTls();
 #if WITH_DEV_AUTOMATION_TESTS
 	if (const auto& Probe = Link->GetPressureProbeForTests()) Probe->bRetired.store(true, std::memory_order_release);
@@ -212,7 +215,29 @@ void VaRest::WebSocket::Lws::FConn::Start(FService& Service)
 #if defined(__linux__) && defined(__x86_64__) && !defined(__ANDROID__) && defined(VAREST_USE_PRIVATE_LWS3) && VAREST_USE_PRIVATE_LWS3
     if (Service.NativeMode()) { StartNative(Service); return; }
 #endif
-	lws_client_connect_info Info = {};
+	State = EConnState::Connecting;
+	ConnectDeadline = StartedAt + Request.ConnectTimeout; // Once: DNS, address fallback, proxy/TLS and upgrade share it.
+	UE_LOG(LogVaRestSocket, Verbose, TEXT("%s: connecting"), *GetLabel());
+#if VAREST_HAS_PRIVATE_DNS
+	PrivateConnect.bActive = true;
+	// Adopt may run inside EVENT_WAIT_CANCELLED: consume/join/connect only after the whole service call returns.
+	return;
+#else
+	lws_client_connect_info Info{};
+	FillConnectInfo(Service, Info);
+	if (!lws_client_connect_via_info(&Info))
+	{
+		Wsi = nullptr;
+		EndPreOpen(EVaRestSocketFailure::ConnectFailed, EVaRestSocketCloseBy::Transport, 0, TEXT("lws_client_connect_via_info returned NULL"));
+		UncountTls(); bDestroyed = true;
+	}
+#endif
+}
+
+
+void VaRest::WebSocket::Lws::FConn::FillConnectInfo(FService& Service, lws_client_connect_info& Info)
+{
+	Info = {};
 	Info.context = Service.GetContext();
 	Info.address = AddressUtf8.GetData();
 	Info.port = Target.Port;
@@ -236,25 +261,124 @@ void VaRest::WebSocket::Lws::FConn::Start(FService& Service)
 	Info.userdata = static_cast<IServiceConnection*>(this);
 	// The wsi early, so a kill reaches an attempt that has not opened yet (libwebsockets.h:3441-3451)
 	Info.pwsi = &Wsi;
-	State = EConnState::Connecting;
-	ConnectDeadline = StartedAt + Request.ConnectTimeout;
-	// Review conc I-3 (VaRest-rti): a wss attempt was counted by FTransport::Connect on the game thread (MarkTlsCounted,
-	// re-review N-2) and stays counted until LWS establishes or destroys it -- the whole upgrade, not only the TLS handshake:
-	// conservative, and simple. UncountTls lowers it once
-	// Ruling Q5: LWS 3.0 resolves the address itself, synchronously, here on the service thread (getaddrinfo inside
-	// lws_client_connect_2, review conc I-4), and tries the first address it returns only; W1b B9 (VaRest-gi0) resolves on
-	// UE::Tasks and falls back to the next address
-	UE_LOG(LogVaRestSocket, Verbose, TEXT("%s: connecting"), *GetLabel());
+}
+
+#if VAREST_HAS_PRIVATE_DNS
+void VaRest::WebSocket::Lws::FConn::DiscardPrivateResolve()
+{
+	Dns::Discard(PrivateConnect.Ticket);
+	PrivateConnect.Ticket = {};
+	PrivateConnect.bActive = false;
+}
+
+void VaRest::WebSocket::Lws::FConn::AdvancePrivateConnect(FService& Service)
+{
+	using S = Dns::EStatus;
+	if (!PrivateConnect.bActive || State != EConnState::Connecting || bDestroyed || Wsi || PrivateConnect.bAttemptLive) return;
+	// Outside callbacks, current owner only. Logical expiration wins over late DNS or another address.
+	if (Service.IsShuttingDown() || FPlatformTime::Seconds() >= ConnectDeadline)
+	{
+		EndPreOpen(Service.IsShuttingDown() ? EVaRestSocketFailure::Shutdown : EVaRestSocketFailure::ConnectTimeout,
+			Service.IsShuttingDown() ? EVaRestSocketCloseBy::Transport : EVaRestSocketCloseBy::Timeout,
+			0, TEXT("the original connect deadline or transport lifetime ended before the next TCP attempt"));
+		return;
+	}
+	lws_client_connect_info Info{};
+	FillConnectInfo(Service, Info);
+	varest_private3_tcp_route Actual{};
+	if (varest_private3_get_tcp_route(&Info, &Actual) != 0)
+	{
+		EndPreOpen(EVaRestSocketFailure::ConnectFailed, EVaRestSocketCloseBy::Transport, 0, TEXT("the private physical TCP endpoint could not be selected"));
+		return;
+	}
+	if (!PrivateConnect.bHaveEndpoint)
+	{
+		PrivateConnect.Route = Actual;
+		PrivateConnect.bHaveEndpoint = true;
+		PrivateConnect.bLiteral = Dns::ParseNumeric(Actual.physical_host, FCStringAnsi::Strlen(Actual.physical_host), Actual.port, PrivateConnect.Literal);
+	}
+	else if (Actual.kind != PrivateConnect.Route.kind || Actual.port != PrivateConnect.Route.port || Actual.allowed_families != PrivateConnect.Route.allowed_families
+		|| FMemory::Memcmp(Actual.physical_host, PrivateConnect.Route.physical_host, sizeof(Actual.physical_host)) != 0)
+	{
+		EndPreOpen(EVaRestSocketFailure::ConnectFailed, EVaRestSocketCloseBy::Transport, 0, TEXT("the physical endpoint changed during the original DNS attempt"));
+		return;
+	}
+	Dns::FAddress Address{};
+	Dns::FError Error{};
+	S Result = S::Pending;
+	if (PrivateConnect.bLiteral)
+	{
+		Result = PrivateConnect.bLiteralUsed ? S::Exhausted : S::Ready;
+		Address = PrivateConnect.Literal;
+		PrivateConnect.bLiteralUsed = true;
+	}
+	else
+	{
+		if (!PrivateConnect.Ticket.Generation)
+		{
+			Result = Dns::Submit(Actual.physical_host, FCStringAnsi::Strlen(Actual.physical_host), Actual.port, PrivateConnect.Ticket
+#if WITH_DEV_AUTOMATION_TESTS
+				, Service.GetOptions().DnsBeforeResolverGateForTest, Service.GetOptions().DnsAfterPublishGateForTest
+#endif
+			);
+			if (Result == S::Queued || Result == S::Capacity || Result == S::Busy || Result == S::Deferred) return;
+		}
+		else Result = Dns::Next(PrivateConnect.Ticket, Address, Error);
+	}
+	if (Result == S::Pending || Result == S::Busy) return;
+	if (Result != S::Ready)
+	{
+		const FString Detail = Result == S::Exhausted && !PrivateConnect.LastError.IsEmpty()
+			? PrivateConnect.LastError
+			: FString::Printf(TEXT("private DNS/address iteration ended (status %u, resolver %d, system %d, worker %d, join %d)"),
+				static_cast<uint32>(Result), Error.Resolver, Error.System, Error.Worker, Error.Join);
+		EndPreOpen(Result == S::Stopped ? EVaRestSocketFailure::Shutdown : EVaRestSocketFailure::ConnectFailed,
+			EVaRestSocketCloseBy::Transport, 0, Detail);
+		return;
+	}
+	if ((Address.Family == 4 && !(Actual.allowed_families & 1)) || (Address.Family == 6 && !(Actual.allowed_families & 2)))
+	{
+		PrivateConnect.LastError = TEXT("the resolved address family is excluded by the current vhost policy");
+		return; // Incremental list iteration continues next turn, without an inadmissible C attempt.
+	}
+	// One candidate, one WSI; only after the previous actual WSI_DESTROY/drop and a whole C return.
+	PrivateConnect.Route.family = Address.Family;
+	PrivateConnect.Route.scope = Address.Scope;
+	FMemory::Memcpy(PrivateConnect.Route.address, Address.Bytes, sizeof(Address.Bytes));
+	Info.varest_private3_tcp_route = &PrivateConnect.Route; // C copies it before any callback or async header wait.
+	PrivateConnect.bEpisodeFailed = false;
+	PrivateConnect.bTcpConnected = false;
+	PrivateConnect.bAttemptLive = true;
+	bLeftPollSet = false; AppendCalls = 0; bRedirected = false;
+	if (Service.IsShuttingDown() || FPlatformTime::Seconds() >= ConnectDeadline)
+	{
+		PrivateConnect.bAttemptLive = false;
+		EndPreOpen(Service.IsShuttingDown() ? EVaRestSocketFailure::Shutdown : EVaRestSocketFailure::ConnectTimeout,
+			Service.IsShuttingDown() ? EVaRestSocketCloseBy::Transport : EVaRestSocketCloseBy::Timeout,
+			0, TEXT("the original lifetime ended before numeric TCP creation"));
+		return;
+	}
+#if WITH_DEV_AUTOMATION_TESTS
+	FServiceCounters& Counts = Service.GetCounters();
+	if (Counts.PrivateNumericCandidates.fetch_add(1) == 0) Counts.PrivateFirstFamily = Address.Family;
+	Counts.PrivateLastFamily = Address.Family;
+#endif
 	if (!lws_client_connect_via_info(&Info))
 	{
-		// NULL: scrubbed (libwebsockets.h:3442-3450), maybe after a CONNECTION_ERROR inside the call that reported already;
-		// *pwsi may name freed memory, so it is never touched again
+		// The exact C call returned: any pwsi from a scrubbed attempt is never dereferenced.
 		Wsi = nullptr;
-		EndPreOpen(EVaRestSocketFailure::ConnectFailed, EVaRestSocketCloseBy::Transport, 0, TEXT("lws_client_connect_via_info returned NULL"));
-		UncountTls();
-		bDestroyed = true;
+		PrivateConnect.bAttemptLive = false;
+		if (State == EConnState::Connecting && PendingFailure == EVaRestSocketFailure::None && !PrivateConnect.bTcpConnected && AppendCalls == 0)
+		{
+			PrivateConnect.bEpisodeFailed = true;
+			if (PrivateConnect.LastError.IsEmpty()) PrivateConnect.LastError = TEXT("numeric TCP client creation/connect failed for every usable address");
+		}
+		else if (State != EConnState::Ended)
+			EndPreOpen(EVaRestSocketFailure::ConnectFailed, EVaRestSocketCloseBy::Transport, 0, TEXT("numeric TCP client creation returned NULL"));
 	}
+	// No recursive next-address loop here, including a synchronously refused candidate.
 }
+#endif
 
 #if defined(__linux__) && defined(__x86_64__) && !defined(__ANDROID__) && defined(VAREST_USE_PRIVATE_LWS3) && VAREST_USE_PRIVATE_LWS3
 namespace VaRest::WebSocket::Lws
@@ -488,6 +612,9 @@ bool FConn::CompleteNativeOpen(FService& Service)
 
 int32 VaRest::WebSocket::Lws::FConn::OnCallback(FService& Service, lws* InWsi, int32 Reason, void* User, void* In, size_t Len)
 {
+#if VAREST_HAS_PRIVATE_DNS
+	if (PrivateConnect.bActive && InWsi && varest_private3_tcp_is_connected(InWsi)) PrivateConnect.bTcpConnected = true;
+#endif
 	switch (Reason)
 	{
 	case LWS_CALLBACK_CLIENT_APPEND_HANDSHAKE_HEADER:
@@ -607,6 +734,9 @@ int32 VaRest::WebSocket::Lws::FConn::OnFilterPreEstablish(lws* InWsi)
 
 int32 VaRest::WebSocket::Lws::FConn::OnEstablished(lws* InWsi)
 {
+#if VAREST_HAS_PRIVATE_DNS
+	DiscardPrivateResolve();
+#endif
 	// The upgrade is done: no verify callback of this attempt runs again (review conc I-3)
 	UncountTls();
 	if (State == EConnState::Ended)
@@ -691,6 +821,15 @@ void VaRest::WebSocket::Lws::FConn::OnConnectionError(const void* In, size_t Len
 		EndPreOpen(PendingFailure, EVaRestSocketCloseBy::Transport, 0, FString::Printf(TEXT("%s (libwebsockets: \"%s\")"), *PendingDetail, *CleanConnectionErrorText(Text)));
 		return;
 	}
+#if VAREST_HAS_PRIVATE_DNS
+	if (PrivateConnect.bActive && State == EConnState::Connecting && !PrivateConnect.bTcpConnected && AppendCalls == 0
+		&& ClassifyConnectionError(Text).Failure == EVaRestSocketFailure::ConnectFailed)
+	{
+		PrivateConnect.bEpisodeFailed = true;
+		PrivateConnect.LastError = CleanConnectionErrorText(Text);
+		return; // No retry until WSI_DESTROY and the enclosing C call have returned.
+	}
+#endif
 	// Plan decision 11, Task 5's table: every class keeps the cleaned string in Detail, Unknown included (Task 5 review M-4)
 	FConnectionErrorEnd Described = DescribeConnectionError(Text, FPlatformTime::Seconds() - StartedAt);
 	EndPreOpen(Described.Failure, Described.By, Described.HttpStatus, MoveTemp(Described.Detail));
@@ -721,6 +860,14 @@ void VaRest::WebSocket::Lws::FConn::OnEnded()
 	}
 #if defined(__linux__) && defined(__x86_64__) && !defined(__ANDROID__) && defined(VAREST_USE_PRIVATE_LWS3) && VAREST_USE_PRIVATE_LWS3
     if (Native.Stage && State == EConnState::Connecting && (Native.Flags & VaRestLwsConnPrivate::NativeEpisodeFailed1)) return;
+#endif
+#if VAREST_HAS_PRIVATE_DNS
+	if (PrivateConnect.bActive && State == EConnState::Connecting && PendingFailure == EVaRestSocketFailure::None
+		&& !PrivateConnect.bTcpConnected && AppendCalls == 0)
+	{
+		PrivateConnect.bEpisodeFailed = true;
+		return;
+	}
 #endif
     if (State != EConnState::Open)
     {
@@ -760,6 +907,14 @@ void VaRest::WebSocket::Lws::FConn::OnDestroyed(FService& Service)
 {
 	// The connection's last callback: whatever has not reported does now, once
 	OnEnded();
+#if VAREST_HAS_PRIVATE_DNS
+	if (PrivateConnect.bActive && PrivateConnect.bEpisodeFailed && State == EConnState::Connecting)
+	{
+		Wsi = nullptr; PrivateConnect.bAttemptLive = false;
+		bLeftPollSet = false;
+		return; // Actual callback fact only; next candidate occurs after the whole service return.
+	}
+#endif
 	UncountTls();
 	UncountClose();
 	if (bKillIssued)
@@ -814,6 +969,14 @@ bool VaRest::WebSocket::Lws::FConn::ReapIfDropped()
 	// later wsi may have its address (VaRest-81s): no LWS call names it again. After the first APPEND only a redirect changes
 	// sockets, and a failed redirect is a stop row (spec 3.4), not a ConnectFailed for W2 to retry. The Detail names no host
 	Wsi = nullptr;
+#if VAREST_HAS_PRIVATE_DNS
+	if (PrivateConnect.bActive && State == EConnState::Connecting && PendingFailure == EVaRestSocketFailure::None
+		&& !PrivateConnect.bTcpConnected && AppendCalls == 0)
+	{
+		PrivateConnect.bAttemptLive = false; PrivateConnect.bEpisodeFailed = true; bLeftPollSet = false;
+		return true; // Source's silent free path, observed only outside callbacks; never touch the old address again.
+	}
+#endif
 	if (AppendCalls > 0 && PendingFailure == EVaRestSocketFailure::None)
 	{
 		SetRedirectFailure();
@@ -912,6 +1075,9 @@ void VaRest::WebSocket::Lws::FConn::CheckDeadlines(FService& Service, double Now
 		Kill(Service);
 		return;
 	}
+#if VAREST_HAS_PRIVATE_DNS
+	if (PrivateConnect.bActive && State == EConnState::Connecting) AdvancePrivateConnect(Service);
+#endif
 	if (State == EConnState::Open)
 	{
 		// LWS calls WRITEABLE only once a held write drained; this sweep releases it even when no WRITEABLE was asked for (plan decision 7)
@@ -936,11 +1102,18 @@ double VaRest::WebSocket::Lws::FConn::NextDeadline() const
 
 bool VaRest::WebSocket::Lws::FConn::WantsShortWait() const
 {
-	return (bKillIssued && !bDestroyed) || HeldBytes > 0 || bControlHeld;
+	return
+#if VAREST_HAS_PRIVATE_DNS
+		(PrivateConnect.bActive && !Wsi) ||
+#endif
+		(bKillIssued && !bDestroyed) || HeldBytes > 0 || bControlHeld;
 }
 
 void VaRest::WebSocket::Lws::FConn::EndForShutdown()
 {
+#if VAREST_HAS_PRIVATE_DNS
+	DiscardPrivateResolve();
+#endif
 	// The thread is stopped and the context is destroyed next, on this thread, before any other context can be made: no
 	// handshake of this attempt runs again, so it leaves the count here even if lws_context_destroy calls no WSI_DESTROY for it
 	UncountTls();
@@ -991,6 +1164,13 @@ void VaRest::WebSocket::Lws::FConn::EndPreOpen(EVaRestSocketFailure Failure, EVa
 		return;
 	}
 	State = EConnState::Ended;
+#if VAREST_HAS_PRIVATE_DNS
+	if (PrivateConnect.bActive)
+	{
+		DiscardPrivateResolve();
+		if (!Wsi) { UncountTls(); bDestroyed = true; }
+	}
+#endif
 	DropOutbox();
 	FVaRestSocketEvent Event;
 	Event.Type = EVaRestSocketEventType::Error;

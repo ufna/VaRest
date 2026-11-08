@@ -1,5 +1,71 @@
 #include "core/private.h"
 
+
+/* The one selection rule used by both the pre-DNS caller and physical connect. */
+static int
+vr_tcp_endpoint3(struct lws_vhost *vh, const char *original, int original_port,
+                 const char **ads, int *port, uint32_t *kind)
+{
+ if (!vh || !original || !ads || !port || !kind) return 1;
+#if defined(LWS_ROLE_H1) || defined(LWS_ROLE_H2)
+ if (vh->http.http_proxy_port) {
+  *ads = vh->http.http_proxy_address; *port = vh->http.http_proxy_port; *kind = 2;
+ } else
+#endif
+#if defined(LWS_WITH_SOCKS5)
+ if (vh->socks_proxy_port) {
+  *ads = vh->socks_proxy_address; *port = vh->socks_proxy_port; *kind = 3;
+ } else
+#endif
+ { *ads = original; *port = original_port; *kind = 1; }
+ return !*ads || *port < 1 || *port > 65535;
+}
+
+static uint32_t
+vr_tcp_families3(struct lws_vhost *vh)
+{
+ uint32_t mask = 1;
+#ifdef LWS_WITH_IPV6
+ if (LWS_IPV6_ENABLED(vh)) mask |= 2;
+ if (lws_check_opt(vh->options, LWS_SERVER_OPTION_IPV6_V6ONLY_MODIFY | LWS_SERVER_OPTION_IPV6_V6ONLY_VALUE)) mask &= ~1u;
+#endif
+ return mask;
+}
+
+LWS_VISIBLE int
+varest_private3_get_tcp_route(const struct lws_client_connect_info *i,
+                             struct varest_private3_tcp_route *out)
+{
+ struct lws_vhost *vh;
+ const char *ads;
+ int port;
+ uint32_t kind;
+ size_t len;
+ if (!out) return 1;
+ memset(out, 0, sizeof(*out));
+ if (!i || !i->context || !i->context->varest_private3_numeric_only ||
+     lws_vr_tracked1(i->context)) return 1;
+ vh = i->vhost ? i->vhost : i->context->vhost_list;
+ if (!vh || vh->context != i->context ||
+     vr_tcp_endpoint3(vh, i->address, i->port, &ads, &port, &kind)) return 1;
+ for (len = 0; len < sizeof(out->physical_host); ++len) {
+  unsigned char ch = (unsigned char)ads[len];
+  if (!ch) break;
+  if (ch <= 32 || ch >= 127) return 1;
+ }
+ if (!len || len == sizeof(out->physical_host)) return 1;
+ memcpy(out->physical_host, ads, len + 1);
+ out->kind = kind; out->port = (uint16_t)port;
+ out->allowed_families = vr_tcp_families3(vh);
+ return 0;
+}
+
+LWS_VISIBLE int
+varest_private3_tcp_is_connected(const struct lws *wsi)
+{
+ return wsi && wsi->context->varest_private3_numeric_only && wsi->varest_private3_tcp_connected;
+}
+
 static struct lws *vr_reset_tracked1(struct lws **,int,const char *,int,const char *,const char *);
 
 
@@ -45,10 +111,11 @@ lws_client_connect_2(struct lws *wsi)
 	struct lws_pollfd pfd;
 	ssize_t plen = 0;
 #endif
-	struct addrinfo *result;
+	struct addrinfo *result = NULL;
 	const char *ads;
 	sockaddr46 sa46;
 	int n, port;
+	uint32_t route_kind;
 	const char *cce = "", *iface;
 	const char *meth = NULL;
 #ifdef LWS_WITH_IPV6
@@ -195,6 +262,10 @@ create_new_conn:
 	 * start off allowing ipv6 on connection if vhost allows it
 	 */
 	wsi->ipv6 = LWS_IPV6_ENABLED(wsi->vhost);
+ if (vr_tcp_endpoint3(wsi->vhost,
+      lws_hdr_simple_ptr(wsi, _WSI_TOKEN_CLIENT_PEER_ADDRESS), wsi->c_port,
+      &ads, &port, &route_kind)) { cce = "invalid physical TCP endpoint"; goto oom4; }
+
 
 #if defined(LWS_ROLE_H1) || defined(LWS_ROLE_H2)
 
@@ -215,8 +286,7 @@ create_new_conn:
 					wsi->vhost->proxy_basic_auth_token);
 
 		plen += sprintf((char *)pt->serv_buf + plen, "\x0d\x0a");
-		ads = wsi->vhost->http.http_proxy_address;
-		port = wsi->vhost->http.http_proxy_port;
+		/* Physical ads/port already selected by vr_tcp_endpoint3. */
 #else
 		if (0) {
 #endif
@@ -228,15 +298,13 @@ create_new_conn:
 	} else if (wsi->vhost->socks_proxy_port) {
 		socks_generate_msg(wsi, SOCKS_MSG_GREETING, &plen);
 		lwsl_client("Sending SOCKS Greeting\n");
-		ads = wsi->vhost->socks_proxy_address;
-		port = wsi->vhost->socks_proxy_port;
+		/* Physical ads/port already selected by vr_tcp_endpoint3. */
 #endif
 	} else {
 
 		/* Priority 3: Connect directly */
 
-		ads = lws_hdr_simple_ptr(wsi, _WSI_TOKEN_CLIENT_PEER_ADDRESS);
-		port = wsi->c_port;
+		/* Physical ads/port already selected by vr_tcp_endpoint3. */
 	}
 
 	/*
@@ -246,14 +314,47 @@ create_new_conn:
 
        lwsl_info("%s: %p: address %s\n", __func__, wsi, ads);
 
+ if (wsi->context->varest_private3_numeric_only) {
+  const struct varest_private3_tcp_route *r = &wsi->varest_private3_tcp_route;
+  size_t len = 0;
+  while (len < sizeof(r->physical_host) && ads[len]) ++len;
+  if (len == sizeof(r->physical_host) || r->kind != route_kind ||
+      r->port != port || r->allowed_families != vr_tcp_families3(wsi->vhost) ||
+      memcmp(r->physical_host, ads, len + 1)) {
+   cce = "numeric TCP route identity mismatch"; goto oom4;
+  }
+  if ((r->family == 4 && !(r->allowed_families & 1)) ||
+      (r->family == 6 && !(r->allowed_families & 2))) {
+   cce = "numeric family excluded by vhost"; goto oom4;
+  }
+  memset(&sa46, 0, sizeof(sa46));
+  if (r->family == 4) {
+#ifdef LWS_WITH_IPV6
+   if (ipv6only) { cce = "IPv4 route excluded by IPv6-only vhost"; goto oom4; }
+#endif
+   wsi->ipv6 = 0;
+   sa46.sa4.sin_family = AF_INET;
+   memcpy(&sa46.sa4.sin_addr, r->address, 4);
+  }
+#ifdef LWS_WITH_IPV6
+  else if (r->family == 6 && LWS_IPV6_ENABLED(wsi->vhost)) {
+   wsi->ipv6 = 1;
+   sa46.sa6.sin6_family = AF_INET6;
+   sa46.sa6.sin6_scope_id = r->scope;
+   memcpy(&sa46.sa6.sin6_addr, r->address, 16);
+  }
+#endif
+  else { cce = "missing or unsupported numeric TCP route"; goto oom4; }
+  goto varest_numeric_ready3; /* No libc resolver or hostname fallback in this context. */
+ }
+
        n = lws_getaddrinfo46(wsi, ads, &result);
 
 #ifdef LWS_WITH_IPV6
 	if (wsi->ipv6) {
-		struct sockaddr_in6 *sa6 =
-				((struct sockaddr_in6 *)result->ai_addr);
+		struct sockaddr_in6 *sa6;
 
-		if (n) {
+		if (n || !result || !result->ai_addr) {
 			/* lws_getaddrinfo46 failed, there is no usable result */
 			lwsl_notice("%s: lws_getaddrinfo46 failed %d\n",
 					__func__, n);
@@ -261,6 +362,7 @@ create_new_conn:
 			goto oom4;
 		}
 
+		sa6 = (struct sockaddr_in6 *)result->ai_addr;
 		memset(&sa46, 0, sizeof(sa46));
 
 		sa46.sa6.sin6_family = AF_INET6;
@@ -348,6 +450,7 @@ create_new_conn:
 	if (result)
 		freeaddrinfo(result);
 
+varest_numeric_ready3:
 	/* now we decided on ipv4 or ipv6, set the port */
 
 	if (!lws_socket_is_valid(wsi->desc.sockfd)) {
@@ -463,6 +566,7 @@ create_new_conn:
 		}
 	}
 
+	wsi->varest_private3_tcp_connected = 1;
 	lwsl_client("connected\n");
 
 #if defined(LWS_ROLE_H1) || defined(LWS_ROLE_H2)
@@ -626,6 +730,8 @@ lws_client_reset(struct lws **pwsi, int ssl, const char *address, int port,
 {
  if (pwsi && *pwsi && lws_vr_tracked1((*pwsi)->context))
   return vr_reset_tracked1(pwsi, ssl, address, port, path, host);
+ /* Fail before closing, header changes, callbacks or any second resolver/TCP hop. */
+ if (pwsi && *pwsi && (*pwsi)->context->varest_private3_numeric_only) return NULL;
 	char origin[300] = "", protocol[300] = "", method[32] = "",
 	     iface[16] = "", alpn[32] = "", *p;
 	struct lws *wsi = *pwsi;
@@ -917,6 +1023,9 @@ lws_client_connect_via_info(struct lws_client_connect_info *i)
 		goto bail;
 
 	wsi->context = i->context;
+ if (i->context->varest_private3_numeric_only && i->varest_private3_tcp_route)
+  wsi->varest_private3_tcp_route = *i->varest_private3_tcp_route;
+
 #if defined(LWS_ROLE_H1)
 	/* assert the mode and union status (hdr) clearly */
 	lws_role_transition(wsi, LWSIFR_CLIENT, LRS_UNCONNECTED, &role_ops_h1);

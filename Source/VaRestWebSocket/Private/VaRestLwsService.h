@@ -85,6 +85,12 @@ namespace VaRest::WebSocket::Lws
 		double ExitFlushSeconds = 0.25;
 		/** Tests (review conc I-2): Start makes the context, then fails as if the thread could not be made */
 		bool bFailThreadForTest = false;
+#if WITH_DEV_AUTOMATION_TESTS
+		/** Native test gates: owned eventfd descriptors, kept open until the actual resolver worker joins. */
+		int DnsBeforeResolverGateForTest = -1, DnsAfterPublishGateForTest = -1;
+		bool bOverrideProxyForTest = false;
+		FString ProxyAddressForTest;
+#endif
 		/** Tests (Task 11 review M-4): FConn::CheckDeadlines does not reap a wsi LWS dropped, so only Kill's guard does */
 		bool bOnlyKillReapsForTest = false;
 	};
@@ -99,6 +105,11 @@ namespace VaRest::WebSocket::Lws
 		std::atomic<int32> CommandsRun{ 0 };
 		/** lws_create_context calls this service made, failed ones included (review conc I-2) */
 		std::atomic<int32> ContextCreations{ 0 };
+#if WITH_DEV_AUTOMATION_TESTS
+		/** Actual numeric candidates handed to C; family witnesses, not a TCP/provider timing proof. */
+		std::atomic<int32> PrivateNumericCandidates{0}, PrivateFirstFamily{0}, PrivateLastFamily{0};
+#endif
+
 		/** Open connections whose close was asked for and not written yet: Shutdown's flush waits for 0 (review conc M-3) */
 		std::atomic<int32> UnsentCloses{ 0 };
 		/** Seconds from lws_set_timeout(LWS_TO_KILL_ASYNC) to WSI_DESTROY; -1 before the first (VaRest-wcv) */
@@ -329,6 +340,9 @@ namespace VaRest::WebSocket::Lws
 		void CompletePressureFencesForTests(bool bShutdown = false);
 #endif
 	};
+
+	/** GT only: actual platform/fork state, never an old NativeOwner authority or full-Tick witness. */
+	bool PrivateDnsThreadsAllowedOnGT();
 
 	/** Any thread: Text as NUL-terminated UTF-8 in Out, for the char* fields libwebsockets keeps */
 	void Utf8Copy(const FString& Text, TArray<ANSICHAR>& Out);

@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "VaRestLwsService.h"
+#include "VaRestDnsNative.h"
 #include "VaRestSocketLink.h"
 #include "VaRestSocketTarget.h"
 #include "VaRestSocketTransport.h"
@@ -124,6 +125,21 @@ namespace VaRest::WebSocket::Lws
 #endif
 
 	private:
+		void FillConnectInfo(FService&, lws_client_connect_info&);
+#if VAREST_HAS_PRIVATE_DNS
+		void AdvancePrivateConnect(FService&);
+		void DiscardPrivateResolve();
+		struct FPrivateConnect
+		{
+			Dns::FTicket Ticket;
+			Dns::FAddress Literal;
+			varest_private3_tcp_route Route{};
+			bool bActive = false, bHaveEndpoint = false, bLiteral = false, bLiteralUsed = false;
+			bool bAttemptLive = false, bEpisodeFailed = false, bTcpConnected = false;
+			FString LastError;
+		};
+		FPrivateConnect PrivateConnect;
+#endif
 #if defined(__linux__) && defined(__x86_64__) && !defined(__ANDROID__)
         friend class FService;
         void StartNative(FService&);

@@ -12,6 +12,8 @@
 #include "Misc/Base64.h"
 #include "Misc/SecureHash.h"
 #include "VaRestSocketTesting.h"
+#include "VaRestDnsNative.h"
+#include "VaRestLwsTransport.h"
 #include <openssl/pem.h>
 #include <arpa/inet.h>
 #include <cerrno>
@@ -263,8 +265,9 @@ namespace VaRest::WebSocket::Lws::VaRestLwsTlsTestPrivate
 	public:
 		~FLoopbackTlsPeer() { StopAndJoin(); ReleaseTls(); }
 
-		bool Start(EVP_PKEY* Key, X509* Leaf)
+		bool Start(EVP_PKEY* Key, X509* Leaf, const TCHAR* Name = TEXT("127.0.0.1"), bool bProxy = false)
 		{
+			ExpectedName = Name; bProxyConnect = bProxy;
 			Context = SSL_CTX_new(TLS_server_method());
 			SocketMethod = BIO_meth_new(BIO_TYPE_SOURCE_SINK | BIO_get_new_index(), "VaRest test nonblocking socket");
 			if (!Context || !SocketMethod || SSL_CTX_use_certificate(Context, Leaf) != 1
@@ -314,6 +317,8 @@ namespace VaRest::WebSocket::Lws::VaRestLwsTlsTestPrivate
 		bool Upgraded() const { return bUpgraded.load(std::memory_order_acquire); }
 		bool EchoedText() const { return bEchoed.load(std::memory_order_acquire); }
 		bool EchoedClose() const { return bClosed.load(std::memory_order_acquire); }
+		bool MatchedSni() const { return bSniMatched.load(std::memory_order_acquire); }
+		bool ProxyConnected() const { return bProxyMatched.load(std::memory_order_acquire); }
 
 		uint32 Run() override
 		{
@@ -336,6 +341,7 @@ namespace VaRest::WebSocket::Lws::VaRestLwsTlsTestPrivate
 			}
 			if (Connection < 0) return 0;
 			bAccepted.store(true, std::memory_order_release);
+			if (bProxyConnect && !ProxyConnect()) return 0;
 			Tls = SSL_new(Context);
 			BIO* Bio = Tls ? BIO_new(SocketMethod) : nullptr;
 			if (!Bio) { Fail(TEXT("server SSL/BIO")); return 0; }
@@ -351,6 +357,9 @@ namespace VaRest::WebSocket::Lws::VaRestLwsTlsTestPrivate
 				if (!Retry(SslError)) break;
 			}
 			if (!bHandshake) { Fail(TEXT("TLS handshake")); return 0; }
+			const char* Sni = SSL_get_servername(Tls, TLSEXT_NAMETYPE_host_name);
+			const FTCHARToUTF8 ExpectedSni(*ExpectedName);
+			bSniMatched.store(Sni && FCStringAnsi::Strcmp(Sni, ExpectedSni.Get()) == 0, std::memory_order_release);
 			if (!Upgrade(Tls)) return 0;
 			uint8 Payload[125];
 			int32 Num = 0;
@@ -425,6 +434,46 @@ namespace VaRest::WebSocket::Lws::VaRestLwsTlsTestPrivate
 		{
 			return Transfer(Tls, true, const_cast<uint8*>(static_cast<const uint8*>(Bytes)), Num);
 		}
+		bool ProxyConnect()
+		{
+			char Header[8192]{}; int32 Used = 0;
+			while (Ready() && Used < sizeof(Header) - 1)
+			{
+				const ssize_t N = recv(Connection, Header + Used, 1, 0);
+				if (N == 1) { ++Used; if (Used >= 4 && FMemory::Memcmp(Header + Used - 4, "\r\n\r\n", 4) == 0) break; continue; }
+				if (N < 0 && errno == EINTR) continue;
+				if (N < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) && Wait(Connection, POLLIN)) continue;
+				return Fail(TEXT("proxy CONNECT read"));
+			}
+			TArray<FString> Lines; FString(UTF8_TO_TCHAR(Header)).ParseIntoArrayLines(Lines);
+			if (Lines.IsEmpty() || Lines[0] != TEXT("CONNECT service.invalid:18443 HTTP/1.0") || Used < 4
+				|| FMemory::Memcmp(Header + Used - 4, "\r\n\r\n", 4) != 0) return Fail(TEXT("proxy original authority"));
+			int32 Auth = 0;
+			for (int32 I = 1; I < Lines.Num(); ++I)
+			{
+				FString Name, Value;
+				if (!Lines[I].Split(TEXT(":"), &Name, &Value)) return Fail(TEXT("proxy header grammar"));
+				if (Name.Equals(TEXT("Proxy-authorization"), ESearchCase::IgnoreCase))
+				{
+					Value.TrimStartAndEndInline();
+					if (Value != TEXT("basic Zml4dHVyZS11c2VyOmZpeHR1cmUtcGFzcw==")) return Fail(TEXT("proxy Basic credential"));
+					++Auth;
+				}
+			}
+			if (Auth != 1) return Fail(TEXT("proxy auth count"));
+			static constexpr char Response[] = "HTTP/1.1 200 Connection established\r\n\r\n";
+			int32 Sent = 0;
+			while (Ready() && Sent < sizeof(Response) - 1)
+			{
+				const ssize_t N = send(Connection, Response + Sent, sizeof(Response) - 1 - Sent, MSG_NOSIGNAL);
+				if (N > 0) { Sent += N; continue; }
+				if (N < 0 && errno == EINTR) continue;
+				if (N < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) && Wait(Connection, POLLOUT)) continue;
+				return Fail(TEXT("proxy CONNECT response"));
+			}
+			bProxyMatched.store(Sent == sizeof(Response) - 1, std::memory_order_release);
+			return Sent == sizeof(Response) - 1;
+		}
 		bool Upgrade(SSL* Tls)
 		{
 			ANSICHAR Header[8192]{};
@@ -447,8 +496,9 @@ namespace VaRest::WebSocket::Lws::VaRestLwsTlsTestPrivate
 				FString Name, Value;
 				if (!Lines[Index].Split(TEXT(":"), &Name, &Value)) return Fail(TEXT("upgrade field"));
 				Value.TrimStartAndEndInline();
+				if (Name.Equals(TEXT("Proxy-authorization"), ESearchCase::IgnoreCase)) return Fail(TEXT("proxy secret reached tunneled server"));
 				if (Name.Equals(TEXT("Host"), ESearchCase::IgnoreCase))
-					{ if (Host || Value != FString::Printf(TEXT("127.0.0.1:%u"), Port)) return Fail(TEXT("upgrade host")); Host = true; }
+					{ if (Host || Value != FString::Printf(TEXT("%s:%u"), *ExpectedName, bProxyConnect ? 18443 : Port)) return Fail(TEXT("upgrade host")); Host = true; }
 				else if (Name.Equals(TEXT("Upgrade"), ESearchCase::IgnoreCase))
 					{ if (UpgradeHeader || !Value.Equals(TEXT("websocket"), ESearchCase::IgnoreCase)) return Fail(TEXT("upgrade token")); UpgradeHeader = true; }
 				else if (Name.Equals(TEXT("Connection"), ESearchCase::IgnoreCase))
@@ -489,6 +539,9 @@ namespace VaRest::WebSocket::Lws::VaRestLwsTlsTestPrivate
 			return Write(Tls, Header, 2) && Write(Tls, Payload, Num);
 		}
 
+		FString ExpectedName;
+		bool bProxyConnect = false;
+		std::atomic<bool> bSniMatched{false}, bProxyMatched{false};
 		SSL_CTX* Context = nullptr;
 		BIO_METHOD* SocketMethod = nullptr;
 		FRunnableThread* Thread = nullptr;
@@ -594,6 +647,82 @@ bool FVaRestLwsTlsLoopbackTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("both real TLS attempts have retired"), GetTlsHandshakesInFlight(), 0);
 	return true;
 }
+
+#if VAREST_HAS_PRIVATE_DNS
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestLwsNamedTlsRouteTest, "VaRest.WebSocket.Lws.PrivateDnsTlsRouting",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FVaRestLwsNamedTlsRouteTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::WebSocket;
+	using namespace VaRest::WebSocket::Lws;
+	using namespace VaRest::WebSocket::Lws::VaRestLwsTlsTestPrivate;
+	if (!TestTrue(TEXT("the actual GT threading phase permits private native DNS"), Dns::InitializeOnGT(PrivateDnsThreadsAllowedOnGT()) == Dns::EStatus::Ready)) return false;
+	for (bool bProxy : {false, true})
+	{
+		const TCHAR* Name = bProxy ? TEXT("service.invalid") : TEXT("localhost");
+		EVP_PKEY* Key = MakeKey();
+		X509* Leaf = Key ? MakeLeaf(Key, bProxy ? "DNS:service.invalid" : "DNS:localhost") : nullptr;
+		BIO* PublicPem = BIO_new(BIO_s_mem());
+		ON_SCOPE_EXIT { BIO_free(PublicPem); X509_free(Leaf); EVP_PKEY_free(Key); };
+		if (!TestTrue(TEXT("a genuine in-memory DNS-name certificate is made"), Leaf && PublicPem && PEM_write_bio_X509(PublicPem, Leaf) == 1)) return false;
+		char* Pem = nullptr; const long Size = BIO_get_mem_data(PublicPem, &Pem);
+		if (!TestTrue(TEXT("the public trust certificate has bounded actual bytes"), Size > 0 && Size < MAX_int32)) return false;
+		FLoopbackTlsPeer Peer;
+		if (!TestTrue(TEXT("the IPv4-only real peer starts"), Peer.Start(Key, Leaf, Name, bProxy))) return false;
+		FServiceOptions Options;
+		Options.ExtraTrustedPem.Append(reinterpret_cast<uint8*>(Pem), static_cast<int32>(Size));
+		Options.bOverrideAllowlist = true;
+		Options.Allowlist.Emplace(TEXT("wss"), TArray<FString>{Name});
+		Options.bOverrideProxyForTest = true;
+		Options.ProxyAddressForTest = bProxy ? FString::Printf(TEXT("fixture-user:fixture-pass@localhost:%u"), Peer.GetPort()) : FString();
+		Options.ActiveWaitCapMs = Options.ShortWaitCapMs = 5;
+		FTransport Transport(MoveTemp(Options));
+		ON_SCOPE_EXIT { Peer.StopAndJoin(); Peer.ReleaseTls(); Transport.Shutdown(); };
+		Dns::FStats Before{};
+		if (!TestTrue(TEXT("no previous native job remains"), Dns::SnapshotForTests(Before) == Dns::EStatus::Ready && Before.Occupied == 0)) return false;
+		FVaRestSocketConnectRequest Request;
+		Request.Url = FString::Printf(TEXT("wss://%s:%u/loopback"), Name, bProxy ? 18443 : Peer.GetPort());
+		Request.ConnectTimeout = 5.0; Request.CloseTimeout = 2.0; Request.PingInterval = 0;
+		Request.LogName = bProxy ? TEXT("native-dns-proxy-route") : TEXT("native-dns-address-fallback");
+		const auto Connection = Transport.Connect(MoveTemp(Request));
+		int32 Opens = 0, Messages = 0, Terminals = 0; bool bPayload = false, bSent = false;
+		FVaRestSocketEvent Terminal;
+		const double Until = FPlatformTime::Seconds() + 10;
+		while (FPlatformTime::Seconds() < Until && !Terminals)
+		{
+			TArray<FVaRestSocketEvent> Events; Connection->PopEvents(Events);
+			for (const auto& Event : Events)
+			{
+				if (Event.Type == EVaRestSocketEventType::Open) { ++Opens; bSent = Connection->Send(FVaRestSocketFrame::Text(FStringView(TEXT("varest-private-wss")))); }
+				else if (Event.Type == EVaRestSocketEventType::Message)
+				{
+					++Messages; bPayload = Event.Bytes.Num() == sizeof(LoopbackText) - 1 && FMemory::Memcmp(Event.Bytes.GetData(), LoopbackText, Event.Bytes.Num()) == 0;
+					Connection->Consumed(Event.Bytes.Num()); Connection->Close(1000, TEXT("named route done"));
+				}
+				else if (Event.IsTerminal()) { ++Terminals; Terminal = Event; }
+			}
+			FPlatformProcess::SleepNoStats(0.001f);
+		}
+		const double Retire = FPlatformTime::Seconds() + 3;
+		while (Transport.GetCounters()->LiveConnections.load() && FPlatformTime::Seconds() < Retire) FPlatformProcess::SleepNoStats(0.001f);
+		Peer.StopAndJoin();
+		TestTrue(FString::Printf(TEXT("the real peer completed (%s)"), *Peer.GetErrorAfterJoin()), Peer.GetErrorAfterJoin().IsEmpty());
+		TestTrue(TEXT("strict hostname TLS and original Host survived numeric TCP routing"), Opens == 1 && Messages == 1 && bSent && bPayload && Terminals == 1
+			&& Peer.MatchedSni() && Peer.Upgraded() && Peer.EchoedText() && Peer.EchoedClose() && Terminal.End.Code == 1000 && Terminal.End.bWasClean);
+		TestEqual(TEXT("all actual WSIs retired under the same context"), Transport.GetCounters()->LiveConnections.load(), 0);
+		TestTrue(TEXT("the actual OS order exercised refused IPv6 then successful IPv4 under one deadline"),
+			Transport.GetCounters()->PrivateNumericCandidates.load() >= 2 && Transport.GetCounters()->PrivateFirstFamily.load() == 6
+			&& Transport.GetCounters()->PrivateLastFamily.load() == 4);
+		if (bProxy) TestTrue(TEXT("CONNECT/auth preserved original authority, without an origin DNS lookup"), Peer.ProxyConnected());
+		Dns::FStats After{}; Dns::SnapshotForTests(After);
+		TestEqual(TEXT("only the physical named endpoint made one actual resolver call"), After.ResolverCalls, Before.ResolverCalls + 1);
+		Peer.ReleaseTls(); Transport.Shutdown();
+		(void)Dns::PollRetirement();
+	}
+	return true;
+}
+#endif
 
 #endif // PLATFORM_LINUX
 
