@@ -28,9 +28,13 @@ namespace VaRest::WsTest::VaRestWsRedirectTestPrivate
 		Req.Headers = { { TEXT("Authorization"), TEXT("Bearer redirect-test-token") } };
 		const TUniquePtr<FEvents> Events = Visit(Transport, MoveTemp(Req));
 		const FVaRestSocketEvent* End = Events->GetEnd();
-		Test.TestTrue(FString::Printf(TEXT("%s %s: Error Redirect, status 0 (plan decision 10) (%s)"), Scheme.Name, What, *Events->Describe()),
-			End && End->Type == EVaRestSocketEventType::Error && End->End.Failure == EVaRestSocketFailure::Redirect && End->End.HttpStatus == 0);
-		if (bExpectTlsVeto)
+		const bool bPrivate = VaRest::WebSocket::Testing::UsesPrivateNumericRoute();
+		const int32 ExpectedStatus = bPrivate ? Status : 0;
+		Test.TestTrue(FString::Printf(TEXT("%s %s: Error Redirect, actual backend status %d (%s)"), Scheme.Name, What, ExpectedStatus, *Events->Describe()),
+			End && End->Type == EVaRestSocketEventType::Error && End->End.Failure == EVaRestSocketFailure::Redirect && End->End.HttpStatus == ExpectedStatus);
+		if (bPrivate)
+			Test.TestTrue(TEXT("private redirect is a transport refusal before a target hop"), End && End->End.By == EVaRestSocketCloseBy::Transport);
+		if (bExpectTlsVeto && !bPrivate)
 		{
 			Test.TestTrue(FString::Printf(TEXT("%s %s: refused at the redirect TLS handshake (%s)"), Scheme.Name, What, *Events->Describe()),
 				End && End->End.Detail.Contains(TEXT("refused at the redirect TLS handshake"), ESearchCase::CaseSensitive));
@@ -62,7 +66,7 @@ bool FVaRestWsRedirectSameServerTest::RunTest(const FString& Parameters)
 	VAREST_WS_BEGIN();
 	for (const FScheme& Scheme : Schemes(Site))
 	{
-		// hs.redirect_relative: LWS follows a relative Location on its own; refused at TLS verification for wss, the second APPEND for ws
+		// Private numeric backend refuses before a target hop; legacy LWS is refused at TLS verification or the second APPEND.
 		const FString Relative = NewKey();
 		ExpectRefused(*this, *Transport, Site, Scheme, 302, TEXT("/ws/echo?key=") + Relative, Relative, TEXT("relative"), Scheme.bTls);
 		// hs.redirect_absolute: the same server by absolute URL. By IP: LWS resolves a Location's host itself, and localhost is ::1
@@ -94,8 +98,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestWsRedirectStatusesTest, "VaRest.Integrat
 bool FVaRestWsRedirectStatusesTest::RunTest(const FString& Parameters)
 {
 	VAREST_WS_BEGIN();
-	// Task 10 review M-2: every redirect status, not only 302. The refusal does not depend on the status (it keys on what LWS
-	// does once it follows), but which statuses LWS 3.0 follows was not measured
+	// Every redirect status: private policy rejects the actual parsed 3xx; legacy hooks reject LWS follow-up activity.
 	for (const FScheme& Scheme : Schemes(Site))
 	{
 		for (const int32 Status : { 301, 302, 303, 307, 308 })
@@ -152,11 +155,12 @@ bool FVaRestWsRedirectUnresolvableTest::RunTest(const FString& Parameters)
 			Events.WaitEnd(30.0);
 			continue;
 		}
-		TestTrue(FString::Printf(TEXT("%s: Error Redirect, status 0, after %.2f s (%s)"), Scheme.Name, End->Time - Started, *Events.Describe()),
-			End->Type == EVaRestSocketEventType::Error && End->End.Failure == EVaRestSocketFailure::Redirect && End->End.HttpStatus == 0);
+		const int32 ExpectedStatus = VaRest::WebSocket::Testing::UsesPrivateNumericRoute() ? 302 : 0;
+		TestTrue(FString::Printf(TEXT("%s: Error Redirect, backend status %d, after %.2f s (%s)"), Scheme.Name, ExpectedStatus, End->Time - Started, *Events.Describe()),
+			End->Type == EVaRestSocketEventType::Error && End->End.Failure == EVaRestSocketFailure::Redirect && End->End.HttpStatus == ExpectedStatus);
 		TestFalse(FString::Printf(TEXT("%s: the Detail names no host"), Scheme.Name), End->End.Detail.Contains(TEXT("a..b"), ESearchCase::IgnoreCase));
 		TestEqual(FString::Printf(TEXT("%s: the 302 was asked once"), Scheme.Name), FetchJournal(*this, Site, Key)[TEXT("connections")].AsInt(), 1);
-		// Gone from the service, with no kill: LWS freed the wsi, so nothing may touch it again
+		// No kill after either private pre-hop refusal or the legacy verified dropped-WSI path.
 		TestTrue(FString::Printf(TEXT("%s: the connection left the service"), Scheme.Name),
 			VaRest::Http::Testing::PumpUntil([&Transport] { return Transport->GetCounters().LiveConnections == 0; }, 5.0, true));
 	}
@@ -215,15 +219,24 @@ bool FVaRestWsRedirectHangsAfterRedirectTest::RunTest(const FString& Parameters)
 			continue;
 		}
 		const double Took = End->Time - Started;
-		// Margins as Timeout.Connect's: reported at the deadline on the service thread, 1 s asked
-		TestTrue(FString::Printf(TEXT("%s: ended at the deadline, %.3f s after the connect (1 s asked)"), Leg.What, Took), Took >= 0.95 && Took < 1.5);
+		const bool bPrivateRefusal = Leg.bRedirected && VaRest::WebSocket::Testing::UsesPrivateNumericRoute();
+		if (bPrivateRefusal)
+			TestTrue(FString::Printf(TEXT("%s: refused before the deadline, %.3f s after connect"), Leg.What, Took), Took >= 0.0 && Took < 0.95);
+		else
+			// Preserve the real silent-TLS control and legacy redirect timeout margins.
+			TestTrue(FString::Printf(TEXT("%s: ended at the deadline, %.3f s after the connect (1 s asked)"), Leg.What, Took), Took >= 0.95 && Took < 1.5);
 		const bool bRedirectSaid = End->End.Detail.Contains(TEXT("which VaRest does not follow"), ESearchCase::CaseSensitive);
 		const bool bDeadlineSaid = End->End.Detail.Contains(TEXT("VaRest's ConnectTimeout (1 s) passed"), ESearchCase::CaseSensitive);
 		if (Leg.bRedirected)
 		{
-			TestTrue(FString::Printf(TEXT("%s: Error Redirect, status 0, By Transport, the Detail naming the redirect and the deadline (%s)"), Leg.What, *Events.Describe()),
-				End->Type == EVaRestSocketEventType::Error && End->End.Failure == EVaRestSocketFailure::Redirect && End->End.HttpStatus == 0
-				&& End->End.By == EVaRestSocketCloseBy::Transport && bRedirectSaid && bDeadlineSaid);
+			if (bPrivateRefusal)
+				TestTrue(FString::Printf(TEXT("%s: Error Redirect 302, By Transport, without deadline (%s)"), Leg.What, *Events.Describe()),
+					End->Type == EVaRestSocketEventType::Error && End->End.Failure == EVaRestSocketFailure::Redirect && End->End.HttpStatus == 302
+					&& End->End.By == EVaRestSocketCloseBy::Transport && !bDeadlineSaid);
+			else
+				TestTrue(FString::Printf(TEXT("%s: Error Redirect, status 0, By Transport, the Detail naming the redirect and the deadline (%s)"), Leg.What, *Events.Describe()),
+					End->Type == EVaRestSocketEventType::Error && End->End.Failure == EVaRestSocketFailure::Redirect && End->End.HttpStatus == 0
+					&& End->End.By == EVaRestSocketCloseBy::Transport && bRedirectSaid && bDeadlineSaid);
 			TestEqual(FString::Printf(TEXT("%s: the 302 was asked once"), Leg.What), FetchJournal(*this, Site, StatusKeys[Index])[TEXT("connections")].AsInt(), 1);
 		}
 		else
@@ -232,14 +245,15 @@ bool FVaRestWsRedirectHangsAfterRedirectTest::RunTest(const FString& Parameters)
 				End->Type == EVaRestSocketEventType::Error && End->End.Failure == EVaRestSocketFailure::ConnectTimeout
 				&& End->End.By == EVaRestSocketCloseBy::Timeout && bDeadlineSaid && !bRedirectSaid);
 		}
-		TestTrue(FString::Printf(TEXT("%s: the killed attempt is destroyed"), Leg.What),
+		TestTrue(FString::Printf(TEXT("%s: the actual attempt is destroyed"), Leg.What),
 			VaRest::Http::Testing::PumpUntil([&Transport] { return Transport->GetCounters().LiveConnections == 0; }, 5.0, true));
 		const VaRest::WebSocket::Testing::FLwsCounters After = Transport->GetCounters();
-		TestEqual(FString::Printf(TEXT("%s: one kill issued"), Leg.What), After.KillsIssued - Before.KillsIssued, 1);
-		TestEqual(FString::Printf(TEXT("%s: one kill landed"), Leg.What), After.KillsLanded - Before.KillsLanded, 1);
-		// It hung where this row says: one TCP connect reached the silent listener
-		TestEqual(FString::Printf(TEXT("%s: the silent listener took one connection"), Leg.What),
-			FetchJson(*this, Site, TEXT("/tcp/silent"))[TEXT("accepted")].AsInt(-1) - AcceptedBefore, 1);
+		const int32 ExpectedHops = bPrivateRefusal ? 0 : 1;
+		TestEqual(FString::Printf(TEXT("%s: actual kill count"), Leg.What), After.KillsIssued - Before.KillsIssued, ExpectedHops);
+		TestEqual(FString::Printf(TEXT("%s: actual landed kills"), Leg.What), After.KillsLanded - Before.KillsLanded, ExpectedHops);
+		// Real peer witness: private redirects never reach TCP; legacy and the direct control each do.
+		TestEqual(FString::Printf(TEXT("%s: actual silent listener connections"), Leg.What),
+			FetchJson(*this, Site, TEXT("/tcp/silent"))[TEXT("accepted")].AsInt(-1) - AcceptedBefore, ExpectedHops);
 	}
 	return true;
 }
@@ -285,8 +299,16 @@ bool FVaRestWsRedirectUnresolvableKillGuardTest::RunTest(const FString& Paramete
 			Events.WaitEnd(30.0);
 			continue;
 		}
-		TestTrue(FString::Printf(TEXT("%s: Error ConnectTimeout at the deadline (%s)"), Scheme.Name, *Events.Describe()),
-			End->Type == EVaRestSocketEventType::Error && End->End.Failure == EVaRestSocketFailure::ConnectTimeout);
+		if (VaRest::WebSocket::Testing::UsesPrivateNumericRoute())
+		{
+			// This backend refuses before reset/free: this is not evidence of the legacy freed-WSI Kill branch.
+			TestTrue(FString::Printf(TEXT("%s: guarded transport refuses Redirect 302 before a resolver hop (%s)"), Scheme.Name, *Events.Describe()),
+				End->Type == EVaRestSocketEventType::Error && End->End.Failure == EVaRestSocketFailure::Redirect
+				&& End->End.HttpStatus == 302 && End->End.By == EVaRestSocketCloseBy::Transport);
+		}
+		else
+			TestTrue(FString::Printf(TEXT("%s: Error ConnectTimeout at the deadline (%s)"), Scheme.Name, *Events.Describe()),
+				End->Type == EVaRestSocketEventType::Error && End->End.Failure == EVaRestSocketFailure::ConnectTimeout);
 		TestTrue(FString::Printf(TEXT("%s: the connection left the service"), Scheme.Name),
 			VaRest::Http::Testing::PumpUntil([&Guarded] { return Guarded->GetCounters().LiveConnections == 0; }, 5.0, true));
 	}

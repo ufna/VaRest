@@ -95,6 +95,15 @@ FString VaRest::WebSocket::Testing::DescribeLwsLogLevel()
 		lwsl_visible(LLL_INFO), lwsl_visible(LLL_CLIENT));
 }
 
+bool VaRest::WebSocket::Testing::UsesPrivateNumericRoute()
+{
+#if VAREST_HAS_PRIVATE_DNS
+	return true;
+#else
+	return false;
+#endif
+}
+
 int32 VaRest::WebSocket::Testing::GetTlsHandshakesInFlight()
 {
 	return VaRest::WebSocket::Lws::TlsHandshakesInFlight().load();

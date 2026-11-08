@@ -82,6 +82,9 @@ namespace VaRest::WebSocket::Testing
 	/** lwsl_visible for this module's LWS copy: "err=1 warn=2 notice=0 info=0 client=0" (libwebsockets.h:434-443) */
 	VARESTWEBSOCKET_API FString DescribeLwsLogLevel();
 
+	/** Compiled backend identity, using the same guard as the real context's numeric-only policy; no IO or user override. */
+	VARESTWEBSOCKET_API bool UsesPrivateNumericRoute();
+
 	/** Any thread: this module's wss attempts that LWS has neither established nor destroyed, across every transport (review conc I-3) */
 	VARESTWEBSOCKET_API int32 GetTlsHandshakesInFlight();
 

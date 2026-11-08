@@ -1,8 +1,8 @@
 {
   "schema": "VaRestPrivateLws.bundled-archive.v1",
   "archive": "libvarest_lws3_private.a",
-  "sha256": "68af6b9140a407d1664d02faee11d595bb4af00768c6f3f7aa73e4485bade798",
-  "bytes": 3052740,
+  "sha256": "234de38f2773750c9a9ce72f13118d9d331d4c29e91ad0ddeb07f7074f5ef0c0",
+  "bytes": 3047612,
   "platform": "Linux",
   "architecture": "x86_64-unknown-linux-gnu",
   "configuration": "Release",
@@ -12,185 +12,202 @@
     "commit": "eaa935a80adb38b5cc4d09ce06ec987b87dcddfa"
   },
   "compiler": "Unreal Linux SDK v26 clang 20.1.8 rockylinux8",
-  "source_recipe_revision": "recipe007+419 external C labels+private numeric TCP route v1 actual32C",
-  "source_recipe_sha256": "2dcaf44b6c16f77a95deb2c17c996d935b908a5639a354cde5b82371aa327c38",
+  "source_recipe_revision": "recipe007+419 external C labels+private numeric TCP route+parsed WS refusal status; actual fresh32C",
+  "source_recipe_sha256": "3e2ecb30bc65ab36be9ef7b3a4db633222730aa71bbb07c2123c96c6a81ffbc2",
   "original_build_receipt_sha256": "3e25170d282311cee1a62b80953cf3967adabae73b4aa59afd53128e76c9597e",
   "source300_receipt_sha256": "10c8a18336c898afb3e999bf5d53e9ef9f19524a9d94e92eccc5d3b29f7d331f",
-  "production": "All33 actual current C compiler/archiver commands exited0; interval all78951 preservation inputs/products PASS. Native controller complete=false is retained reader STOP on lexical server/../lextable.h; new readonly readback341c4fd7 normalizes exact PRE-admitted dependency spelling and assesses real bcmp import, with no native replay. All32 dependencies postonly0/member roundtrip;421 prefixed globals=old419+two route helpers;189 real SDK imports=old188+bcmp, actual strings.h primary signature checked. CPP/binding/runtime still UNBUILT/UNRUN for this candidate.",
+  "production": "All33 actual current C compiler/archiver commands exited0;32 ordered members match genuine objects;421 owned prefixed globals/189 imports unchanged from previous archive, all32 PRE dependency joins/postonly0 and108297 immutable guards PASS. One original base64 unused-but-set-variable warning retained. Source373 C archive qualification only; current C++ consumer/link/runtime remains previousSource372 until fresh SDK build and actual tests.",
   "scope": "Existing eligibility remains Linux x64 non-merged source Editor Development modular or Game Development/Shipping monolithic, precompiled refused. Archive C qualification alone grants no current CPP/runtime/platform/release acceptance. Old NativeMode/Profile2/Host5/SourceH/full4608 are not activated.",
   "source_and_license": "Supplied upstream C/header/configuration/license ancestry retained; current same-source explicit numeric TCP context/WSI selection fields, no-DNS/no-redirect fallback guards and IPv6 failed-gai result ordering are identified by actual complete source delta and current source recipe. External-name419 pragma header unchanged; two new helpers are explicitly prefixed. No Engine source edits.",
   "members": [
     {
       "name": "00_base64-decode.o",
-      "sha256": "81001a04158ff42877afa119a39e16c254b0a2df734b071455e1854bab3dd8ba",
-      "bytes": 16048
+      "sha256": "bfa6e9e3aa9d28cf18593b3b65fb1d82d2da00c403bc75fa894734a51618987a",
+      "bytes": 16080
     },
     {
       "name": "01_libwebsockets.o",
-      "sha256": "69090647a8996f89dffed4aa8ffaeca1b3b745b21611978480044d689a5b756a",
-      "bytes": 230224
+      "sha256": "52c670903ed09e7e9816f1b428ac8473d20e1b7ad0b82d807d3772e50280b9c9",
+      "bytes": 229960
     },
     {
       "name": "02_service.o",
-      "sha256": "dd8e95d2ada3fcd0320a2e28b871b0af5ed84dcb0094c7399179d437e2270e16",
-      "bytes": 122656
+      "sha256": "e3ac64a4692fcbf94a1b1b158d72ac77dbc41274f4ceb51c7f6efa8997996923",
+      "bytes": 122392
     },
     {
       "name": "03_pollfd.o",
-      "sha256": "d5cd85a5abdc5737ad766ffdcb1b373cb4c728e2e8595a16dc5f9f232e4a5416",
-      "bytes": 90040
+      "sha256": "02908588269141fadd4a94f65a623da0b07d530f3dc62d5b7ac2bb23301c9d05",
+      "bytes": 89776
     },
     {
       "name": "04_output.o",
-      "sha256": "b10020833662ca2e8af091bf7697b171d8da401d8d57515d80127bfac91c6ddd",
-      "bytes": 78216
+      "sha256": "590756ac0a150dbdec75bd21a70c3abe88d3e255b7ba719998e0aaa62baff5d4",
+      "bytes": 77952
     },
     {
       "name": "05_context.o",
-      "sha256": "e8aac704411c6cdae86fdf252e47c79670e7e5c7edf6ecb825e84a85c2dba349",
-      "bytes": 199416
+      "sha256": "987f1d3de4098837964eaab04cb2c0e5ccd141f82bae6301efa2b1cc48e0cea6",
+      "bytes": 199152
     },
     {
       "name": "06_alloc.o",
-      "sha256": "e1297470de4143cff545b4fabc189c1c0b876195c68f49cd2cace46736cc6b8d",
-      "bytes": 20016
+      "sha256": "a96dce3cf4995b00d62f364945210aa17f8183f14e6545b25480f162a558620a",
+      "bytes": 20072
     },
     {
       "name": "07_ops-pipe.o",
-      "sha256": "806a227c812747e7fc293f9a8ca2b20766525a9e210e131201deecfc2fdf0864",
-      "bytes": 59976
+      "sha256": "211143685620e94041458df3e640822f99463d3258404c4267336737b2a12c7e",
+      "bytes": 59856
     },
     {
       "name": "08_lws-ring.o",
-      "sha256": "a2e37e341e6edbbd6486ffa61b1a3026def9eede6f9644376416de1b0f35b418",
-      "bytes": 19080
+      "sha256": "924a8d2453636ea66941c81d305671258713b9d4b566ddf020f579890cf6d805",
+      "bytes": 19176
     },
     {
       "name": "09_header.o",
-      "sha256": "ea7df4425fc7baf063776762a2571faadde457b97d895f77f441373f83d598c5",
-      "bytes": 104824
+      "sha256": "cda7e197774b6e59017e634f63a687020b554c85f16bf66746d8bedc212e88e3",
+      "bytes": 104416
     },
     {
       "name": "10_parsers.o",
-      "sha256": "9d444e62cf368971c1b7aba1a267228e2d758232ddfbb263b49b4bb89dca8b0a",
-      "bytes": 118968
+      "sha256": "0e96bd39196b626d122548daae14fe5ead0745627aceb2fcaaaddb04f1639e24",
+      "bytes": 118856
     },
     {
       "name": "11_ops-h1.o",
-      "sha256": "aaa6846aba0476377f88d05b3c74c613d0ed56fbe96979977698fce29e38f4e8",
-      "bytes": 77960
+      "sha256": "c716736150b0ec1f67ee1fb79da78439e11e7cdefa95494387ddb839b8c24af5",
+      "bytes": 77840
     },
     {
       "name": "12_ops-ws.o",
-      "sha256": "902cc8826b5abc05415acfca597fbc0f838b70afa227654e4ade3f201ddd7741",
-      "bytes": 116408
+      "sha256": "321d906b39deec9cea87c43b8590958b56515e384c3fb8e529cee3d7e895a128",
+      "bytes": 116144
     },
     {
       "name": "13_client-ws.o",
-      "sha256": "975b1d8b101db304e575804ace479de7e5b31ac2bc55588d88b368b0b5bc73a6",
-      "bytes": 89464
+      "sha256": "16cf88e1534d097535c4074c07d67e20197d863ec902ac15e1a06b36f6a110ce",
+      "bytes": 89192
     },
     {
       "name": "14_client-parser-ws.o",
-      "sha256": "32699f62825b8e039a4e84f740b1bf1a56eccde220531203cfad1069b9a75ca2",
-      "bytes": 73168
+      "sha256": "b75f79cd401d56bfdce3ba006871fb5e1afe1d4dd63fce016b97147fe36317fb",
+      "bytes": 72896
     },
     {
       "name": "15_server-ws.o",
-      "sha256": "c1903b3f80b3026614ff8fd00280837260d7054486a1335decede1f5306e9be6",
-      "bytes": 85448
+      "sha256": "b10388d9c108457da4d4f62b013683850969ccba21b9a2234ae115227e70c49d",
+      "bytes": 85176
     },
     {
       "name": "16_ops-raw.o",
-      "sha256": "9e2f7f740959df862bf82a16c8ff673bc0e170852809d8d5cd7b8fe7eee10c2e",
-      "bytes": 64584
+      "sha256": "ec99034d4139b1bb36b8d1fdfa37716e3b04b7770cfdd8d446699d907aa0042b",
+      "bytes": 64456
     },
     {
       "name": "17_client.o",
-      "sha256": "55820fb9ab7b9d6faa74dd886ad4f15e652c447d74403d8db22fc0aad6b8e401",
-      "bytes": 113888
+      "sha256": "a8dfd73b9a6d6ed8c99d280a108cd0b3889605fb1c97e63e6711e5325bfc2d5d",
+      "bytes": 113944
     },
     {
       "name": "18_client-handshake.o",
-      "sha256": "ffd5b31a065f981b29d7ece0369cad9bf10a0be892dd08696da3def8c7f1449f",
-      "bytes": 164736
+      "sha256": "9677fef57c45be69e51c2cbe9fc18d9d8cbf17fbefb6261d151f9ede60fe9b2f",
+      "bytes": 164616
     },
     {
       "name": "19_ops-listen.o",
-      "sha256": "6937e5b9aca55c7b32428f547bd7f3d7b74581bc28aaf801ef933d5cdff8d881",
-      "bytes": 63336
+      "sha256": "c127df4de98f51ac48da935ae89754aaae71636181e1dd1f254ce897cbdf0b2a",
+      "bytes": 63216
     },
     {
       "name": "20_tls.o",
-      "sha256": "2c2f6854aef2f76952f33ea935c69a7401cb20763b98fd2bc4e7b9ccd5097a90",
-      "bytes": 84336
+      "sha256": "c1fa425090a5be53885281cb156429bfaf97acde52ff79d7a961b02b14586129",
+      "bytes": 84072
     },
     {
       "name": "21_ssl.o",
-      "sha256": "ea773ef0bbfffeaaf9e009ac2db9b5f295aff72b2d0e2ebadc35d00a4b98d817",
-      "bytes": 118400
+      "sha256": "b3c85fe937d0c86d06bf558e36f613e2b5215f7efc5d98f5d53f993bdcd82fad",
+      "bytes": 118296
     },
     {
       "name": "22_tls-server.o",
-      "sha256": "59e13cc1b29ddef93c0256dded9781a74399ecbb7383609dce1a3578bdabf6dd",
-      "bytes": 76760
+      "sha256": "a7d71bbf4969e72ce00b4cfd41cf6bf66b312fa0bba8095a2adc9ecc3b8fa91a",
+      "bytes": 76504
     },
     {
       "name": "23_openssl-server.o",
-      "sha256": "6768a31af30ac67dc34755cd74bb41d2bfed2b4862f3e05974b7d9d412084530",
-      "bytes": 88400
+      "sha256": "2dbebd0a112f573bc58ca82225a6364a42fcb281fe0852552a4d188a103c585d",
+      "bytes": 88288
     },
     {
       "name": "24_tls-client.o",
-      "sha256": "9430666d9805b175787138dcd5986714d2c8b22532ddafa9a933d9682222dfaf",
-      "bytes": 64432
+      "sha256": "93276383f8ed41d2d653866096217583e20b90b07859a8879da905fb9bb8350e",
+      "bytes": 64160
     },
     {
       "name": "25_openssl-client.o",
-      "sha256": "18cf1d62196ae094bc10ea084e1bca3287381fb674545e51242951dd638ebcef",
-      "bytes": 127552
+      "sha256": "4a03c746d48a8a36ea536616700bc8a9e057bec6e6bc241aee31566d737ef62e",
+      "bytes": 127424
     },
     {
       "name": "26_sha-1.o",
-      "sha256": "6f535db06ee3346f79bedff4da6efefb179d8c55fcb8f8b87be64e757a33ca07",
-      "bytes": 15096
+      "sha256": "b9e9858a23239ee8b612670d605200062885732b2176435197baf99ec31e289b",
+      "bytes": 15136
     },
     {
       "name": "27_lws-plat-unix.o",
-      "sha256": "c02cf1faf5b1f3d0b1876df817bcc520b5cfccb801773911ba3fc52b0bb9421b",
-      "bytes": 136808
+      "sha256": "a7db94d6c8eb2d87730c8b5415a37ecd5ab80c99b0bd56ca955c1f60c740c827",
+      "bytes": 136688
     },
     {
       "name": "28_server.o",
-      "sha256": "35fe558746a256d80bedf16f66379f86626fd4190302759578b0bd2235dd8570",
-      "bytes": 182944
+      "sha256": "92fffbe35b8d9c5382fa348bb42b15a0d3a6099d03d9f1ea258c6849cd9346e0",
+      "bytes": 182832
     },
     {
       "name": "29_lws-spa.o",
-      "sha256": "6552cf9c1b2f202d02122254e1717799787759dc6f445a6cab95c8cfbb5046d3",
-      "bytes": 84024
+      "sha256": "95ba01c089007f157506ce944c400bbe5beb4c82e9ad4319f77e8283d7a5b37d",
+      "bytes": 83904
     },
     {
       "name": "30_poll.o",
-      "sha256": "19c0a45273a9f2c397a235e74e438e711c6d4debe157d8639bbf380918f791e0",
-      "bytes": 52912
+      "sha256": "9d48eae929e0dbc894a94cb01bb4b8d987cb81b07b35ddb9624b6fbff829c130",
+      "bytes": 52792
     },
     {
       "name": "31_varest-custody.o",
-      "sha256": "4462748f81a32f47a06a7e30c80eaa8b56731221d26390126c8e6ed25e319646",
-      "bytes": 92736
+      "sha256": "bc7a97938d215ac958072d97023be14eec939a2f1d022f6d9f6783501d1a96b4",
+      "bytes": 92464
     }
   ],
   "current_native_controller_result": {
-    "path": "/w/Unreal/VaRest-recovery/takeover-01441-20261107/private-lws-async-dns-c-native-001/result.json",
-    "sha256": "598c9f870f0715bebd7d8ab1d522480cf7d97b1bca429f2b56a07147d9403aaf",
-    "bytes": 107694,
-    "LF": 2110
+    "path": "/home/ufna/VaRest-recovery/takeover-01441-20261108-sio/source373-private-status-c-native-001/result.json",
+    "sha256": "3f5850610fb28e6bf3966136eb33af97056132837fa4f032ba4b3a780206323d",
+    "bytes": 141481,
+    "LF": 3054
   },
   "current_complete_C_readback": {
-    "path": "/w/Unreal/VaRest-recovery/takeover-01441-20261107/private-lws-async-dns-c-readback-002/result.json",
-    "sha256": "341c4fd7d0d436b23f3689412247ace61af71619ab1378170babde556370f148",
-    "bytes": 1356,
-    "LF": 36
+    "path": "/home/ufna/VaRest-recovery/takeover-01441-20261108-sio/source373-private-status-c-native-001/report.md",
+    "sha256": "2f4678a3821195df98a053256dfc5333159bba329dc5fd876706ee98ba1aae89",
+    "bytes": 2374,
+    "LF": 3
+  },
+  "previous_source350_production": {
+    "provenance_sha256": "57383679208d4098dbf1c1ea9054530ee70f1da5d62ee529a87efff94d556f2a",
+    "archive_sha256": "68af6b9140a407d1664d02faee11d595bb4af00768c6f3f7aa73e4485bade798",
+    "production": "All33 actual current C compiler/archiver commands exited0; interval all78951 preservation inputs/products PASS. Native controller complete=false is retained reader STOP on lexical server/../lextable.h; new readonly readback341c4fd7 normalizes exact PRE-admitted dependency spelling and assesses real bcmp import, with no native replay. All32 dependencies postonly0/member roundtrip;421 prefixed globals=old419+two route helpers;189 real SDK imports=old188+bcmp, actual strings.h primary signature checked. CPP/binding/runtime still UNBUILT/UNRUN for this candidate.",
+    "current_native_controller_result": {
+      "path": "/w/Unreal/VaRest-recovery/takeover-01441-20261107/private-lws-async-dns-c-native-001/result.json",
+      "sha256": "598c9f870f0715bebd7d8ab1d522480cf7d97b1bca429f2b56a07147d9403aaf",
+      "bytes": 107694,
+      "LF": 2110
+    },
+    "current_complete_C_readback": {
+      "path": "/w/Unreal/VaRest-recovery/takeover-01441-20261107/private-lws-async-dns-c-readback-002/result.json",
+      "sha256": "341c4fd7d0d436b23f3689412247ace61af71619ab1378170babde556370f148",
+      "bytes": 1356,
+      "LF": 36
+    }
   }
 }

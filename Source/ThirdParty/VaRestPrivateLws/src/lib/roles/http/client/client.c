@@ -782,6 +782,15 @@ lws_client_interpret_server_handshake(struct lws *wsi)
 	if (ah)
 		ah->http_response = n;
 
+	/* Preserve the parsed status before any private WS refusal or redirect hop. */
+	if (wsi->do_ws && wsi->context->varest_private3_numeric_only &&
+	    n >= 100 && n <= 599 && n != 101) {
+		lws_snprintf(varest_redirect3, sizeof(varest_redirect3),
+			     "HS: ws upgrade not 101, was %d", n);
+		cce = varest_redirect3;
+		goto bail3;
+	}
+
 	if (n == 301 || n == 302 || n == 303 || n == 307 || n == 308) {
   if (wsi->context->varest_private3_numeric_only) {
    lws_snprintf(varest_redirect3, sizeof(varest_redirect3), "HS: ws upgrade not 101, was %d", n);
