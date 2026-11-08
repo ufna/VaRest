@@ -88,7 +88,8 @@ struct FCase : TSharedFromThis<FCase,ESPMode::ThreadSafe>
 		if (!Test.TestTrue(TEXT("owned real Core Hub initializes"),Core->InitializeOnGT(nullptr,true,Error)) ||
 			!Test.TestTrue(TEXT("owned real Socket Hub initializes"),Hub->InitializeOnGT(Core.Get()))) return false;
 		Deadline=FPlatformTime::Seconds()+45;
-		Socket=FVaRestSio::Make(Hub.Get(),TEXT("Reference"),Url(Kind==ECase::Heartbeat ? 2:0)).NoReconnect().WithLogLevel(EVaRestLogLevel::None);
+		const FStringView DefaultNamespace=Kind==ECase::Auth ? TEXTVIEW("/auth") : TEXTVIEW("/");
+		Socket=FVaRestSio::Make(Hub.Get(),TEXT("Reference"),Url(Kind==ECase::Heartbeat ? 2:0,DefaultNamespace)).NoReconnect().WithLogLevel(EVaRestLogLevel::None);
 		if (!Test.TestTrue(TEXT("public real-default-transport factory"),Socket.IsValid())) return false;
 		FVaRestSioLimits Limits;Limits.ReadyTimeout=1.5;
 		if (Kind==ECase::Heartbeat) { Limits.MaxMessageBytes=20*1024*1024;Limits.MaxPacketBytes=20*1024*1024; }
@@ -131,6 +132,7 @@ struct FCase : TSharedFromThis<FCase,ESPMode::ThreadSafe>
 	void SetupAcks()
 	{
 		const auto W=Weak();
+		Test.AddExpectedError(TEXT("VaRest socket: a request message was replied to more than once"),EAutomationExpectedErrorFlags::Contains,1);
 		Socket.On(TEXT("server-plain"),[W](int32 V,FVaRestSioAck& Ack) { if (auto S=W.Pin();S && !S->Cleaned)
 		{ S->Check(V==7,TEXT("typed server request integer"));S->Check(Admitted(Ack.Send(TEXT("typed-ok"))),TEXT("typed trailing ACK sent"));S->Check(Ack.Send(TEXT("twice"))==EVaRestSendResult::Rejected,TEXT("original ACK once flag survives a second send")); } });
 		Socket.On(TEXT("server-binary"),[W](const TArray<uint8>& B,FVaRestSioAck& Ack) { if (auto S=W.Pin();S && !S->Cleaned)
@@ -140,7 +142,7 @@ struct FCase : TSharedFromThis<FCase,ESPMode::ThreadSafe>
 		Socket.On(TEXT("report-binary"),[W](bool Good) { if (auto S=W.Pin();S && !S->Cleaned) { S->Check(Good,TEXT("official peer accepted later worker binary ACK"));++S->BinaryReports; } });
 		Socket.On(TEXT("report-timeout"),[W](bool Good) { if (auto S=W.Pin();S && !S->Cleaned) { S->Check(Good,TEXT("official peer observed unanswered ACK timeout"));++S->TimeoutReports; } });
 		Socket.On(TEXT("report-stale"),[W](bool Good) { if (auto S=W.Pin();S && !S->Cleaned) { S->Check(Good,TEXT("stale namespace ACK never reaches peer"));++S->StaleReports; } });
-		Admin=Socket.Namespace(TEXT("/admin"));
+		Admin=Socket.Namespace(TEXT("/admin")).WithConnectOnStart(true);
 		Admin.OnConnect([W](const FVaRestSioConnect&) { if (auto S=W.Pin();S && !S->Cleaned) ++S->AdminConnected; });
 		Admin.OnDisconnect(nullptr,[W](const FVaRestSioDisconnect&) { if (auto S=W.Pin();S && !S->Cleaned) ++S->AdminDisconnected; });
 		Admin.On(TEXT("server-late"),[W](int32 V,FVaRestSioAck& Ack) { if (auto S=W.Pin();S && !S->Cleaned) { S->Check(V==11,TEXT("stale ACK fixture request"));S->Late=Ack; } });
@@ -156,15 +158,15 @@ struct FCase : TSharedFromThis<FCase,ESPMode::ThreadSafe>
 		const auto W=Weak();SessionChanged=Client.OnSessionChanged().AddLambda([W](EVaRestSessionChange Change)
 		{ if (auto S=W.Pin();S && !S->Cleaned && Change==EVaRestSessionChange::Refreshed) ++S->Refreshed; });
 		Socket.WithClient(Client).WithAuthPlacement(FVaRestSioAuthPlacement::Payload(TEXT("access"),TEXT("Bearer ")));
-		Socket.Namespace(TEXT("/")).WithConnectOnStart(false);
-		Admin=Socket.Namespace(TEXT("/auth"));
+		Admin=Socket.DefaultNamespace();
+		Check(Admin.GetName()==TEXTVIEW("/auth"),TEXT("auth fixture selects the real default auth namespace"));
 		Admin.OnConnect([W](const FVaRestSioConnect&) { if (auto S=W.Pin();S && !S->Cleaned) ++S->AdminConnected; });
 		Admin.OnConnectError(nullptr,[W](const FVaRestError&,const FVaRestSioConnectError& E) { if (auto S=W.Pin();S && !S->Cleaned) { S->Check(E.Data.Get(TEXT("code")).AsInt64()==401,TEXT("actual middleware error code401"));++S->Refused; } });
 		return true;
 	}
 	void SetupNamespaces()
 	{
-		const auto W=Weak();Admin=Socket.Namespace(TEXT("/admin"));Slow=Socket.Namespace(TEXT("/slow"));
+		const auto W=Weak();Admin=Socket.Namespace(TEXT("/admin")).WithConnectOnStart(true);Slow=Socket.Namespace(TEXT("/slow")).WithConnectOnStart(true);
 		Admin.OnConnect([W](const FVaRestSioConnect&) { if (auto S=W.Pin();S && !S->Cleaned) ++S->AdminConnected; });
 		Admin.OnDisconnect(nullptr,[W](const FVaRestSioDisconnect&) { if (auto S=W.Pin();S && !S->Cleaned) ++S->AdminDisconnected; });
 		Slow.OnConnectError(nullptr,[W](const FVaRestError& E,const FVaRestSioConnectError&) { if (auto S=W.Pin();S && !S->Cleaned) { S->Check(E.Kind==EVaRestErrorKind::Timeout,TEXT("unanswered namespace reaches real timeout"));++S->SlowErrors; } });
@@ -187,7 +189,7 @@ struct FCase : TSharedFromThis<FCase,ESPMode::ThreadSafe>
 	bool Update()
 	{
 		if(Cleaned) return true;
-		if(FPlatformTime::Seconds()>Deadline) { Test.AddError(FString::Printf(TEXT("real Socket.IO reference deadline: case=%d phase=%d connected=%d config=%d errors=%d"),int32(Kind),Phase,Connected,ConfigErrors,Errors));Cleanup();return true; }
+		if(FPlatformTime::Seconds()>Deadline) { Test.AddError(FString::Printf(TEXT("real Socket.IO reference deadline: case=%d phase=%d connected=%d config=%d errors=%d admin=%d slow=%d refused=%d refreshed=%d"),int32(Kind),Phase,Connected,ConfigErrors,Errors,AdminConnected,SlowErrors,Refused,Refreshed));Cleanup();return true; }
 		bool Done=false;
 		switch(Kind)
 		{
