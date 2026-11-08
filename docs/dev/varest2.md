@@ -38,7 +38,11 @@ The pipeline combines custom outer stages with offline handling, cache, retries,
 
 ## WebSocket
 
-Add `VaRestWebSocket`. VaRest uses its own client transport on engine-bundled libwebsockets and does not depend on Unreal's `WebSockets` module.
+The ordinary cooked Linux Shipping example now uses the public `SocketComponent` and default client: actual text echo, local Close notification, an independent peer close/EOF record and an unforced game exit. See [the real screenshot and launch commands](first-look.md#публичный-websocket-в-обычной-shipping-игре). Linux x64's current transport uses the plugin-contained private namespaced LWS3 copy; this does not require Engine source changes.
+
+`Close()` immediately changes the high-level socket to Disconnected and reports a local `By=Client` notification. Its default `bWasClean=false` does not report the detached handshake result; the server's later close reply is not delivered by a second public callback. Do not treat that immediate notification as a wire acknowledgement. Transport-level terminal events have their own close classification.
+
+Add `VaRestWebSocket`. VaRest uses its own client transport and does not depend on Unreal's `WebSockets` module.
 
 Use **Make Socket** for an ad hoc connection or **Get Socket** for an API entry. Check the error, bind lifecycle/message/error delegates, then **Connect**. Open transport and application readiness are separate states. Configure routing and `ReadyWhen` if a welcome or authentication message must precede ready sends.
 

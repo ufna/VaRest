@@ -228,5 +228,95 @@
     "handwritten_host_target_or_game_module": false,
     "SDK_generated_temporary_target_module": true,
     "limits": "Actual current code350 ordinary package/typedHTTP/unforced native exit/raw frame only. UUID is fixed public demo response, no randomness claim. Explicit norhithread; scene never instantiates WebSocket. PublicShippingWS/TLS/DNS/provider/fork/unload/globalexit/defaultRHI/platform/performance/release and whole Goal stay OPEN."
+  },
+  "public_socket007_shipping": {
+    "source_version": 354,
+    "editor_fixture_version": 354,
+    "runtime_cpp_version": 350,
+    "source_checkpoint": "80dbb56c0ea278da5b9c56707e7b46a6b60de588",
+    "actual_role": "Ordinary cooked LinuxShipping public SocketComponent/default client",
+    "raw_png": {
+      "path": "/w/Unreal/VaRest-recovery/takeover-01441-20261107/public-cooked-ws-blueprint-local-close-game-visual-001/screenshots/01-packaged-shipping-game-public-websocket.png",
+      "sha256": "44e6e882d04925e0d7641612e300e8955a466b4e4b62952bb37f862d74b1f652",
+      "bytes": 189079,
+      "width": 1440,
+      "height": 900,
+      "pixels_unchanged": true
+    },
+    "actual_game_result": {
+      "path": "/w/Unreal/VaRest-recovery/takeover-01441-20261107/public-cooked-ws-blueprint-local-close-game-visual-001/result.json",
+      "sha256": "9002839af0de7b401eaec2c6a42d5322e4e860315da9dd2b1d9ce51d9f43e941",
+      "bytes": 1829
+    },
+    "package_result": {
+      "path": "/w/Unreal/VaRest-recovery/takeover-01441-20261107/public-cooked-ws-blueprint-local-close-package-001/result.json",
+      "sha256": "24561801697c7ed218b4048b07208c78df426dc7f72377d058a6ee268a95fd18",
+      "bytes": 2124
+    },
+    "root_readback": {
+      "path": "/w/Unreal/VaRest-recovery/takeover-01441-20261107/public-cooked-ws-blueprint-local-close-Root-readback-001/report.md",
+      "sha256": "a00ccb171eccdb2062e4abd438277766c34b4bfd492b46b3c4927f84709ae332",
+      "bytes": 5818
+    },
+    "process": {
+      "pid": 826114,
+      "forced": false,
+      "actual_window": {
+        "id": 2097243,
+        "hex": "0x20005b",
+        "title": "HostProject  ",
+        "x": 80,
+        "y": 50,
+        "width": 1440,
+        "height": 900
+      },
+      "capture_exit_code": 0,
+      "exit_code": 0,
+      "server_exit_code": 0,
+      "elapsed_seconds": 13.793298913020408
+    },
+    "preserved": 79458,
+    "ws_receipts": [
+      {
+        "event": "upgrade",
+        "method": "GET",
+        "path": "/echo",
+        "host": "localhost:18445",
+        "status": 101
+      },
+      {
+        "event": "message",
+        "opcode": 1,
+        "masked": true,
+        "text": "\"VaRest cooked WebSocket demo\"",
+        "bytes": 30,
+        "sha256": "a6b7f7f92cdaa443d734e75a76cb0257af990157ce2af9b14d7c4991d7c8cc00"
+      },
+      {
+        "event": "echo_sent",
+        "bytes": 30,
+        "sha256": "a6b7f7f92cdaa443d734e75a76cb0257af990157ce2af9b14d7c4991d7c8cc00"
+      },
+      {
+        "event": "close_received",
+        "code": 1000,
+        "reason": "demo complete",
+        "masked": true
+      },
+      {
+        "event": "close_sent",
+        "code": 1000
+      },
+      {
+        "event": "eof",
+        "normal": true
+      }
+    ],
+    "stage_archive_pairs": 22,
+    "engine_source_modified": false,
+    "custom_host_target_or_game_module": false,
+    "local_callback_is_wire_ack": false,
+    "prior006_visual_failure_preserved": true,
+    "limits": "Finite actual public WS/echo/localClose plus independent peer close/EOF and raw-frame/native-exit. Not Shipping WSS/CA/proxy/address-order/provider/fork/unload/globalexit/defaultRHI/platform/performance/release acceptance."
   }
 }
