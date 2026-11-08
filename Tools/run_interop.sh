@@ -55,6 +55,7 @@ with (out/'result.json').open('x') as f:json.dump({'complete':True,'versions':ro
 PY
   exit 0
 fi
+mkdir -m 700 -- "$OUTPUT/user"
 NODE=(env -u NODE_PATH -u NODE_OPTIONS -u NODE_EXTRA_CA_CERTS -u DEBUG node --no-global-search-paths)
 PEER_PID=
 cleanup() {
@@ -76,8 +77,8 @@ set +e
 env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u all_proxy -u ALL_PROXY -u no_proxy -u NO_PROXY \
   timeout --foreground --kill-after=15 240 "$EDITOR" "$PROJECT" \
   '-ExecCmds=Automation RunTests ^Interop.VaRest.SocketIO.Reference; Quit' \
-  -unattended -nullrhi -nosplash -nopause -ForceDPCVars=HomeScreen.EnableHomeScreen=0 \
-  "-abslog=$OUTPUT/editor.log" "-ReportExportPath=$OUTPUT/automation" \
+  -unattended -FORCELOGFLUSH -nullrhi -nosplash -nopause -nosound -nowrite -ddc=NoZenLocalFallback -ForceDPCVars=HomeScreen.EnableHomeScreen=0 \
+  "-UserDir=$OUTPUT/user/" "-abslog=$OUTPUT/editor.log" "-ReportExportPath=$OUTPUT/automation" \
   "-VaRestSioInterop=ws://127.0.0.1:$PORT" "-SioReferenceVersion=$VERSION" >"$OUTPUT/editor.stdout" 2>"$OUTPUT/editor.stderr"
 EDITOR_RC=$?
 kill -TERM "$PEER_PID" 2>/dev/null
