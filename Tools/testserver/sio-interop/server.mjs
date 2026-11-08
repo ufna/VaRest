@@ -9,13 +9,17 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 const options = new Map();
 for (let i = 2; i < process.argv.length; i += 2) {
   const key = process.argv[i], value = process.argv[i + 1];
-  if (!['--server', '--port', '--receipts', '--modules-root'].includes(key) || value === undefined || options.has(key))
+  if (!['--server', '--port', '--receipts', '--modules-root', '--demo-int73'].includes(key) || value === undefined || options.has(key))
     throw new Error('invalid reference peer option');
   options.set(key, value);
 }
 const aliases = { '4.8': ['socket.io', '4.8.4'], '4.5': ['socket.io-v45', '4.5.4'], '4.4': ['socket.io-v44', '4.4.1'], '2': ['socket.io-v2', '2.5.1'] };
 const selected = options.get('--server');
 if (!Object.hasOwn(aliases, selected)) throw new Error('explicit fixed server version required');
+// A separate public Blueprint demo contract; ordinary reference cases keep the exact string oracle.
+if (options.has('--demo-int73') && (options.get('--demo-int73') !== '1' || selected !== '4.8'))
+  throw new Error('int73 demo requires explicit 1 and official 4.8 server');
+const demoInt73 = options.has('--demo-int73');
 const portText = options.get('--port');
 if (!/^[1-9][0-9]{3,4}$/.test(portText ?? '')) throw new Error('explicit unprivileged port required');
 const basePort = Number(portText);
@@ -72,8 +76,9 @@ function installNamespace(io, name, profile) {
     socket.on('disconnect', reason => record('namespace.disconnected', { profile, namespace: name, connection: engine.ordinal, reason: safeReason(reason) }));
     socket.on('error', () => { ++errors; record('error', { category: 'namespace_error', profile, namespace: name }); });
     socket.on('echo', (value, ack) => {
-      if (!check(value === 'varest-public-sio', 'unexpected_echo_value')) return;
-      record('echo.received', { profile, namespace: name, connection: engine.ordinal });
+      if (!check(demoInt73 ? value === 73 : value === 'varest-public-sio', 'unexpected_echo_value')) return;
+      record('echo.received', { profile, namespace: name, connection: engine.ordinal,
+        ...(demoInt73 ? { demo: 'public-int73', validated_number: 73 } : {}) });
       if (typeof ack === 'function') ack(value);
       response(socket, 'echo', value);
     });
@@ -251,6 +256,7 @@ process.once('SIGINT', () => void stop());
 process.once('uncaughtException', () => { ++errors; record('error', { category: 'uncaught_exception' }); void stop(); });
 process.once('unhandledRejection', () => { ++errors; record('error', { category: 'unhandled_rejection' }); void stop(); });
 await Promise.all(servers.map(({ server, port }) => new Promise(resolve => server.listen(port, '127.0.0.1', resolve))));
-record('ready', { profiles: servers.map(({ profile, port }) => ({ profile, port })), recovery_available: selected === '4.8' });
+record('ready', { profiles: servers.map(({ profile, port }) => ({ profile, port })), recovery_available: selected === '4.8',
+  ...(demoInt73 ? { demo: 'public-int73' } : {}) });
 console.log(`VAREST_SIO_REFERENCE_READY ${exactVersion} ${basePort} ${basePort + 1} ${basePort + 2}`);
 later(() => { ++errors; record('error', { category: 'unclosed_reference_deadline' }); void stop(); }, 300000);
