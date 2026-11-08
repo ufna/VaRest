@@ -2,6 +2,12 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 #include "Misc/AutomationTest.h"
+#include "Containers/Ticker.h"
+#include "HAL/PlatformMisc.h"
+#include "Misc/CommandLine.h"
+#include "Misc/CoreDelegates.h"
+#include "Misc/Parse.h"
+#include "VaRestWebSocketLog.h"
 #include "HAL/PlatformProcess.h"
 #include "HAL/PlatformTime.h"
 #include "VaRestDnsNative.h"
@@ -171,6 +177,105 @@ bool FVaRestDnsConnectLifetimeTest::RunTest(const FString& Parameters)
 		TArray<FVaRestSocketEvent> Late; Connection->PopEvents(Late);
 		TestTrue(TEXT("late native completion publishes no new socket event"), Late.IsEmpty());
 	}
+	return true;
+}
+
+
+namespace VaRest::WebSocket::Lws::VaRestDnsOrderlyExitPrivate
+{
+	bool Dedicated()
+	{
+		return FParse::Param(FCommandLine::Get(), TEXT("VaRestPrivateDnsOrderlyExitFixture"))
+			&& FParse::Param(FCommandLine::Get(), TEXT("unattended"))
+			&& FParse::Param(FCommandLine::Get(), TEXT("nowrite"));
+	}
+	// This one-case process deliberately retains its own kernel gate through actual OS exit.
+	// No destructor closes/reuses a descriptor still borrowed by the real native child.
+	int ProcessOwnedGate = -1;
+}
+
+IMPLEMENT_COMPLEX_AUTOMATION_TEST(FVaRestDnsOrderlyExitTest, "VaRest.WebSocket.Lws.PrivateDnsOrderlyExit",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+void FVaRestDnsOrderlyExitTest::GetTests(TArray<FString>& Names, TArray<FString>& Commands) const
+{
+	if (VaRest::WebSocket::Lws::VaRestDnsOrderlyExitPrivate::Dedicated())
+	{
+		Names.Add(TEXT("Held")); Commands.Add(TEXT("Held"));
+	}
+}
+
+bool FVaRestDnsOrderlyExitTest::RunTest(const FString& Parameters)
+{
+	using namespace VaRest::WebSocket::Dns;
+	using namespace VaRest::WebSocket::Lws;
+	using namespace VaRest::WebSocket::Lws::VaRestDnsNativeTestPrivate;
+	using namespace VaRest::WebSocket::Lws::VaRestDnsOrderlyExitPrivate;
+	if (!Dedicated() || Parameters != TEXT("Held"))
+	{
+		AddError(TEXT("The held-DNS exit case requires its dedicated sole-test nowrite/unattended process"));
+		return false;
+	}
+	if (!TestTrue(TEXT("actual GT fork/threading state admits this native pool"), InitializeOnGT(PrivateDnsThreadsAllowedOnGT()) == EStatus::Ready)) return false;
+	FStats Initial{};
+	if (!TestTrue(TEXT("the fresh process has no outstanding DNS job and no prior gate"), SnapshotForTests(Initial) == EStatus::Ready && Initial.Occupied == 0 && !Initial.bClosed && ProcessOwnedGate == -1)) return false;
+	ProcessOwnedGate = eventfd(0, EFD_CLOEXEC | EFD_SEMAPHORE);
+	if (!TestTrue(TEXT("a genuine process-owned unsignaled eventfd was created"), ProcessOwnedGate >= 0)) return false;
+	FStats Held{};
+	{
+		FServiceOptions Options;
+		Options.DnsBeforeResolverGateForTest = ProcessOwnedGate;
+		Options.ActiveWaitCapMs = Options.ShortWaitCapMs = 5;
+		Options.ExitFlushSeconds = 0;
+		Options.bOverrideAllowlist = true;
+		Options.Allowlist.Emplace(TEXT("ws"), TArray<FString>{TEXT("localhost")});
+		FTransport Transport(MoveTemp(Options));
+		FVaRestSocketConnectRequest Request;
+		Request.Url = TEXT("ws://localhost:9/orderly-exit");
+		Request.ConnectTimeout = 30.0;
+		Request.LogName = TEXT("private-dns-orderly-exit");
+		const auto Connection = Transport.Connect(MoveTemp(Request));
+		if (!TestTrue(TEXT("real service submitted one actual child held before its OS resolver"), Until([] {
+			FStats Stats{}; return SnapshotForTests(Stats) == EStatus::Ready && Stats.Occupied == 1 && Stats.Unjoined == 1 && Stats.BeforeResolverWaiting == 1;
+		}))) { Transport.Shutdown(); return false; }
+		const double ShutdownStarted = FPlatformTime::Seconds();
+		Transport.Shutdown();
+		if (!TestTrue(TEXT("the actual service shutdown returns without releasing the native gate"), FPlatformTime::Seconds() - ShutdownStarted < 1.0)) return false;
+		TArray<FVaRestSocketEvent> Events; Connection->PopEvents(Events);
+		int32 Opens = 0, Terminals = 0;
+		EVaRestSocketFailure Failure = EVaRestSocketFailure::None;
+		for (const auto& Event : Events)
+		{
+			Opens += Event.Type == EVaRestSocketEventType::Open;
+			if (Event.IsTerminal()) { ++Terminals; Failure = Event.End.Failure; }
+		}
+		if (!TestTrue(TEXT("pending real connection has exactly one Shutdown terminal and no TCP open"), Opens == 0 && Terminals == 1 && Failure == EVaRestSocketFailure::Shutdown)) return false;
+		if (!TestTrue(TEXT("retained native storage outlives the real service without a fake resolver or join"), SnapshotForTests(Held) == EStatus::Ready && !Held.bClosed && Held.Occupied == 1 && Held.Unjoined == 1 && Held.BeforeResolverWaiting == 1
+			&& Held.Created == Initial.Created + 1 && Held.Joined == Initial.Joined && Held.ResolverCalls == Initial.ResolverCalls)) return false;
+	}
+	const auto Witness = FCoreDelegates::OnExit.AddLambda([Created = Held.Created, Joined = Held.Joined, Calls = Held.ResolverCalls]
+	{
+		FStats Late{};
+		const bool bActual = SnapshotForTests(Late) == EStatus::Ready && Late.bClosed && Late.Occupied == 1 && Late.Unjoined == 1 && Late.BeforeResolverWaiting == 1
+			&& Late.Created == Created && Late.Joined == Joined && Late.ResolverCalls == Calls;
+		if (bActual)
+			UE_LOG(LogVaRestSocket, Display, TEXT("VAREST_PRIVATE_DNS_ORDERLY_EXIT_VERIFIED: actual pool closed, one unjoined pre-resolver child, no resolver/join completion claim"));
+		else
+			UE_LOG(LogVaRestSocket, Error, TEXT("VAREST_PRIVATE_DNS_ORDERLY_EXIT_REFUSED: late native state does not match the held-job contract"));
+	});
+	if (!TestTrue(TEXT("the actual late application-exit witness was registered"), Witness.IsValid())) return false;
+	const auto ExitTicker = FTSTicker::GetCoreTicker().AddTicker(TEXT("VaRestPrivateDnsOrderlyExitFixture"), 3.0f, [](float)
+	{
+		UE_LOG(LogVaRestSocket, Display, TEXT("VAREST_PRIVATE_DNS_ORDERLY_EXIT_REQUESTED: nonforce main-loop exit, gate remains unsignaled"));
+		FPlatformMisc::RequestExit(false, TEXT("VaRestPrivateDnsOrderlyExitFixture"));
+		return false;
+	});
+	if (!TestTrue(TEXT("a normal ticker will request nonforce exit after this test result"), ExitTicker.IsValid()))
+	{
+		FCoreDelegates::OnExit.Remove(Witness);
+		return false;
+	}
+	AddInfo(TEXT("VAREST_PRIVATE_DNS_HELD_FOR_ORDERLY_EXIT: real pthread and owned eventfd retained; only the later real OnExit witness plus unforced process0 can qualify this case. Controlled blocking is before getaddrinfo, not an observed NSS stall."));
 	return true;
 }
 
