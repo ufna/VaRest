@@ -1,0 +1,178 @@
+{
+  "schema": 1,
+  "source_version": 366,
+  "editor_fixture_version": 365,
+  "runtime_cpp_version": 350,
+  "role": "Ordinary archived Linux Shipping Game / public Socket.IO Blueprint",
+  "engine_source_modified": false,
+  "custom_host_target_or_handwritten_game_cpp_required": false,
+  "temporary_target_files_created_by_sdk": true,
+  "source_checkpoint": "e4e66a132a415a041ae49d48c7a390d6ecc909e9",
+  "raw_png": {
+    "path": "/home/ufna/VaRest-recovery/takeover-01441-20261108-sio/public-sio-packaged-shipping-game-visual-003/screenshots/01-packaged-shipping-game-public-socketio.png",
+    "sha256": "924e28304291dde99c96d020b67c6f7852e30ce7d68ca42788addbf11e018dcf",
+    "bytes": 168708,
+    "LF": 442,
+    "width": 1440,
+    "height": 900,
+    "pixels_unchanged": true,
+    "whole_original_viewed": true
+  },
+  "actual_result": {
+    "path": "/home/ufna/VaRest-recovery/takeover-01441-20261108-sio/public-sio-packaged-shipping-game-visual-003/result.json",
+    "sha256": "f662eab684deea72206f6a9fd82418b5ffffc68fc7535d8d0a3756759ecdcf9b",
+    "bytes": 2746,
+    "LF": 104,
+    "process": {
+      "pid": 2792836,
+      "forced": false,
+      "actual_window": {
+        "id": 2097243,
+        "hex": "0x20005b",
+        "title": "VaRestInterop  ",
+        "x": 80,
+        "y": 50,
+        "width": 1440,
+        "height": 900
+      },
+      "capture_exit_code": 0,
+      "exit_code": 0,
+      "planned_peer_graceful_stop": true,
+      "server_exit_code": 0,
+      "elapsed_seconds": 13.852304668020224
+    },
+    "protected_inputs": 107893,
+    "preservation_failures": []
+  },
+  "Root_readback": {
+    "path": "/home/ufna/VaRest-recovery/takeover-01441-20261108-sio/public-sio-packaged-shipping-Root-readback-001/report.md",
+    "sha256": "57c80c0bb11a4a31e285770796c2a8958189f1ba170514c0a9d063b933d72a5c",
+    "bytes": 4692,
+    "LF": 6
+  },
+  "package": {
+    "path": "/home/ufna/VaRest-recovery/takeover-01441-20261108-sio/public-cooked-sio-game-package-002/result.json",
+    "sha256": "97771f5c1a6c97d115946e1e9310272474c22458e714dadea163e62c4d6871a6",
+    "products": 44,
+    "stage_archive_identical_pairs": 22,
+    "ordinary_UAT": true,
+    "native_Game_producer": "68756f044c164feaace5b6068af13e5d07657b498a55bc6149a7bc012d68932f",
+    "executable_sha256": "479adcc19afaac3caf5fc8a0bff7f1d52ff61506cb6014bf7c007ecfb1f00d76",
+    "BuildID": "ac661cf56620491e88d8e06c2dcaa39d8634d56d",
+    "working_directory": "/home/ufna/VaRest-recovery/takeover-01441-20261108-sio/public-cooked-sio-game-package-002/archive/Linux",
+    "sample_config_restored_original": true
+  },
+  "scene": {
+    "blueprint": "/Game/VaRestFirstLookSio002/BP_PublicSio",
+    "manual_map": "/Game/VaRestFirstLookSio002/FirstLook",
+    "automatic_map": "/Game/VaRestFirstLookSio002/FirstLookAuto",
+    "blueprint_sha256": "5e8197da4ad662062d5562a7c6c889e530d33a2f800b98e52c2b06af90e9f881",
+    "genuine_Editor_author": "a2d3f02c22638ef00f263fe1f7aae4d2902fb79802d7ce0ef7fec0529b451427",
+    "genuine_cold_check": "08665d7f9f90afcec1abb7b7dee86b43b261be39747e4c08b13bb0b24be9a308",
+    "author_pass_fail": [
+      1,
+      0
+    ],
+    "cold_pass_fail": [
+      1,
+      0
+    ],
+    "public_component": "UVaRestSioComponent",
+    "typed_action": "Emit With Ack",
+    "emitted_integer": 73,
+    "actual_typed_reply": 73,
+    "local_close_code": 1000,
+    "logical_disconnect": "OnDisconnect/FVaRestSioDisconnect/SocketClosed"
+  },
+  "official_reference_peer": {
+    "version": "4.8.4",
+    "script": "Tools/testserver/sio-interop/server.mjs",
+    "sha256": "545ff5e3bfe7c66dbdbac98f4bbad58bfbfbad0671e0639f794e71a5f2c6ddee",
+    "explicit_mode": [
+      "--demo-int73",
+      "1"
+    ],
+    "namespace": "/",
+    "recorded_events": [
+      {
+        "seq": 1,
+        "event": "ready",
+        "server": "4.8.4",
+        "profiles": [
+          {
+            "profile": "base",
+            "port": 19700
+          },
+          {
+            "profile": "payload",
+            "port": 19701
+          },
+          {
+            "profile": "heartbeat",
+            "port": 19702
+          }
+        ],
+        "recovery_available": true,
+        "demo": "public-int73"
+      },
+      {
+        "seq": 2,
+        "event": "engine.connected",
+        "server": "4.8.4",
+        "profile": "base",
+        "connection": 1
+      },
+      {
+        "seq": 3,
+        "event": "namespace.connected",
+        "server": "4.8.4",
+        "profile": "base",
+        "namespace": "/",
+        "connection": 1,
+        "recovered": false
+      },
+      {
+        "seq": 4,
+        "event": "echo.received",
+        "server": "4.8.4",
+        "profile": "base",
+        "namespace": "/",
+        "connection": 1,
+        "demo": "public-int73",
+        "validated_number": 73
+      },
+      {
+        "seq": 5,
+        "event": "namespace.disconnected",
+        "server": "4.8.4",
+        "profile": "base",
+        "namespace": "/",
+        "connection": 1,
+        "reason": "client namespace disconnect"
+      },
+      {
+        "seq": 6,
+        "event": "engine.closed",
+        "server": "4.8.4",
+        "profile": "base",
+        "connection": 1,
+        "reason": "transport close",
+        "pongs": 0
+      },
+      {
+        "seq": 7,
+        "event": "stopped",
+        "server": "4.8.4",
+        "errors": 0
+      }
+    ],
+    "separate_current_reference_matrix": "984971da3ba5af5ad4e37c842ca21ab136c8f77b8b2c59dc3a8bb12debff6905"
+  },
+  "limits": [
+    "Local plain WebSocket transport with official Socket.IO4.8.4; no WSS/CA/proxy/general provider/ABI/fork/unload/global-exit proof.",
+    "Local Close1000 is the immediate logical public notification; peer records namespace and transport end, not raw RFC6455 close or ACK bytes.",
+    "Explicit stock -norhithread remains current NVIDIA/RHI limitation; no defaultRHI or other-platform/performance/full-release acceptance.",
+    "Previous001/002 failed scenes retained in recovery; current003 is a new bounded corrected demo, not a relabeled failure.",
+    "Inspector I1Tasks16-17/Mac/LinuxArm64 owner-deferred; broader Goal remains active."
+  ]
+}

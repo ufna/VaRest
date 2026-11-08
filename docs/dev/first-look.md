@@ -1,12 +1,12 @@
 # Первый просмотр VaRest 2.0
 
-Обычная Shipping-игра теперь показала и публичный WebSocket: реальный echo, локальный Close1000, независимый журнал сетевого закрытия и штатный выход0 за13.793с. Первый из16 настоящих кадров галереи — новая карта007; HTTP200→201 сохранён следующим кадром. Engine, Host, Target и игровой код не менялись; исправлено только ошибочное ожидание новой демосцены от локального callback.
+Публичные HTTP, WebSocket и Socket.IO теперь показаны в обычных Shipping-играх. Новый первый кадр галереи — реальный типизированный ACK73 от официального Socket.IO4.8.4, локальный Close1000 и штатный выход Game0/peer0 за13.852с. Следом сохранены WS echo/Close и HTTP200→201. Engine, Host, Target и игровой код не модифицировались; сцены используют обычные Blueprint и публичные компоненты плагина.
 
 Текущий проект использует неизменённый source engine и обычные модули плагина. Штатные Editor, UnrealGame Development и Shipping собраны; обычная потребляющая Shipping-игра HostProject прошла все949 действий сборки, стандартную упаковку BuildCookRun PAK/IoStore и настоящий запуск. Ручной игровой модуль, `Target.cs` или правки Engine не нужны: временные целевые файлы проекта создаёт сам SDK при включении плагина. OpenAPI-проверки11/0 прошли; отдельная регрессия1/0 вызывает настоящий Save-валидатор до и после повторного импорта.
 
 Northwind из [документа съёмки](../examples/first-look/NorthwindGameApi.json) уже импортирован в `/Game/FirstLook/DA_NorthwindGameApi`: API, четыре структуры и два enum сохранены на диск. Проверка `-Check` в новом процессе загрузила их и вернула отсутствие изменений. В отдельном настоящем Editor ассет открыт и сохранён кнопкой Save: ошибок типов нет, остаются предупреждения о добавлении API в Settings.Apis. Окно ассета и Editor закрылись штатно, код выхода 0. Это проверено с обычным параметром движка `-norhithread`; прежний сбой стандартного Vulkan/RHI-режима остаётся открытым. Ранее повреждённый демо-ассет сохранён отдельно и автоматически не мигрируется.
 
-[Шестнадцать настоящих скриншотов в одном офлайн HTML](../demo/unreal-editor-gallery.html). Первый — публичный WebSocket в обычном cooked Shipping; следующий — реальный типизированный GET200 → POST201. Все исходные PNG сохранены без обработки. Старый ошибочный006 кадр не выдаётся за успешный.
+[Семнадцать настоящих скриншотов в одном офлайн HTML](../demo/unreal-editor-gallery.html). Первые три — публичные Socket.IO с ACK73, WebSocket с echo/Close и типизированный GET200 → POST201 в обычном cooked Shipping. Все исходные PNG сохранены без обработки. Старый ошибочный006 кадр не выдаётся за успешный.
 
 Northwind/Save и девять исторических интерфейсов Editor остаются в той же галерее; прежний Development-кадр с PrintString сохранён отдельно. Это разные фактические проверки, а не все интерфейсы в Shipping.
 
@@ -23,6 +23,33 @@ Northwind/Save и девять исторических интерфейсов E
 ```
 
 Проект уже включает плагин VaRest и сохранённый `/Game/FirstLook/DA_NorthwindGameApi`. `-norhithread` — штатный параметр неизменённого Engine, использованный при успешной проверке на этой машине после сбоя NVIDIA/Vulkan в другом режиме; это не требование к поставке плагина. Не используйте `-unattended` или `-nullrhi` для просмотра панели Inspector. Если Editor предлагает пересобрать модули, не соглашайтесь автоматически: сохраните сообщение, это расхождение с зафиксированной сборкой. Перед следующей сборкой модулей плагина Editor должен быть закрыт.
+
+## Публичный Socket.IO с типизированным ACK в Shipping
+
+В отдельном обычном проекте `/home/ufna/VaRest-recovery/takeover-01441-20261108-sio/stock-plugin-editor-interop-001/VaRestInterop/VaRestInterop.uproject` доступны `/Game/VaRestFirstLookSio002/FirstLook` и `BP_PublicSio`: обычный Actor, SioComponent и публичный Emit With Ack. Карта FirstLook остаётся открытой; FirstLookAuto завершает игру через10с после результата. Создание и холодное открытие реальных файлов прошли по1/0; ниже проверен настоящий упакованный Game. Ручной Host, Target или игровой C++ для сцены не нужны.
+
+В первом терминале запустите строгий peer с **новым свободным именем журнала**; порты19700–19702 должны быть свободны. Закреплённые модули уже установлены для выполненной проверки:
+
+```bash
+node --no-global-search-paths /w/Unreal/VaRest/Tools/testserver/sio-interop/server.mjs \
+  --server 4.8 --demo-int73 1 --port 19700 \
+  --receipts ./varest-public-sio-int73-demo.jsonl \
+  --modules-root /w/Unreal/VaRest-recovery/takeover-01441-20261107/socketio-reference-closed-modules-001/project
+```
+
+После `VAREST_SIO_REFERENCE_READY` во втором терминале с графическим сеансом:
+
+```bash
+cd /home/ufna/VaRest-recovery/takeover-01441-20261108-sio/public-cooked-sio-game-package-002/archive/Linux
+./VaRestInterop/Binaries/Linux/VaRestInterop-Linux-Shipping \
+  -norhithread -windowed -ResX=1440 -ResY=900
+```
+
+Ожидаются реальный Sid, Namespace `/`, `Typed ACK: 73`, `Typed ACK 73 matched; local Close requested` и `Local Close:1000`. Игра закрывается сама; сервер остановите Ctrl+C. `--demo-int73 1` обязателен для этого примера: обычный режим peer принимает строку другого конечного сценария. Сервер подтверждает фактически принятое число, не подставляет готовый ответ. Для повторения задайте свободное имя журнала.
+
+Реальный прогон003: Game0/peer0/13.852с без принудительного завершения, все107893 защищённых входа совпали; [исходный кадр и протокол](../demo/unreal-socketio-shipping-game-capture-manifest.json). Это официальный4.8.4 поверх локального WS; local Close — немедленное логическое уведомление с настоящими полями, не доказательство финального сетевого ACK. Отдельная Node-матрица10/0 покрыла4.8.4/4.5.4/4.4.1 и точный отказ несовместимой2.5.1. WSS/CA/proxy и весь lifecycle этим примером не закрыты.
+
+Новый обычный UAT Cook/Stage/PAK-IoStore/Package/Archive002 завершился0, все22 пары stage/archive идентичны. Для упаковки только в собственном демопроекте временно выбрана карта002 через LinuxEngine.ini; затем исходная карта001 восстановлена. Сам пакет уже содержит GameDefaultMap002; Shipping игнорирует выбор карты из CLI. Это данные примера, не требование установки плагина. Упаковка повторно использует настоящий неизменённый Game/runtime350 и совпадающий Editor365; C++ не пересобирался.
 
 ## Публичный WebSocket в обычной Shipping-игре
 
@@ -109,4 +136,4 @@ VaRest.Inspector.Capture 1
 
 ## Что пока не входит в этот просмотр
 
-Host5 с правками движка отменён. Публичный cooked WS/echo/Close теперь проверен в конечном примере выше. Общие DNS/provider/lifetime, полный Socket.IO interoperability, worker/cooked-reflection, игровые/платформенные и релизные проверки остаются отдельной незавершённой работой. Для просмотра JSON/HTTP/OpenAPI/Inspector в обычном Editor включать native-owner флаг не нужно. Прогресс и границы подтверждённых запусков: [development passport](../passport/2026-11-04-varest2-development.md).
+Host5 с правками движка отменён. Публичный cooked WS/echo/Close теперь проверен в конечном примере выше. Публичные HTTP/WS/Socket.IO и конечная официальная Socket.IO-матрица подтверждены в указанных пределах. Общие DNS/provider/lifetime, fork/module-unload/global-exit, defaultRHI, worker/cooked-reflection, остальные игровые/платформенные и релизные проверки остаются отдельной незавершённой работой. Для просмотра JSON/HTTP/OpenAPI/Inspector в обычном Editor включать native-owner флаг не нужно. Прогресс и границы подтверждённых запусков: [development passport](../passport/2026-11-04-varest2-development.md).
