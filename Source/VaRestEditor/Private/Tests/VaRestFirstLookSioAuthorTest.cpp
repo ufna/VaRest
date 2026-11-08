@@ -148,9 +148,9 @@ bool FVaRestSioShippingAuthorTest::RunTest(const FString& Parameters)
 {
     using namespace VaRestSioVisualAuthor;
     if (!Dedicated() || (Parameters!=TEXT("PublicEcho") && Parameters!=TEXT("Cold"))) { AddError(TEXT("Dedicated sole nowrite socket author required"));return false; }
-    const FString Folder=TEXT("/Game/VaRestFirstLookSio001");
+    const FString Folder=TEXT("/Game/VaRestFirstLookSio002");
     const FString BlueprintPath=Folder+TEXT("/BP_PublicSio");
-    const FString OutputDir=FPaths::ProjectContentDir()/TEXT("VaRestFirstLookSio001");
+    const FString OutputDir=FPaths::ProjectContentDir()/TEXT("VaRestFirstLookSio002");
     if (Parameters==TEXT("Cold"))
     {
         TStrongObjectPtr<UBlueprint> Saved(LoadObject<UBlueprint>(nullptr,*(BlueprintPath+TEXT(".BP_PublicSio"))));
@@ -158,6 +158,10 @@ bool FVaRestSioShippingAuthorTest::RunTest(const FString& Parameters)
         if (!TestTrue(TEXT("cold genuine saved connected graph"),Class && Class->UberGraphFunction && !Class->UberGraphFunction->Script.IsEmpty())) return false;
         for (const FName Event:{FName(TEXT("SioConnected")),FName(TEXT("SioClosed")),FName(TEXT("SioError")),FName(TEXT("SioGaveUp")),FName(TEXT("SioConnectFailed"))})
             if (!TestNotNull(TEXT("cold actual delegate event function"),Class->FindFunctionByName(Event))) return false;
+        // Cold saved callback must consume the actual logical Socket.IO delegate.
+        auto* ClosedFunction=Class->FindFunctionByName(TEXT("SioClosed"));
+        auto* ClosedArgument=ClosedFunction ? FindFProperty<FStructProperty>(ClosedFunction,TEXT("Disconnect")):nullptr;
+        if (!TestTrue(TEXT("cold public logical disconnect signature"),ClosedArgument && ClosedArgument->Struct==FVaRestSioDisconnect::StaticStruct())) return false;
         auto* Auto=FindFProperty<FBoolProperty>(Class,TEXT("AutoCloseAfterDemo"));
         auto* Matched=FindFProperty<FBoolProperty>(Class,TEXT("AckMatched"));if (!Auto || !Matched) return false;
         for (const bool bAuto:{false,true})
@@ -262,7 +266,7 @@ bool FVaRestSioShippingAuthorTest::RunTest(const FString& Parameters)
         A.Wire(Exec,A.Pin(Add,UEdGraphSchema_K2::PN_Execute));Exec=A.Pin(Add,UEdGraphSchema_K2::PN_Then);A.X+=300;return Event;
     };
     auto* Ready=Bind(GET_MEMBER_NAME_CHECKED(UVaRestSioClient,OnConnect),TEXT("SioConnected"));
-    auto* Closed=Bind(GET_MEMBER_NAME_CHECKED(UVaRestSocketClient,OnDisconnected),TEXT("SioClosed"));
+    auto* Closed=Bind(GET_MEMBER_NAME_CHECKED(UVaRestSioClient,OnDisconnect),TEXT("SioClosed"));
     auto* Error=Bind(GET_MEMBER_NAME_CHECKED(UVaRestSocketClient,OnError),TEXT("SioError"));
     auto* GaveUp=Bind(GET_MEMBER_NAME_CHECKED(UVaRestSocketClient,OnGaveUp),TEXT("SioGaveUp"));
     auto* ConnectFailed=Bind(GET_MEMBER_NAME_CHECKED(UVaRestSioClient,OnConnectError),TEXT("SioConnectFailed"));
@@ -308,7 +312,10 @@ bool FVaRestSioShippingAuthorTest::RunTest(const FString& Parameters)
     }
     A.X=900;A.Y=4200;
     auto* BreakClose=Node<UK2Node_BreakStruct>(Graph,A.X,A.Y+300);BreakClose->StructType=FVaRestSocketClose::StaticStruct();BreakClose->AllocateDefaultPins();
-    A.Wire(A.Pin(Closed,TEXT("Close")),A.StructPin(BreakClose,FVaRestSocketClose::StaticStruct(),EGPD_Input));
+    // Socket.IO intentionally suppresses inherited transport events. Consume its actual logical event.
+    auto* BreakDisconnect=Node<UK2Node_BreakStruct>(Graph,A.X,A.Y+600);BreakDisconnect->StructType=FVaRestSioDisconnect::StaticStruct();BreakDisconnect->AllocateDefaultPins();
+    A.Wire(A.Pin(Closed,TEXT("Disconnect")),A.StructPin(BreakDisconnect,FVaRestSioDisconnect::StaticStruct(),EGPD_Input));
+    A.Wire(A.Pin(BreakDisconnect,GET_MEMBER_NAME_CHECKED(FVaRestSioDisconnect,Close)),A.StructPin(BreakClose,FVaRestSocketClose::StaticStruct(),EGPD_Input));
     auto* Code=A.String(A.Pin(BreakClose,GET_MEMBER_NAME_CHECKED(FVaRestSocketClose,Code)),UKismetStringLibrary::StaticClass()->FindFunctionByName(GET_FUNCTION_NAME_CHECKED(UKismetStringLibrary,Conv_IntToString)),TEXT("InInt"));
     auto* CloseText=A.SetText(A.Pin(Closed,UEdGraphSchema_K2::PN_Then),TEXT("Close"),A.Prefix(TEXT("Local Close: "),Code));
     auto Gate=[&](UEdGraphPin* In,UEdGraphPin* Condition,const TCHAR* Failure) {
@@ -326,21 +333,26 @@ bool FVaRestSioShippingAuthorTest::RunTest(const FString& Parameters)
         auto* Not=A.Fn(UKismetMathLibrary::StaticClass()->FindFunctionByName(GET_FUNCTION_NAME_CHECKED(UKismetMathLibrary,Not_PreBool)));
         A.Wire(A.Pin(BreakClose,Member),A.Pin(Not,TEXT("A")));return Not ? Not->GetReturnValuePin():nullptr;
     };
-    auto EnumIs=[&](FName Member,UEnum* Enum,int64 Value) -> UEdGraphPin* {
+    auto EnumIs=[&](UEdGraphPin* ValuePin,UEnum* Enum,int64 Value) -> UEdGraphPin* {
         auto* EqualEnum=Node<UK2Node_EnumEquality>(Graph,A.X,A.Y+300);EqualEnum->AllocateDefaultPins();
-        A.Wire(A.Pin(BreakClose,Member),EqualEnum->GetInput1Pin());
+        A.Wire(ValuePin,EqualEnum->GetInput1Pin());
         if (!Enum || EqualEnum->GetInput2Pin()->PinType.PinSubCategoryObject.Get()!=Enum || !Enum->IsValidEnumValue(Value))
         { A.Fail(TEXT("Actual close enum pin/type/value unavailable"));return nullptr; }
         EqualEnum->GetInput2Pin()->DefaultValue=Enum->GetNameStringByValue(Value);return EqualEnum->GetReturnValuePin();
     };
-    Clean=Gate(Clean,EnumIs(GET_MEMBER_NAME_CHECKED(FVaRestSocketClose,By),StaticEnum<EVaRestSocketCloseBy>(),static_cast<int64>(EVaRestSocketCloseBy::Client)),TEXT("Error: close was not local"));
-    Clean=Gate(Clean,EnumIs(GET_MEMBER_NAME_CHECKED(FVaRestSocketClose,Failure),StaticEnum<EVaRestSocketFailure>(),static_cast<int64>(EVaRestSocketFailure::None)),TEXT("Error: local close reported failure"));
+    Clean=Gate(Clean,EnumIs(A.Pin(BreakClose,GET_MEMBER_NAME_CHECKED(FVaRestSocketClose,By)),StaticEnum<EVaRestSocketCloseBy>(),static_cast<int64>(EVaRestSocketCloseBy::Client)),TEXT("Error: close was not local"));
+    Clean=Gate(Clean,EnumIs(A.Pin(BreakClose,GET_MEMBER_NAME_CHECKED(FVaRestSocketClose,Failure)),StaticEnum<EVaRestSocketFailure>(),static_cast<int64>(EVaRestSocketFailure::None)),TEXT("Error: local close reported failure"));
     Clean=Gate(Clean,IsFalse(GET_MEMBER_NAME_CHECKED(FVaRestSocketClose,bWasClean)),TEXT("Error: local notification claimed wire ACK"));
     Clean=Gate(Clean,IsFalse(GET_MEMBER_NAME_CHECKED(FVaRestSocketClose,bWillReconnect)),TEXT("Error: local close will reconnect"));
     auto* SameReason=A.Fn(UKismetStringLibrary::StaticClass()->FindFunctionByName(GET_FUNCTION_NAME_CHECKED(UKismetStringLibrary,EqualEqual_StrStr)));
     A.Wire(A.Pin(BreakClose,GET_MEMBER_NAME_CHECKED(FVaRestSocketClose,Reason)),A.Pin(SameReason,TEXT("A")));
     if (auto* P=A.Pin(SameReason,TEXT("B"))) P->DefaultValue=TEXT("demo complete");
     Clean=Gate(Clean,SameReason ? SameReason->GetReturnValuePin():nullptr,TEXT("Error: local close reason differs"));
+    auto* SameNamespace=A.Fn(UKismetStringLibrary::StaticClass()->FindFunctionByName(GET_FUNCTION_NAME_CHECKED(UKismetStringLibrary,EqualEqual_StrStr)));
+    A.Wire(A.Pin(BreakDisconnect,GET_MEMBER_NAME_CHECKED(FVaRestSioDisconnect,Namespace)),A.Pin(SameNamespace,TEXT("A")));
+    if (auto* P=A.Pin(SameNamespace,TEXT("B"))) P->DefaultValue=TEXT("/");
+    Clean=Gate(Clean,SameNamespace ? SameNamespace->GetReturnValuePin():nullptr,TEXT("Error: unexpected disconnected namespace"));
+    Clean=Gate(Clean,EnumIs(A.Pin(BreakDisconnect,GET_MEMBER_NAME_CHECKED(FVaRestSioDisconnect,Reason)),StaticEnum<EVaRestSioDisconnectReason>(),static_cast<int64>(EVaRestSioDisconnectReason::SocketClosed)),TEXT("Error: namespace did not report local socket closure"));
     // Select camera after actual async callbacks, preserving ordinary controller startup management.
     auto* ResultView=A.Fn(APlayerController::StaticClass()->FindFunctionByName(GET_FUNCTION_NAME_CHECKED(APlayerController,SetViewTargetWithBlend)));
     A.Wire(PC ? PC->GetReturnValuePin():nullptr,A.Pin(ResultView,UEdGraphSchema_K2::PN_Self));A.Wire(A.Pin(Self,UEdGraphSchema_K2::PN_Self),A.Pin(ResultView,TEXT("NewViewTarget")));
