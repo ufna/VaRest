@@ -1,5 +1,15 @@
 # VaRest 2.0 development passport — 2026-11-04
 
+## Source376 — current packaged Shipping default-RHI frame, 2026-11-08
+
+Actual matching VaRestInterop project Shipping33 completes0:28pluginCPP+SDK-generated default project module+2standardPCH+Link+Metadata,0EngineCPP. Current executable d50a6dbc/debug9b318eb0/BuildID6009f37b/receipt7d922a38 are the genuine producer; all31fresh dependencies/3887PRE/postonly0 and64live private bindings remain attributed to closed native readback1f8173d9. Stock UnrealGame31 and old365 package remain separate history.
+
+Current standard UAT41c35a22 Cook/Stage/PAK-IoStore/Package/Archive completes0/58.006s, all108395 protected tuples preserved;44 regular products form22 exact stage/archive pairs b94c1533. Owned harmless sample LinuxEngine.ini temporarily selects Sio002 only during cook and is exactly restored. Actual unavailable-isolated-Zen warnings remain; no Engine/Host/Target/source/cache/object rewrite or fake receipt.
+
+Actual archived current Shipping/default renderer mode passes fb7d7179: public Blueprint/SioComponent/EmitWithAck and real official Socket.IO4.8.4 numeric73, Game0/peer0/unforced13.210282s, namespace0, all108450 preserved. No -norhithread/-nullrhi/driver override. Root FULLviewed unchanged1440x900 PNG40ec5d48/167042B, genuine SID/typedACK73/localClose1000/all9rows; new gallery entry19 and separate capture manifest retain all18 old raw frames/manifests. Own capgetPID0/nonrootzero precedes peer/Game; no credential content/metadata or external backend. Full Root7e52f462/3485B4LF+ledger83dafdc4/all6325rehashed retain exact limits: no full Shipping game.log/new GPU-thread telemetry/raw ACK-or-Close wire recording, no universal provider/driver/global-exit acceptance.
+
+Source376 changes only gallery/guide/these two progress documents plus one byte-exact PNG and its new capture manifest; all841Source+shadow remain code373. Ordinary Editor964/964 and Game21SoftQuit0 are genuine prior current results. Linux BuildPlugin-StrictIncludes/portable consumer, remaining protocol/provider/fork/unload/platform/quiet-machine benchmark/release-documentation gates remain OPEN; I1Tasks16-17/Mac/LinuxArm64 owner-deferred. No special Editor/custom Game integration or full release acceptance. Broad Goal continues.
+
 ## Source375 — current stock Game Development and Shipping, 2026-11-08
 
 Actual current code373 stock Game Development completes all8 actions0 (6pluginCompile+Link+receiptMetadata),0EngineCompile0newPCH/all108267 preserved. Executable2bb8ae57/debug e2150593 share BuildID6b32bb0b; all6fresh dependencies join3435PRE/postonly0. Raw binding13736e22 verifies71live fields/32private imports/all1061objects;408prefix definitions are388FUNC+20OBJECT, distinct from Carchive421globals/189SDKimports. Corrected native readback40b77ae preserves the original prose erratum without changing inputs or rerunning SDK.

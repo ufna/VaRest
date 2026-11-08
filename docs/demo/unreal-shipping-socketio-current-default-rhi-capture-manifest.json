@@ -1,0 +1,83 @@
+{
+  "schema": "varest.actual-unmodified-unreal-capture.v1",
+  "source_version_at_capture": 375,
+  "documentation_snapshot": 376,
+  "runtime_cpp_version": 373,
+  "editor_fixture_version": 365,
+  "source_checkpoint_at_capture": "f8aada82ad4dd8ed5b1b33d179d13701581f6736",
+  "role": "Current ordinary packaged Shipping/public Blueprint Socket.IO, default renderer mode",
+  "engine_source_modified": false,
+  "custom_host_target_or_handwritten_game_cpp_required": false,
+  "temporary_target_files_created_by_sdk": true,
+  "raw_png": {
+    "path": "docs/demo/unreal-shipping-socketio-current-default-rhi.png",
+    "original": "/home/ufna/VaRest-recovery/takeover-01441-20261108-sio/current-plugin-public-sio-default-rhi-373-runtime-001/screenshots/01-packaged-shipping-game-public-socketio.png",
+    "sha256": "40ec5d48b8343be7b5a59086dffbbe4513a767147fd748448a72c3331721c930",
+    "bytes": 167042,
+    "LF": 527,
+    "width": 1440,
+    "height": 900,
+    "unchanged_pixels": true,
+    "Root_full_frame_viewed": true
+  },
+  "actual_result": {
+    "path": "/home/ufna/VaRest-recovery/takeover-01441-20261108-sio/current-plugin-public-sio-default-rhi-373-runtime-001/result.json",
+    "sha256": "fb7d7179450bd422b97f783fa784b32f42bb54eb42ae0e92f571e6a2fbc3d4c3",
+    "bytes": 2761,
+    "LF": 104,
+    "game_exit": 0,
+    "peer_exit": 0,
+    "forced": false,
+    "elapsed_seconds": 13.210281973995734,
+    "protected_inputs": 108450,
+    "actual_numeric_ack": 73,
+    "local_logical_close": 1000
+  },
+  "Root_readback": {
+    "path": "/home/ufna/VaRest-recovery/takeover-01441-20261108-sio/current-plugin-public-sio-default-rhi-373-runtime-001/report.md",
+    "sha256": "7e52f46273eafe604a80ab83a73941229fd0ed18b54de5e7aebb08c4995d1af2",
+    "bytes": 3485,
+    "LF": 4
+  },
+  "package": {
+    "result": {
+      "path": "/home/ufna/VaRest-recovery/takeover-01441-20261108-sio/current-plugin-public-sio-package-373-001/result.json",
+      "sha256": "41c35a22cd633033634752323e83049a0454b8adb21ba9ba4906ac5175e7422b",
+      "bytes": 2117,
+      "LF": 32
+    },
+    "products": {
+      "path": "/home/ufna/VaRest-recovery/takeover-01441-20261108-sio/current-plugin-public-sio-package-373-001/actual-admitted-stage-archive-products.json",
+      "sha256": "b94c15330f8e70aa3f4f2c6cdad2ddbcd35a3108bfa3aad5e79f234fe27ea3ed",
+      "bytes": 11997,
+      "LF": 178
+    },
+    "root": "/home/ufna/VaRest-recovery/takeover-01441-20261108-sio/current-plugin-public-sio-package-373-001/archive/Linux",
+    "actual_stage_archive_pairs": 22,
+    "current_executable_sha256": "d50a6dbc56a7ac4ece3e6605be2a8083a9bc7ed558dead864bef5a26ca224f59",
+    "build_id": "6009f37b138b74207a9a2b1dfbe0048a317679ca",
+    "actual_project_native_actions": 33,
+    "engine_source_cpp_compiles": 0
+  },
+  "scene": {
+    "map": "/Game/VaRestFirstLookSio002/FirstLookAuto",
+    "public_component": "VaRestSioComponent",
+    "public_action": "EmitWithAck",
+    "host": "ws://localhost:19700",
+    "namespace": "/",
+    "sid": "c_nZ8CCQCISTkNRbAAAA",
+    "native_automatic_exit": true
+  },
+  "official_reference_peer": {
+    "version": "4.8.4",
+    "strict_demo_argument": "--demo-int73 1",
+    "actual_received_number": 73
+  },
+  "limits": [
+    "Actual command has no -norhithread/-nullrhi/driver override; this one finite default-mode frame and normal exit are observed, no universal GPU/driver/thread telemetry guarantee.",
+    "Typed ACK73 is genuine client callback/display with peer validated numeric input; raw ACK response and RFC6455 Close1000 bytes were not separately recorded. LocalClose1000 is local logical API evidence.",
+    "Shipping emits no full game.log; no full shutdown-log/global-exit proof inferred.",
+    "Prior eighteen gallery frames and capture manifests retain their historical source/config/renderer scopes.",
+    "No WSS/proxy/all-platform/performance/provider/fork/physical-unload/full-release acceptance."
+  ]
+}
