@@ -28,11 +28,13 @@
 #include "K2Node_CallFunction.h"
 #include "K2Node_Event.h"
 #include "K2Node_IfThenElse.h"
+#include "K2Node_EnumEquality.h"
 #include "K2Node_MakeStruct.h"
 #include "K2Node_Self.h"
 #include "K2Node_VariableGet.h"
 #include "Kismet/GameplayStatics.h"
 #include "Kismet/KismetGuidLibrary.h"
+#include "Kismet/KismetMathLibrary.h"
 #include "Kismet/KismetStringLibrary.h"
 #include "Kismet/KismetSystemLibrary.h"
 #include "Kismet/KismetTextLibrary.h"
@@ -145,9 +147,9 @@ bool FVaRestSocketShippingAuthorTest::RunTest(const FString& Parameters)
 {
     using namespace VaRestSocketVisualAuthor;
     if (!Dedicated() || (Parameters!=TEXT("PublicEcho") && Parameters!=TEXT("Cold"))) { AddError(TEXT("Dedicated sole nowrite socket author required"));return false; }
-    const FString Folder=TEXT("/Game/VaRestFirstLookSocket006");
+    const FString Folder=TEXT("/Game/VaRestFirstLookSocket007");
     const FString BlueprintPath=Folder+TEXT("/BP_PublicSocket");
-    const FString OutputDir=FPaths::ProjectContentDir()/TEXT("VaRestFirstLookSocket006");
+    const FString OutputDir=FPaths::ProjectContentDir()/TEXT("VaRestFirstLookSocket007");
     if (Parameters==TEXT("Cold"))
     {
         TStrongObjectPtr<UBlueprint> Saved(LoadObject<UBlueprint>(nullptr,*(BlueprintPath+TEXT(".BP_PublicSocket"))));
@@ -289,7 +291,7 @@ bool FVaRestSocketShippingAuthorTest::RunTest(const FString& Parameters)
     auto* BreakClose=Node<UK2Node_BreakStruct>(Graph,A.X,A.Y+300);BreakClose->StructType=FVaRestSocketClose::StaticStruct();BreakClose->AllocateDefaultPins();
     A.Wire(A.Pin(Closed,TEXT("Close")),A.StructPin(BreakClose,FVaRestSocketClose::StaticStruct(),EGPD_Input));
     auto* Code=A.String(A.Pin(BreakClose,GET_MEMBER_NAME_CHECKED(FVaRestSocketClose,Code)),UKismetStringLibrary::StaticClass()->FindFunctionByName(GET_FUNCTION_NAME_CHECKED(UKismetStringLibrary,Conv_IntToString)),TEXT("InInt"));
-    auto* CloseText=A.SetText(A.Pin(Closed,UEdGraphSchema_K2::PN_Then),TEXT("Close"),A.Prefix(TEXT("Close: "),Code));
+    auto* CloseText=A.SetText(A.Pin(Closed,UEdGraphSchema_K2::PN_Then),TEXT("Close"),A.Prefix(TEXT("Local Close: "),Code));
     auto Gate=[&](UEdGraphPin* In,UEdGraphPin* Condition,const TCHAR* Failure) {
         auto* Branch=Node<UK2Node_IfThenElse>(Graph,A.X,A.Y);Branch->AllocateDefaultPins();
         A.Wire(In,Branch->GetExecPin());A.Wire(Condition,Branch->GetConditionPin());
@@ -299,12 +301,32 @@ bool FVaRestSocketShippingAuthorTest::RunTest(const FString& Parameters)
     auto* Is1000=A.Fn(UKismetStringLibrary::StaticClass()->FindFunctionByName(GET_FUNCTION_NAME_CHECKED(UKismetStringLibrary,EqualEqual_StrStr)));
     A.Wire(Code,A.Pin(Is1000,TEXT("A")));if (auto* P=A.Pin(Is1000,TEXT("B"))) P->DefaultValue=TEXT("1000");
     Clean=Gate(Clean,Is1000 ? Is1000->GetReturnValuePin():nullptr,TEXT("Error: unexpected close code"));
-    Clean=Gate(Clean,A.Pin(BreakClose,GET_MEMBER_NAME_CHECKED(FVaRestSocketClose,bWasClean)),TEXT("Error: close was not clean"));
+    // High-level Close is immediate (WS3.1/D26); final detached wire ACK is not this event.
+    // Require its real local notification, never manufacture a clean handshake flag.
+    auto IsFalse=[&](FName Member) {
+        auto* Not=A.Fn(UKismetMathLibrary::StaticClass()->FindFunctionByName(GET_FUNCTION_NAME_CHECKED(UKismetMathLibrary,Not_PreBool)));
+        A.Wire(A.Pin(BreakClose,Member),A.Pin(Not,TEXT("A")));return Not ? Not->GetReturnValuePin():nullptr;
+    };
+    auto EnumIs=[&](FName Member,UEnum* Enum,int64 Value) -> UEdGraphPin* {
+        auto* EqualEnum=Node<UK2Node_EnumEquality>(Graph,A.X,A.Y+300);EqualEnum->AllocateDefaultPins();
+        A.Wire(A.Pin(BreakClose,Member),EqualEnum->GetInput1Pin());
+        if (!Enum || EqualEnum->GetInput2Pin()->PinType.PinSubCategoryObject.Get()!=Enum || !Enum->IsValidEnumValue(Value))
+        { A.Fail(TEXT("Actual close enum pin/type/value unavailable"));return nullptr; }
+        EqualEnum->GetInput2Pin()->DefaultValue=Enum->GetNameStringByValue(Value);return EqualEnum->GetReturnValuePin();
+    };
+    Clean=Gate(Clean,EnumIs(GET_MEMBER_NAME_CHECKED(FVaRestSocketClose,By),StaticEnum<EVaRestSocketCloseBy>(),static_cast<int64>(EVaRestSocketCloseBy::Client)),TEXT("Error: close was not local"));
+    Clean=Gate(Clean,EnumIs(GET_MEMBER_NAME_CHECKED(FVaRestSocketClose,Failure),StaticEnum<EVaRestSocketFailure>(),static_cast<int64>(EVaRestSocketFailure::None)),TEXT("Error: local close reported failure"));
+    Clean=Gate(Clean,IsFalse(GET_MEMBER_NAME_CHECKED(FVaRestSocketClose,bWasClean)),TEXT("Error: local notification claimed wire ACK"));
+    Clean=Gate(Clean,IsFalse(GET_MEMBER_NAME_CHECKED(FVaRestSocketClose,bWillReconnect)),TEXT("Error: local close will reconnect"));
+    auto* SameReason=A.Fn(UKismetStringLibrary::StaticClass()->FindFunctionByName(GET_FUNCTION_NAME_CHECKED(UKismetStringLibrary,EqualEqual_StrStr)));
+    A.Wire(A.Pin(BreakClose,GET_MEMBER_NAME_CHECKED(FVaRestSocketClose,Reason)),A.Pin(SameReason,TEXT("A")));
+    if (auto* P=A.Pin(SameReason,TEXT("B"))) P->DefaultValue=TEXT("demo complete");
+    Clean=Gate(Clean,SameReason ? SameReason->GetReturnValuePin():nullptr,TEXT("Error: local close reason differs"));
     // Select camera after actual async callbacks, preserving ordinary controller startup management.
     auto* ResultView=A.Fn(APlayerController::StaticClass()->FindFunctionByName(GET_FUNCTION_NAME_CHECKED(APlayerController,SetViewTargetWithBlend)));
     A.Wire(PC ? PC->GetReturnValuePin():nullptr,A.Pin(ResultView,UEdGraphSchema_K2::PN_Self));A.Wire(A.Pin(Self,UEdGraphSchema_K2::PN_Self),A.Pin(ResultView,TEXT("NewViewTarget")));
     A.Wire(Clean,ResultView ? ResultView->GetExecPin():nullptr);
-    auto* Done=A.SetText(A.Pin(ResultView,UEdGraphSchema_K2::PN_Then),TEXT("Status"),nullptr,TEXT("Completed: public socket echo and close"));
+    auto* Done=A.SetText(A.Pin(ResultView,UEdGraphSchema_K2::PN_Then),TEXT("Status"),nullptr,TEXT("Echo matched; local Close requested"));
     A.Wire(Done,QuitBranch->GetExecPin());
     for (auto* Event:{Error,GaveUp})
     {
