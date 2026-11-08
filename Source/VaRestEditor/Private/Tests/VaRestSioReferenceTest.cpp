@@ -37,7 +37,7 @@ struct FCase : TSharedFromThis<FCase,ESPMode::ThreadSafe>
 	TArray<FVaRestSioAckHandle> Requests;
 	FString Version,LastConfigMessage;
 	int32 Port=0,Phase=0,Connected=0,AdminConnected=0,AdminDisconnected=0,SlowErrors=0;
-	int32 Errors=0,ConfigErrors=0,TerminalServer=0,Refused=0,Refreshed=0,PlainReports=0,BinaryReports=0,TimeoutReports=0,StaleReports=0,StaleCanceled=0;
+	int32 Errors=0,ConfigErrors=0,TerminalServer=0,Refused=0,Refreshed=0,PlainReports=0,BinaryReports=0,TimeoutReports=0,StaleReports=0,StaleCanceled=0,V2Canceled=0;
 	int32 BinaryEvents=0,BinaryAcks=0,NestedAcks=0,SizedAcks=0,LargeEvents=0,EchoAcks=0;
 	int32 RootConnection=0,AdminConnection=0,Reports=0,WrongAttempts=0;
 	TArray<int32> Counters;
@@ -102,11 +102,13 @@ struct FCase : TSharedFromThis<FCase,ESPMode::ThreadSafe>
 			{
 				if (S->Kind==ECase::ServerAcks && S->StaleAttempted && S->StaleCanceled==0 && E.Kind==EVaRestErrorKind::Canceled &&
 				E.Message.Equals(TEXT("WebSocket send refusals: config=0, offline=0, canceled=1"),ESearchCase::CaseSensitive)) ++S->StaleCanceled;
+			else if (S->Kind==ECase::UnsupportedV2 && S->V2Canceled==0 && E.Kind==EVaRestErrorKind::Canceled &&
+				E.Message.Equals(TEXT("WebSocket send refusals: config=0, offline=0, canceled=1"),ESearchCase::CaseSensitive)) ++S->V2Canceled;
 			else if (E.Kind==EVaRestErrorKind::Config) { ++S->ConfigErrors;S->LastConfigMessage=E.Message; }
 				else if (E.Kind==EVaRestErrorKind::Server) ++S->TerminalServer;
 				else if (!((S->Kind==ECase::Recovery && E.Kind==EVaRestErrorKind::Connection) ||
 					(S->Kind==ECase::Namespaces && E.Kind==EVaRestErrorKind::Timeout)))
-				{ ++S->Errors;S->Test.AddError(FString::Printf(TEXT("unexpected real-peer socket error Kind=%d"),int32(E.Kind))); }
+				{ ++S->Errors;S->Test.AddError(FString::Printf(TEXT("unexpected real-peer socket error Kind=%d Message=%s"),int32(E.Kind),*E.Message)); }
 			}
 		});
 		if (Kind==ECase::Recovery) SetupRecovery();
