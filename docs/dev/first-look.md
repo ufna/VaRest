@@ -1,10 +1,12 @@
 # Первый просмотр VaRest 2.0
 
+Текущий пакет **code350** повторно собран и упакован штатным SDK: пять новых действий плагина, стандартный UAT Cook/Stage/PAK+IoStore/Package/Archive — код0. Настоящая игра выполнила GET200 → типизированный POST201 и сама вышла0 за14,032с; все79078 проверок сохранности прошли. Первый из пятнадцати кадров галереи — этот текущий запуск. Старые успешные снимки и результаты ниже сохранены как история. Исходники движка, Host и ручной Target не менялись; продолжаем отдельно проверять публичный WebSocket в cooked Shipping.
+
 Текущий проект использует неизменённый source engine и обычные модули плагина. Штатные Editor, UnrealGame Development и Shipping собраны; обычная потребляющая Shipping-игра HostProject прошла все949 действий сборки, стандартную упаковку BuildCookRun PAK/IoStore и настоящий запуск. Ручной игровой модуль, `Target.cs` или правки Engine не нужны: временные целевые файлы проекта создаёт сам SDK при включении плагина. OpenAPI-проверки11/0 прошли; отдельная регрессия1/0 вызывает настоящий Save-валидатор до и после повторного импорта.
 
 Northwind из [документа съёмки](../examples/first-look/NorthwindGameApi.json) уже импортирован в `/Game/FirstLook/DA_NorthwindGameApi`: API, четыре структуры и два enum сохранены на диск. Проверка `-Check` в новом процессе загрузила их и вернула отсутствие изменений. В отдельном настоящем Editor ассет открыт и сохранён кнопкой Save: ошибок типов нет, остаются предупреждения о добавлении API в Settings.Apis. Окно ассета и Editor закрылись штатно, код выхода 0. Это проверено с обычным параметром движка `-norhithread`; прежний сбой стандартного Vulkan/RHI-режима остаётся открытым. Ранее повреждённый демо-ассет сохранён отдельно и автоматически не мигрируется.
 
-[Четырнадцать настоящих скриншотов в одном офлайн HTML](../demo/unreal-editor-gallery.html). Первый — уже упакованная Shipping-игра: `Alex Demo`, HTTP200, ID из настоящего ответа демо-сервера, `Players:27`, HTTP201. Реальный GET дал типизированный PlayerProfile, его поля стали телом POST; отдельный сервер проверил `Alex Demo/27/true`. Процесс сам завершился с кодом0 за13,595с, все74528 проверок сохранности файлов прошли. В сцене обычные камера, TextRender и Directional Light; нет PrintString/Shipping debug override, своего Host/Target или правок движка. Прежний успешный loose-stage Shipping-кадр сохранён вторым, старые чёрные кадры не добавлялись как успешные.
+[Пятнадцать настоящих скриншотов в одном офлайн HTML](../demo/unreal-editor-gallery.html). Первый — уже упакованная Shipping-игра: `Alex Demo`, HTTP200, ID из настоящего ответа демо-сервера, `Players:27`, HTTP201. Реальный GET дал типизированный PlayerProfile, его поля стали телом POST; отдельный сервер проверил `Alex Demo/27/true`. Текущий процесс сам завершился с кодом0 за14,032с, все79078 проверок сохранности файлов прошли; прежний пакет code340 сохранён следующим кадром. В сцене обычные камера, TextRender и Directional Light; нет PrintString/Shipping debug override, своего Host/Target или правок движка. Прежний успешный loose-stage Shipping-кадр сохранён отдельно, старые чёрные кадры не добавлялись как успешные.
 
 Northwind/Save и девять исторических интерфейсов Editor остаются в той же галерее; прежний Development-кадр с PrintString сохранён отдельно. Это разные фактические проверки, а не все интерфейсы в Shipping.
 
@@ -36,7 +38,7 @@ python3 /w/Unreal/VaRest/docs/examples/first-look/demo-typed-http-server.py \
 Во втором терминале на машине с графическим сеансом:
 
 ```bash
-/w/Unreal/VaRest-recovery/takeover-01441-20261107/stock-normal-buildcookrun-package-003/archive/Linux/HostProject/Binaries/Linux/HostProject-Linux-Shipping \
+/w/Unreal/VaRest-recovery/takeover-01441-20261107/private-lws-async-dns-normal-package-001/archive/Linux/HostProject/Binaries/Linux/HostProject-Linux-Shipping \
   -game -norhithread -windowed -ResX=1440 -ResY=900
 ```
 

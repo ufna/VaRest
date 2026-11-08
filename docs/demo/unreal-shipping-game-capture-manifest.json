@@ -150,5 +150,83 @@
     "handwritten_host_target_or_game_module": false,
     "SDK_generated_temporary_target_module": true,
     "limits": "Finite actual ordinary packaged game/typedHTTP/original visible frame/unforced exit. Normal -norhithread retained; defaultRHI, WS/DNS/proxy/TLS/code-storage lifetime/Game private binding, Socket.IO external interop, platform/performance/release and whole Goal remain open."
+  },
+  "source350_packaged_shipping": {
+    "actual_role": "Current ordinary SDK-generated HostProject LinuxShipping/full standard BuildCookRun",
+    "source_version": 351,
+    "code_version": 350,
+    "source_checkpoint": "f7891efdc071569eba983e91d5950ba60e46f965",
+    "raw_png": {
+      "path": "/w/Unreal/VaRest-recovery/takeover-01441-20261107/private-lws-async-dns-packaged-game-visual-001/screenshots/01-packaged-shipping-game-typed-http.png",
+      "sha256": "7427021acb6fcb6adac4f5d6e5cfac874a2a4eb8986f62359d08914c11cab87a",
+      "bytes": 155102,
+      "width": 1440,
+      "height": 900,
+      "pixels_unchanged": true
+    },
+    "actual_game_result": {
+      "path": "/w/Unreal/VaRest-recovery/takeover-01441-20261107/private-lws-async-dns-packaged-game-visual-001/result.json",
+      "sha256": "f2972bc3a10a2cc1c8e758dbe2007f3b9cdfd246bac2db5b62aa99feea02039b",
+      "bytes": 1784,
+      "LF": 52
+    },
+    "native_result": {
+      "path": "/w/Unreal/VaRest-recovery/takeover-01441-20261107/private-lws-async-dns-game-shipping-build-001/native-result.json",
+      "sha256": "d0608db32f3a6e565f2f305aaa90805ede0acf373a45937e9ace5015f00a9108"
+    },
+    "package_result": {
+      "path": "/w/Unreal/VaRest-recovery/takeover-01441-20261107/private-lws-async-dns-normal-package-001/result.json",
+      "sha256": "a0534e421a0f025d3c433697ceaf2406d45e9fa428af177d4f4426156fa7236f"
+    },
+    "root_readback": {
+      "path": "/w/Unreal/VaRest-recovery/takeover-01441-20261107/private-lws-async-dns-Shipping-package-Root-readback-001/report.md",
+      "sha256": "36aa5308d03579e4d907b0cf64bcb6ae8e26eb33663e1feed580b07a98c1fb7f",
+      "bytes": 6973,
+      "LF": 19
+    },
+    "process": {
+      "pid": 1858305,
+      "actual_window": {
+        "id": 2097243,
+        "hex": "0x20005b",
+        "title": "HostProject  ",
+        "x": 80,
+        "y": 50,
+        "width": 1440,
+        "height": 900
+      },
+      "capture_exit_code": 0,
+      "exit_code": 0,
+      "forced": false,
+      "elapsed_seconds": 14.031502205005381
+    },
+    "preserved": 79078,
+    "http": [
+      {
+        "method": "GET",
+        "path": "/profile",
+        "status": 200,
+        "response_bytes": 80,
+        "response_sha256": "a9c5b84b13f4d4cade36ad81b5cca9bcd07b557e0b4cda402eb573eddc18334c"
+      },
+      {
+        "method": "POST",
+        "path": "/matches",
+        "status": 201,
+        "response_bytes": 77,
+        "response_sha256": "adb6681445e56869a70ea92826b984c02cebd3bd60f3ba6760bdbbb7778b0dd3",
+        "consumed_fixed_demo_fields": {
+          "map": "Alex Demo",
+          "maxPlayers": 27,
+          "ranked": true
+        },
+        "request_sha256": "a454b5449f6121fe932859c1344d8c200b40bf8eb8f9c2970313acd833aa9816"
+      }
+    ],
+    "stage_archive_pairs": 22,
+    "engine_source_modified": false,
+    "handwritten_host_target_or_game_module": false,
+    "SDK_generated_temporary_target_module": true,
+    "limits": "Actual current code350 ordinary package/typedHTTP/unforced native exit/raw frame only. UUID is fixed public demo response, no randomness claim. Explicit norhithread; scene never instantiates WebSocket. PublicShippingWS/TLS/DNS/provider/fork/unload/globalexit/defaultRHI/platform/performance/release and whole Goal stay OPEN."
   }
 }
