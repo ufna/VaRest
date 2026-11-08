@@ -37,12 +37,12 @@ struct FCase : TSharedFromThis<FCase,ESPMode::ThreadSafe>
 	TArray<FVaRestSioAckHandle> Requests;
 	FString Version,LastConfigMessage;
 	int32 Port=0,Phase=0,Connected=0,AdminConnected=0,AdminDisconnected=0,SlowErrors=0;
-	int32 Errors=0,ConfigErrors=0,TerminalServer=0,Refused=0,Refreshed=0,PlainReports=0,BinaryReports=0,TimeoutReports=0,StaleReports=0;
+	int32 Errors=0,ConfigErrors=0,TerminalServer=0,Refused=0,Refreshed=0,PlainReports=0,BinaryReports=0,TimeoutReports=0,StaleReports=0,StaleCanceled=0;
 	int32 BinaryEvents=0,BinaryAcks=0,NestedAcks=0,SizedAcks=0,LargeEvents=0,EchoAcks=0;
 	int32 RootConnection=0,AdminConnection=0,Reports=0,WrongAttempts=0;
 	TArray<int32> Counters;
 	bool Recovered=false,BinaryOffset=false,Cleaned=false,PendingControl=false,WorkerChecked=false;
-	bool IsStalling=false,UploadDone=false;
+	bool IsStalling=false,UploadDone=false,StaleAttempted=false;
 	int64 PingsBefore=0,StallPongs=0,UploadPongs=0,UploadPauses=0;
 	double Deadline=0,ObserveUntil=0,UploadElapsed=0;
 	FDelegateHandle SessionChanged;
@@ -100,7 +100,9 @@ struct FCase : TSharedFromThis<FCase,ESPMode::ThreadSafe>
 		{
 			if (auto S=W.Pin();S && !S->Cleaned)
 			{
-				if (E.Kind==EVaRestErrorKind::Config) { ++S->ConfigErrors;S->LastConfigMessage=E.Message; }
+				if (S->Kind==ECase::ServerAcks && S->StaleAttempted && S->StaleCanceled==0 && E.Kind==EVaRestErrorKind::Canceled &&
+				E.Message.Equals(TEXT("WebSocket send refusals: config=0, offline=0, canceled=1"),ESearchCase::CaseSensitive)) ++S->StaleCanceled;
+			else if (E.Kind==EVaRestErrorKind::Config) { ++S->ConfigErrors;S->LastConfigMessage=E.Message; }
 				else if (E.Kind==EVaRestErrorKind::Server) ++S->TerminalServer;
 				else if (!((S->Kind==ECase::Recovery && E.Kind==EVaRestErrorKind::Connection) ||
 					(S->Kind==ECase::Namespaces && E.Kind==EVaRestErrorKind::Timeout)))
@@ -228,14 +230,14 @@ struct FCase : TSharedFromThis<FCase,ESPMode::ThreadSafe>
 	{
 		if(Phase==0 && Connected==1 && AdminConnected==1) { Control(TEXT("server-acks"),Socket.DefaultNamespace());Control(TEXT("stale-ack"),Admin);++Phase; }
 		if(!WorkerChecked && Worker.IsValid() && Worker.IsReady()) { Check(Admitted(Worker.Get()),TEXT("later worker original ACK admitted"));WorkerChecked=true; }
-		if(Phase==1 && AdminDisconnected && Late.IsValid()) { Check(!Late.CanReplyOnGT(),TEXT("namespace disconnect invalidates original ACK pin"));Check(Late.Send(TEXT("late"))==EVaRestSendResult::Rejected,TEXT("stale namespace ACK rejected locally"));++Phase; }
-		if(Phase==2 && PlainReports && BinaryReports && TimeoutReports && StaleReports && WorkerChecked)
+		if(Phase==1 && AdminDisconnected && Late.IsValid()) { Check(!Late.CanReplyOnGT(),TEXT("namespace disconnect invalidates original ACK pin"));StaleAttempted=true;Check(Late.Send(TEXT("late"))==EVaRestSendResult::Dropped,TEXT("stale namespace ACK dropped by its original pin"));++Phase; }
+		if(Phase==2 && PlainReports && BinaryReports && TimeoutReports && StaleReports && WorkerChecked && StaleCanceled==1)
 		{ Check(PlainReports==1 && BinaryReports==1 && TimeoutReports==1 && StaleReports==1,TEXT("each real server ACK outcome occurs once"));Echo(Socket.DefaultNamespace());++Phase; }
 		return Phase==3 && EchoAcks==1;
 	}
 	bool Auth()
 	{
-		if(Phase==0 && AdminConnected==1) { Check(Refreshed==1 && Refused==1,TEXT("middleware401 caused one real HTTP refresh and one retry"));Echo(Admin);++Phase; }
+		if(Phase==0 && AdminConnected==1) { Test.TestEqual(TEXT("middleware401 caused one real HTTP refresh"),Refreshed,1);Test.TestEqual(TEXT("reactively consumed401 is not a terminal public connect error"),Refused,0);Test.TestEqual(TEXT("actual native counter includes the consumed401"),Socket.GetStats().ConnectErrors,int64(1));Test.TestEqual(TEXT("successful refresh has no terminal Server error"),TerminalServer,0);Echo(Admin);++Phase; }
 		else if(Phase==1 && EchoAcks==1)
 		{
 			Socket.Close();Client.SetSession(TEXT("varest-public-sio-1"),TEXT("varest-public-sio-refresh"));
@@ -243,7 +245,7 @@ struct FCase : TSharedFromThis<FCase,ESPMode::ThreadSafe>
 		}
 		else if(Phase==2 && TerminalServer>0 && Socket.GetState()==EVaRestSocketState::Disconnected)
 		{
-			Check(Refreshed==2 && Refused==3,TEXT("second cycle refreshes once then repeated middleware refusal is terminal"));
+			Test.TestEqual(TEXT("two cycles refresh exactly once each"),Refreshed,2);Test.TestEqual(TEXT("only repeated refusal after refresh is public terminal"),Refused,1);Test.TestEqual(TEXT("all three wire401 packets remain counted"),Socket.GetStats().ConnectErrors,int64(3));Test.TestEqual(TEXT("repeated refusal reports one terminal Server error"),TerminalServer,1);
 			Other=FVaRestSio::Make(Hub.Get(),TEXT("InvalidNamespace"),Url(0,TEXTVIEW("/not-registered"))).NoReconnect().WithLogLevel(EVaRestLogLevel::None);
 			const auto W=Weak();Other.OnConnectError(nullptr,[W](const FVaRestError& E,const FVaRestSioConnectError&) { if(auto S=W.Pin();S && !S->Cleaned) { S->Check(E.Kind==EVaRestErrorKind::Config,TEXT("actual Invalid namespace is Config"));S->PendingControl=true; } });Other.Connect();++Phase;
 		}
