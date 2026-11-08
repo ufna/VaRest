@@ -1,0 +1,12 @@
+{
+  "name": "varest-socketio-reference-interop",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Fixed official reference server versions for isolated VaRest interoperability qualification",
+  "dependencies": {
+    "socket.io": "4.8.4",
+    "socket.io-v45": "npm:socket.io@4.5.4",
+    "socket.io-v44": "npm:socket.io@4.4.1",
+    "socket.io-v2": "npm:socket.io@2.5.1"
+  }
+}
