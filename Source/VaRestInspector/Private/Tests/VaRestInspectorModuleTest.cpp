@@ -222,7 +222,9 @@ bool FVaRestInspectorModuleTest::RunTest(const FString& Parameters)
 	Policy.Limits = Limits;
 	const auto Detail = Policy.Detail();
 	TestTrue(TEXT("metadata requested"), EnumHasAnyFlags(Detail.Flags, EVaRestTraceDetail::Metadata));
-	TestEqual(TEXT("I1 requests no socket frames"), Detail.FrameCap, 0);
+	TestEqual(TEXT("body-enabled policy requests its configured socket frame cap"), Detail.FrameCap, Limits.FrameBytes);
+	auto MetadataOnly = Policy; MetadataOnly.bBodies = false;
+	TestEqual(TEXT("metadata-only policy requests no frame excerpts"), MetadataOnly.Detail().FrameCap, 0);
 	const auto Support = VaRest::Inspector::Private::GetSupportedAllocator();
 	TestFalse(TEXT("bootstrap capability remains uncalibrated"), Support.bCalibrationPassed);
 	TestFalse(TEXT("uncalibrated capability refuses controllers"), Support.SupportsController(64, 8));
@@ -384,7 +386,11 @@ bool FVaRestInspectorModuleTest::RunTest(const FString& Parameters)
   MakeShared<VaRest::Inspector::Private::ModuleTesting::FPublicPolicyState,ESPMode::ThreadSafe>(*this,*Inspector,Observed,ObserverHandle)));
  ObserverTransferred=true;
 #endif
-	TestNull(TEXT("capture console object is absent"), IConsoleManager::Get().FindConsoleObject(TEXT("VaRest.Inspector.Capture")));
+#if VAREST_WITH_INSPECTOR
+	TestNotNull(TEXT("compiled Inspector registers its capture console command"), IConsoleManager::Get().FindConsoleObject(TEXT("VaRest.Inspector.Capture")));
+#else
+	TestNull(TEXT("compiled-out Inspector registers no capture console command"), IConsoleManager::Get().FindConsoleObject(TEXT("VaRest.Inspector.Capture")));
+#endif
 	return true;
 }
 

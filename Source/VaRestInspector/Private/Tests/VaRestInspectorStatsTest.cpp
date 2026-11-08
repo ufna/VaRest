@@ -293,12 +293,12 @@ static FSnapshot Take(FCase& C)
 	return Out;
 }
 template <typename F>
-static void Group(FCase& C, const FSnapshot& Snapshot, const TCHAR* Endpoint, F&& Check, uint64 Client = 9, const TCHAR* Key = TEXT(""))
+static void Group(FCase& C, const FSnapshot& Snapshot, const TCHAR* Endpoint, F&& Check, uint64 Client = 9, const TCHAR* Key = TEXT(""), uint64 ScopeId = 0)
 {
 	if (!C.Test.TestTrue(TEXT("stats owner exists for borrowed visit"), Snapshot.IsValid())) return;
 	int32 Found = 0;
 	Snapshot->ForEachStats([&](const FVaRestInspectorHttpStats& V) {
-		if (!V.bOverflow && V.ClientId == Client && V.Endpoint == FName(Endpoint) && V.Key.Equals(Key, ESearchCase::CaseSensitive))
+		if (!V.bOverflow && V.ScopeId == ScopeId && V.ClientId == Client && V.Endpoint == FName(Endpoint) && V.Key.Equals(Key, ESearchCase::CaseSensitive))
 		{
 			++Found; Check(V);
 		}
@@ -667,7 +667,10 @@ bool FVaRestInspectorStatsHttpTest::RunTest(const FString& Parameters)
 		}
 		auto WrongSource = Dispatch(1, 101);
 		WrongSource.Source = static_cast<EVaRestTraceSource>(255);
+		const int64 PendingBefore = C.Roots.Pending->Count.load();
 		C.Test.TestEqual(TEXT("real codec refuses unsupported source before creating Store input"), C.Queue.TryPush(WrongSource), EPush::Unsupported);
+		C.Test.TestEqual(TEXT("unknown source reserves no pending packet"), C.Roots.Pending->Count.load(), PendingBefore);
+		C.Test.TestFalse(TEXT("unknown source leaves no packet that can shift later ingress"), C.Queue.TryPopMetadata().IsSet());
 		if (!Deliver(C, Dispatch(0, 101), false) || !Deliver(C, Dispatch(1, 0), false) || !Deliver(C, Dispatch(1, 101)) ||
 			!Deliver(C, Dispatch(1, 101)) || !Deliver(C, Ended(1, 101)) || !Deliver(C, Ended(1, 101)) ||
 			!Deliver(C, Completed(1)) || !Deliver(C, Completed(1), false) || !Deliver(C, Dispatch(1, 102), false)) return false;
@@ -938,7 +941,7 @@ bool FVaRestInspectorStatsBoundsTest::RunTest(const FString& Parameters)
 		if (!Deliver(C, Started(5, TEXT(""), 0, 9, TEXT(""), TEXT("https://example.test/two?nonce=2"))) || !Deliver(C, Completed(5))) return false;
 		if (!Deliver(C, Started(6, TEXT(""), 0, 9, TEXT(""), TEXT("https://[2001:DB8::1]:443/secret?q=1"))) || !Deliver(C, Completed(6))) return false;
 		if (!Deliver(C, Started(7, TEXT("RealClientZero"), 0, 0)) || !Deliver(C, Completed(7))) return false;
-		auto OtherScope = Started(8, TEXT("WrongScope")); OtherScope.Payload.Get<FVaRestTraceStarted>().ScopeId = 1;
+		auto OtherScope = Started(8, TEXT("EndpointKey")); OtherScope.Payload.Get<FVaRestTraceStarted>().ScopeId = 1;
 		if (!Deliver(C, OtherScope) || !Deliver(C, Completed(8)) || !Deliver(C, Ended(9, 901)) || !Deliver(C, Completed(9))) return false;
 		if (!Deliver(C, Started(10, TEXT(""), 0, 9, TEXT(""), TEXT("https://:443/no-host"))) || !Deliver(C, Completed(10))) return false;
 		if (!Deliver(C, Started(11, TEXT(""), 0, 9, TEXT(""), TEXT("https://[not-ipv6]/no-host"))) || !Deliver(C, Completed(11))) return false;
@@ -949,11 +952,13 @@ bool FVaRestInspectorStatsBoundsTest::RunTest(const FString& Parameters)
 		Group(C, S, TEXT(""), [&](const auto& V) { C.Test.TestEqual(TEXT("host key drops userinfo,port,path,query,fragment and normalizes ASCII case"), V.Completed, uint64(2)); }, 9, TEXT("H:GET example.test"));
 		Group(C, S, TEXT(""), [&](const auto& V) { C.Test.TestEqual(TEXT("bracketed IPv6 host key is bounded and normalized"), V.Completed, uint64(1)); }, 9, TEXT("H:GET [2001:db8::1]"));
 		Group(C, S, TEXT("RealClientZero"), [&](const auto& V) { C.Test.TestEqual(TEXT("source-proven real client0 is named, not unknown"), V.Started, uint64(1)); }, 0);
+		Group(C, S, TEXT("EndpointKey"), [&](const auto& V) { C.Test.TestTrue(TEXT("same endpoint/client in a real non-Process scope has its own group"), V.ScopeId == 1 && V.ClientId == 9 && V.Started == 1 && V.Completed == 1); }, 9, TEXT(""), 1);
 		Overflow(C, S, [&](const auto& V) {
-			C.Test.TestEqual(TEXT("unsupported scope,orphan,malformed authority/IPv6/port use one overflow"), V.Completed, uint64(5));
+			C.Test.TestEqual(TEXT("orphan and malformed authority/IPv6/port use one overflow"), V.Completed, uint64(4));
 			C.Test.TestTrue(TEXT("overflow retains no rejected key or endpoint"), V.Key.IsEmpty() && V.Endpoint.IsNone());
 		});
-		C.Test.TestEqual(TEXT("exact actual named memberships plus one overflow"), FStoreAccess::Groups(C.Store), 6);
+		C.Test.TestEqual(TEXT("exact actual Process/scoped named memberships plus one overflow"), FStoreAccess::Groups(C.Store), 7);
+		C.Test.TestEqual(TEXT("scoped group and overflow conserve all actual twelve completions"), Totals(S).Completed, uint64(12));
 		return true;
 	}, 4);
 

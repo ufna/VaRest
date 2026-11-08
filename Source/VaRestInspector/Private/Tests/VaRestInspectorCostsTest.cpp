@@ -448,7 +448,7 @@ bool LocalPending(FAutomationTestBase& Test)
 }
 bool NumericDefaults(FAutomationTestBase& Test)
 {
-	auto P = Policy(); P.Limits.BodyBytes = 32; P.Limits.BinaryBytes = 0;
+	auto P = Policy(); P.Limits.BodyBytes = 32; P.Limits.BinaryBytes = 0; P.Limits.FrameBytes = 0; // explicit HTTP-only numerical demand
 	FCaptureFixture F(Test, false, true, true, &P);
 	if (!F.Ready() || !F.Service->IsCapturing()) return false;
 	// Observe broadcasts without masking the Inspector's own numerical demand.

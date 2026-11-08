@@ -173,6 +173,9 @@ EMeasure FPacketCodec::Measure(const FVaRestTraceEvent& Borrowed, const FCapture
 	const FAllocationAdapter& Allocator, FPacketLayout& Out, bool bSnapshot)
 {
 	Out = FPacketLayout{};
+	// A future/invalid source cannot become HTTP merely through a known payload kind.
+	if (Borrowed.Source != EVaRestTraceSource::Http && Borrowed.Source != EVaRestTraceSource::Socket)
+		return EMeasure::Unsupported;
 	if (Borrowed.Source == EVaRestTraceSource::Socket && Borrowed.Kind != EVaRestTraceKind::Socket && Borrowed.Kind != EVaRestTraceKind::SocketAttempt && Borrowed.Kind != EVaRestTraceKind::SocketFrame && Borrowed.Kind != EVaRestTraceKind::SocketNote && Borrowed.Kind != EVaRestTraceKind::Excerpt)
 		return EMeasure::Unsupported;
 	FPacketHeader Header;

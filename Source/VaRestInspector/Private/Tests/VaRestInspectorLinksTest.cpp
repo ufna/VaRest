@@ -596,9 +596,12 @@ bool FVaRestInspectorLinksAndMarkersTest::RunTest(const FString&)
 		if (!Deliver(C, Scope(0, true, TEXT("Process"))))
 			return false;
 		C.Test.TestEqual(TEXT("same Process metadata does not invent a change"), C.Store.Revision(), Open);
-		if (!Deliver(C, Scope(7, true, TEXT("PIE fiction"))) || !Deliver(C, Scope(0, false, TEXT("untrusted-label"))))
+		if (!Deliver(C, Scope(7, true, TEXT("GameInstance scope"))) || !Deliver(C, Scope(0, false, TEXT("untrusted-label"))))
 			return false;
-		C.Test.TestEqual(TEXT("unsupported scope and label visibly omitted"), C.Store.Diagnostics().OmittedScopes, uint64(2));
+		C.Test.TestEqual(TEXT("valid logical scope and fixed Process label are not unsupported"), C.Store.Diagnostics().OmittedScopes, uint64(0));
+		const FString LongScopeLabel = FString::ChrN(129, TEXT('s'));
+		if (!Deliver(C, Scope(70, true, *LongScopeLabel)) || !Deliver(C, Scope(71, true, *LongScopeLabel))) return false;
+		C.Test.TestEqual(TEXT("actual bounded logical-scope labels diagnose both truncated observations"), C.Store.Diagnostics().OmittedScopes, uint64(2));
 		int32 BeforeRows = 0;
 		C.Store.ForEachRecord([&](const auto&) { ++BeforeRows; });
 		C.Test.TestEqual(TEXT("scope metadata creates no HTTP row"), BeforeRows, 0);
@@ -620,10 +623,10 @@ bool FVaRestInspectorLinksAndMarkersTest::RunTest(const FString&)
 		P.bOpened = true;
 		P.Label = TEXT("Process");
 		Attached.Scopes.Add(P);
-		FVaRestTraceScope Unsupported;
-		Unsupported.ScopeId = 8;
-		Unsupported.Label = TEXT("another PIE fiction");
-		Attached.Scopes.Add(Unsupported);
+		FVaRestTraceScope LongAttachedScope;
+		LongAttachedScope.ScopeId = 8;
+		LongAttachedScope.Label = LongScopeLabel;
+		Attached.Scopes.Add(LongAttachedScope);
 		FVaRestTraceClient A;
 		A.ClientId = 9;
 		A.ScopeId = 0;
@@ -635,7 +638,7 @@ bool FVaRestInspectorLinksAndMarkersTest::RunTest(const FString&)
 		if (!C.Test.TestTrue(TEXT("actual attached Scope/Client/Started ingestion"), C.Store.ApplyAttached(Attached, C.Policy, C.Roots.Pending.ToSharedRef(), C.Roots.Lifetime->Allocator)))
 			return false;
 		C.Test.TestTrue(TEXT("attached Process/client metadata updates global revision"), C.Store.Revision() > BeforeAttach);
-		C.Test.TestEqual(TEXT("unsupported attached scope is visible"), C.Store.Diagnostics().OmittedScopes, uint64(3));
+		C.Test.TestEqual(TEXT("actual attached over-limit scope label is visibly diagnosed"), C.Store.Diagnostics().OmittedScopes, uint64(3));
 		Row(C, 3, [&](const auto& V) { C.Test.TestTrue(TEXT("validated attached Started carries context before optional text"), V.bContextKnown && V.ScopeLabel == TEXT("Process") && V.ClientLabel == TEXT("attached-nine")); });
 		SnapshotRow(C, Mutable, 1, [&](const auto& V) { C.Test.TestTrue(TEXT("old client copy survives metadata updates"), V.ClientLabel == TEXT("client-nine")); });
 		if (!Deliver(C, Marker(3)))
@@ -656,6 +659,12 @@ bool FVaRestInspectorLinksAndMarkersTest::RunTest(const FString&)
 		});
 		C.Test.TestEqual(TEXT("one real core marker"), Core, 1);
 		C.Test.TestEqual(TEXT("one unknown-context derived marker"), UnknownDerived, 1);
+		if (!Deliver(C, Client(10, 7, TEXT("scope-seven client")))) return false;
+		auto ScopedStart = Started(4);
+		ScopedStart.Payload.Get<FVaRestTraceStarted>().ScopeId = 7;
+		ScopedStart.Payload.Get<FVaRestTraceStarted>().ClientId = 10;
+		if (!Deliver(C, ScopedStart)) return false;
+		Row(C, 4, [&](const auto& V) { C.Test.TestTrue(TEXT("actual non-Process scope/client labels remain independent from Process"), V.bContextKnown && V.ScopeId == 7 && V.ClientId == 10 && V.ScopeLabel == TEXT("GameInstance scope") && V.ClientLabel == TEXT("scope-seven client")); });
 		C.Store.Clear();
 		SnapshotRow(C, Mutable, 2, [&](const auto& V) { C.Test.TestTrue(TEXT("old orphan copy stays unknown after Clear"), !V.bContextKnown && V.ScopeLabel.IsEmpty()); });
 		return true;

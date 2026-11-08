@@ -7,6 +7,8 @@
 #include "Interfaces/IPluginManager.h"
 #include "Interfaces/ISslCertificateManager.h"
 #include "Misc/AutomationTest.h"
+#include "Misc/CommandLine.h"
+#include "Misc/Parse.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Misc/ScopeExit.h"
@@ -263,7 +265,11 @@ bool FVaRestWsTlsCertificateIpTest::RunTest(const FString& Parameters)
 		return false;
 	}
 	TArray<uint8> Pem;
-	const FString Path = FPaths::Combine(Plugin->GetBaseDir(), TEXT("Tools/testserver/certs/test-server.pem"));
+	// A Source-only external-plugin test shadow need not carry Tools/cert fixtures.
+	// The operator may name the published test leaf; this native test alone loads its public PEM.
+	FString Path;
+	if (!FCommandLine::IsInitialized() || !FParse::Value(FCommandLine::Get(), TEXT("VaRestTestServerCertificate="), Path))
+		Path = FPaths::Combine(Plugin->GetBaseDir(), TEXT("Tools/testserver/certs/test-server.pem"));
 	if (!TestTrue(FString::Printf(TEXT("the test server's certificate (%s)"), *Path), FFileHelper::LoadFileToArray(Pem, *Path)))
 	{
 		return false;
