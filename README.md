@@ -15,6 +15,14 @@ This branch is **2.0.0-dev**, targeting **Unreal Engine 5.8**. It contains the n
 - OpenAPI JSON import, generated types and endpoints, previews, reports and controlled reimport.
 - Deprecated 1.x Blueprint nodes retained for existing assets. New graphs use the 2.0 nodes.
 
+## Current limits
+
+- OpenAPI import accepts JSON. YAML and Swagger 2.0 input need conversion before import.
+- Socket.IO uses WebSocket transport; HTTP polling is not implemented. WebRTC is outside the 2.0 scope.
+- Reflected response conversion uses the game-thread path. Reflected worker/cooked-worker modes remain disabled pending transfer qualification.
+- The explicit streaming typed decoder is a performance candidate; ordinary typed responses still use DOM conversion.
+- HTTP `CONNECT` requests are refused before transport.
+
 ## Get started
 
 1. Put this repository in your project's `Plugins/VaRest` directory and enable VaRest.
