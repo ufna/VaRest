@@ -1,5 +1,15 @@
 # VaRest 2.0 development passport — 2026-11-04
 
+## Source377 — strict Shipping direct-include correction, 2026-11-09
+
+Actual standard Linux BuildPlugin -StrictIncludes Source376/code373 completed Editor4320/0 and GameDevelopment320/0, then Shipping316 action rows failed6: VaRestLwsService.cpp701/977 uses FConn while VaRestLwsConn.h was included only under WITH_DEV_AUTOMATION_TESTS. The prior normal unity Shipping happened to supply that declaration from another CPP. Four genuine existing Inspector GetRefCount deprecation warnings remain; no pristine-output claim.
+
+Negative Root3912ccb89c9c45e2fdfe45de1bb235b532820a71ac892483896d6e1fec4b3d36/3267B11LF, readpinsc6c448a52576d99860040078ed1daca6390b5d49c0aa655e9164478c82ef6062/1916534B33959LF, manifestb4a4434a88aa000655817694adab41c20dcdcf185101be8fefe6ea39525e5f78/973B32LF retain all three raw logs, actual parent6,128371 unchanged inputs,3364 independently rehashed Source files,11028 product roles/11027nonnull and286 final-null transients. The failed Shipping.o stays null; its actual .d exists. No restoration/deletion or fake package was performed. All owned SDK processes retired, local8/public executor settings preserved; original local2/cancellation/orphan correction remains separate immutable history.
+
+Source377 removes only the development-automation guard around this CPP's direct FConn header include, in canonical and shadow source. No runtime algorithm, native-mode, ABI declaration, Engine/Launch/Core/ModuleManager/Host/Target, private archive, cache/object/mtime or sample gameplay change. All840other Source files and gallery19 remain identical. This is an authored source correction, not compiled/strict/runtime/consumer/release acceptance; the next actual standard strict producer requires fresh graphs/current inputs and genuine output preimages.
+
+Prior code373 Editor964/964, ordinary Game21SoftQuit0 and matching project Shipping33/UAT0/default-RHI public Socket.IO ACK73/gallery19/checkpoint297d8169 keep their actual prior SDK/source intervals. New strict package/artifact/dependency/source-consumer and current runtime gates remain OPEN; no historical binary or whole old proof is rebound to Source377. Platform/quiet-machine benchmark/provider/fork/unload/global-exit/full release and Goal stay incomplete. I1Tasks16–17/Mac/LinuxArm64 remain owner-deferred. Only ordinary plugin integration is intended; no handwritten Host/Target/Game module or Engine source patch is needed.
+
 ## Source376 — current packaged Shipping default-RHI frame, 2026-11-08
 
 Actual matching VaRestInterop project Shipping33 completes0:28pluginCPP+SDK-generated default project module+2standardPCH+Link+Metadata,0EngineCPP. Current executable d50a6dbc/debug9b318eb0/BuildID6009f37b/receipt7d922a38 are the genuine producer; all31fresh dependencies/3887PRE/postonly0 and64live private bindings remain attributed to closed native readback1f8173d9. Stock UnrealGame31 and old365 package remain separate history.

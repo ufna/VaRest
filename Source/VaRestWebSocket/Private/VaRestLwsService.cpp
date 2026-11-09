@@ -21,9 +21,7 @@
 #include "NativeOwner/VaRestNativeOwnerResources.h"
 #include <type_traits>
 #endif
-#if WITH_DEV_AUTOMATION_TESTS
 #include "VaRestLwsConn.h"
-#endif
 
 // VaRestSocketTransport.h for MaxConnectTimeoutSeconds: this file must compile alone, outside a unity blob (review spec I-2b)
 static_assert(VaRest::WebSocket::FrameHeadroom >= LWS_PRE, "FVaRestSocketFrame's headroom must hold libwebsockets' frame header (libwebsockets.h:4773)");
