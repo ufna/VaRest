@@ -9,6 +9,7 @@ public class VaRestOpenApi : ModuleRules
         DefaultBuildSettings = BuildSettingsVersion.V5;
         PublicDependencyModuleNames.AddRange(new[] { "Core", "CoreUObject", "Engine", "VaRestJson", "UnrealEd", "DeveloperSettings", "DataValidation" });
         PrivateDependencyModuleNames.AddRange(new[] { "Json", "VaRestHttp", "BlueprintGraph", "AssetTools", "AssetRegistry", "MessageLog", "Slate", "SlateCore", "PropertyEditor", "InputCore", "ToolMenus", "ContentBrowser", "ContentBrowserData", "DesktopPlatform", "HTTP", "SSL" });
-        AddEngineThirdPartyPrivateStaticDependencies(Target, "libcurl", "OpenSSL");
+        // Direct static curl users need its complete link set with precompiled modular SDKs.
+        AddEngineThirdPartyPrivateStaticDependencies(Target, "libcurl", "nghttp2", "OpenSSL", "zlib");
     }
 }

@@ -1,11 +1,12 @@
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 
+#if defined(__linux__) && defined(__x86_64__) && !defined(__ANDROID__)
+
 #include "VaRestNativeOwnerSourceSupplier.h"
 #include "VaRestNativeOwnerCallerEntry.h"
 #include "VaRestNativeOwnerDeployment1.h"
 #include "VaRestNativeOwnerPump.h"
 
-#if defined(__linux__) && defined(__x86_64__) && !defined(__ANDROID__)
 #include <dlfcn.h>
 #include <elf.h>
 #include <link.h>
