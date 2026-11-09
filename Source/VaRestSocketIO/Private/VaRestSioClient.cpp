@@ -16,9 +16,9 @@ UVaRestSioClient* UVaRestSioClient::WrapOnGT(UVaRestSocketHub* Hub, FVaRestSioSo
 	if (!View->InitializeSioOnGT(MoveTemp(Native))) return nullptr;
 	State->BlueprintClient = View; return View;
 }
-bool UVaRestSioClient::InitializeSioOnGT(FVaRestSioSocket Native)
+bool UVaRestSioClient::InitializeSioOnGT(FVaRestSioSocket InSocket)
 {
-	check(IsInGameThread()); Socket = MoveTemp(Native); auto* State = Socket.StateOnGT(); if (!State) return false;
+	check(IsInGameThread()); Socket = MoveTemp(InSocket); auto* State = Socket.StateOnGT(); if (!State) return false;
 	InitializeOnGT(Socket.Native, false); const TWeakObjectPtr<UVaRestSioClient> Weak(this);
 	const bool bConnect = State->Add<void(const FVaRestSioConnect&)>(State->AnyConnect, this, [Weak](const FVaRestSioConnect& Info)
 	{ if (auto* View = Weak.Get()) { const TStrongObjectPtr<UVaRestSioClient> Pin(View); View->OnConnect.Broadcast(Info); } });

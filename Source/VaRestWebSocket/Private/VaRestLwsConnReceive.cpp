@@ -13,7 +13,7 @@ int32 VaRest::WebSocket::Lws::FConn::OnReceive(FService& Service, lws* InWsi, co
 		PressureTesting::FReceiveWitness Value;
 		Value.MessageOrdinal = static_cast<uint64>(Probe->Count(EVaRestSocketEventType::Message));
 		Value.Length = Len; Value.Remaining = lws_remaining_packet_payload(InWsi);
-		Value.bFinal = lws_is_final_fragment(InWsi); Value.bBinary = lws_frame_is_binary(InWsi);
+		Value.bFinal = lws_is_final_fragment(InWsi) != 0; Value.bBinary = lws_frame_is_binary(InWsi) != 0;
 		Value.bAssembling = bAssembling; Value.AssemblyBytes = Assembly.Num(); Value.Queued = Link->GetQueuedEventCount();
 		Probe->NoteReceive(Value);
 	}

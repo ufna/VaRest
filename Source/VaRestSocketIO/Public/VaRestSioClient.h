@@ -56,7 +56,7 @@ public:
 	bool ListenOnGT(FStringView Namespace, FStringView Event, const UObject* Owner, TFunction<void(const FVaRestSioEvent&)> Handler, bool bOnce);
 	virtual void BeginDestroy() override;
 private:
-	bool InitializeSioOnGT(FVaRestSioSocket Native);
+	bool InitializeSioOnGT(FVaRestSioSocket InSocket);
 	FVaRestSioNamespace ResolveNamespace(FStringView Namespace, bool bCreate = true) const;
 	FVaRestSioSocket Socket;
 	using UVaRestSocketClient::SetHeartbeat;

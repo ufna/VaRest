@@ -1,12 +1,13 @@
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 
 #pragma once
+
+#if defined(__linux__) && defined(__x86_64__) && !defined(__ANDROID__)
+
 #include "VaRestNativeOwnerAbi.h"
 #include "VaRestNativeOwnerPrivateService1.h"
 #include "VaRestNativeOwnerPrivateResource1.h"
 #include "VaRestNativeOwnerPrivateApi1.h"
-
-#if defined(__linux__) && defined(__x86_64__) && !defined(__ANDROID__)
 namespace VaRest::WebSocket::Lws
 {
     class FTransport;

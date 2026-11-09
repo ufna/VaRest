@@ -79,7 +79,7 @@ bool FVaRestQueueStoreCodecBuffersTest::RunTest(const FString& Parameters)
         if (!TestTrue(TEXT("hard maximum decoded"),Decoded.HasValue())) return false;
         FQueueCodecBufferOwner Returned(EQueueCodecAccount::Body,Decoded.GetValue().Body.Bytes);
         TestTrue(TEXT("32 MiB bytes exact"),Decoded.GetValue().Body.Bytes==Item.Body.Bytes);
-        TestTrue(TEXT("actual encoded allocation observed"),Probe.Buffers.Peak[0]>=Encoded.GetAllocatedSize());
+        TestTrue(TEXT("actual encoded allocation observed"),Probe.Buffers.Peak[0]>=int64(Encoded.GetAllocatedSize()));
         TestTrue(TEXT("input and output body owners observed"),Probe.Buffers.Peak[1]>=64LL*1024*1024);
         TestTrue(TEXT("additional backing buffers below metadata allowance"),Probe.Buffers.Peak[2]>0 && Probe.Buffers.Peak[2]<=2LL*1024*1024);
         TestEqual(TEXT("all parser backing tokens released"),Probe.Buffers.Current[2],int64(0));

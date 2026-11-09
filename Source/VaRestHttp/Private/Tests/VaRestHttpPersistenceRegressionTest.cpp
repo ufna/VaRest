@@ -194,7 +194,7 @@ for (int32 Size : {0,1,2,3,1024*1024,32*1024*1024})
     if (!TestTrue(TEXT("canonical lengths decode"),Decoded.HasValue())) return false;
     Testing::FQueueCodecBufferOwner ReturnedBody(Testing::EQueueCodecAccount::Body,Decoded.GetValue().Body.Bytes);
     TestTrue(TEXT("canonical body exact"),Decoded.GetValue().Body.Bytes==Roundtrip.Body.Bytes);
-    TestTrue(TEXT("actual encoded backing observed separately"),Probe.Buffers.Peak[0]>=Bytes.GetAllocatedSize());
+    TestTrue(TEXT("actual encoded backing observed separately"),Probe.Buffers.Peak[0]>=int64(Bytes.GetAllocatedSize()));
     TestTrue(TEXT("caller and returned body backing observed separately"),Probe.Buffers.Peak[1]>=2LL*Size);
     TestTrue(TEXT("additional backing buffers within two MiB"),Probe.Buffers.Peak[2]>0 && Probe.Buffers.Peak[2]<=2LL*1024*1024);
     TestEqual(TEXT("all additional owner tokens released"),Probe.Buffers.Current[2],int64(0));

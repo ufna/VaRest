@@ -3,9 +3,9 @@
 #pragma once
 
 #include "CoreTypes.h"
-#include "VaRestNativeOwnerAbi.h"
-
 #if defined(__linux__) && defined(__x86_64__) && !defined(__ANDROID__)
+
+#include "VaRestNativeOwnerAbi.h"
 
 class IConsoleVariable;
 template <typename T> class TConsoleVariableData;

@@ -1,5 +1,7 @@
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 
+#include "CoreTypes.h"
+
 #if WITH_DEV_AUTOMATION_TESTS && PLATFORM_LINUX
 
 #include "VaRestSocketPressureWirePeer.h"

@@ -234,7 +234,7 @@ private:
   const auto Engine=Request->GetHttpRequest();
   if (Case==3)
   {
-   Test.TestEqual(TEXT("binary engine payload size"),Engine->GetContentLength(),3);
+   Test.TestEqual(TEXT("binary engine payload size"),Engine->GetContentLength(),uint64(3));
    Test.TestEqual(TEXT("explicit legacy header wins"),Engine->GetHeader(TEXT("Content-Type")),FString(TEXT("application/x-override")));
   }
   if (Case==4) Test.TestEqual(TEXT("custom verb staging"),Engine->GetVerb(),FString(TEXT("PATCH")));

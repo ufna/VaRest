@@ -453,7 +453,7 @@ void FRootStoredDeleter::operator()(FProductionRootBlock* Root)
  if (Mask&(1u<<uint8(EManualSlot::State)))
  {
   FCallbackState* State=Root->State.Get(); if (State->EndFrame.IsValid() || State->PreExit.IsValid() || State->FrameDepth!=0) TerminalInvariantFailure(TEXT("callback state still owned"));
-  State->~FCallbackState(); D->ConstructedSlotMask.fetch_and(uint16(~(1u<<uint8(EManualSlot::State))));
+  State->~FCallbackState(); D->ConstructedSlotMask.fetch_and(uint16(0xffffu^(1u<<uint8(EManualSlot::State))));
  }
  for (uint8 N=2;N<16;++N) if (D->Claims[N].State==EClaimState::Reserved) D->RetireClaim(N);
  D->Identity.DomainPhase=EDomainPhase::Retiring; D->Identity.Closed=true;

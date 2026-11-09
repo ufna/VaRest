@@ -465,7 +465,7 @@ void FAllocationLifetime::StaticDestroyObject(const FAllocationLifetime* P)
  auto* Object=const_cast<FAllocationLifetime*>(P);
  if (!Object->Region.Domain()) { delete Object; return; }
  FRootRegionLease Keep=MoveTemp(Object->Region); FReservationDomain* D=Keep.Domain();
- Object->~FAllocationLifetime(); D->ConstructedSlotMask.fetch_and(uint16(~(1u<<uint8(EManualSlot::Lifetime))));
+ Object->~FAllocationLifetime(); D->ConstructedSlotMask.fetch_and(uint16(0xffffu^(1u<<uint8(EManualSlot::Lifetime))));
 }
 bool FAllocationAdapter::Calibrate(FReservationDomain& D,EControllerShape Shape,SIZE_T Request,uint32 Alignment)
 {
