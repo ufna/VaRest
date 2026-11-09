@@ -4,7 +4,7 @@ using UnrealBuildTool;
 
 // WebSocket spec 1.1: VaRest's own WebSocket transport on the libwebsockets 3.0 the engine bundles (ruling R1), and from W2
 // on the socket, its stages and its Blueprint surface. Dependencies mirror the engine's WebSockets module
-// (WebSockets.Build.cs:92-120); that module itself is never one.
+// (WebSockets.Build.cs:92-120). Development Game automation code additionally links WebSockets for the opt-in fixture below.
 public class VaRestWebSocket : ModuleRules
 {
 	public VaRestWebSocket(ReadOnlyTargetRules Target) : base(Target)
@@ -66,6 +66,17 @@ public class VaRestWebSocket : ModuleRules
 		{
 			// Existing selection only; these targets have no private RxFlow repair claim.
 			AddEngineThirdPartyPrivateStaticDependencies(Target, "OpenSSL", "libWebSockets", "zlib");
+		}
+
+		// WITH_DEV_AUTOMATION_TESTS is normally enabled in Development. Discovery still requires a dedicated
+		// -VaRestCookedCoexistFixture -unattended -nowrite process; Shipping and Editor do not gain this dependency.
+		bool bCookedCoexistTests = bPrivateLws && Target.Type == TargetType.Game
+			&& Target.Configuration == UnrealTargetConfiguration.Development && !Target.bForceDisableAutomationTests;
+		PrivateDefinitions.Add("VAREST_COOKED_COEXIST_TESTS=" + (bCookedCoexistTests ? "1" : "0"));
+		if (bCookedCoexistTests)
+		{
+			PrivateIncludePathModuleNames.Add("WebSockets");
+			DynamicallyLoadedModuleNames.Add("WebSockets");
 		}
 	}
 }
