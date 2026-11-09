@@ -115,6 +115,7 @@ namespace VaRest::WebSocket::CookedCoexist
 	bool BothAtOnce(FAutomationTestBase& Test, FWebSocketsModule& Module, ILwsTestTransport& Transport,
 		const FString& EngineUrl, FVaRestSocketConnectRequest&& Request)
 	{
+		Test.AddInfo(FString::Printf(TEXT("CookedCoexist journal-key URLs: %s %s"), *EngineUrl, *Request.Url));
 		const TSharedRef<FEngineSide> Engine = MakeShared<FEngineSide>();
 		const TSharedRef<IWebSocket> Socket = OpenEngine(Module, EngineUrl, Engine);
 		FPrivateSide Own(Transport.Connect(MoveTemp(Request)));
@@ -181,6 +182,7 @@ bool FVaRestCookedCoexistTest::RunTest(const FString& Parameters)
 	AddExpectedMessagePlain(TEXT("Lws("), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, -1);
 	VaRest::Http::Testing::FLogCapture Capture;
 	FVaRestSocketConnectRequest Warmup; Warmup.Url = FString::Printf(TEXT("ws://127.0.0.1:%d/ws/echo?key=%s"), Port, *FGuid::NewGuid().ToString(EGuidFormats::Digits));
+	AddInfo(FString::Printf(TEXT("CookedCoexist journal-key URL: %s"), *Warmup.Url));
 	FPrivateSide Ready(Transport->Connect(MoveTemp(Warmup)));
 	if (!TestTrue(TEXT("real private context opens before the Engine-module observation"), PumpUntil([&] { Ready.Pull(); return Ready.bOpen || Ready.Terminals > 0; }, 20.0, true) && Ready.bOpen)) return false;
 	Ready.Connection->Close(1000, TEXT("warmup done"));
