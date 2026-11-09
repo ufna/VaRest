@@ -220,18 +220,28 @@ bool FVaRestCookedCoexistTest::RunTest(const FString& Parameters)
 	TestEqualSensitive(TEXT("Engine category verbosity restored"), LogVerbosity(), OldVerbosity);
 	TestEqualSensitive(TEXT("actual private C emitter survived both Engine legs"), DescribeLwsLogLevel(), PrivateLevel);
 	// Verify the restored manager policy by real I/O too, not only by reading the memory key we wrote.
+	const int32 RestoredLogBegin = Capture.GetLines().Num();
 	const TSharedRef<FEngineSide> Restored = MakeShared<FEngineSide>();
 	const auto Probe = OpenEngine(FModuleManager::GetModuleChecked<FWebSocketsModule>(TEXT("WebSockets")),
 		FString::Printf(TEXT("wss://127.0.0.1:%d/ws/echo?key=%s"), TlsPort, *FGuid::NewGuid().ToString(EGuidFormats::Digits)), Restored);
 	const bool bPolicySettled = PumpUntil([&] { return Restored->bOpen || Restored->bEnded; }, 20.0, true);
 	if (!Restored->bEnded) Probe->Close(1000, TEXT("restore control done"));
 	const bool bPolicyDrained = PumpUntil([&] { return Restored->bEnded; }, 10.0, true);
-	const bool bTlsFailure = Restored->Error.Contains(TEXT("SSL"), ESearchCase::IgnoreCase)
-		|| Restored->Error.Contains(TEXT("cert"), ESearchCase::IgnoreCase)
-		|| Restored->Error.Contains(TEXT("verify"), ESearchCase::IgnoreCase);
-	const bool bPolicyRefused = bPolicySettled && bPolicyDrained && !Restored->bOpen && bTlsFailure;
+	// This SDK can report only "client connect failed" to IWebSocket. Its C emitter carries the verification cause.
+	FString VerificationFailure;
+	const TArray<FString> RestoredLines = Capture.GetLines();
+	for (int32 Index = RestoredLogBegin; Index < RestoredLines.Num(); ++Index)
+	{
+		const FString& Line = RestoredLines[Index];
+		if (Line.StartsWith(TEXT("LogWebSockets: "), ESearchCase::CaseSensitive)
+			&& Line.Contains(TEXT("Lws(Error): SSL error:"), ESearchCase::CaseSensitive)
+			&& Line.Contains(TEXT("certificate"), ESearchCase::IgnoreCase)
+			&& Line.Contains(TEXT("preverify_ok=0"), ESearchCase::CaseSensitive)) VerificationFailure = Line;
+	}
+	const bool bPolicyRefused = bPolicySettled && bPolicyDrained && !Restored->bOpen
+		&& !Restored->Error.IsEmpty() && !VerificationFailure.IsEmpty();
 	TestTrue(TEXT("actual Engine WSS rejects the peer test CA after secure-policy restoration"), bPolicyRefused);
-	AddInfo(FString::Printf(TEXT("CookedCoexist restored-policy refusal: %s"), *Restored->Error));
+	AddInfo(FString::Printf(TEXT("CookedCoexist restored-policy refusal: %s; verification: %s"), *Restored->Error, *VerificationFailure));
 	int32 EngineLines = 0, PrivateKeysInEngine = 0;
 	for (const FString& Line : Capture.GetLines())
 	{
