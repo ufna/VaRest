@@ -1,0 +1,42 @@
+{
+  "schema": "varest.unreal.raw-capture.v1",
+  "source_snapshot": 378,
+  "compiled_code_version": 377,
+  "date": "2026-11-09",
+  "image": {
+    "path": "unreal-shipping-strict-source-consumer.png",
+    "sha256": "beee984c8ee54a98bdbf7b1f6c2bc93b0f351d38b86d81492762bbb4ebe4c904",
+    "bytes": 168743,
+    "width": 1440,
+    "height": 900,
+    "unaltered": true,
+    "embedded_in_gallery_without_pixel_changes": true
+  },
+  "actual_window": {
+    "id": 2097243,
+    "hex": "0x20005b",
+    "title": "VaRestConsumer  ",
+    "x": 80,
+    "y": 50,
+    "width": 1440,
+    "height": 900
+  },
+  "Game_exit_code": 0,
+  "peer_exit_code": 0,
+  "unforced_elapsed_seconds": 13.208863383013522,
+  "runtime_guard_count": 177141,
+  "ordinary_project": "/home/ufna/VaRest-recovery/takeover-01441-20261108-sio/strict-plugin-linux-source377-ordinary-consumer-001/Project/VaRestConsumer.uproject",
+  "shipping_executable_sha256": "095ebb67c4d0cf4669745c36fb78c579e1fc2f1872b09e0813de23672e97a78f",
+  "shipping_BuildID": "0e470dee180202c8a8282f712c4d6259582de957",
+  "runtime_result": {
+    "path": "/home/ufna/VaRest-recovery/takeover-01441-20261108-sio/strict-plugin-linux-source377-ordinary-consumer-001/runtime-001/result.json",
+    "sha256": "e7314512b37231301ca97ce5523242e0a32a114c7edc42e7d18e71169096fd32"
+  },
+  "Root_report": {
+    "path": "/home/ufna/VaRest-recovery/takeover-01441-20261108-sio/strict-plugin-linux-source377-ordinary-consumer-001/delivery-readback-001/report.md",
+    "sha256": "665c749947b88725146373ee3f7a31cfd20b83fc5d8cf756fe2083f8f07b3f7f"
+  },
+  "method": "Actual public Blueprint/SioComponent/EmitWithAck, officialSocketIO4.8.4 strictnumber73 in owned loopback after nonroot zero-capability admission, owned PID-window capture; defaultRHI, no Engine/Host/Target/manualGame patch, nativeowner/testfactory/mock/AI/overlay or pixel editing.",
+  "native_before_coverage_limit": "Original native readback001 remains false for exact8 SDK headers without pre-native identities, cec30c2e; no postonly0/preimage fabrication. All8 were genuine before/final guards in later cook/runtime.",
+  "limits": "Current finite ordinary Linux source-consumer/demo only. LocalClose1000 is local API notification, not raw ACK/Close wire recording; no fullShippinggame.log/freshGPUthread/wholeABI/provider/fork/unload/globalexit/platform/quietbench/release guarantee. All19 earlier images/manifests remain unchanged."
+}

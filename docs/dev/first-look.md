@@ -1,14 +1,37 @@
 # Первый просмотр VaRest 2.0
 
-Строгий стандартный Linux BuildPlugin для Source377 теперь завершился0 во всех трёх стадиях: Editor493, Game Development320 и Shipping316. Проверены1891файл сырого пакета/841исходник/853продукта манифестов, все142555входов сохранены;1114свежих .d join4287входов без неподтверждённых зависимостей. Это проверка производства пакета, не запуск в новой игре: обычный проект-потребитель и новая проверка runtime ещё впереди. README/LICENSE не вошли в сырой SDKфильтр и требуют чистой сборки комплекта поставки. Ниже сохранены реальные кадры и runtime code373 своего прежнего интервала; после новой сборки SDK старый проект нельзя считать автоматически перепроверенным.
+Стандартный строгий Linux BuildPlugin для code377 прошёл Editor, Game Development и Shipping. Его пакет скопирован в новый обычный проект: Development и Shipping собраны0, затем Cook/Stage/PAK-IoStore/Package/Archive и настоящий запуск игры завершились0. Публичный Blueprint/SioComponent получил типизированный ACK73 от официального Socket.IO4.8.4; движок, Host, Target и игровой код вручную не модифицировались. Временные игровые файлы создал сам SDK.
 
-Последняя проверенная сборка плагина code373 проверен в обычной упакованной Shipping-игре без смены режима RHI: официальный Socket.IO4.8.4 вернул типизированный ACK73, игра и peer завершились0 без принудительной остановки за13.210с. Все108450 защищённых входов сохранены. Engine, Host, Target и игровой код не модифицировались; сцена использует обычный Blueprint и публичный SioComponent. Предыдущие HTTP/WS/Socket.IO кадры сохраняют свою собственную историю.
+[Двадцать настоящих скриншотов в офлайн HTML](../demo/unreal-editor-gallery.html#strict-source-consumer). Новый кадр20 — эта игра/code377 в обычном режиме RHI; исходный PNG и протокол сохранены отдельно. Предыдущие19 кадров остаются со своими реальными версиями и условиями. Это конечная проверка Linux source-consumer, а не завершение всего релиза.
 
-Штатные Editor и Game Development/Shipping собраны из обычного GitHub Engine. Текущая обычная suite Editor прошла964/964; Game Development —21/0 со штатным SoftQuit. Совпадающая проектная Shipping-сборка прошла33 действия0 (28CPP плагина, стандартные PCH, SDK-generated FDefaultModuleImpl, Link/receipt), без компиляции Engine CPP. Ручной игровой модуль или Target.cs не нужен: временные файлы создаёт SDK. Новый стандартный UAT Cook/Stage/PAK-IoStore/Package/Archive завершился0; все22 пары stage/archive идентичны.
+## Новая Shipping-игра из строгого пакета
+
+В первом терминале запустите тот же строгий официальный peer; имя журнала должно быть свободно, как и порты19700–19702:
+
+```bash
+node --no-global-search-paths /w/Unreal/VaRest/Tools/testserver/sio-interop/server.mjs \
+  --server 4.8 --demo-int73 1 --port 19700 \
+  --receipts ./varest-strict-consumer-sio.jsonl \
+  --modules-root /w/Unreal/VaRest-recovery/takeover-01441-20261107/socketio-reference-closed-modules-001/project
+```
+
+После `VAREST_SIO_REFERENCE_READY` во втором терминале с графическим сеансом:
+
+```bash
+cd /home/ufna/VaRest-recovery/takeover-01441-20261108-sio/strict-plugin-linux-source377-ordinary-consumer-001/package-001/archive/Linux
+./VaRestConsumer/Binaries/Linux/VaRestConsumer-Linux-Shipping \
+  -windowed -ResX=1440 -ResY=900
+```
+
+Ожидаются новый Sid, Namespace `/`, `Emit: echo(73)`, `Typed ACK: 73` и `Local Close: 1000`. Игра автоматически закроется примерно через10с после ответа; сервер остановите Ctrl+C. Для повторения используйте новое имя журнала. Настоящий прогон: Game0/peer0/13.209с,177141 вход сохранён; обычный RHI без -norhithread/-nullrhi/driver override. [Пины и точные пределы кадра20](../demo/unreal-shipping-strict-source-consumer-capture-manifest.json). Local Close — локальное уведомление API, не отдельная запись сетевых ACK/Close кадров.
+
+Новый проект: `/home/ufna/VaRest-recovery/takeover-01441-20261108-sio/strict-plugin-linux-source377-ordinary-consumer-001/Project/VaRestConsumer.uproject`; сцены `/Game/VaRestFirstLookSio002/FirstLook` и `FirstLookAuto` — обычные сохранённые Blueprint/уровни. Прогон выше проверяет упакованную игру. Исторические интерфейсы Editor и команды ниже относятся к указанным там проектам/версиям.
+
+Штатные Editor и Game Development/Shipping собраны из обычного GitHub Engine. Предыдущая обычная suite Editor/code373 прошла964/964; Game Development —21/0 со штатным SoftQuit. Совпадающая проектная Shipping-сборка прошла33 действия0 (28CPP плагина, стандартные PCH, SDK-generated FDefaultModuleImpl, Link/receipt), без компиляции Engine CPP. Ручной игровой модуль или Target.cs не нужен: временные файлы создаёт SDK. Новый стандартный UAT Cook/Stage/PAK-IoStore/Package/Archive завершился0; все22 пары stage/archive идентичны.
 
 Northwind из [документа съёмки](../examples/first-look/NorthwindGameApi.json) уже импортирован в `/Game/FirstLook/DA_NorthwindGameApi`: API, четыре структуры и два enum сохранены на диск. Проверка `-Check` в новом процессе загрузила их и вернула отсутствие изменений. В отдельном настоящем Editor ассет открыт и сохранён кнопкой Save: ошибок типов нет, остаются предупреждения о добавлении API в Settings.Apis. Окно ассета и Editor закрылись штатно, код выхода 0. Это проверено с обычным параметром движка `-norhithread`; позднее отдельное открытие текущего API в обычном режиме Vulkan и выход0 подтверждены ниже, без универсальной гарантии для всех прежних сбоев. Ранее повреждённый демо-ассет сохранён отдельно и автоматически не мигрируется.
 
-[Девятнадцать настоящих скриншотов в одном офлайн HTML](../demo/unreal-editor-gallery.html#current-shipping-default-rhi). Кадр19 показывает текущую Shipping/code373 без -norhithread. Первые18 сохранены с исходными PNG и историческими условиями; ранние игровые HTTP/WS/Socket.IO проверки использовали -norhithread. Старый ошибочный006 кадр не выдаётся за успешный.
+Кадр19 сохраняет предыдущую Shipping/code373 без -norhithread. Первые18 также сохранены с исходными PNG и историческими условиями; ранние игровые HTTP/WS/Socket.IO проверки использовали -norhithread. Старый ошибочный006 кадр не выдаётся за успешный.
 
 Northwind/Save и девять исторических интерфейсов Editor остаются в той же галерее; прежний Development-кадр с PrintString сохранён отдельно. Это разные фактические проверки, а не все интерфейсы в Shipping.
 
