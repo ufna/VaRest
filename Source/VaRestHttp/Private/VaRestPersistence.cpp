@@ -8,6 +8,7 @@
 #include "HAL/PlatformProcess.h"
 #include "HAL/PlatformTime.h"
 #include "Misc/Paths.h"
+#include "Misc/PathViews.h"
 #include "Misc/ScopeExit.h"
 #include "Misc/ScopeLock.h"
 #include "Tasks/Pipe.h"
@@ -610,7 +611,7 @@ VaRest::Http::FIoResult VaRest::Http::ListFiles(const FString& InDirectory)
 		                              if (Status.Kind==EPathKind::Error) { Result.Detail=TEXT("EntryStatus"); return false; }
 		                              if (Status.Kind==EPathKind::Regular)
 		                              {
-			                              FString Name = FPaths::GetCleanFilename(Path);
+			                              FString Name(FPathViews::GetCleanFilename(Path));
 			                              if (Name.Len() > 256 || NameChars + Name.Len() > 524288 || NameBytes + Name.GetAllocatedSize() > 2 * 1024 * 1024)
 			                              {
 				                              Result.Detail = TEXT("DirectoryLimit");
