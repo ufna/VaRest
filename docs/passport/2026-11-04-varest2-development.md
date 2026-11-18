@@ -1,5 +1,17 @@
 # VaRest 2.0 development passport — 2026-11-04
 
+## Source393 — reviewed Optional and real-GC fixtures integrated, UNBUILT, 2026-11-18
+
+Three previously authored test files are integrated unchanged into canonical Source and the existing ordinary Editor/Game consumer copies: Optional002 header3b100945 and CPP3e78c933, and GC001 CPPe6a51c46. All 843 prior Source files remain exact; the Source count is now846. This changes no production admission, reflected-worker mode, Engine/Host/Target source or existing API/enum spelling. Fresh UHT/native build and actual isolated automation are still required; no execution success is claimed for these new files.
+
+Two actual independent Codex source reviews completed without blocking findings. Optional/native review e6b813d1 with33 verified inputs accepts the finite Optional candidate and existing canonical NativeContracts a504. GC review a1e679d9 with24 verified inputs accepts the aggregate live-state/RuleOwner retention and retirement experiment. Root read all candidate sources/reports and reverified every review input. Reports are retained under /w/Unreal/VaRest-recovery/takeover-20261118-from-01441/optional-review-001 and gc-review-001.
+
+VaRest-ajz.13.1 closes its finite declaration/transitive-invalidation scope by joining this independent source acceptance to the genuine earlier Source390 NativeContracts Success in the full965 result. No successful build or runtime is repeated merely for that review, and that old result retains its actual SDK interval. Optional/GC parents13.2/13.3 remain open pending execution.
+
+The Optional fixture checks the real nested Optional-only native contract refusal, generated scalar/array/map materialization and one-shot transfer/reset. Its six operation categories combine both types and explicit manual operations; they do not prove every native carrier path independently. Registration/cleanup requires a fresh owned process with no preexisting matching test declarations. The GC fixture checks aggregate state/bag/type and direct RuleOwner liveness with a genuine dropped-state control, actual collection and later owned invalidation; it neither isolates each pin nor materializes values. Its30-second latent waiting check does not bound synchronous GC, so an outer runtime deadline remains necessary.
+
+Module stop/late handoff, cooked Blueprint closure, current Shipping, remaining platforms, OpenAPI lifecycle/URL/undo, quiet M7 measurements and full release remain open. Initial GT mode, disabled reflected workers and owner-deferred Mac/LinuxArm64/I1 Tasks16–17 remain unchanged. Source392 current Game evidence and all prior failed outcomes remain preserved. This is an intermediate reviewed-source checkpoint, not a feature or release acceptance.
+
 ## Source392 — current packaged Development evidence recovered, 2026-11-18
 
 This documentation checkpoint records the completed 14 November Game work recovered during the owner-directed session transfer. Only this ledger and the development passport change; all 843 Source files remain code390. The ordinary plugin/stock Engine delivery boundary, initial GT mode and disabled reflected workers remain unchanged. The verified Source391 archive and all 907 published checkpoint blobs matched the canonical files before this update.
