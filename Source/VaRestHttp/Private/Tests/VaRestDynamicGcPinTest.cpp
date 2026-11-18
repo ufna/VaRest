@@ -8,6 +8,7 @@
 #include "HAL/PlatformTime.h"
 #include "Misc/AutomationTest.h"
 #include "UObject/Class.h"
+#include "UObject/ObjectRedirector.h"
 #include "UObject/StrongObjectPtr.h"
 #include "UObject/UObjectGlobals.h"
 
@@ -28,7 +29,9 @@ struct FFixture
     {
         const FName EnumName = MakeUniqueObjectName(GetTransientPackage(), UEnum::StaticClass(), FName(TEXT("VaRestDynamicGcEnum")));
         Enum.Reset(NewObject<UEnum>(GetTransientPackage(), EnumName, RF_Transient));
-        Owner.Reset(NewObject<UObject>(GetTransientPackage(), NAME_None, RF_Transient));
+        if (!Test.TestFalse(TEXT("GC rule owner uses a concrete native class"),
+            UObjectRedirector::StaticClass()->HasAnyClassFlags(CLASS_Abstract))) return false;
+        Owner.Reset(NewObject<UObjectRedirector>(GetTransientPackage(), NAME_None, RF_Transient));
         if (!Test.TestNotNull(TEXT("owned real enum"), Enum.Get()) || !Test.TestNotNull(TEXT("owned rule owner"), Owner.Get())) return false;
         TArray<TPair<FName, int64>> Values;
         Values.Emplace(FName(*(EnumName.ToString() + TEXT("::Entry"))), int64(0));
