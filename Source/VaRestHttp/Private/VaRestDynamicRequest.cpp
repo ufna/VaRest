@@ -423,7 +423,7 @@ void FDynamicRequestAccess::BeginNativeDecodeOnGT(const FVaRestExchangeRef& Exch
 	Worker->Work=Work; Worker->Completion=Completion;
 #if WITH_DEV_AUTOMATION_TESTS
 	Work->StopIdentity={VaRest::ModuleStopTest::ERoute::Ordinary,Ex.RequestId,Ex.ClientId,0,0,0,
-		static_cast<uint64>(reinterpret_cast<UPTRINT>(Worker.Get()))};
+		static_cast<uint64>(reinterpret_cast<UPTRINT>(&Worker.Get()))};
 	Worker->StopProbe=Handler.Data->StopProbe; Worker->StopIdentity=Work->StopIdentity;
 #endif
 #if !UE_BUILD_SHIPPING

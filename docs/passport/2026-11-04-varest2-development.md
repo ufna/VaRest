@@ -1,5 +1,13 @@
 # VaRest 2.0 development passport — 2026-11-04
 
+## Source397 — native identity-address fix and reviewed settings-only source integrated, UNBUILT, 2026-11-18
+
+Actual Source396 product build failed6/unforced185.135893s after22 compile attempts; one new test-only identity cast passed TSharedRef.Get by reference instead of its address. All23139 protected inputs remained unchanged; no runtime was launched. Existing Inspector refcount warnings remain. Source397 changes exactly that expression to &Worker.Get(), preserving the actual allocation identity. The complete original failed native result is retained, not relabeled as success.
+
+Integrated corrected settings-only-smoke-source-002 (seal26173f80/patch20f1d6d3), independently reviewed by peer001 and correction peer0029ca08e5c. Healthy enum decode retains the strict zero-report gate; real reflected array/map storage then receives and verifies unset values before the unchanged golden and standalone encoder oracles. Ten proposed Tools files replace the three reviewed Core smoke stubs and add seven files. The separate Core-only PostConfigInit witness source and its descriptor entry remain exact. The real Editor author, early cooked-Game FindObject/default-converter entry, Engine-config overlay template and real production-mutant patches are source only; no asset/cook/runtime/negative success is claimed.
+
+All848Source files match canonical and both owned Linux consumers. The ordinary Editor explicitly enables the fixture copy; actual Engine config/asset authoring/positive cook and both discriminating negatives remain pending. A fresh product graph/build and then a separate fixture-producer graph/build are required before actual module-stop eight-process checks or asset authoring. Source396's foreign-plugin graph contained VaRest product compiles only; no witness compile was silently inferred. Whole M5/BP/cooked/current Shipping/remaining platforms/OpenAPI/M7/performance/release remain open. Reflected workers stay disabled, Mac/LinuxArm64/I1Tasks16–17 retain their owner deferrals, and Goal remains active.
+
 ## Source396 — reviewed real module-stop fixture integrated, UNBUILT, 2026-11-18
 
 Integrated immutable module-stop-source-003 (FINAL5904ebf4/manifest827cddf8), based on the full002 review and independent003 correction review1cb3cd65. Eight existing Source files receive test-build instrumentation; two new Source files supply the Core-only contract and opt-in Http fixture. Five new Tools/m5-smoke files provide the separate early Core-only witness and temporary Core runtime stub. The settings-only proofB implementation remains separately reviewed/corrected and uninstalled. Normal/Fab profiles do not enable this fixture.

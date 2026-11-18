@@ -3,7 +3,7 @@
   "Version": 1,
   "VersionName": "M5-source-candidate",
   "FriendlyName": "VaRest M5 isolated smoke fixture",
-  "Description": "Opt-in source fixture; module-stop observation is not packaged asset qualification.",
+  "Description": "Opt-in M5 fixture: settings-only proof B and separate Core-only module-stop witness. Proof A and whole Task 14 qualification remain independent.",
   "EnabledByDefault": false,
   "CanContainContent": true,
   "SupportedTargetPlatforms": [
@@ -25,6 +25,20 @@
       "PlatformAllowList": [
         "Linux"
       ]
+    },
+    {
+      "Name": "VaRestM5SmokeEditor",
+      "Type": "Editor",
+      "LoadingPhase": "Default",
+      "PlatformAllowList": [
+        "Linux"
+      ]
+    }
+  ],
+  "Plugins": [
+    {
+      "Name": "VaRest",
+      "Enabled": true
     }
   ]
 }

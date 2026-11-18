@@ -2,9 +2,10 @@
 using UnrealBuildTool;
 public class VaRestM5Smoke : ModuleRules
 {
- public VaRestM5Smoke(ReadOnlyTargetRules Target) : base(Target)
- {
-  PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
-  PrivateDependencyModuleNames.Add("Core");
- }
+    public VaRestM5Smoke(ReadOnlyTargetRules Target) : base(Target)
+    {
+        PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
+        PublicDependencyModuleNames.Add("Core");
+        PrivateDependencyModuleNames.AddRange(new string[] { "CoreUObject", "Engine", "VaRestHttp", "VaRestJson" });
+    }
 }
