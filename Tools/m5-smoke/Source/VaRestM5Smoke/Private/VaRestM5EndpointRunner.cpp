@@ -25,7 +25,19 @@ bool AVaRestM5EndpointRunner::Arm()
 {
     if (!IsInGameThread()) return Fail(TEXT("Fixture reflected continuation left GameThread"));
     if (!FParse::Param(FCommandLine::Get(),TEXT("VaRestM5Endpoints")) || IsRunningCommandlet()) return false;
-    if (bArmed || bPassed || !Api || !Api->GetPathName().Equals(VaRestM5Endpoint::ApiPath,ESearchCase::CaseSensitive)) return Fail(TEXT("Wrong/repeated ordinary A fixture"));
+    const auto RefuseArm=[this](const TCHAR* Branch)
+    {
+        const auto* Defaults=Cast<AVaRestM5EndpointRunner>(GetClass()->GetDefaultObject(false)); // observation only; never create/load a CDO
+        const FString ActualApi=Api ? Api.GetPathName():TEXT("<null>");
+        const FString DefaultApi=Defaults && Defaults->Api ? Defaults->Api.GetPathName():TEXT("<null>");
+        return Fail(FString::Printf(TEXT("Arm refused branch=%s bArmed=%d bPassed=%d actor=%s class=%s actorIsCDO=%d api=%s expectedApi=%s cdoPresent=%d cdoApi=%s"),
+            Branch,bArmed ? 1:0,bPassed ? 1:0,*GetPathName(),*GetClass()->GetPathName(),HasAnyFlags(RF_ClassDefaultObject) ? 1:0,
+            *ActualApi,VaRestM5Endpoint::ApiPath,Defaults ? 1:0,*DefaultApi));
+    };
+    if (bArmed) return RefuseArm(TEXT("AlreadyArmed"));
+    if (bPassed) return RefuseArm(TEXT("AlreadyPassed"));
+    if (!Api) return RefuseArm(TEXT("ApiNull"));
+    if (!Api->GetPathName().Equals(VaRestM5Endpoint::ApiPath,ESearchCase::CaseSensitive)) return RefuseArm(TEXT("ApiPathMismatch"));
     UVaRestHub* Hub=UVaRestHub::Get(this); Client=Hub ? Hub->GetClient(Api) : nullptr;
     if (!Client || !Client->GetBaseUrl().StartsWith(TEXT("http://127.0.0.1:"),ESearchCase::CaseSensitive)) return Fail(TEXT("No ordinary asset client/owned loopback base URL"));
     const auto* Payload=FindFProperty<FStructProperty>(GetClass(),TEXT("Payload"));
