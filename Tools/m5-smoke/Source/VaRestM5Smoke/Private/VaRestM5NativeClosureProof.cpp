@@ -23,7 +23,7 @@ DEFINE_LOG_CATEGORY_STATIC(LogVaRestM5NativeClosure, Log, All);
 namespace VaRestM5NativeClosure
 {
 enum class EOp : uint8 { Construct, Copy, Assign, Destroy, Equal, Hash, Count };
-constexpr uint8 Root = 0, Leaf = 1, Types = 2, Ops = uint8(EOp::Count);
+constexpr uint8 NativeRootOpIndex = 0, NativeLeafOpIndex = 1, Types = 2, Ops = uint8(EOp::Count);
 std::atomic<bool> Tracking{false};
 std::atomic<int64> Counts[Types][Ops]{}, Live[Types]{};
 std::atomic<int64> WrongThread{0}, MissingDependency{0}, BadValues{0};
@@ -46,7 +46,7 @@ FString ReadNativeDependency()
     if (Tracking.load(std::memory_order_acquire)) MissingDependency.fetch_add(1, std::memory_order_relaxed);
     return TEXT("unavailable-native-dependency"); // no dead-pointer dereference, even in a negative candidate
 }
-bool NativeValuesRetired() { return Live[Root].load() == 0 && Live[Leaf].load() == 0; }
+bool NativeValuesRetired() { return Live[NativeRootOpIndex].load() == 0 && Live[NativeLeafOpIndex].load() == 0; }
 FString Object(const TCHAR* Name, bool Optional)
 {
     return FString::Printf(TEXT("{\"name\":\"%s\",%s\"mode\":\"One\",\"times\":[\"2026-11-18T00:00:00.000Z\"],\"labels\":[\"lower\",\"UPPER\"],\"dates\":{\"date\":\"2026-11-18T00:00:00.000Z\"}}"),
@@ -96,35 +96,35 @@ struct FWorkerDrop
 }
 
 using namespace VaRestM5NativeClosure;
-FVaRestM5ClosureLeaf::FVaRestM5ClosureLeaf() : Text(TEXT("leaf-default")) { Record(Leaf, EOp::Construct); }
-FVaRestM5ClosureLeaf::FVaRestM5ClosureLeaf(const FVaRestM5ClosureLeaf& Other) : Text(Other.Text), Number(Other.Number) { Record(Leaf, EOp::Copy); }
+FVaRestM5ClosureLeaf::FVaRestM5ClosureLeaf() : Text(TEXT("leaf-default")) { Record(NativeLeafOpIndex, EOp::Construct); }
+FVaRestM5ClosureLeaf::FVaRestM5ClosureLeaf(const FVaRestM5ClosureLeaf& Other) : Text(Other.Text), Number(Other.Number) { Record(NativeLeafOpIndex, EOp::Copy); }
 FVaRestM5ClosureLeaf& FVaRestM5ClosureLeaf::operator=(const FVaRestM5ClosureLeaf& Other)
-{ Record(Leaf, EOp::Assign); if (this != &Other) { Text = Other.Text; Number = Other.Number; } return *this; }
-FVaRestM5ClosureLeaf::~FVaRestM5ClosureLeaf() { Record(Leaf, EOp::Destroy); }
+{ Record(NativeLeafOpIndex, EOp::Assign); if (this != &Other) { Text = Other.Text; Number = Other.Number; } return *this; }
+FVaRestM5ClosureLeaf::~FVaRestM5ClosureLeaf() { Record(NativeLeafOpIndex, EOp::Destroy); }
 bool FVaRestM5ClosureLeaf::operator==(const FVaRestM5ClosureLeaf& Other) const
-{ Record(Leaf, EOp::Equal); return Text == Other.Text && Number == Other.Number; }
+{ Record(NativeLeafOpIndex, EOp::Equal); return Text == Other.Text && Number == Other.Number; }
 uint32 GetTypeHash(const FVaRestM5ClosureLeaf& Value)
-{ Record(Leaf, EOp::Hash); return HashCombine(GetTypeHash(Value.Text), GetTypeHash(Value.Number)); }
-FVaRestM5ClosureRoot::FVaRestM5ClosureRoot() : Name(TEXT("native-default")), NativeDefault(ReadNativeDependency()) { Record(Root, EOp::Construct); }
+{ Record(NativeLeafOpIndex, EOp::Hash); return HashCombine(GetTypeHash(Value.Text), GetTypeHash(Value.Number)); }
+FVaRestM5ClosureRoot::FVaRestM5ClosureRoot() : Name(TEXT("native-default")), NativeDefault(ReadNativeDependency()) { Record(NativeRootOpIndex, EOp::Construct); }
 FVaRestM5ClosureRoot::FVaRestM5ClosureRoot(const FVaRestM5ClosureRoot& Other)
-    : Name(Other.Name), NativeDefault(Other.NativeDefault), Maybe(Other.Maybe), Mode(Other.Mode), Times(Other.Times), Labels(Other.Labels), Dates(Other.Dates) { Record(Root, EOp::Copy); }
+    : Name(Other.Name), NativeDefault(Other.NativeDefault), Maybe(Other.Maybe), Mode(Other.Mode), Times(Other.Times), Labels(Other.Labels), Dates(Other.Dates) { Record(NativeRootOpIndex, EOp::Copy); }
 FVaRestM5ClosureRoot& FVaRestM5ClosureRoot::operator=(const FVaRestM5ClosureRoot& Other)
 {
-    Record(Root, EOp::Assign);
+    Record(NativeRootOpIndex, EOp::Assign);
     if (this != &Other) { Name = Other.Name; NativeDefault = Other.NativeDefault; Maybe = Other.Maybe; Mode = Other.Mode; Times = Other.Times; Labels = Other.Labels; Dates = Other.Dates; }
     return *this;
 }
-FVaRestM5ClosureRoot::~FVaRestM5ClosureRoot() { ObserveRealDestruction(*this); Record(Root, EOp::Destroy); }
+FVaRestM5ClosureRoot::~FVaRestM5ClosureRoot() { ObserveRealDestruction(*this); Record(NativeRootOpIndex, EOp::Destroy); }
 bool FVaRestM5ClosureRoot::operator==(const FVaRestM5ClosureRoot& Other) const
 {
-    Record(Root, EOp::Equal);
+    Record(NativeRootOpIndex, EOp::Equal);
     if (Name != Other.Name || NativeDefault != Other.NativeDefault || !(Maybe == Other.Maybe) || Mode != Other.Mode || Times != Other.Times || Labels.Num() != Other.Labels.Num() || Dates.Num() != Other.Dates.Num()) return false;
     for (const FString& Item : Labels) if (!Other.Labels.Contains(Item)) return false;
     for (const auto& Item : Dates) { const FDateTime* Value = Other.Dates.Find(Item.Key); if (!Value || *Value != Item.Value) return false; }
     return true;
 }
 uint32 GetTypeHash(const FVaRestM5ClosureRoot& Value)
-{ Record(Root, EOp::Hash); return HashCombine(HashCombine(GetTypeHash(Value.Name), GetTypeHash(Value.NativeDefault)), Value.Maybe.IsSet() ? GetTypeHash(Value.Maybe.GetValue()) : 0u); }
+{ Record(NativeRootOpIndex, EOp::Hash); return HashCombine(HashCombine(GetTypeHash(Value.Name), GetTypeHash(Value.NativeDefault)), Value.Maybe.IsSet() ? GetTypeHash(Value.Maybe.GetValue()) : 0u); }
 
 class FVaRestM5NativeClosureProof::FImpl final
 {
