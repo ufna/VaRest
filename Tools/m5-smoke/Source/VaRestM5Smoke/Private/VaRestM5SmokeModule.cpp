@@ -1,5 +1,6 @@
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 #include "VaRestM5SettingsOnlyProof.h"
+#include "VaRestM5NativeClosureProof.h"
 #include "CoreGlobals.h"
 #include "Engine/Engine.h"
 #include "Engine/GameEngine.h"
@@ -42,6 +43,12 @@ class FVaRestM5SmokeModule final : public IModuleInterface
 public:
     virtual void StartupModule() override
     {
+        if (FParse::Param(FCommandLine::Get(), TEXT("VaRestM5NativeClosureProof")))
+        {
+            NativeClosure = MakeUnique<FVaRestM5NativeClosureProof>();
+            NativeClosure->Start();
+            return;
+        }
         if (!FParse::Param(FCommandLine::Get(), TEXT("VaRestM5SettingsOnly"))) return;
         if (IsRunningCommandlet())
         {
@@ -64,6 +71,7 @@ public:
     }
     virtual void ShutdownModule() override
     {
+        NativeClosure.Reset();
         FCoreDelegates::GetOnPostEngineInit().Remove(PostInit);
         DropWitness();
     }
@@ -123,6 +131,7 @@ private:
         if (FParse::Param(FCommandLine::Get(), TEXT("VaRestM5SettingsExit")))
             FPlatformMisc::RequestExitWithStatus(false, 0, TEXT("VaRestM5SettingsOnly"));
     }
+    TUniquePtr<FVaRestM5NativeClosureProof> NativeClosure;
     FDelegateHandle PostInit;
     TSharedPtr<FEarlyRequestWitness, ESPMode::ThreadSafe> Witness;
 };
