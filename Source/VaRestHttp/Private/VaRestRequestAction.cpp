@@ -290,7 +290,7 @@ UVaRestRequestAction* UVaRestRequestAction::AdoptOnGT(const UObject* WorldContex
 	if ((State.bTypedResponse || State.bTypedError) && !FDynamicRequestAccess::SetPreparationOnGT(Request,[Weak](FDynamicPrepareToken& Token) {
 		if (auto* Current=Weak.Get()) Current->PrepareOnGT(Token);
 	})) { Error=TEXT("DynamicOutputPreparationFailed"); return nullptr; }
-	State.Builder=MakeUnique<TVaRestRequest<FVaRestDynamicResult>>(MoveTemp(Request)
+	State.Builder=MakeUnique<TVaRestRequest<FVaRestDynamicResult>>(MoveTemp(Request).KeepBody()
 		.OnComplete([Weak](const TVaRestResult<FVaRestDynamicResult>& Result) { if (auto* Current=Weak.Get()) Current->CompleteOnGT(Result); })
 		.OnQueued([Weak](const FString& QueueId) { if (auto* Current=Weak.Get()) Current->QueuedOnGT(QueueId); }));
 	Hub->OnDeinitializing.AddDynamic(Action,&UVaRestRequestAction::HubClosing);

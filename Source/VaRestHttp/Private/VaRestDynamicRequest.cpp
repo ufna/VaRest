@@ -71,7 +71,9 @@ void DecodeNative(FDynamicHandlerData& Native,FFinish& Finish)
 	{
 	case EVaRestTypeKind::Json:Native.bDecoded=DecodeJson(Finish,Native.Parsed->Json);break;
 	case EVaRestTypeKind::String:DecodeText(Finish,Native.Parsed->Text);Native.bDecoded=!Finish.Error.IsError();break;
-	case EVaRestTypeKind::Bytes:Native.Parsed->Bytes=MoveTemp(Finish.Body);Native.bDecoded=true;break;
+	case EVaRestTypeKind::Bytes:
+		if (Finish.bKeepBody) Finish.Response.Body=Finish.Body;
+		Native.Parsed->Bytes=MoveTemp(Finish.Body);Native.bDecoded=true;break;
 	case EVaRestTypeKind::None:
 		CheckEnvelopePredicate(Finish);
 		if (Finish.Error.IsError()) Finish.Response.Body=MoveTemp(Finish.Body);else ReleaseBody(Finish);
