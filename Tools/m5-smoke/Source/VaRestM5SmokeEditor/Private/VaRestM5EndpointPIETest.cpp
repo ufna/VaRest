@@ -86,6 +86,17 @@ struct FRun : IAutomationLatentCommand
         BP.Reset(LoadObject<UBlueprint>(nullptr,BPPath,nullptr,LOAD_DisableCompileOnLoad));
         auto* Class=BP ? Cast<UBlueprintGeneratedClass>(BP->GeneratedClass):nullptr;
         auto* CDO=Class ? Cast<AVaRestM5EndpointRunner>(Class->GetDefaultObject()):nullptr;
+        // Observe resolved state only; unresolved parent/Uber observations stay -1 rather than loading.
+        const bool ParentResolved=BP && BP->ParentClass.GetGCPtr().IsResolved();
+        const bool UberResolved=Class && Class->UberGraphFunction.IsResolved();
+        const auto* ObservedUber=Class && UberResolved ? Class->UberGraphFunction.Get():nullptr;
+        const FString ObservedParentPath=BP ? BP->ParentClass.GetGCPtr().GetPathName():TEXT("<no-BP>");
+        const FString ObservedApiPath=CDO && CDO->Api ? CDO->Api.GetPathName():CDO ? TEXT("<null>"):TEXT("<no-CDO>");
+        Test.AddInfo(FString::Printf(TEXT("VAREST_M5_PIE_COLD_GUARD_OBSERVED bp=%d class=%d uber=%d uberResolved=%d scriptBytes=%d upToDate=%d status=%d regenerated=%d compiles=%d parentResolved=%d parentMatches=%d parentPath=%s cdo=%d bPassed=%d clientPresent=%d apiPresent=%d apiPath=%s"),
+            BP ? 1:0,Class ? 1:0,Class ? (Class->UberGraphFunction ? 1:0):INDEX_NONE,UberResolved ? 1:0,ObservedUber ? ObservedUber->Script.Num():INDEX_NONE,
+            BP ? (BP->IsUpToDate() ? 1:0):INDEX_NONE,BP ? static_cast<int32>(BP->Status):INDEX_NONE,BP ? (BP->bHasBeenRegenerated ? 1:0):INDEX_NONE,Compiles,
+            ParentResolved ? 1:0,BP && Class && ParentResolved ? (BP->ParentClass.Get()==AVaRestM5EndpointRunner::StaticClass() ? 1:0):INDEX_NONE,*ObservedParentPath,
+            CDO ? 1:0,CDO ? (CDO->bPassed ? 1:0):INDEX_NONE,CDO ? (CDO->Client ? 1:0):INDEX_NONE,CDO ? (CDO->Api ? 1:0):INDEX_NONE,*ObservedApiPath));
         if (!Class || !Class->UberGraphFunction || Class->UberGraphFunction->Script.IsEmpty() || !BP->IsUpToDate()
             || BP->bHasBeenRegenerated || Compiles || BP->ParentClass.Get()!=AVaRestM5EndpointRunner::StaticClass() || !CDO || CDO->bPassed || CDO->Client || !CDO->Api || !CDO->Api->GetPathName().Equals(ApiPath,ESearchCase::CaseSensitive)) return Error(TEXT("Saved generated class/bytecode/default API unavailable without compile-on-load"));
         SavedClass=Class;SavedScript=Class->UberGraphFunction->Script;
