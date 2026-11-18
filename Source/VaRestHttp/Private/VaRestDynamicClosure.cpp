@@ -383,9 +383,22 @@ bool FDynamicTypedState::SetPreparationOnGT(TUniqueFunction<void(FDynamicPrepare
 	if (bFinalized || bStale || bPreparationBound || !Callback) return false;
 	bPreparationBound=true; Preparation=MoveTemp(Callback); return true;
 }
+#if WITH_DEV_AUTOMATION_TESTS
+bool FDynamicTypedState::OwnedReflectionRetiredForStopTestOnGT() const
+{
+	check(IsInGameThread());
+	return bStale && Pins.IsEmpty() && !Rules && !Preparation &&
+		!ResponseCarrier.BagType.IsValid() && !ErrorCarrier.BagType.IsValid() &&
+		!ResponseCarrier.Struct.IsValid() && !ErrorCarrier.Struct.IsValid() &&
+		!ResponseCarrier.Bag.IsValid() && !ErrorCarrier.Bag.IsValid();
+}
+#endif
 bool FDynamicTypedState::MaterializeOnGT(FCarrier& Carrier,const FVaRestJson& Json,const FVaRestJsonConvertOptions& Options,FVaRestJsonDecodeReport& Report)
 {
 	check(IsInGameThread());
+#if WITH_DEV_AUTOMATION_TESTS
+	if (StopProbe) StopProbe->ReflectedMaterializationOnGT();
+#endif
 	if (!CurrentOnGT()) return false;
 	bool bValid=false;
 	const UScriptStruct* AllocationType=Carrier.Type.Kind==EVaRestTypeKind::Struct && Carrier.Type.Container==EVaRestTypeContainer::None ?

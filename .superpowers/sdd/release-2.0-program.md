@@ -1,5 +1,13 @@
 # VaRest 2.0 release program ledger (controller-level; per-plan ledgers live in sibling dirs)
 
+## Source396 — reviewed real module-stop fixture integrated, UNBUILT, 2026-11-18
+
+Integrated immutable module-stop-source-003 (FINAL5904ebf4/manifest827cddf8), based on the full002 review and independent003 correction review1cb3cd65. Eight existing Source files receive test-build instrumentation; two new Source files supply the Core-only contract and opt-in Http fixture. Five new Tools/m5-smoke files provide the separate early Core-only witness and temporary Core runtime stub. The settings-only proofB implementation remains separately reviewed/corrected and uninstalled. Normal/Fab profiles do not enable this fixture.
+
+Actual trace membership is checked before setup, every Update and real OnPreExit before own-sink removal; the native witness accepts only the corresponding plain membership/mask/count observation. Both real ordinary/managed native parse handoffs, original any-thread Clock.Now semantics, GT ownership retirement, prepublished managed return fate and the same production Control quarantine remain intact. Four closure cases each require separate None and Timings processes with actual SoftQuit, real Http removal, matching off-GT late publications and nonforced exit0. No such build or runtime occurred at this checkpoint; early Automation Success will mean armed only.
+
+All848Source files match canonical and both owned Linux consumers. The existing ordinary Editor descriptor now explicitly enables the separately copied witness fixture; no handwritten Engine/Host/Target/Game source change or native-owner activation. Fresh full graph/build and actual eight-process qualification remain pending. Source394 three-case successes keep their actual prior source/SDK interval and warnings. Whole M5/cooked BP/settings-only positives and two negatives/current Shipping/remaining platforms/OpenAPI/M7/performance/release remain open; reflected workers stay disabled and Mac/LinuxArm64/I1Tasks16–17 remain owner-deferred. Goal remains active.
+
 ## Source395 — actual Optional/native and GC qualification passed, 2026-11-18
 
 Source395 updates only these two status documents; all846Source files and their ordinary Editor/Game copies remain code394. The real current native build completed2/0 in24.820335s, oneHttpCompile/Link, preserving22802inputs and producing5real outputs. Its single fresh dependency file joins3335paths entirely to measured native-before identities,0post-only/changed. Actual HttpSO/debug share GNU BuildID9d0490c1c95e928d97d905aa33fa0edbe7701883; the exact pair is retained in actual-http-images.tar.gz SHA79d88e5a99a9fbf6d421411469f6edd7eda98c2d4266abc1cbd7b57eea9e2f37/19368335B for evidence, without restoring over live SDK files.

@@ -1,0 +1,30 @@
+{
+  "FileVersion": 3,
+  "Version": 1,
+  "VersionName": "M5-source-candidate",
+  "FriendlyName": "VaRest M5 isolated smoke fixture",
+  "Description": "Opt-in source fixture; module-stop observation is not packaged asset qualification.",
+  "EnabledByDefault": false,
+  "CanContainContent": true,
+  "SupportedTargetPlatforms": [
+    "Linux"
+  ],
+  "Modules": [
+    {
+      "Name": "VaRestM5StopWitness",
+      "Type": "Runtime",
+      "LoadingPhase": "PostConfigInit",
+      "PlatformAllowList": [
+        "Linux"
+      ]
+    },
+    {
+      "Name": "VaRestM5Smoke",
+      "Type": "Runtime",
+      "LoadingPhase": "Default",
+      "PlatformAllowList": [
+        "Linux"
+      ]
+    }
+  ]
+}

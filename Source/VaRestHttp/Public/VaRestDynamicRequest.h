@@ -47,6 +47,10 @@ public:
 	virtual void ValidateTerminalOnGT(FFinish& Finish) override;
 	virtual void DiscardValue() override;
 	virtual void Deliver(FFinish& Finish) override;
+#if WITH_DEV_AUTOMATION_TESTS
+	virtual TSharedPtr<VaRest::ModuleStopTest::INativeProbe, ESPMode::ThreadSafe> ModuleStopProbeOnGT() const override;
+	virtual bool NativeJsonParsedForStopTest() const override;
+#endif
 	virtual bool WantsProgress() const override { return bool(OnProgress); }
 	virtual void Progress(const FVaRestProgress& Snapshot) override { if (OnProgress) OnProgress(Snapshot); }
 

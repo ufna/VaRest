@@ -7,6 +7,7 @@
 
 namespace VaRest::Http
 {
+class FDynamicCompletion;
 /** Internal preparation only; no private spec exposure or public arbitrary handler replacement. */
 struct FDynamicRequestAccess
 {
@@ -36,6 +37,11 @@ struct FDynamicRequestAccess
 	{
 		check(IsInGameThread());return Request.Spec && Request.Spec->Headers.Contains(Name);
 	}
+#if WITH_DEV_AUTOMATION_TESTS
+ static bool BindModuleStopProbeOnGT(TVaRestRequest<FVaRestDynamicResult>& Request,
+  TSharedRef<VaRest::ModuleStopTest::INativeProbe, ESPMode::ThreadSafe> Probe);
+ static TSharedPtr<FDynamicCompletion, ESPMode::ThreadSafe> CompletionForStopTestOnGT(TVaRestRequest<FVaRestDynamicResult>& Request);
+#endif
 	static void BeginNativeDecodeOnGT(const FVaRestExchangeRef& Exchange,FFinish&& Finish);
 	static bool ValidateOnGT(TVaRestRequest<FVaRestDynamicResult>& Request,FString& Error)
 	{

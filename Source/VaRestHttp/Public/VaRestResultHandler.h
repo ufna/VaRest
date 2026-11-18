@@ -2,6 +2,10 @@
 
 #pragma once
 
+#if WITH_DEV_AUTOMATION_TESTS
+#include "VaRestModuleStopTest.h"
+#endif
+
 #include "CoreMinimal.h"
 #include "VaRestClock.h"
 #include "VaRestEnvelope.h"
@@ -78,6 +82,10 @@ namespace VaRest::Http
 	{
 	public:
 		virtual ~IResultHandler() = default;
+#if WITH_DEV_AUTOMATION_TESTS
+		virtual TSharedPtr<VaRest::ModuleStopTest::INativeProbe, ESPMode::ThreadSafe> ModuleStopProbeOnGT() const { check(IsInGameThread()); return {}; }
+		virtual bool NativeJsonParsedForStopTest() const { return false; } // native data only, under the actual worker borrow
+#endif
 
 		/** For traces (Inspector IN-5 ResultType) */
 		virtual FName GetResultType() const = 0;

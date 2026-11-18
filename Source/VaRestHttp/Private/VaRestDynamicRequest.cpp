@@ -14,6 +14,9 @@
 #include "VaRestTraceExcerpts.h"
 #include "HAL/FileManager.h"
 #include "Tasks/Task.h"
+#if WITH_DEV_AUTOMATION_TESTS
+#include "HAL/PlatformTLS.h"
+#endif
 
 namespace VaRest::Http
 {
@@ -27,6 +30,9 @@ struct FDynamicHandlerData
 	TSharedRef<FDynamicResultData,ESPMode::ThreadSafe> Parsed=MakeShared<FDynamicResultData,ESPMode::ThreadSafe>();
 	bool bPrepared=false,bDecoded=false,bDiscarded=false,bBudgetRefused=false,bFinalized=false;
 	bool bResponseJson=false,bTypedResponse=false,bTypedError=false;
+#if WITH_DEV_AUTOMATION_TESTS
+	TSharedPtr<VaRest::ModuleStopTest::INativeProbe, ESPMode::ThreadSafe> StopProbe;
+#endif
 };
 namespace DynamicRequestPrivate
 {
@@ -90,6 +96,9 @@ struct FNativeDynamicWork
 	TSharedPtr<std::atomic<bool>,ESPMode::ThreadSafe> Abort;
 	FFinish Finish; // Clock and all DecodeOptions callbacks/rules are removed on GT before publication
 	bool bDidRun=false,bCleanupRan=false;
+#if WITH_DEV_AUTOMATION_TESTS
+	VaRest::ModuleStopTest::FWorkerIdentity StopIdentity;
+#endif
 	~FNativeDynamicWork() { check(!Finish.Clock && !Finish.DecodeOptions.BytesWriter && !Finish.DecodeOptions.BytesResolver); }
 	void Run()
 	{
@@ -111,6 +120,10 @@ struct FNativeDynamicWork
 #if !UE_BUILD_SHIPPING
 		++Testing::Counters().DecodeTasksHandedBack;
 #endif
+#if WITH_DEV_AUTOMATION_TESTS
+		if (Data->StopProbe) Data->StopProbe->HoldAfterNativeParse(StopIdentity, Data->bDecoded && Data->Parsed->Json.IsValid() && !Finish.Error.IsError(), Finish.bTimeDecode,
+			static_cast<uint64>(reinterpret_cast<UPTRINT>(Finish.Clock.Get())), FPlatformTLS::GetCurrentThreadId(), IsInGameThread());
+#endif
 	}
 	void CleanupDroppedFile()
 	{
@@ -124,11 +137,18 @@ struct FNativeDynamicWorker
 {
 	TSharedPtr<FNativeDynamicWork,ESPMode::ThreadSafe> Work;
 	TSharedPtr<FDynamicCompletion,ESPMode::ThreadSafe> Completion;
+#if WITH_DEV_AUTOMATION_TESTS
+	TSharedPtr<VaRest::ModuleStopTest::INativeProbe, ESPMode::ThreadSafe> StopProbe;
+	VaRest::ModuleStopTest::FWorkerIdentity StopIdentity;
+#endif
 	~FNativeDynamicWorker()
 	{
 		// Last worker payload use precedes release. GT acquire then reads bDidRun/result, even if the task was dropped.
 		Work.Reset();
 		Completion->NotifyReadyFromWorker();
+#if WITH_DEV_AUTOMATION_TESTS
+		if (StopProbe) StopProbe->Published(StopIdentity, VaRest::ModuleStopTest::EPublication::OrdinaryReady, FPlatformTLS::GetCurrentThreadId(), IsInGameThread(), Completion->IsStopped());
+#endif
 	}
 };
 struct FOrdinaryDynamicPending
@@ -193,6 +213,24 @@ TResultHandler<FVaRestDynamicResult>::TResultHandler(FVaRestDynamicResultConfig&
 	Data->ProblemCode.Reset();
 }
 TResultHandler<FVaRestDynamicResult>::~TResultHandler() = default;
+#if WITH_DEV_AUTOMATION_TESTS
+TSharedPtr<VaRest::ModuleStopTest::INativeProbe, ESPMode::ThreadSafe> TResultHandler<FVaRestDynamicResult>::ModuleStopProbeOnGT() const
+{ check(IsInGameThread()); return Data->StopProbe; }
+bool TResultHandler<FVaRestDynamicResult>::NativeJsonParsedForStopTest() const
+{ return Data->bDecoded && Data->Parsed->Json.IsValid(); }
+bool FDynamicRequestAccess::BindModuleStopProbeOnGT(TVaRestRequest<FVaRestDynamicResult>& Request,
+ TSharedRef<VaRest::ModuleStopTest::INativeProbe, ESPMode::ThreadSafe> Probe)
+{
+ check(IsInGameThread());
+ if (!Request.Spec || Request.Handler().Data->StopProbe) return false;
+ auto& Data=*Request.Handler().Data;
+ const auto Types=Data.Completion ? Data.Completion->TypesOnGT() : nullptr;
+ if (!Types) return false;
+ Data.StopProbe=Probe; Types->SetModuleStopProbeOnGT(Probe); return true;
+}
+TSharedPtr<FDynamicCompletion, ESPMode::ThreadSafe> FDynamicRequestAccess::CompletionForStopTestOnGT(TVaRestRequest<FVaRestDynamicResult>& Request)
+{ check(IsInGameThread()); return Request.Spec ? Request.Handler().Data->Completion : nullptr; }
+#endif
 bool TResultHandler<FVaRestDynamicResult>::SetPreparationOnGT(TUniqueFunction<void(FDynamicPrepareToken&)>&& Callback)
 {
 	check(IsInGameThread());
@@ -326,6 +364,9 @@ void TResultHandler<FVaRestDynamicResult>::DiscardValue()
 void TResultHandler<FVaRestDynamicResult>::Deliver(FFinish& Finish)
 {
 	check(IsInGameThread());
+#if WITH_DEV_AUTOMATION_TESTS
+	if (Data->StopProbe) Data->StopProbe->UserDeliveryOnGT();
+#endif
 	if (Finish.Error.IsError()) { if (OnError) OnError(Finish.Error); }
 	else if (OnSuccess && Value.IsSet()) OnSuccess(Value.GetValue(),Finish.Response);
 	if (OnComplete)
@@ -380,6 +421,11 @@ void FDynamicRequestAccess::BeginNativeDecodeOnGT(const FVaRestExchangeRef& Exch
 	if (Completion->IsStopped() || FClientState::IsShuttingDown() || Ex.bFinished) return;
 	const auto Worker=MakeShared<FNativeDynamicWorker,ESPMode::ThreadSafe>();
 	Worker->Work=Work; Worker->Completion=Completion;
+#if WITH_DEV_AUTOMATION_TESTS
+	Work->StopIdentity={VaRest::ModuleStopTest::ERoute::Ordinary,Ex.RequestId,Ex.ClientId,0,0,0,
+		static_cast<uint64>(reinterpret_cast<UPTRINT>(Worker.Get()))};
+	Worker->StopProbe=Handler.Data->StopProbe; Worker->StopIdentity=Work->StopIdentity;
+#endif
 #if !UE_BUILD_SHIPPING
 	++Testing::Counters().DecodeTasksLaunched;
 #endif

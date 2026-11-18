@@ -50,6 +50,10 @@ public:
 	void ValidateTerminalOnGT(FFinish& Finish,FVaRestDynamicTypeInfo& Response,FVaRestDynamicTypeInfo& Error) const;
 	void InvalidateOnGT();
 	bool SetPreparationOnGT(TUniqueFunction<void(FDynamicPrepareToken&)>&& Callback);
+#if WITH_DEV_AUTOMATION_TESTS
+	void SetModuleStopProbeOnGT(TSharedPtr<VaRest::ModuleStopTest::INativeProbe, ESPMode::ThreadSafe> InProbe) { check(IsInGameThread()); StopProbe=MoveTemp(InProbe); }
+	bool OwnedReflectionRetiredForStopTestOnGT() const;
+#endif
 private:
 	friend class FDynamicPrepareToken;
 	friend class FDynamicTypeRuntime;
@@ -70,6 +74,9 @@ private:
 	bool MaterializeOnGT(FCarrier& Carrier, const FVaRestJson& Json, const FVaRestJsonConvertOptions& Options, FVaRestJsonDecodeReport& Report);
 	bool TakeOnGT(const FProperty* Destination, void* Address, bool bError);
 	FCarrier ResponseCarrier, ErrorCarrier;
+#if WITH_DEV_AUTOMATION_TESTS
+	TSharedPtr<VaRest::ModuleStopTest::INativeProbe, ESPMode::ThreadSafe> StopProbe; // native only; never stores the separate GT observer
+#endif
 	TArray<TStrongObjectPtr<const UObject>> Pins;
 	TWeakObjectPtr<const UObject> RuleOwner;
 	TSharedPtr<const FVaRestJsonRuleSnapshot, ESPMode::ThreadSafe> Rules;

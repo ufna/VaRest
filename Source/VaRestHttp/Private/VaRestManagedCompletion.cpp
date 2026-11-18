@@ -4,6 +4,9 @@
 #include "Tasks/Task.h"
 #include "VaRestClientState.h"
 #include "VaRestManagedOperation.h"
+#if WITH_DEV_AUTOMATION_TESTS
+#include "HAL/PlatformTLS.h"
+#endif
 
 namespace VaRest::Http
 {
@@ -39,6 +42,9 @@ public:
 		auto& Frame = Completion->Payload();
 		check(Frame.WorkerGeneration == Generation);
 		Frame.bWorkerEnded.store(true, std::memory_order_release); // LAST frame use; Completion keeps actual row/allocation through return
+#if WITH_DEV_AUTOMATION_TESTS
+		if (StopProbe) StopProbe->Published(StopIdentity, VaRest::ModuleStopTest::EPublication::ManagedWorkerEnded, FPlatformTLS::GetCurrentThreadId(), IsInGameThread(), Completion->Control()->IsStopped());
+#endif
 	}
 	void Run()
 	{
@@ -49,13 +55,37 @@ public:
 		{
 			Frame.bWorkerDidRun.store(true, std::memory_order_relaxed);
 			Frame.WorkerKernel(); // ACTUAL callable/handler/finish are owned by Frame, not this worker or its closure
+#if WITH_DEV_AUTOMATION_TESTS
+			if (StopProbe) StopProbe->HoldAfterNativeParse(StopIdentity, Frame.Handler && Frame.Handler->NativeJsonParsedForStopTest() && !Frame.Finish.Error.IsError(), Frame.Finish.bTimeDecode,
+				static_cast<uint64>(reinterpret_cast<UPTRINT>(Frame.Finish.Clock.Get())), FPlatformTLS::GetCurrentThreadId(), IsInGameThread());
+#endif
 		}
 	}
 
 private:
 	FManagedCompletionRef Completion;
 	uint64 Generation;
+#if WITH_DEV_AUTOMATION_TESTS
+public:
+	TSharedPtr<VaRest::ModuleStopTest::INativeProbe, ESPMode::ThreadSafe> StopProbe;
+	VaRest::ModuleStopTest::FWorkerIdentity StopIdentity;
+#endif
 };
+
+#if WITH_DEV_AUTOMATION_TESTS
+/** Observes lifetime of the ACTUAL prerequisite GT return capture; no affine fields are owned here. */
+struct FModuleStopReturnCapture
+{
+	TSharedPtr<VaRest::ModuleStopTest::INativeProbe, ESPMode::ThreadSafe> Probe;
+	TSharedPtr<FNativeLifetimeControl, ESPMode::ThreadSafe> Control;
+	VaRest::ModuleStopTest::FWorkerIdentity Identity;
+	bool bRan=false; // only the actual GTK return task writes; destruction follows its final use
+	~FModuleStopReturnCapture()
+	{
+		if (Probe) Probe->Published(Identity, bRan ? VaRest::ModuleStopTest::EPublication::ManagedReturnCaptureRan : VaRest::ModuleStopTest::EPublication::ManagedReturnCaptureAbandoned, FPlatformTLS::GetCurrentThreadId(), IsInGameThread(), Control->IsStopped());
+	}
+};
+#endif
 
 FManagedCompletionPayload::FManagedCompletionPayload(FNativeOperationRef InRef, FVaRestExchange* InTarget)
 	: Ref(MoveTemp(InRef))
@@ -178,6 +208,9 @@ FManagedCompletionAccess::~FManagedCompletionAccess()
 	if (!bDropHere)
 		Frame->ReturnedCompletion = MoveTemp(Completion);       // native-only mailbox; GTK reads it only after ended acquire
 	Frame->bAccessEnded.store(true, std::memory_order_release); // LAST frame access
+#if WITH_DEV_AUTOMATION_TESTS
+	if (StopProbe) StopProbe->Published(StopIdentity, VaRest::ModuleStopTest::EPublication::ManagedAccessEnded, FPlatformTLS::GetCurrentThreadId(), IsInGameThread(), Ref.Control->IsStopped());
+#endif
 	if (bDropHere)
 		Completion.Reset(); // LAST cell access; exact Ref retains allocation through full native settle method
 }
@@ -279,10 +312,37 @@ void FManagedCompletionAccess::LaunchWorkerOnGT()
 	Owner->bWorkerEnded.store(false, std::memory_order_relaxed);
 	Owner->bWorkerDidRun.store(false, std::memory_order_relaxed);
 	TSharedPtr<FManagedCompletionWorker, ESPMode::ThreadSafe> Token = MakeShared<FManagedCompletionWorker, ESPMode::ThreadSafe>(Self, Owner->WorkerGeneration);
+#if WITH_DEV_AUTOMATION_TESTS
+ if (Owner->WorkerGeneration==1 && Owner->Handler) StopProbe=Owner->Handler->ModuleStopProbeOnGT();
+ StopIdentity={VaRest::ModuleStopTest::ERoute::Managed,Internals(Owner->Exchange()).RequestId,
+  Internals(Owner->Exchange()).ClientId,Owner->WorkerGeneration,Ref.Cell.Generation,Ref.Cell.Index,
+  static_cast<uint64>(reinterpret_cast<UPTRINT>(Token.Get()))};
+ Token->StopProbe=StopProbe; Token->StopIdentity=StopIdentity;
+ TSharedPtr<FModuleStopReturnCapture, ESPMode::ThreadSafe> ReturnCapture;
+ if (StopProbe)
+ {
+  ReturnCapture=MakeShared<FModuleStopReturnCapture, ESPMode::ThreadSafe>();
+  ReturnCapture->Probe=StopProbe; ReturnCapture->Identity=StopIdentity; ReturnCapture->Control=Control;
+ }
+#endif
 	UE::Tasks::FTaskEvent Published(TEXT("VaRest.ManagedCompletionPublished"));
 	auto Worker = UE::Tasks::Launch(TEXT("VaRest.ManagedCompletionWorker"), [Held = MoveTemp(Token)] { Held->Run(); }, UE::Tasks::Prerequisites(Published));
 	// GTK handback exists BEFORE any worker completion, even when Stop makes the worker skip user/decoder work.
+#if WITH_DEV_AUTOMATION_TESTS
+ UE::Tasks::Launch(TEXT("VaRest.ManagedCompletionReturn"), [Self, ReturnCapture] {
+  if (ReturnCapture)
+  {
+   ReturnCapture->bRan=true;
+   ReturnCapture->Probe->Published(ReturnCapture->Identity, VaRest::ModuleStopTest::EPublication::ManagedReturnExecuted,
+    FPlatformTLS::GetCurrentThreadId(),IsInGameThread(),Self->Control()->IsStopped());
+  }
+  Self->WorkerReturnedOnGT();
+  if (ReturnCapture) ReturnCapture->Probe->Published(ReturnCapture->Identity, VaRest::ModuleStopTest::EPublication::ManagedReturnCompleted,
+   FPlatformTLS::GetCurrentThreadId(),IsInGameThread(),Self->Control()->IsStopped());
+ }, UE::Tasks::Prerequisites(Worker), UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
+#else
 	UE::Tasks::Launch(TEXT("VaRest.ManagedCompletionReturn"), [Self] { Self->WorkerReturnedOnGT(); }, UE::Tasks::Prerequisites(Worker), UE::Tasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::GameThreadNormalPri);
+#endif
 	Published.Trigger(); // actual Task.h prerequisite; worker cannot run before BOTH GTK-owned continuations were published
 }
 void FManagedCompletionAccess::WorkerReturnedOnGT()

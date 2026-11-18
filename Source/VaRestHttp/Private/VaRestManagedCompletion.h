@@ -1,6 +1,9 @@
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 
 #pragma once
+#if WITH_DEV_AUTOMATION_TESTS
+#include "VaRestModuleStopTest.h"
+#endif
 
 #include "VaRestNativeOperationStore.h"
 #include "VaRestResultHandler.h"
@@ -107,5 +110,9 @@ private:
 	std::atomic<bool> bCancelPosted{false};
 	std::atomic<bool> bCancelTaskEnded{false};
 	bool bCancelInvoked = false; // GTK only; task end acquire precedes fallback read
+#if WITH_DEV_AUTOMATION_TESTS
+	TSharedPtr<VaRest::ModuleStopTest::INativeProbe, ESPMode::ThreadSafe> StopProbe;
+	VaRest::ModuleStopTest::FWorkerIdentity StopIdentity;
+#endif
 };
 } // namespace VaRest::Http
