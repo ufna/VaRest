@@ -135,6 +135,14 @@ Offline probes default to 10 seconds and prefer eligible queue heads across ever
 
 `OnChanged()` is a narrow **synchronous GT observer** exception: state changes first; nested edges queue FIFO without recursive notification; final state reconciles probes. Request outcomes, OnQueued, OnQueuedResult and accepted Flush callbacks remain asynchronous relative to Send, Cancel, setters and connectivity transitions.
 
+## Configured API cook ownership
+
+`UVaRestHttpSettings::Apis` remains the configured soft API list. VaRest explicitly adds its API packages through ModifyCook, and normal-game startup loads and retains them before game instances. The array now uses standard `Untracked` metadata so importing its config does not create an independent engine startup cook root. This is an explicit enumeration policy, not a global NeverCook or a change to config values/runtime loading.
+
+`Untracked` also omits that soft-reference edge from automatic asset-registry redirector/delete fixup. Runtime loading can follow an existing redirector; automatic settings maintenance after asset moves/deletion is not claimed equivalent. Keep the configured list current when reorganizing API assets.
+
+The actual code397 settings-only packaged baseline passes early FindObject, production-owner and default-options conversion with no requests. Its first real ModifyCook-removal cook still includes all four packages via StartupSoftObjectPath, so that absence control is invalid. Source399's metadata correction requires fresh positive, real ModifyCook absence, real preload failure and restored positive evidence. The new eight-request Blueprint fixture source is independently reviewed and integrated but unbuilt; no A/cooked/whole M5 acceptance follows.
+
 ## Trace and M5 integration freeze
 
 Started stays immediate, with actual cache policy and `bCacheLookupPending` during unresolved reads; snapshots show current state and Completed carries final CacheLookup and bFromCache independently. Cache hits have no transport attempt. Queued/stale/expiry notes before an attempt use the real RequestId and Attempt0, never an invented attempt. CacheStored means actual synchronous memory retention before Completed; best-effort disk writes neither delay successful delivery nor emit late request Notes. A disk-only stored response may have no CacheStored Note.
@@ -158,3 +166,8 @@ The M5 consumer freeze preserves these exact names and fields:
 | Optional auth contract | `GetIdentity`, `GetIdentityContractName`, existing `GetAuthName` semantics |
 
 M5 supplies reflected Hub/config wrappers, a reflected queued-result wrapper around the plain C++ response, asset-path default queue naming with explicit account isolation policy, endpoint `bQueueWhenOffline`, per-Hub connectivity/ScopeId and settings directory exposure. It preserves runtime readback and OnQueuedResult semantics, and implements Deinitialize cancellation plus asynchronous flush with false-admission handling. It consumes this one queue implementation.
+
+
+### Source300 continuation evidence
+
+The matching Source299 plugin build passed; ordinary wire diagnostics exposed a signed-short default header-pool overflow before TCP and an extensionless empty-frame suppression after Open. Source300 corrects those two private-LWS source paths and selects fresh archive006. Independent finite source reviews pass; private-C rebuild, matching plugin link and actual wire acceptance are pending. No test deadline/threshold or Host/native ownership gate is relaxed; whole release remains open.

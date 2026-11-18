@@ -7,7 +7,7 @@ public class VaRestM5SmokeEditor : ModuleRules
         PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
         PrivateDependencyModuleNames.AddRange(new string[] {
             "Core", "CoreUObject", "Engine", "UnrealEd", "BlueprintGraph", "AssetRegistry",
-            "VaRestHttp", "VaRestJson", "VaRestM5Smoke"
+            "VaRestHttp", "VaRestJson", "VaRestM5Smoke", "VaRestEditor", "KismetCompiler"
         });
     }
 }

@@ -5,7 +5,6 @@ public class VaRestM5Smoke : ModuleRules
     public VaRestM5Smoke(ReadOnlyTargetRules Target) : base(Target)
     {
         PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
-        PublicDependencyModuleNames.Add("Core");
-        PrivateDependencyModuleNames.AddRange(new string[] { "CoreUObject", "Engine", "VaRestHttp", "VaRestJson" });
+        PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "VaRestHttp", "VaRestJson" });
     }
 }

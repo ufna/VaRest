@@ -68,7 +68,7 @@ public:
 	EVaRestJsonNaming Naming = EVaRestJsonNaming::CamelCase;
 
 	/** API assets loaded before game instances and explicitly included by the cook delegate. */
-	UPROPERTY(config, EditAnywhere, Category = "API Assets")
+	UPROPERTY(config, EditAnywhere, Category = "API Assets", meta = (Untracked))
 	TArray<TSoftObjectPtr<UVaRestApi>> Apis;
 
 	/** Relative to ProjectSavedDir exactly once. Absolute roots retain the native storage-root normalization. */
