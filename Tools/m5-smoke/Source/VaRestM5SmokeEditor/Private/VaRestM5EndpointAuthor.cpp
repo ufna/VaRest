@@ -37,6 +37,7 @@
 #include "UObject/UnrealType.h"
 #include "UserDefinedStructure/UserDefinedStructEditorData.h"
 #include "VaRestApi.h"
+#include "VaRestJsonConvert.h"
 #include "VaRestJsonRules.h"
 
 namespace VaRestM5EndpointAuthor
@@ -223,12 +224,20 @@ bool AuthorRunner(FAutomationTestBase& Test,UVaRestApi* Api,UScriptStruct* Root,
     if (!Defaults || !Payload || Payload->Struct!=Root) return false;
     Defaults->Api=Api;
     if (!PreparePayload(Api,Root,Payload->ContainerPtrToValuePtr<void>(Defaults),Error)) { Test.AddError(Error);return false; }
+    Class->UpdateCustomPropertyListForPostConstruction();
     FAssetRegistryModule::AssetCreated(BP.Get());Package->MarkPackageDirty();
     FSavePackageArgs Save;Save.TopLevelFlags=RF_Public|RF_Standalone;Save.SaveFlags=SAVE_NoError;
     if (!UPackage::SavePackage(Package.Get(),BP.Get(),*FPackageName::LongPackageNameToFilename(BPPath,FPackageName::GetAssetPackageExtension()),Save)) return false;
     UWorld* World=UEditorLoadingAndSavingUtils::NewBlankMap(false);if (!World) return false;
     FActorSpawnParameters Spawn;Spawn.Name=TEXT("SM5_Runner");Spawn.ObjectFlags=RF_Transactional;Spawn.SpawnCollisionHandlingOverride=ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
     AActor* Actor=World->SpawnActor<AActor>(Class,FVector::ZeroVector,FRotator::ZeroRotator,Spawn);if (!Actor) return false;
+    const auto* Inherited=Cast<AVaRestM5EndpointRunner>(Actor);
+    const auto* InheritedPayload=FindFProperty<FStructProperty>(Actor->GetClass(),TEXT("Payload"));
+    if (!Test.TestTrue(TEXT("fresh actor inherits exact API and default-encoded payload"),
+        Inherited && Inherited->Api==Api && Inherited->Api.GetPathName().Equals(VaRestM5Endpoint::ApiPath,ESearchCase::CaseSensitive)
+        && InheritedPayload && InheritedPayload->Struct==Root
+        && FVaRestJsonConvert::StructToString(InheritedPayload->Struct,InheritedPayload->ContainerPtrToValuePtr<void>(Inherited)).Equals(VaRestM5Endpoint::WireBody(),ESearchCase::CaseSensitive))) return false;
+    Test.AddInfo(TEXT("VAREST_M5_ENDPOINT_SPAWN_DEFAULTS_VERIFIED exactApi=1 defaultEncodedPayload=1 noInstanceRepair=1"));
     Actor->SetActorLabel(TEXT("VaRest M5 real endpoint/send fixture"),false);
     if (!UEditorLoadingAndSavingUtils::SaveMap(World,FString(Folder)+TEXT("/SM5_Map"))) return false;
     Test.AddInfo(TEXT("VAREST_M5_ENDPOINT_RUNNER_AUTHORED genuineNativeK2=8 endpoint=4 send=4 bytecode=1 map=SM5_Map runtimeCookWire=UNRUN"));

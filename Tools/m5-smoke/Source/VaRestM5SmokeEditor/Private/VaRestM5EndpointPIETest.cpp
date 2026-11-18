@@ -15,6 +15,8 @@
 #include "K2Node.h"
 #include "K2Node_VariableSet.h"
 #include "Kismet2/BlueprintEditorUtils.h"
+#include "Kismet2/CompilerResultsLog.h"
+#include "Kismet2/KismetEditorUtilities.h"
 #include "Misc/AutomationTest.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Parse.h"
@@ -22,7 +24,6 @@
 #include "Tests/AutomationEditorCommon.h"
 #include "UObject/Package.h"
 #include "UObject/StrongObjectPtr.h"
-#include "UObject/UObjectIterator.h"
 #include "UObject/UnrealType.h"
 #include "VaRestApi.h"
 namespace VaRestM5EndpointPIE
@@ -49,6 +50,8 @@ struct FRun : IAutomationLatentCommand
     TStrongObjectPtr<ULevelEditorPlaySettings> Settings;
     TWeakObjectPtr<UClass> SavedClass;
     TArray<uint8> SavedScript;
+    const FProperty* SavedPropertyLink=nullptr;
+    int32 SavedPropertiesSize=0,PreparedCompileEvents=0,OwnedPreCompiles=0,PreparedOwnedPreCompiles=0;
     TWeakObjectPtr<UWorld> World;
     TWeakObjectPtr<AVaRestM5EndpointRunner> Runner;
     FDelegateHandle PreCompile,Compiled,Begin,End;
@@ -74,16 +77,24 @@ struct FRun : IAutomationLatentCommand
     bool Unchanged() const
     {
         const auto* Class=BP ? Cast<UBlueprintGeneratedClass>(BP->GeneratedClass):nullptr;
-        return Compiles==0 && BP && !BP->bHasBeenRegenerated && Class==SavedClass.Get() && Class && Class->UberGraphFunction && Class->UberGraphFunction->Script==SavedScript;
+        return BP && OwnedPreCompiles==PreparedOwnedPreCompiles && BP->IsUpToDate() && Class && Class==SavedClass.Get()
+            && Class->GetPropertiesSize()==SavedPropertiesSize && Class->PropertyLink==SavedPropertyLink
+            && Class->UberGraphFunction && Class->UberGraphFunction->Script==SavedScript;
     }
     bool Inspect()
     {
         using namespace VaRestM5Endpoint;
-        if (!Dedicated() || !GEditor || !GEngine || GEditor->PlayWorld || GEditor->GetPlaySessionRequest().IsSet() || GEditor->GetPlayInEditorSessionInfo().IsSet() || PIEWorlds()
-            || FindObject<UBlueprint>(nullptr,BPPath) || FindPackage(nullptr,MapPath)) return Error(TEXT("Dedicated cold saved-BP/map process with no play session required"));
-        PreCompile=GEditor->OnBlueprintPreCompile().AddLambda([this](UBlueprint*) { ++Compiles; });
+        if (!Dedicated() || !GEditor || !GEngine || GEditor->PlayWorld || GEditor->GetPlaySessionRequest().IsSet() || GEditor->GetPlayInEditorSessionInfo().IsSet() || PIEWorlds())
+            return Error(TEXT("Dedicated ordinary saved-BP/map process with no play session required"));
+        PreCompile=GEditor->OnBlueprintPreCompile().AddLambda([this](UBlueprint* InBP) { ++Compiles;if (InBP && InBP->GetPathName()==BPPath) ++OwnedPreCompiles; });
         Compiled=GEditor->OnBlueprintCompiled().AddLambda([this]() { ++Compiles; });
-        BP.Reset(LoadObject<UBlueprint>(nullptr,BPPath,nullptr,LOAD_DisableCompileOnLoad));
+        BP.Reset(LoadObject<UBlueprint>(nullptr,BPPath));
+        if (!BP || !FEditorFileUtils::LoadMap(MapPath,false,false)) return Error(TEXT("Ordinary saved Blueprint/map load failed"));
+        // Preparation may compile/reinstance normally. Obtain no class/CDO/property pointer until it finishes.
+        FCompilerResultsLog PreparationLog;
+        FKismetEditorUtilities::CompileBlueprint(BP.Get(),EBlueprintCompileOptions::SkipGarbageCollection|EBlueprintCompileOptions::SkipSave,&PreparationLog);
+        Test.AddInfo(FString::Printf(TEXT("VAREST_M5_PIE_PREPARATION compileErrors=%d compileWarnings=%d compileEvents=%d ownedPreCompileEvents=%d saves=disabled"),PreparationLog.NumErrors,PreparationLog.NumWarnings,Compiles,OwnedPreCompiles));
+        if (PreparationLog.NumErrors) return Error(TEXT("Ordinary saved Blueprint preparation compile failed"));
         auto* Class=BP ? Cast<UBlueprintGeneratedClass>(BP->GeneratedClass):nullptr;
         auto* CDO=Class ? Cast<AVaRestM5EndpointRunner>(Class->GetDefaultObject()):nullptr;
         // Observe resolved state only; unresolved parent/Uber observations stay -1 rather than loading.
@@ -92,14 +103,15 @@ struct FRun : IAutomationLatentCommand
         const auto* ObservedUber=Class && UberResolved ? Class->UberGraphFunction.Get():nullptr;
         const FString ObservedParentPath=BP ? BP->ParentClass.GetGCPtr().GetPathName():TEXT("<no-BP>");
         const FString ObservedApiPath=CDO && CDO->Api ? CDO->Api.GetPathName():CDO ? TEXT("<null>"):TEXT("<no-CDO>");
-        Test.AddInfo(FString::Printf(TEXT("VAREST_M5_PIE_COLD_GUARD_OBSERVED bp=%d class=%d uber=%d uberResolved=%d scriptBytes=%d upToDate=%d status=%d regenerated=%d compiles=%d parentResolved=%d parentMatches=%d parentPath=%s cdo=%d bPassed=%d clientPresent=%d apiPresent=%d apiPath=%s"),
+        Test.AddInfo(FString::Printf(TEXT("VAREST_M5_PIE_PREPARED_GUARD_OBSERVED bp=%d class=%d uber=%d uberResolved=%d scriptBytes=%d upToDate=%d status=%d regenerated=%d compiles=%d parentResolved=%d parentMatches=%d parentPath=%s cdo=%d bPassed=%d clientPresent=%d apiPresent=%d apiPath=%s"),
             BP ? 1:0,Class ? 1:0,Class ? (Class->UberGraphFunction ? 1:0):INDEX_NONE,UberResolved ? 1:0,ObservedUber ? ObservedUber->Script.Num():INDEX_NONE,
             BP ? (BP->IsUpToDate() ? 1:0):INDEX_NONE,BP ? static_cast<int32>(BP->Status):INDEX_NONE,BP ? (BP->bHasBeenRegenerated ? 1:0):INDEX_NONE,Compiles,
             ParentResolved ? 1:0,BP && Class && ParentResolved ? (BP->ParentClass.Get()==AVaRestM5EndpointRunner::StaticClass() ? 1:0):INDEX_NONE,*ObservedParentPath,
             CDO ? 1:0,CDO ? (CDO->bPassed ? 1:0):INDEX_NONE,CDO ? (CDO->Client ? 1:0):INDEX_NONE,CDO ? (CDO->Api ? 1:0):INDEX_NONE,*ObservedApiPath));
         if (!Class || !Class->UberGraphFunction || Class->UberGraphFunction->Script.IsEmpty() || !BP->IsUpToDate()
-            || BP->bHasBeenRegenerated || Compiles || BP->ParentClass.Get()!=AVaRestM5EndpointRunner::StaticClass() || !CDO || CDO->bPassed || CDO->Client || !CDO->Api || !CDO->Api->GetPathName().Equals(ApiPath,ESearchCase::CaseSensitive)) return Error(TEXT("Saved generated class/bytecode/default API unavailable without compile-on-load"));
-        SavedClass=Class;SavedScript=Class->UberGraphFunction->Script;
+            || BP->ParentClass.Get()!=AVaRestM5EndpointRunner::StaticClass() || !CDO || CDO->bPassed || CDO->Client || !CDO->Api || !CDO->Api->GetPathName().Equals(ApiPath,ESearchCase::CaseSensitive)) return Error(TEXT("Prepared generated class/bytecode/default API unavailable"));
+        const int32 InspectionOwnedPreCompiles=OwnedPreCompiles,InspectionSize=Class->GetPropertiesSize();
+        const FProperty* InspectionPropertyLink=Class->PropertyLink;TArray<uint8> InspectionScript=Class->UberGraphFunction->Script;
         const auto* Environment=CDO->Api->FindEnvironment(CDO->Api->DefaultEnvironment);
         if (!Environment || Environment->BaseUrl!=TEXT("http://127.0.0.1:18765")) return Error(TEXT("Saved owned server port differs"));
         UObject *Root=nullptr,*Enum=nullptr;for (const auto& T:CDO->Api->JsonTypes) if (T.Type) { if (T.Type->GetPathName()==RootPath) Root=T.Type.Get();if (T.Type->GetPathName()==EnumPath) Enum=T.Type.Get(); }
@@ -140,18 +152,20 @@ struct FRun : IAutomationLatentCommand
             int32 Linked=0;for (const auto* P:Output->LinkedTo) if (P) if (const auto* Set=Cast<UK2Node_VariableSet>(P->GetOwningNodeUnchecked());Set && Set->VariableReference.GetMemberName()==Variable && P==Set->FindPin(Variable)) ++Linked;
             if (Linked!=1) return Error(TEXT("Actual typed output assignment is absent/ambiguous"));++Assignments;
         }
-        if (Cases.Num()!=8 || Assignments!=8 || !Unchanged()) return Error(TEXT("Saved eight-node bytecode/assignments not intact"));
-        if (!FEditorFileUtils::LoadMap(MapPath,false,false) || !Unchanged()) return Error(TEXT("Saved ordinary map failed cold load or compiled"));
+        if (Cases.Num()!=8 || Assignments!=8) return Error(TEXT("Prepared eight-node bytecode/assignments not intact"));
         UWorld* EditorWorld=GEditor->GetEditorWorldContext().World();int32 Placed=0;
         if (!EditorWorld || EditorWorld->GetOutermost()->GetName()!=MapPath) return Error(TEXT("Wrong loaded saved map"));
         for (TActorIterator<AVaRestM5EndpointRunner> It(EditorWorld);It;++It) { if (It->GetClass()!=Class || It->bPassed || It->Client) return Error(TEXT("Saved placed runner class/state differs"));++Placed; }
         if (Placed!=1) return Error(TEXT("Exactly one ordinary placed runner required"));
-        for (TObjectIterator<UBlueprint> It;It;++It) if (It->Status!=BS_Unknown && It->IsPossiblyDirty()) return Error(TEXT("Dirty loaded Blueprint would prompt/recompile on PIE; refuse"));
         Settings.Reset(DuplicateObject<ULevelEditorPlaySettings>(GetDefault<ULevelEditorPlaySettings>(),GetTransientPackage()));
         Settings->AutoRecompileBlueprints=false;Settings->SetRunUnderOneProcess(true);Settings->SetPlayNetMode(PIE_Standalone);Settings->SetPlayNumberOfClients(1);
         Begin=FEditorDelegates::BeginPIE.AddLambda([this](bool Simulate) { ++Begins;if (Simulate) Error(TEXT("SIE is forbidden")); });
         End=FEditorDelegates::EndPIE.AddLambda([this](bool Simulate) { ++Ends;if (Simulate) Error(TEXT("SIE teardown is forbidden")); });
-        Test.AddInfo(FString::Printf(TEXT("VAREST_M5_PIE_COLD_INSPECT nodes=8 assignments=8 serializedBytecode=1 scriptBytes=%d compileEvents=0"),SavedScript.Num()));return true;
+        if (OwnedPreCompiles!=InspectionOwnedPreCompiles || BP->GeneratedClass!=Class || !Class->UberGraphFunction || Class->UberGraphFunction->Script!=InspectionScript
+            || Class->GetPropertiesSize()!=InspectionSize || Class->PropertyLink!=InspectionPropertyLink) return Error(TEXT("Owned Blueprint changed during prepared inspection"));
+        SavedClass=Class;SavedScript=MoveTemp(InspectionScript);SavedPropertiesSize=InspectionSize;SavedPropertyLink=InspectionPropertyLink;
+        PreparedCompileEvents=Compiles;PreparedOwnedPreCompiles=OwnedPreCompiles;
+        Test.AddInfo(FString::Printf(TEXT("VAREST_M5_PIE_PREPARED_INSPECT profile=OrdinarySaved nodes=8 assignments=8 preparedBytecode=1 scriptBytes=%d propertiesSize=%d preparationCompileEvents=%d preparationOwnedPreCompileEvents=%d"),SavedScript.Num(),SavedPropertiesSize,PreparedCompileEvents,PreparedOwnedPreCompiles));return true;
     }
     void Stop() { EndOwnedSession();Stage=2;Deadline=FPlatformTime::Seconds()+15; }
     virtual bool Update() override
@@ -163,7 +177,7 @@ struct FRun : IAutomationLatentCommand
             if (!FAutomationEditorCommonUtils::SetPlaySessionStartToActiveViewport(Params)) { Error(TEXT("Real Slate level viewport required; use Root Xvfb/default-RHI Editor profile"));return true; }
             Requested=true;GEditor->RequestPlaySession(Params);Stage=1;Deadline=FPlatformTime::Seconds()+45;return false;
         }
-        if (!Unchanged()) { Error(TEXT("Saved Blueprint compiled/regenerated or bytecode/class changed during PIE"));if (Stage!=2) Stop(); }
+        if (!Unchanged()) { Error(TEXT("Prepared Blueprint compiled or bytecode/class/layout changed during PIE"));if (Stage!=2) Stop(); }
         if (Stage==1)
         {
             UWorld* PIE=GEditor->PlayWorld;
@@ -178,18 +192,18 @@ struct FRun : IAutomationLatentCommand
         }
         if (!GEditor->PlayWorld && !PIEWorlds() && !World.IsValid() && !Runner.IsValid() && !GEditor->GetPlaySessionRequest().IsSet() && !GEditor->GetPlayInEditorSessionInfo().IsSet())
         {
-            Requested=false;if (!Observed || Begins!=1 || Ends!=1 || !Unchanged()) Error(TEXT("Missing actual runner completion/BeginPIE/EndPIE or unchanged serialized class"));
-            if (!Failed) Test.AddInfo(TEXT("VAREST_M5_PIE_PASS actualPIE=1 runnerCompleted=1 EndPIE=1 worldGone=1 activeInfoGone=1 noCompile=1 wireJournal=RootRequired"));return true;
+            Requested=false;if (!Observed || Begins!=1 || Ends!=1 || !Unchanged()) Error(TEXT("Missing actual runner completion/BeginPIE/EndPIE or unchanged prepared class"));
+            if (!Failed) Test.AddInfo(FString::Printf(TEXT("VAREST_M5_PIE_PASS profile=OrdinarySaved actualPIE=1 runnerCompleted=1 EndPIE=1 worldGone=1 activeInfoGone=1 preparationCompileEvents=%d preparationOwnedPreCompileEvents=%d measuredCompileEvents=%d measuredOwnedPreCompileEvents=%d classScriptLayoutUnchanged=1 wireJournal=RootRequired"),PreparedCompileEvents,PreparedOwnedPreCompiles,Compiles-PreparedCompileEvents,OwnedPreCompiles-PreparedOwnedPreCompiles));return true;
         }
         if (FPlatformTime::Seconds()>Deadline) { Error(TEXT("Real EndPIE/world destruction grace15 expired"));return true; }return false;
     }
 };
 }
 IMPLEMENT_COMPLEX_AUTOMATION_TEST(FVaRestM5EndpointPIE,"VaRest.M5.Endpoint.PIE",EAutomationTestFlags::EditorContext|EAutomationTestFlags::EngineFilter)
-void FVaRestM5EndpointPIE::GetTests(TArray<FString>& Names,TArray<FString>& Commands) const { if (VaRestM5EndpointPIE::Dedicated()) { Names.Add(TEXT("ColdSaved"));Commands.Add(TEXT("ColdSaved")); } }
+void FVaRestM5EndpointPIE::GetTests(TArray<FString>& Names,TArray<FString>& Commands) const { if (VaRestM5EndpointPIE::Dedicated()) { Names.Add(TEXT("OrdinarySaved"));Commands.Add(TEXT("OrdinarySaved")); } }
 bool FVaRestM5EndpointPIE::RunTest(const FString& Parameters)
 {
-    if (!VaRestM5EndpointPIE::Dedicated() || Parameters!=TEXT("ColdSaved")) { AddError(TEXT("Dedicated real Editor PIE flags required; EndpointsExit forbidden"));return false; }
+    if (!VaRestM5EndpointPIE::Dedicated() || Parameters!=TEXT("OrdinarySaved")) { AddError(TEXT("Dedicated real Editor PIE flags required; EndpointsExit forbidden"));return false; }
     auto Run=MakeShared<VaRestM5EndpointPIE::FRun>(*this);if (!Run->Inspect()) return false;
     FAutomationTestFramework::Get().EnqueueLatentCommand(Run);return true;
 }
