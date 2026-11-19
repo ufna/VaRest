@@ -37,6 +37,7 @@ public class VaRestEditor : ModuleRules
                 "Slate",
                 "SlateCore",
                 "InputCore",
+                "HTTP",
                 "AssetTools",
                 "AssetRegistry",
                 "UnrealEd",     // for FAssetEditorManager

@@ -1,5 +1,21 @@
 # VaRest 2.0 release program ledger (controller-level; per-plan ledgers live in sibling dirs)
 
+Source424 finite M6 test link-dependency correction (UNBUILT/UNRUN):
+actual Source423 native exited6 after both plugin Compile actions and the Tests
+Link succeeded; Editor Link reported undefined FHttpModule::Get at the new
+legacy request fixture line162. All26395 immutable guards remained unchanged.
+Root retains the failed interval and genuine missing Editor .so. Its exact
+three successful actions/seven products and two fresh .d records3759 unique
+inputs are separately recorded, including the actual Tests GNU pair; this is
+not a complete Source423 native pass and permits no runtime launch.
+
+Only add HTTP to existing VaRestEditor private module dependencies so UBT can
+link the direct fixture call. All Source423 C++/oracles/UHT types are unchanged.
+A fresh FULL Source424 graph and actual guarded plugin build must follow;
+link-only reuse is recorded honestly if the actual graph selects it. No object,
+cache, generated source, timestamp or missing image is manually restored. The
+five new Editor cases, M5/M6 and whole release Goal remain unqualified/open.
+
 Source423 M6 remaining acceptance cases (source checkpoint; UNBUILT/UNRUN):
 private automation adds public ApplyURL/actual LatentActionManager delivery,
 genuine native HTTP ConnectionError with per-Hub reachability, and actual owned
