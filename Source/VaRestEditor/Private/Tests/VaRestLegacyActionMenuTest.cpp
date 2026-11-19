@@ -14,6 +14,15 @@
 #include "VaRest_BreakJson.h"
 #include "VaRestJsonLibrary.h"
 #include "VaRestJsonObject.h"
+#include "BlueprintActionMenuUtils.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraphSchema_K2.h"
+#include "Engine/Blueprint.h"
+#include "GameFramework/Actor.h"
+#include "Kismet2/KismetEditorUtilities.h"
+#include "UObject/Package.h"
+#include "UObject/StrongObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
 
 namespace VaRestLegacyActionMenuTest
 {
@@ -82,6 +91,16 @@ bool FVaRestLegacyActionMenuTest::RunTest(const FString& Parameters)
  if (!Ok) return false;
 
  FBlueprintActionDatabase& Database=FBlueprintActionDatabase::Get();
+ TStrongObjectPtr<UBlueprint> PaletteBlueprint(FKismetEditorUtilities::CreateBlueprint(
+  AActor::StaticClass(),GetTransientPackage(),
+  MakeUniqueObjectName(GetTransientPackage(),UBlueprint::StaticClass(),TEXT("M6MenuContext")),BPTYPE_Normal));
+ if (!TestNotNull(TEXT("owned real palette Blueprint"),PaletteBlueprint.Get())) return false;
+ PaletteBlueprint->ClearFlags(RF_Standalone); PaletteBlueprint->SetFlags(RF_Transient);
+ ON_SCOPE_EXIT { Database.ClearAssetActions(PaletteBlueprint.Get()); };
+ if (!TestTrue(TEXT("real palette Blueprint has generated classes and a K2 event graph"),
+  PaletteBlueprint->Status!=BS_Error && PaletteBlueprint->GeneratedClass && PaletteBlueprint->SkeletonGeneratedClass
+  && PaletteBlueprint->UbergraphPages.Num()>0 && PaletteBlueprint->UbergraphPages[0]
+  && Cast<UEdGraphSchema_K2>(PaletteBlueprint->UbergraphPages[0]->GetSchema())!=nullptr)) return false;
  UBlueprintEditorSettings* Settings=GetMutableDefault<UBlueprintEditorSettings>();
  const bool SavedExpose=Settings->bExposeDeprecatedFunctions;
  ON_SCOPE_EXIT
@@ -128,10 +147,10 @@ bool FVaRestLegacyActionMenuTest::RunTest(const FString& Parameters)
   }
   Ok&=Check(TEXT("actual database"),Unfiltered);
 
-  FBlueprintActionFilter Filter;
+  FBlueprintActionContext Context;
+  Context.Blueprints.Add(PaletteBlueprint.Get());
   FBlueprintActionMenuBuilder Menu(FBlueprintActionMenuBuilder::DefaultConfig);
-  Menu.AddMenuSection(Filter);
-  Menu.RebuildActionList();
+  FBlueprintActionMenuUtils::MakePaletteMenu(Context,nullptr,Menu);
   Ok&=TestEqual(TEXT("default menu build completes synchronously"),Menu.GetNumPendingActions(),0);
   FObservedActions Visible;
   for (int32 Index=0;Index<Menu.GetNumActions();++Index)

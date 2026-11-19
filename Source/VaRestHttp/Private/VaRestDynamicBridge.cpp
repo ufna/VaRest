@@ -1,6 +1,7 @@
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 
 #include "VaRestDynamicBridge.h"
+#include "VaRestDynamicFileCleanup.h"
 #include "VaRestFrameDispatcher.h"
 #include "VaRestDynamicClosure.h"
 
@@ -12,11 +13,13 @@ struct FDynamicCompletionPayload
 	{
 		check(IsInGameThread());
 		Kernel.Reset(); // real finish/config/callback destruction happens here, never in the native producer
+		FileUse.Reset(); // only signals an already-selected native file cleanup job
 		Types.Reset();
 		auto Cleanup=MoveTemp(ActionCleanup);
 		if (Cleanup) Cleanup();
 	}
 	TUniqueFunction<void()> Kernel;
+	TSharedPtr<FDynamicFileUse,ESPMode::ThreadSafe> FileUse;
 	TUniqueFunction<void()> ActionCleanup;
 	TSharedPtr<FDynamicTypedState,ESPMode::ThreadSafe> Types;
 	bool bSelected=false;
@@ -67,6 +70,21 @@ bool FDynamicCompletion::BindWorkerOnGT(TUniqueFunction<void()>& Kernel)
 	const auto Owned=Payload.Pin();
 	if (!Owned || Owned->bSelected || !Kernel || Ticket->IsStopped()) return false;
 	Owned->bSelected=true; Owned->Kernel=MoveTemp(Kernel); return true;
+}
+bool FDynamicCompletion::SetCurrentFileUseOnGT(TSharedRef<FDynamicFileUse,ESPMode::ThreadSafe> Use)
+{
+	check(IsInGameThread());
+	const auto Owned=Payload.Pin();
+	if (!Owned || Owned->bSelected || Ticket->IsStopped()) return false;
+	Owned->FileUse=MoveTemp(Use); // an older physical tag still owns its own independent file
+	return true;
+}
+TSharedPtr<FDynamicFileUse,ESPMode::ThreadSafe> FDynamicCompletion::TakeCurrentFileUseOnGT(const FDynamicFileCleanupData* Expected)
+{
+	check(IsInGameThread());
+	const auto Owned=Payload.Pin();
+	if (!Owned || !Owned->bSelected || Ticket->IsStopped() || !Owned->FileUse || &Owned->FileUse->Data.Get()!=Expected) return nullptr;
+	return MoveTemp(Owned->FileUse);
 }
 void FDynamicCompletion::NotifyReadyFromWorker() { Ticket->NotifyReadyFromWorker(); }
 bool FDynamicCompletion::IsStopped() const { return Ticket->IsStopped(); }

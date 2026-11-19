@@ -1,5 +1,48 @@
 # VaRest 2.0 release program ledger (controller-level; per-plan ledgers live in sibling dirs)
 
+Source426 ordinary SaveTo native ownership and meaningful Blueprint palette context
+(combined source checkpoint; new C++ UNBUILT/UNRUN):
+
+Actual Source425 native passed, unforced23.404919765s, with26446 immutable inputs
+unchanged and five declared products (Root87bb6079). The one selected menu test
+then failed unforced32.062332145s: four errors, one retained startup warning,
+45031 protected inputs with only the two declared SDK metadata transitions.
+Both modes had database legacy0/old-nodes0/positive4/v2-custom1, while the final
+menu had no positive controls. Failed Rootda421e47 is retained as a failure.
+The installed SDK schema filter rejects every action with no Blueprint/graph
+context. The private test now supplies its own transient real K2 Blueprint to
+the actual standard palette API, preserving109 frozen metadata checks, both
+preference modes, exact legacy exclusion and all bridge/v2 positive controls.
+Four independently qualified Source424 HTTP/JSON cases carry; no repeat of the
+30-second Connection fixture is needed for this private menu correction.
+
+The M5 production change selects one native file-cleanup job before each actual
+ordinary dynamic SaveTo dispatch and its reentrant callouts. A separate last-use
+token only triggers the already selected native event. Physical dispatch and
+the actual decoder functor own use; the exchange keeps only an identity marker
+and weak observation. The terminal decoder is selected behind a preparation
+gate before EndWaits/trace/clock callouts; native file cleanup precedes its worker
+readiness handoff. Every disk entry refuses execution on GTK before marking native work performed.
+Admission requires actual multithreading and live scheduler workers, with checks
+again before physical Start; live unavailable admission uses terminal Config.
+The SDK ignores its high-level DoNotRunInsideBusyWait flag, so no guarantee is
+attributed to that flag. The rejected first source packet and candidate are
+retained UNADOPTED/UNBUILT. The revised graph exposes no task Wait handles and
+performs no Wait; its qualification remains scoped to a live native scheduler.
+Global scheduler stop/drain can refuse native cleanup and retain a file; full
+scheduler-shutdown cleanup is OPEN. No GTK/destructor file IO or fresh late
+cleanup selection is introduced. A failed fixture retains its actual owned
+state until native quiescence; it cannot free raw observation targets early.
+Focused opt-in Healthy, ClockStop and early MakeFinish CopyStop scenarios use
+three distinct fresh processes and actual owned files; none has run yet.
+
+This is the mapped ordinary-module contract. A retained frame ticket/shared
+pointer does not prove executable residency after unload. Full module-unload,
+all abandonment/cooked/platform/package gates, M7 adoption and the whole Goal
+remain OPEN. Fresh complete combined-source graph, full closure review, guarded
+native build and the selected runtime cases remain required. DOM stays default,
+Android selectors stay OFF, and owner deferrals persist.
+
 Source425 private menu-oracle correction (new CPP UNBUILT/UNRUN):
 actual Source424 native passed2/0 in23.852431232s with all26412 immutable inputs
 unchanged, fresh1.d3643 dependencies/oneGNU pair/SDK parents checked(919a8692).

@@ -7,6 +7,8 @@
 namespace VaRest::Http
 {
 class FDynamicFrameTicket;
+class FDynamicFileUse;
+struct FDynamicFileCleanupData;
 struct FDynamicCompletionPayload;
 class FDynamicTypedState;
 
@@ -21,6 +23,8 @@ public:
 	/** Select once, before terminal bookkeeping. Failure preserves Kernel; success never invokes it inline. */
 	bool DeferOnGT(TUniqueFunction<void()>& Kernel);
 	bool BindWorkerOnGT(TUniqueFunction<void()>& Kernel);
+	bool SetCurrentFileUseOnGT(TSharedRef<FDynamicFileUse,ESPMode::ThreadSafe> Use);
+	TSharedPtr<FDynamicFileUse,ESPMode::ThreadSafe> TakeCurrentFileUseOnGT(const FDynamicFileCleanupData* Expected);
 	void NotifyReadyFromWorker();
 	bool IsStopped() const;
 	void CancelOnGT();

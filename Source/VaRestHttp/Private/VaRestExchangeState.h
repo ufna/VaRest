@@ -32,6 +32,8 @@ namespace VaRest::Http
 	 * and ResponseFile are that dispatch's own (the probe is made per FVaRestTransportRequest), so a stale end is stamped
 	 * with its own transport times and deletes its own SaveTo file.
 	 */
+	class FDynamicFileUse;
+	struct FDynamicFileCleanupData;
 	struct FDispatchTag
 	{
 		int32 Attempt = 0;
@@ -39,6 +41,8 @@ namespace VaRest::Http
 		uint32 Serial = 0;
 		TSharedPtr<FVaRestTransportProbe, ESPMode::ThreadSafe> Probe;
 		FString ResponseFile;
+		bool bDynamicFilePreowned=false;
+		TSharedPtr<FDynamicFileUse,ESPMode::ThreadSafe> DynamicFileUse;
 	};
 
 	/**
@@ -144,6 +148,10 @@ namespace VaRest::Http
 		double LimiterWait = 0.0;
 		FVaRestHeaders AttemptHeaders;
 		FString TempFile;
+		/** Stable marker survives cleanup/weak expiry; Ex never strongly owns a native file-use token. */
+		FString DynamicPreownedFile;
+		uint32 DynamicFileSerial=0;
+		TWeakPtr<FDynamicFileCleanupData,ESPMode::ThreadSafe> DynamicFileData;
 		/** Managed current file's EXISTING finalization permission after its physical callback returns; GTK parked only. */
 		FNativeLogicalTailLease FileCleanup;
 		TSharedPtr<IVaRestTransportCall, ESPMode::ThreadSafe> TransportCall;

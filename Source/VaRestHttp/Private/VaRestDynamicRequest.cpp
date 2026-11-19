@@ -2,6 +2,8 @@
 
 #include "VaRestDynamicRequest.h"
 #include "VaRestDynamicBridge.h"
+#include "VaRestDynamicFileCleanup.h"
+#include "Misc/ScopeExit.h"
 #include "VaRestDynamicResultData.h"
 #include "VaRestFrameDispatcher.h"
 #include "VaRestClientState.h"
@@ -14,6 +16,8 @@
 #include "VaRestTraceExcerpts.h"
 #include "HAL/FileManager.h"
 #include "Tasks/Task.h"
+#include "Async/Fundamental/Scheduler.h"
+#include "HAL/PlatformProcess.h"
 #if WITH_DEV_AUTOMATION_TESTS
 #include "HAL/PlatformTLS.h"
 #endif
@@ -105,6 +109,7 @@ struct FNativeDynamicWork
 	void Run()
 	{
 		LLM_SCOPE_BYTAG(VaRest);
+		if (IsInGameThread() && (!Finish.TempFile.IsEmpty() || !Finish.SaveTo.IsEmpty() || Finish.bBodyInFile)) return; // no file IO or false work marker in SDK fallback
 		bDidRun=true;
 		const auto IsCanceled=[this] { return Abort->load(std::memory_order_relaxed) || Data->Completion->IsStopped(); };
 		const bool bCanceled=IsCanceled();
@@ -131,6 +136,7 @@ struct FNativeDynamicWork
 	{
 		// This task was selected and published on GTK together with the decoder, before any observed Stop. Its genuine
 		// decoder prerequisite separates file ownership; no GTK IO, destructor IO or new late worker is introduced.
+		if (IsInGameThread()) return; // not actual native cleanup, even if the decoder already consumed its path
 		bCleanupRan=true;
 		if (!bDidRun && !Finish.TempFile.IsEmpty()) IFileManager::Get().Delete(*Finish.TempFile,false,false,true);
 	}
@@ -163,6 +169,61 @@ struct FOrdinaryDynamicPending
 	double StartedAt=-1;
 	bool bTimeDecode=false,bConsumed=false;
 };
+}
+
+FDynamicFileCleanupData::FDynamicFileCleanupData(FString InPath,uint64 InRequest,uint32 InSerial,
+	TSharedRef<FDynamicCompletion,ESPMode::ThreadSafe> InCompletion)
+	: Path(MoveTemp(InPath)),Request(InRequest),Serial(InSerial),Completion(MoveTemp(InCompletion)),Released(TEXT("VaRest.DynamicFileReleased")) {}
+FDynamicFileCleanupData::~FDynamicFileCleanupData() = default;
+FDynamicFileUse::~FDynamicFileUse() { Data->Released.Trigger(); } // no IO, lookup, Launch or GT handback
+
+bool FDynamicRequestAccess::CanUseFileWorkersOnGT()
+{
+	check(IsInGameThread());
+	return FPlatformProcess::SupportsMultithreading() && LowLevelTasks::FScheduler::Get().GetNumWorkers()>0;
+}
+
+bool FDynamicRequestAccess::SelectFileCleanupOnGT(const FVaRestExchangeRef& Exchange,FDispatchTag& Dispatch,bool& bStopped)
+{
+	check(IsInGameThread());
+	auto& Ex=Internals(*Exchange);
+	auto& Handler=static_cast<TResultHandler<FVaRestDynamicResult>&>(*Ex.Handler);
+	const auto Completion=Handler.Data->Completion;
+	bStopped=!Completion || Completion->IsStopped() || FClientState::IsShuttingDown();
+	if (bStopped || !CanUseFileWorkersOnGT()) return false;
+	const auto Data=MakeShared<FDynamicFileCleanupData,ESPMode::ThreadSafe>(FString(Dispatch.ResponseFile),Ex.RequestId,Dispatch.Serial,Completion.ToSharedRef());
+	const auto Use=MakeShared<FDynamicFileUse,ESPMode::ThreadSafe>(Data);
+	// Never captures Use: token destruction triggers this already-selected native job without a cycle.
+	UE::Tasks::Launch(TEXT("VaRest.DynamicDecodeFileCleanup"),[Data] {
+		LLM_SCOPE_BYTAG(VaRest);
+		if (IsInGameThread()) return; // unsupported global-scheduler fallback is not native cleanup
+#if WITH_DEV_AUTOMATION_TESTS
+		Data->FinalObservation.State->Thread.store(FPlatformTLS::GetCurrentThreadId(),std::memory_order_relaxed);
+		Data->FinalObservation.State->OnGT.store(IsInGameThread(),std::memory_order_relaxed);
+		Data->FinalObservation.State->Ran.store(true,std::memory_order_release);
+#endif
+		if (Data->Worker) Data->Worker->Work->CleanupDroppedFile();
+		else IFileManager::Get().Delete(*Data->Path,false,false,true);
+		Data->Worker.Reset(); // SAME terminal Worker publishes readiness only after actual cleanup
+#if WITH_DEV_AUTOMATION_TESTS
+		Data->FinalObservation.State->Ended.store(true,std::memory_order_release);
+#endif
+	},UE::Tasks::Prerequisites(Data->Released),UE::Tasks::ETaskPriority::Normal,UE::Tasks::EExtendedTaskPriority::None);
+	if (!Completion->SetCurrentFileUseOnGT(Use))
+	{ bStopped=Completion->IsStopped() || FClientState::IsShuttingDown();return false; }
+	Dispatch.DynamicFileUse=Use;
+	Dispatch.bDynamicFilePreowned=true;
+	Ex.DynamicPreownedFile=Dispatch.ResponseFile;
+	Ex.DynamicFileSerial=Dispatch.Serial;
+	Ex.DynamicFileData=Data;
+	return true;
+}
+
+bool FDynamicRequestAccess::FileCleanupIsStoppedOnGT(const FDispatchTag& Dispatch)
+{
+	check(IsInGameThread());
+	return Dispatch.bDynamicFilePreowned && (!Dispatch.DynamicFileUse ||
+		Dispatch.DynamicFileUse->Data->Completion->IsStopped() || FClientState::IsShuttingDown());
 }
 
 TResultHandler<FVaRestDynamicResult>::TResultHandler() : Data(MakeShared<FDynamicHandlerData,ESPMode::ThreadSafe>()) {}
@@ -415,27 +476,50 @@ void FDynamicRequestAccess::BeginNativeDecodeOnGT(const FVaRestExchangeRef& Exch
 		Returned.bLaterFramePending=false; Returned.bLaterFrameReady=true;
 		if (Returned.State) Returned.State->Complete(Exchange,MoveTemp(Done));
 	};
-	if (!Completion || !Completion->BindWorkerOnGT(Resume)) return; // Pending's real GTK destructor performs silent bookkeeping
-	Ex.State->EndWaits(Ex); // callback ownership was installed BEFORE reentrant cancellation/shutdown
+	if (!Completion || !Completion->BindWorkerOnGT(Resume)) return; // any existing file already has native cleanup
+	const auto MakeWorker=[&] {
+		const auto Worker=MakeShared<FNativeDynamicWorker,ESPMode::ThreadSafe>();
+		Worker->Work=Work; Worker->Completion=Completion;
+#if WITH_DEV_AUTOMATION_TESTS
+		Work->StopIdentity={VaRest::ModuleStopTest::ERoute::Ordinary,Ex.RequestId,Ex.ClientId,0,0,0,
+			static_cast<uint64>(reinterpret_cast<UPTRINT>(&Worker.Get()))};
+		Worker->StopProbe=Handler.Data->StopProbe; Worker->StopIdentity=Work->StopIdentity;
+#endif
+		return Worker;
+	};
+	TOptional<UE::Tasks::FTaskEvent> FilePreparation;
+	ON_SCOPE_EXIT { if (FilePreparation) FilePreparation->Trigger(); };
+	const bool bFileCleanup=!Work->Finish.TempFile.IsEmpty();
+	if (bFileCleanup)
+	{
+		const auto FileData=Ex.DynamicFileData.Pin();
+		auto Use=FileData ? Completion->TakeCurrentFileUseOnGT(FileData.Get()) : nullptr;
+		if (!FileData || !Use || FileData->Path!=Work->Finish.TempFile || FileData->Serial!=Ex.DynamicFileSerial || FileData->Worker)
+		{ Completion->CancelOnGT();return; }
+		FilePreparation.Emplace(TEXT("VaRest.DynamicFilePreparation"));
+		const auto PublishingUse=Use; // bars Trigger even if the decoder functor is discarded during publication
+		(void)PublishingUse;
+		const auto Worker=MakeWorker();
+		// File use is ONLY in this actual decoder functor, never Work or cleanup-job data.
+		const auto DecodeTask=UE::Tasks::Launch(TEXT("VaRest.DynamicDecode"),[Worker,Use=MoveTemp(Use)] { (void)Use;Worker->Work->Run(); },
+			UE::Tasks::Prerequisites(FilePreparation.GetValue()),UE::Tasks::ETaskPriority::Normal,UE::Tasks::EExtendedTaskPriority::None);
+		FileData->Released.AddPrerequisites(UE::Tasks::Prerequisites(DecodeTask));
+		FileData->Worker=Worker; // GT tag/local ownership still bars Trigger; no concurrent Finish access
+#if !UE_BUILD_SHIPPING
+		++Testing::Counters().DecodeTasksLaunched;
+#endif
+	}
+	Ex.State->EndWaits(Ex); // both file jobs are selected BEFORE this first reentrant callout
 	if (Completion->IsStopped() || FClientState::IsShuttingDown() || Ex.bFinished) return;
-	Excerpts::EmitOnDecode(Work->Finish); // raw entity is still intact; no worker service lookup/late callback publication
+	Excerpts::EmitOnDecode(Work->Finish);
 	if (Pending->bTimeDecode && Pending->Clock) Pending->StartedAt=Pending->Clock->Now();
 	if (Completion->IsStopped() || FClientState::IsShuttingDown() || Ex.bFinished) return;
-	const auto Worker=MakeShared<FNativeDynamicWorker,ESPMode::ThreadSafe>();
-	Worker->Work=Work; Worker->Completion=Completion;
-#if WITH_DEV_AUTOMATION_TESTS
-	Work->StopIdentity={VaRest::ModuleStopTest::ERoute::Ordinary,Ex.RequestId,Ex.ClientId,0,0,0,
-		static_cast<uint64>(reinterpret_cast<UPTRINT>(&Worker.Get()))};
-	Worker->StopProbe=Handler.Data->StopProbe; Worker->StopIdentity=Work->StopIdentity;
-#endif
+	if (bFileCleanup) return; // scope exit releases the already-selected graph after GTK preparation
+	const auto Worker=MakeWorker();
 #if !UE_BUILD_SHIPPING
 	++Testing::Counters().DecodeTasksLaunched;
 #endif
-	const bool bFileCleanup=!Work->Finish.TempFile.IsEmpty(); // before the first worker can mutate native Finish
-	const auto DecodeTask=UE::Tasks::Launch(TEXT("VaRest.DynamicDecode"),[Worker] { Worker->Work->Run(); });
-	if (bFileCleanup)
-		UE::Tasks::Launch(TEXT("VaRest.DynamicDecodeFileCleanup"),[Worker] { Worker->Work->CleanupDroppedFile(); },UE::Tasks::Prerequisites(DecodeTask));
-	// Worker is retained by both native tasks and this GTK publication stack. Only their actual last use signals the frame.
+	UE::Tasks::Launch(TEXT("VaRest.DynamicDecode"),[Worker] { Worker->Work->Run(); });
 }
 }
 

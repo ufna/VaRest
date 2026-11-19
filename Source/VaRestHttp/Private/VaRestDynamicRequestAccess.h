@@ -8,6 +8,7 @@
 namespace VaRest::Http
 {
 class FDynamicCompletion;
+struct FDispatchTag;
 /** Internal preparation only; no private spec exposure or public arbitrary handler replacement. */
 struct FDynamicRequestAccess
 {
@@ -42,6 +43,10 @@ struct FDynamicRequestAccess
   TSharedRef<VaRest::ModuleStopTest::INativeProbe, ESPMode::ThreadSafe> Probe);
  static TSharedPtr<FDynamicCompletion, ESPMode::ThreadSafe> CompletionForStopTestOnGT(TVaRestRequest<FVaRestDynamicResult>& Request);
 #endif
+	/** Before physical Start/callouts, select this ordinary dynamic file's native cleanup. */
+	static bool CanUseFileWorkersOnGT();
+	static bool SelectFileCleanupOnGT(const FVaRestExchangeRef& Exchange,FDispatchTag& Dispatch,bool& bStopped);
+	static bool FileCleanupIsStoppedOnGT(const FDispatchTag& Dispatch);
 	static void BeginNativeDecodeOnGT(const FVaRestExchangeRef& Exchange,FFinish&& Finish);
 	static bool ValidateOnGT(TVaRestRequest<FVaRestDynamicResult>& Request,FString& Error)
 	{

@@ -593,9 +593,9 @@ namespace VaRest::Http::PipelinePrivate
 				if (!Ex.TempFile.IsEmpty())
 				{
 					// An earlier attempt's file; removed off the game thread (spec 1: disk IO on UE::Tasks)
-					if (!ManagedPayload)
+					if (!ManagedPayload && Ex.DynamicPreownedFile!=Ex.TempFile)
 						UE::Tasks::Launch(TEXT("VaRest.DeleteTemp"), [Stale = Ex.TempFile] { IFileManager::Get().Delete(*Stale, false, false, true); });
-					else if (Ex.FileCleanup.IsHeld())
+					else if (ManagedPayload && Ex.FileCleanup.IsHeld())
 						DeleteManagedTemp(MoveTemp(Ex.FileCleanup), FString(Ex.TempFile));
 					// Otherwise its physical callback/owned IO still holds the earlier file's preadmitted cleanup.
 				}
@@ -665,6 +665,27 @@ namespace VaRest::Http::PipelinePrivate
 			ThisDispatch.Serial = ++Ex.DispatchCount;
 			ThisDispatch.Probe = Request.Probe;
 			ThisDispatch.ResponseFile = Ex.TempFile;
+			const auto RefuseUnstartedDynamicFile=[&] {
+				Ex.TempFile.Reset(); // this newly chosen name has never reached physical Start
+				FVaRestAttemptOutcome Refused;
+				Refused.Failure=EVaRestTransportFailure::Other;
+				Refused.FailureDetail=TEXT("DispatchCapacity"); // existing Config/nonretry classification
+				Refused.FailureMessage=TEXT("ordinary dynamic SaveTo requires a live multithreaded native scheduler");
+				OnOutcome(MoveTemp(Refused));
+			};
+			bool bFileCleanupStopped=false;
+			if (!ManagedPayload && !ThisDispatch.ResponseFile.IsEmpty() && Ex.Handler &&
+				Ex.Handler->GetCompletionPolicy()==EResultCompletionPolicy::LaterFrame &&
+				!FDynamicRequestAccess::SelectFileCleanupOnGT(Exchange,ThisDispatch,bFileCleanupStopped))
+			{
+				if (bFileCleanupStopped)
+				{
+					Ex.TempFile.Reset();
+					Ex.State->DropDeferredDynamicCompletion(Exchange);
+				}
+				else RefuseUnstartedDynamicFile(); // a live unavailable worker is an observable finite Config failure
+				return;
+			}
 			std::optional<FManagedDispatchPreparation> Prepared;
 			if (ManagedPayload)
 			{
@@ -688,6 +709,16 @@ namespace VaRest::Http::PipelinePrivate
 			TracePoints::AttemptDispatched(Ex, Dispatch);
 			if (IsManagedStopped(Exchange))
 				return;
+			if (FDynamicRequestAccess::FileCleanupIsStoppedOnGT(ThisDispatch))
+			{
+				if (!Ex.bFinished) Ex.State->DropDeferredDynamicCompletion(Exchange);
+				return;
+			}
+			if (ThisDispatch.bDynamicFilePreowned && !FDynamicRequestAccess::CanUseFileWorkersOnGT())
+			{
+				RefuseUnstartedDynamicFile();
+				return;
+			}
 			// The gap was this attempt's; the next one reports its own (IN-2), and so its own wait behind a refresh
 			Ex.NextGap = EVaRestTraceGap::None;
 			Ex.NextGapSeconds = 0.0;
@@ -727,6 +758,16 @@ namespace VaRest::Http::PipelinePrivate
 			Ex.Config->Clock->ClearTimer(Ex.ProgressTimer);
 			if (IsManagedStopped(Exchange))
 				return;
+			if (FDynamicRequestAccess::FileCleanupIsStoppedOnGT(ThisDispatch))
+			{
+				if (!Ex.bFinished) Ex.State->DropDeferredDynamicCompletion(Exchange);
+				return;
+			}
+			if (ThisDispatch.bDynamicFilePreowned && !FDynamicRequestAccess::CanUseFileWorkersOnGT())
+			{
+				RefuseUnstartedDynamicFile();
+				return;
+			}
 			if (Prepared && (IsManagedClosed(Exchange) || Ex.IsCancelRequested() || Ex.bFinished || Ex.bCompletionQueued ||
 								Ex.Phase != EVaRestExchangePhase::InChain))
 			{
@@ -984,6 +1025,13 @@ bool VaRest::Http::FClientState::Resolve(FExchangeState& Exchange, FString& OutE
 	}
 	AppendQuery(Resolved, Exchange.Query);
 	Exchange.Url = MoveTemp(Resolved);
+	if (!Exchange.Managed.IsValid() && !Exchange.SaveTo.IsEmpty() && Exchange.Handler &&
+		Exchange.Handler->GetCompletionPolicy()==EResultCompletionPolicy::LaterFrame &&
+		!FDynamicRequestAccess::CanUseFileWorkersOnGT())
+	{
+		OutError=TEXT("ordinary dynamic SaveTo requires a live multithreaded native scheduler");
+		return false; // existing Resolve Config/later-frame path, before any temp name or physical Start
+	}
 
 	// Client defaults, then the request's own: they win whatever the case of the name (spec 3.2: "Every content type can be overridden with Header")
 	Exchange.RequestHeaders = Cfg.DefaultHeaders;
@@ -1299,7 +1347,7 @@ void VaRest::Http::FClientState::OnAttemptDone(const FVaRestExchangeRef& Exchang
 			check(FileCleanup.IsHeld());
 			DeleteManagedTemp(MoveTemp(FileCleanup), MoveTemp(Tag.ResponseFile));
 		}
-		else
+		else if (!Tag.bDynamicFilePreowned)
 			UE::Tasks::Launch(TEXT("VaRest.DeleteTemp"), [Stale = MoveTemp(Tag.ResponseFile)] { IFileManager::Get().Delete(*Stale, false, false, true); });
 	}
 	FVaRestAttemptOutcome Outcome;
@@ -1342,12 +1390,20 @@ void VaRest::Http::FClientState::OnChainDone(const FVaRestExchangeRef& Exchange,
 				if (Ex.FileCleanup.IsHeld())
 					DeleteManagedTemp(MoveTemp(Ex.FileCleanup), FString(Ex.TempFile));
 			}
-			else
+			else if (Ex.DynamicPreownedFile!=Ex.TempFile)
 				UE::Tasks::Launch(TEXT("VaRest.DeleteTemp"), [Stale = Ex.TempFile] { IFileManager::Get().Delete(*Stale, false, false, true); });
 		}
 		return;
 	}
 	FFinish Finish = MakeFinish(Ex);
+	// Copying caller-owned DecodeOptions can reenter shutdown or accept a different outcome.
+	// A dynamic file already has its selected owner; this stack must not reuse a retired handler.
+	if (Ex.DynamicPreownedFile==Finish.TempFile && !Finish.TempFile.IsEmpty() &&
+		(IsShuttingDown() || Ex.bFinished || Ex.bCompletionQueued || !Ex.Handler || Ex.Phase!=EVaRestExchangePhase::InChain))
+	{
+		if (IsShuttingDown() && !Ex.bFinished) DropDeferredDynamicCompletion(Exchange);
+		return;
+	}
     if (Outcome.bQueued)
     {
         Finish.bQueued = true;
