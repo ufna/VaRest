@@ -42,8 +42,9 @@ public class VaRestWebSocket : ModuleRules
 		// dependencies): static OpenSSL, libwebsockets and zlib, one copy per module in modular builds (spec 1.2)
 		//419 external C labels isolate this archive from the Engine LWS copy even in monolithic Game.
 		// EditorDevelopment modular is qualified; ordinary Game Dev/Shipping qualification is a separate gate.
-		// Multi-architecture, merged, other platforms/configurations and precompiled WS remain outside this tranche.
-		bool bPrivateLws = Target.Platform == UnrealTargetPlatform.Linux
+		// Android qualification is a separate explicit default-OFF source opt-in; no UE/device support follows from selection.
+		// Unsupported architectures/tuples, merged and precompiled private WS remain outside this tranche.
+		bool bLinuxPrivateLws = Target.Platform == UnrealTargetPlatform.Linux
 			&& Target.Architecture == UnrealArch.X64
 			&& !Target.bMergeModules
 			&& ((Target.Type == TargetType.Editor
@@ -52,12 +53,23 @@ public class VaRestWebSocket : ModuleRules
 				|| (Target.Type == TargetType.Game
 					&& (Target.Configuration == UnrealTargetConfiguration.Development || Target.Configuration == UnrealTargetConfiguration.Shipping)
 					&& Target.LinkType == TargetLinkType.Monolithic));
+		bool bAndroidPrivateLws = Target.Platform == UnrealTargetPlatform.Android && VaRestPrivateLws.AndroidQualificationOptIn;
+		if (bAndroidPrivateLws && !VaRestPrivateLws.IsAndroidQualificationTuple(Target))
+		{
+			throw new BuildException("Android private LWS qualification requires Game ARM64 Development/Shipping monolithic, non-merged source builds; no fallback for an explicit unsupported opt-in.");
+		}
+		bool bPrivateLws = bLinuxPrivateLws || bAndroidPrivateLws;
 		PrivateDefinitions.Add("VAREST_USE_PRIVATE_LWS3=" + (bPrivateLws ? "1" : "0"));
 		if (bPrivateLws)
 		{
 			if (bUsePrecompiled)
 			{
 				throw new BuildException("VaRest private LWS requires a fresh source-built WS module; precompiled WS is not qualified.");
+			}
+			if (bAndroidPrivateLws)
+			{
+				PrivateDefinitions.Add("VAREST_PRIVATE_ANDROID_ARM64_LWS_SOURCE_OPT_IN=1");
+				PrivateDefinitions.Add("VAREST_ENABLE_ANDROID_PRIVATE_DNS=1");
 			}
 			PrivateDependencyModuleNames.Add("VaRestPrivateLws");
 			AddEngineThirdPartyPrivateStaticDependencies(Target, "OpenSSL", "zlib");
@@ -70,7 +82,7 @@ public class VaRestWebSocket : ModuleRules
 
 		// WITH_DEV_AUTOMATION_TESTS is normally enabled in Development. Discovery still requires a dedicated
 		// -VaRestCookedCoexistFixture -unattended -nowrite process; Shipping and Editor do not gain this dependency.
-		bool bCookedCoexistTests = bPrivateLws && Target.Type == TargetType.Game
+		bool bCookedCoexistTests = bLinuxPrivateLws && Target.Type == TargetType.Game
 			&& Target.Configuration == UnrealTargetConfiguration.Development && !Target.bForceDisableAutomationTests;
 		PrivateDefinitions.Add("VAREST_COOKED_COEXIST_TESTS=" + (bCookedCoexistTests ? "1" : "0"));
 		if (bCookedCoexistTests)

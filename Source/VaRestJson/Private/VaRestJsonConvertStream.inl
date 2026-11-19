@@ -102,9 +102,9 @@ struct FStreamTape
 		if (!Budget.ChargeProduct(Next, sizeof(T), 0, 0)) return false;
 		Items.Reserve(Next); Capacity = Next; return true;
 	}
-	bool Append(FStreamTapeEvent Event)
+	bool Append(FStreamTapeEvent Event, int64 Work = 1)
 	{
-		if (!Budget.Charge(0, 1, 1) || !ReserveForAppend(Events, EventCapacity)) return false;
+		if (!Budget.Charge(0, 1, Work) || !ReserveForAppend(Events, EventCapacity)) return false;
 		Events.Add(Event); return true;
 	}
 	bool Unsigned(EStreamTapeKind Kind, uint64 Value = 0)
@@ -120,8 +120,7 @@ struct FStreamTape
 		const UPTRINT Offset = Pointer - Base;
 		if (Offset >= static_cast<UPTRINT>(Input.Num()) || uint64(Length) > uint64(Input.Num()) - Offset - 1) return false;
 		if (Kind != EStreamTapeKind::RawNumber && Input[static_cast<int32>(Offset + Length)] != 0) return false;
-		if (!Budget.Charge(0, 0, Length)) return false;
-		FStreamTapeEvent Event{}; Event.Kind = Kind; Event.Text = {static_cast<uint32>(Offset), Length}; return Append(Event);
+		FStreamTapeEvent Event{}; Event.Kind = Kind; Event.Text = {static_cast<uint32>(Offset), Length}; return Append(Event, int64(Length) + 1);
 	}
 	bool AddContainerCount(int32& Index)
 	{
@@ -148,14 +147,13 @@ struct FPreflight
 	};
 	FPlan& Plan;
 	const UScriptStruct* Root;
-	FJsonBudget Budget;
 	FStreamTape& Tape;
 	TArray<FFrame, TInlineAllocator<16>> Frames;
 	FUtf8Scratch Scratch;
 	bool bRoot = true, bFallback = false;
-	FPreflight(FPlan& InPlan, const UScriptStruct* InRoot, int64 Bytes, FStreamTape& InTape)
-		: Plan(InPlan), Root(InRoot), Budget({0, InPlan.Options.MaxValues, InPlan.Options.MaxWorkUnits}), Tape(InTape)
-	{ Budget.Charge(0, 0, Bytes); }
+	// The caller-limit guard admits only all-zero options; the finite Tape account owns scratch admission.
+	FPreflight(FPlan& InPlan, const UScriptStruct* InRoot, FStreamTape& InTape)
+		: Plan(InPlan), Root(InRoot), Tape(InTape) {}
 	const FProperty* Slot()
 	{
 		if (Frames.IsEmpty()) return nullptr;
@@ -164,7 +162,7 @@ struct FPreflight
 		if (Parent.Map) return Parent.Map->ValueProp;
 		const auto* Out = Parent.Pending; Parent.Pending = nullptr; return Out;
 	}
-	bool Scalar() { Slot(); bRoot = false; return Budget.Charge(0, 1, 1); }
+	bool Scalar() { Slot(); bRoot = false; return true; }
 	bool Null() { return Scalar() && Tape.Unsigned(EStreamTapeKind::Null); }
 	bool Bool(bool Value) { return Scalar() && Tape.Unsigned(EStreamTapeKind::Bool, Value ? 1u : 0u); }
 	bool Int(int Value) { return Int64(Value); }
@@ -176,7 +174,7 @@ struct FPreflight
 	bool String(const char* Text, rapidjson::SizeType Length, bool) { return Scalar() && Tape.Text(EStreamTapeKind::String, Text, Length); }
 	bool Key(const char* Text, rapidjson::SizeType Length, bool)
 	{
-		if (!Budget.Charge(0, 1, 1) || Frames.IsEmpty() || !Tape.Text(EStreamTapeKind::Key, Text, Length)) return false;
+		if (Frames.IsEmpty() || !Tape.Text(EStreamTapeKind::Key, Text, Length)) return false;
 		auto& Frame = Frames.Last(); if (!Frame.Fields) return true;
 		const FUtf8StringView Name(reinterpret_cast<const UTF8CHAR*>(Text), static_cast<int32>(Length));
 		const int32 Index = MatchNextField(*Frame.Fields,Name,Frame.LastField+1,Scratch);
@@ -189,7 +187,7 @@ struct FPreflight
 	}
 	bool Begin(bool bObject)
 	{
-		if (!Budget.Charge(0, 1, 1) || Frames.Num() >= MaxDepth || !Tape.Unsigned(bObject ? EStreamTapeKind::Object : EStreamTapeKind::Array)) return false;
+		if (Frames.Num() >= MaxDepth || !Tape.Unsigned(bObject ? EStreamTapeKind::Object : EStreamTapeKind::Array)) return false;
 		const bool bWasRoot = bRoot; const auto* Property = Slot(); bRoot = false;
 		FFrame Frame; Frame.bObject = bObject;
 		if (bObject)
@@ -209,13 +207,13 @@ struct FPreflight
 	{
 		if (Frames.IsEmpty()) return false;
 		if (Frames.Last().CountIndex!=INDEX_NONE) Tape.ContainerCounts[Frames.Last().CountIndex]=Count;
-		Frames.Pop(EAllowShrinking::No); return Budget.Charge(0, 0, 1) && Tape.Unsigned(EStreamTapeKind::EndObject, Count);
+		Frames.Pop(EAllowShrinking::No); return Tape.Unsigned(EStreamTapeKind::EndObject, Count);
 	}
 	bool EndArray(rapidjson::SizeType Count)
 	{
 		if (Frames.IsEmpty()) return false;
 		if (Frames.Last().CountIndex!=INDEX_NONE) Tape.ContainerCounts[Frames.Last().CountIndex]=Count;
-		Frames.Pop(EAllowShrinking::No); return Budget.Charge(0, 0, 1) && Tape.Unsigned(EStreamTapeKind::EndArray, Count);
+		Frames.Pop(EAllowShrinking::No); return Tape.Unsigned(EStreamTapeKind::EndArray, Count);
 	}
 };
 
@@ -457,13 +455,13 @@ bool FVaRestJsonConvert::Utf8ToStructStreaming(TConstArrayView<uint8> Utf8, cons
 	FStreamTape Tape(Utf8);
 	if (Tape.Budget.HasFailed()) { Tape.Reset(); return Fallback(); }
 	const int64 Start = BomLength(Utf8.GetData(), Utf8.Num());
-	FPreflight Probe(Plan, Struct, Utf8.Num(), Tape);
+	FPreflight Probe(Plan, Struct, Tape);
 	bool Validated = false;
 	{
 		rapidjson::InsituStringStream Stream(reinterpret_cast<char*>(Tape.Input.GetData() + Start));
 		UE::Json::Private::FAllocatorImpl Allocator; FReader Reader(&Allocator);
 		const auto Result = Reader.Parse<StreamFlags | rapidjson::kParseInsituFlag>(Stream, Probe);
-		Validated = !Result.IsError() && Start + static_cast<int64>(Stream.Tell()) == Utf8.Num() && !Probe.bFallback && !Probe.Budget.HasFailed() && !Tape.Budget.HasFailed();
+		Validated = !Result.IsError() && Start + static_cast<int64>(Stream.Tell()) == Utf8.Num() && !Probe.bFallback && !Tape.Budget.HasFailed();
 	} // Every captured text offset refers to Tape.Input; no reader stack storage survives validation.
 	if (!Validated) { Tape.Reset(); return Fallback(); }
 	// Full syntax/shape/scratch admission precedes all destination writes. Replay never reparses or restores Input.

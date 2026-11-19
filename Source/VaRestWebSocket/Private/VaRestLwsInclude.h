@@ -23,7 +23,9 @@ THIRD_PARTY_INCLUDES_START
 #if defined(LIBWEBSOCKET_H_3060898B846849FF9F88F5DB59B5950C)
 #error "An LWS header preceded the private VaRest LWS include; inspect the actual PCH/unity include closure."
 #endif
+#if !PLATFORM_ANDROID
 #include "VaRestPrivateLws/varest_external_names.h"
+#endif
 #include "VaRestPrivateLws/libwebsockets.h"
 #else
 #include "libwebsockets.h"
@@ -40,6 +42,10 @@ THIRD_PARTY_INCLUDES_START
 #include <openssl/x509v3.h>
 THIRD_PARTY_INCLUDES_END
 #undef UI
+
+#if PLATFORM_ANDROID && defined(VAREST_USE_PRIVATE_LWS3) && VAREST_USE_PRIVATE_LWS3
+#include "VaRestPrivateLws/varest_cpp_api.h"
+#endif
 
 #if PLATFORM_WINDOWS
 #include "Windows/HideWindowsPlatformTypes.h"
