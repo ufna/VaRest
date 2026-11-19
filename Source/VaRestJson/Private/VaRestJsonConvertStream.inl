@@ -121,13 +121,23 @@ static_assert(alignof(FStreamTapeEvent) == alignof(uint64), "streaming tape alig
 static_assert(STRUCT_OFFSET(FStreamTapeEvent, Kind) == 8 && STRUCT_OFFSET(FStreamTapeEvent, bStructKey) == 9 &&
 	STRUCT_OFFSET(FStreamTapeEvent, FieldIndex) == 12, "key selection fits the existing 16-byte event");
 struct FDecoder;
+constexpr int32 StreamTapeRecordSize(EStreamTapeKind Kind)
+{
+	// In-process native payload bits; every unaligned access below uses Memcpy.
+	constexpr uint8 Sizes[] = {1, 2, 9, 9, 9, 9, 14, 9, 1, 1, 1, 1};
+	static_assert(UE_ARRAY_COUNT(Sizes) == static_cast<uint8>(EStreamTapeKind::EndArray) + 1);
+	const uint8 Index = static_cast<uint8>(Kind);
+	return Index < static_cast<int32>(UE_ARRAY_COUNT(Sizes)) ? Sizes[Index] : 0;
+}
+static_assert(sizeof(int64) == 8 && sizeof(uint64) == 8 && sizeof(double) == 8 && sizeof(uint32) == 4);
+static_assert(StreamTapeMaxEvents <= MAX_int32 / sizeof(FStreamTapeEvent));
 struct FStreamTape
 {
 	FJsonBudget Budget{{StreamTapeMaxRequestedBytes, StreamTapeMaxEvents, StreamTapeMaxWork}};
 	TArray<uint8> Input;
-	TArray<FStreamTapeEvent> Events;
+	TArray<uint8> Events;
 	TArray<uint32> ContainerCounts;
-	int32 EventCapacity = 0, CountCapacity = 0;
+	int32 EventCapacity = 0, CountCapacity = 0, EventCount = 0, LastEventOffset = INDEX_NONE;
 	explicit FStreamTape(TConstArrayView<uint8> Utf8)
 	{
 		if (!Budget.Charge(int64(Utf8.Num()) + 1, 0, Utf8.Num())) return;
@@ -144,10 +154,51 @@ struct FStreamTape
 		if (!Budget.ChargeProduct(Next, sizeof(T), 0, 0)) return false;
 		Items.Reserve(Next); Capacity = Next; return true;
 	}
+	bool ReserveEvent()
+	{
+		if (EventCount < EventCapacity) return true;
+		if (EventCapacity >= StreamTapeMaxEvents) return false;
+		const int32 Next = static_cast<int32>(FMath::Min(StreamTapeMaxEvents, FMath::Max(int64(8), int64(EventCapacity) * 2)));
+		// Preserve the old WHOLE-growth 16-byte/event charge and conservative reserve.
+		// Written/replayed bytes are packed; allocated capacity is not a reduced-memory claim.
+		if (!Budget.ChargeProduct(Next, sizeof(FStreamTapeEvent), 0, 0)) return false;
+		Events.Reserve(Next * static_cast<int32>(sizeof(FStreamTapeEvent))); EventCapacity = Next; return true;
+	}
 	bool Append(FStreamTapeEvent Event, int64 Work = 1)
 	{
-		if (!Budget.Charge(0, 1, Work) || !ReserveForAppend(Events, EventCapacity)) return false;
-		Events.Add(Event); return true;
+		const int32 Bytes = StreamTapeRecordSize(Event.Kind);
+		if (!Bytes || !Budget.Charge(0, 1, Work) || !ReserveEvent()) return false;
+		const int32 Offset = Events.Num();
+		Events.SetNumUninitialized(Offset + Bytes);
+		uint8* Record = Events.GetData() + Offset;
+		Record[0] = static_cast<uint8>(Event.Kind);
+		switch (Event.Kind)
+		{
+		case EStreamTapeKind::Bool: Record[1] = Event.Unsigned != 0 ? 1 : 0; break;
+		case EStreamTapeKind::Int64: FMemory::Memcpy(Record + 1, &Event.Signed, sizeof(Event.Signed)); break;
+		case EStreamTapeKind::Uint64: FMemory::Memcpy(Record + 1, &Event.Unsigned, sizeof(Event.Unsigned)); break;
+		case EStreamTapeKind::Double: FMemory::Memcpy(Record + 1, &Event.Number, sizeof(Event.Number)); break;
+		case EStreamTapeKind::String:
+		case EStreamTapeKind::Key:
+		case EStreamTapeKind::RawNumber:
+			FMemory::Memcpy(Record + 1, &Event.Text.Offset, sizeof(Event.Text.Offset));
+			FMemory::Memcpy(Record + 5, &Event.Text.Length, sizeof(Event.Text.Length));
+			if (Event.Kind == EStreamTapeKind::Key)
+			{
+				Record[9] = Event.bStructKey ? 1 : 0;
+				FMemory::Memcpy(Record + 10, &Event.FieldIndex, sizeof(Event.FieldIndex));
+			}
+			break;
+		default: break; // Null/container markers have no replayed payload; End's count is already unused.
+		}
+		++EventCount; LastEventOffset = Offset; return true;
+	}
+	bool SetLastStructKey(int32 Index)
+	{
+		if (LastEventOffset < 0 || LastEventOffset > Events.Num() || Events.Num() - LastEventOffset != 14
+			|| Events[LastEventOffset] != static_cast<uint8>(EStreamTapeKind::Key) || Index < INDEX_NONE) return false;
+		Events[LastEventOffset + 9] = 1;
+		FMemory::Memcpy(Events.GetData() + LastEventOffset + 10, &Index, sizeof(Index)); return true;
 	}
 	bool Unsigned(EStreamTapeKind Kind, uint64 Value = 0)
 	{ FStreamTapeEvent Event{}; Event.Kind = Kind; Event.Unsigned = Value; return Append(Event); }
@@ -169,7 +220,7 @@ struct FStreamTape
 		if (!Budget.Charge(0, 0, 1) || !ReserveForAppend(ContainerCounts, CountCapacity)) return false;
 		Index = ContainerCounts.Add(0); return true;
 	}
-	void Reset() { Events.Empty(); ContainerCounts.Empty(); Input.Empty(); EventCapacity = CountCapacity = 0; }
+	void Reset() { Events.Empty(); ContainerCounts.Empty(); Input.Empty(); EventCapacity = CountCapacity = EventCount = 0; LastEventOffset = INDEX_NONE; }
 	bool Replay(FDecoder& Decoder) const;
 };
 
@@ -222,7 +273,7 @@ struct FPreflight
 		const int32 Index = MatchNextField(*Frame.Fields,Name,Frame.LastField+1,Scratch);
 		// Reject invalid Plan selection during validation, before any destination/report context exists.
 		if (Index != INDEX_NONE && !Frame.Fields->Fields.IsValidIndex(Index)) return false;
-		auto& Event = Tape.Events.Last(); Event.bStructKey = true; Event.FieldIndex = Index;
+		if (!Tape.SetLastStructKey(Index)) return false;
 		if (Index != INDEX_NONE)
 		{
 			if (Index <= Frame.LastField) bFallback = true; // exact/tier/last-occurrence selection stays in the DOM path
@@ -474,27 +525,62 @@ struct FDecoder
 };
 bool FStreamTape::Replay(FDecoder& Decoder) const
 {
-	for (const FStreamTapeEvent& Event : Events)
+	int32 Offset = 0, ReplayedEvents = 0;
+	while (Offset < Events.Num())
 	{
+		const EStreamTapeKind Kind = static_cast<EStreamTapeKind>(Events[Offset]);
+		const int32 Bytes = StreamTapeRecordSize(Kind);
+		if (!Bytes || Bytes > Events.Num() - Offset || ReplayedEvents >= EventCount) return false;
+		const uint8* Payload = Events.GetData() + Offset + 1;
 		bool Continued = false;
-		switch (Event.Kind)
+		switch (Kind)
 		{
 		case EStreamTapeKind::Null: Continued = Decoder.Null(); break;
-		case EStreamTapeKind::Bool: Continued = Decoder.Bool(Event.Unsigned != 0); break;
-		case EStreamTapeKind::Int64: Continued = Decoder.Int64(Event.Signed); break;
-		case EStreamTapeKind::Uint64: Continued = Decoder.Uint64(Event.Unsigned); break;
-		case EStreamTapeKind::Double: Continued = Decoder.Double(Event.Number); break;
-		case EStreamTapeKind::String: Continued = Decoder.String(reinterpret_cast<const char*>(Input.GetData() + Event.Text.Offset), Event.Text.Length, false); break;
-		case EStreamTapeKind::Key: Continued = Decoder.Key(reinterpret_cast<const char*>(Input.GetData() + Event.Text.Offset), Event.Text.Length, Event.bStructKey, Event.FieldIndex); break;
-		case EStreamTapeKind::RawNumber: Continued = Decoder.RawNumber(reinterpret_cast<const char*>(Input.GetData() + Event.Text.Offset), Event.Text.Length, false); break;
+		case EStreamTapeKind::Bool:
+			if (Payload[0] > 1) return false;
+			Continued = Decoder.Bool(Payload[0] != 0); break;
+		case EStreamTapeKind::Int64:
+		{
+			int64 Value; FMemory::Memcpy(&Value, Payload, sizeof(Value)); Continued = Decoder.Int64(Value); break;
+		}
+		case EStreamTapeKind::Uint64:
+		{
+			uint64 Value; FMemory::Memcpy(&Value, Payload, sizeof(Value)); Continued = Decoder.Uint64(Value); break;
+		}
+		case EStreamTapeKind::Double:
+		{
+			double Value; FMemory::Memcpy(&Value, Payload, sizeof(Value)); Continued = Decoder.Double(Value); break;
+		}
+		case EStreamTapeKind::String:
+		case EStreamTapeKind::Key:
+		case EStreamTapeKind::RawNumber:
+		{
+			uint32 TextOffset, Length;
+			FMemory::Memcpy(&TextOffset, Payload, sizeof(TextOffset));
+			FMemory::Memcpy(&Length, Payload + 4, sizeof(Length));
+			if (uint64(TextOffset) >= uint64(Input.Num()) || uint64(Length) > uint64(Input.Num()) - TextOffset - 1) return false;
+			if (Kind != EStreamTapeKind::RawNumber && Input[static_cast<int32>(uint64(TextOffset) + Length)] != 0) return false;
+			const char* Text = reinterpret_cast<const char*>(Input.GetData() + TextOffset);
+			if (Kind == EStreamTapeKind::Key)
+			{
+				const uint8 Flag = Payload[8]; int32 FieldIndex;
+				FMemory::Memcpy(&FieldIndex, Payload + 9, sizeof(FieldIndex));
+				if (Flag > 1 || FieldIndex < INDEX_NONE || (!Flag && FieldIndex != INDEX_NONE)) return false;
+				Continued = Decoder.Key(Text, Length, Flag != 0, FieldIndex);
+			}
+			else if (Kind == EStreamTapeKind::String) Continued = Decoder.String(Text, Length, false);
+			else Continued = Decoder.RawNumber(Text, Length, false);
+			break;
+		}
 		case EStreamTapeKind::Object: Continued = Decoder.StartObject(); break;
 		case EStreamTapeKind::Array: Continued = Decoder.StartArray(); break;
-		case EStreamTapeKind::EndObject: Continued = Decoder.EndObject(static_cast<rapidjson::SizeType>(Event.Unsigned)); break;
-		case EStreamTapeKind::EndArray: Continued = Decoder.EndArray(static_cast<rapidjson::SizeType>(Event.Unsigned)); break;
+		case EStreamTapeKind::EndObject: Continued = Decoder.EndObject(0); break;
+		case EStreamTapeKind::EndArray: Continued = Decoder.EndArray(0); break;
 		}
 		if (!Continued) return false;
+		Offset += Bytes; ++ReplayedEvents;
 	}
-	return true;
+	return ReplayedEvents == EventCount;
 }
 }
 
