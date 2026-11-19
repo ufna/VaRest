@@ -69,6 +69,12 @@ bool FVaRestJsonStreamingParityTest::RunTest(const FString& Parameters)
  struct FCase { const ANSICHAR* Text; bool Stream; bool Strict=false; };
  const FCase Cases[]={
   {"{\"id\":7,\"name\":\"text\\u0000tail\"}",true},
+  {"{\"\\u0069d\":7,\"\\u006eame\":\"quote\\\" slash\\\\ nul\\u0000tail\",\"unused\":\"later\\u263a\"}",true},
+  {"\xef\xbb\xbf{\"id\":7,\"name\":\"BOM\\u0000tail\"}",true},
+  {"{\"id\":1,\"name\":\"decoded\\u0000tail\",\"\\u0069d\":2}",false},
+  {"{\"id\":7,\"name\":\"fully decoded\"} trailing",false},
+  {"{\"id\":7,\"name\":\"decoded\\u0000tail\",\"unused\":[1,",false},
+  {"{\"id\":18446744073709551615,\"name\":\"unsigned event\"}",true},
   {"{\"name\":\"last\",\"id\":7}",false},
   {"{\"id\":1,\"id\":2,\"name\":\"last\"}",false},
   {"{\"ID\":1,\"id\":2,\"name\":\"last\"}",false},
@@ -84,6 +90,18 @@ bool FVaRestJsonStreamingParityTest::RunTest(const FString& Parameters)
   FVaRestJsonTestInner Dom,Stream; Dom.Id=Stream.Id=91; Dom.Name=Stream.Name=TEXT("keep");
   FVaRestJsonConvertOptions Options; Options.bStrict=Case.Strict;
   Decode(*this,Bytes(Case.Text),Dom,Stream,Case.Stream,Options);
+ }
+ // Exact64-bit and negative-zero events must survive the tape without a floating/integer reinterpretation.
+ FVaRestJsonBenchItem NumericDom,NumericStream;
+ TestTrue(TEXT("signed64 and double-bit events retain native parity"),Decode(*this,Bytes("{\"id\":-2147483648,\"uid\":-9223372036854775808,\"price\":-0.0}"),NumericDom,NumericStream,true));
+ TestEqual(TEXT("minimum signed64 is copied exactly"),NumericStream.Uid,MIN_int64);
+ TestTrue(TEXT("negative-zero double bits match DOM"),FMemory::Memcmp(&NumericDom.Price,&NumericStream.Price,sizeof(double))==0);
+ // Nonzero caller limits retain the existing DOM account, including successful bounded calls.
+ for (int32 Limit=0;Limit<3;++Limit)
+ {
+  FVaRestJsonTestInner LimitedDom,LimitedStream;FVaRestJsonConvertOptions Limited;
+  if (Limit==0) Limited.MaxOutputBytes=4096;else if (Limit==1) Limited.MaxValues=64;else Limited.MaxWorkUnits=8192;
+  TestTrue(TEXT("explicit bounded options preserve successful DOM conversion and select fallback"),Decode(*this,Bytes("{\"id\":7,\"name\":\"bounded\\u0000tail\"}"),LimitedDom,LimitedStream,false,Limited));
  }
  FVaRestJsonBenchResponse Source; Source.Ok=true; Source.Data.Count=32;
  for (int32 I=0;I<32;++I)
@@ -121,6 +139,18 @@ bool FVaRestJsonStreamingParityTest::RunTest(const FString& Parameters)
   TestEqual(TEXT("native case-equal keys still keep the last value"),MapStream.Data.Items[4].Stats.FindRef(TEXT("A")),6);
   TestEqual(TEXT("counted null key remains diagnosed before any move"),MapStream.Data.Items[4].Stats.Num(),Strict?1:2);
  }
+ // A discarded tape must use the original bytes and leave native storage untouched before DOM's syntax refusal.
+ // Three million tiny ignored values exceed the candidate's finite event admission without a new test hook.
+ auto Pressure=Bytes("{\"id\":7,\"name\":\"decoded\\u0000tail\",\"ignored\":[");
+ for (int32 Index=0;Index<3*1024*1024;++Index) { if (Index) Pressure.Add(',');Pressure.Add('0'); }
+ Pressure.Append(Bytes("]}"));
+ FVaRestJsonTestInner PressureDom,PressureStream;
+ TestTrue(TEXT("valid over-cap input selects DOM fallback and retains full native parity"),Decode(*this,Pressure,PressureDom,PressureStream,false));
+ Pressure.Append(Bytes(" trailing"));
+ PressureDom.Id=PressureStream.Id=91;PressureDom.Name=PressureStream.Name=TEXT("keep");
+ TestFalse(TEXT("tape-cap fallback preserves original syntax diagnostics and avoids early writes"),Decode(*this,Pressure,PressureDom,PressureStream,false));
+ TestEqual(TEXT("tape-cap syntax refusal preserves caller integer"),PressureStream.Id,91);
+ TestEqual(TEXT("tape-cap syntax refusal preserves caller string"),PressureStream.Name,FString(TEXT("keep")));
  FVaRestJsonTestTree RawDom,RawStream;
  TestTrue(TEXT("raw JSON layouts retain the DOM decoder"),Decode(*this,Bytes("{\"children\":[{\"free\":[1,2]}]}"),RawDom,RawStream,false));
  FVaRestJsonTestInner BudgetDom,BudgetStream; BudgetDom.Id=BudgetStream.Id=91;

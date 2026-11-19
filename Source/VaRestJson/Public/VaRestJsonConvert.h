@@ -206,8 +206,8 @@ struct VARESTJSON_API FVaRestJsonConvert
 	/** Parse, then JsonToStruct; a syntax error is reported as an Error (with its line and column) */
 	static bool Utf8ToStruct(TConstArrayView<uint8> Utf8, const UScriptStruct* Struct, void* Data,
 		const FVaRestJsonConvertOptions& Options = FVaRestJsonConvertOptions(), FVaRestJsonDecodeReport* OutReport = nullptr);
-	/** Explicit M7 candidate. Supported native struct/array layouts use a validated SAX walk without a response DOM.
-	 * Other layouts, raw JSON/byte callbacks, duplicate or reordered bound fields use the existing DOM semantics.
+	/** Explicit M7 candidate. With all caller limits zero, supported native layouts use one validated SAX parse and bounded event replay.
+	 * Any explicit byte/value/work limit, tape-cap refusal, other layouts, raw JSON/byte callbacks or duplicate/reordered fields use the existing DOM semantics.
 	 * This does not change the default decoder or qualify reflected worker/cooked conversion. */
 	static bool Utf8ToStructStreaming(TConstArrayView<uint8> Utf8, const UScriptStruct* Struct, void* Data,
 		const FVaRestJsonConvertOptions& Options = FVaRestJsonConvertOptions(), FVaRestJsonDecodeReport* OutReport = nullptr,

@@ -60,13 +60,85 @@ int32 MatchNextField(const FFieldMap& Fields,FUtf8StringView Name,int32 Next,FUt
 	return Fields.Match(Name,HashKey(Name),Scratch,Tier);
 }
 
+// Only unlimited caller options enter this candidate. Scratch admission has its own finite logical account;
+// exceeding it selects the unchanged DOM path, not a new caller-visible conversion-budget refusal.
+constexpr int64 StreamTapeMaxRequestedBytes = 128ll * 1024 * 1024;
+constexpr int64 StreamTapeMaxEvents = 2ll * 1024 * 1024;
+constexpr int64 StreamTapeMaxWork = 256ll * 1024 * 1024;
+enum class EStreamTapeKind : uint8 { Null, Bool, Int64, Uint64, Double, String, Key, RawNumber, Object, Array, EndObject, EndArray };
+struct FStreamTapeEvent
+{
+	union
+	{
+		int64 Signed;
+		uint64 Unsigned;
+		double Number;
+		struct { uint32 Offset, Length; } Text;
+	};
+	EStreamTapeKind Kind = EStreamTapeKind::Null;
+};
+static_assert(sizeof(FStreamTapeEvent) == 16, "streaming tape events stay compact");
+struct FDecoder;
+struct FStreamTape
+{
+	FJsonBudget Budget{{StreamTapeMaxRequestedBytes, StreamTapeMaxEvents, StreamTapeMaxWork}};
+	TArray<uint8> Input;
+	TArray<FStreamTapeEvent> Events;
+	TArray<uint32> ContainerCounts;
+	int32 EventCapacity = 0, CountCapacity = 0;
+	explicit FStreamTape(TConstArrayView<uint8> Utf8)
+	{
+		if (!Budget.Charge(int64(Utf8.Num()) + 1, 0, Utf8.Num())) return;
+		Input.SetNumUninitialized(Utf8.Num() + 1);
+		if (!Utf8.IsEmpty()) FMemory::Memcpy(Input.GetData(), Utf8.GetData(), Utf8.Num());
+		Input.Last() = 0;
+	}
+	template<class T> bool ReserveForAppend(TArray<T>& Items, int32& Capacity)
+	{
+		if (Items.Num() < Capacity) return true;
+		if (Capacity >= StreamTapeMaxEvents) return false;
+		const int32 Next = static_cast<int32>(FMath::Min(StreamTapeMaxEvents, FMath::Max(int64(8), int64(Capacity) * 2)));
+		// Charge the WHOLE requested allocation on every growth, not just live elements or a capacity delta.
+		if (!Budget.ChargeProduct(Next, sizeof(T), 0, 0)) return false;
+		Items.Reserve(Next); Capacity = Next; return true;
+	}
+	bool Append(FStreamTapeEvent Event)
+	{
+		if (!Budget.Charge(0, 1, 1) || !ReserveForAppend(Events, EventCapacity)) return false;
+		Events.Add(Event); return true;
+	}
+	bool Unsigned(EStreamTapeKind Kind, uint64 Value = 0)
+	{ FStreamTapeEvent Event{}; Event.Kind = Kind; Event.Unsigned = Value; return Append(Event); }
+	bool Int64(int64 Value)
+	{ FStreamTapeEvent Event{}; Event.Kind = EStreamTapeKind::Int64; Event.Signed = Value; return Append(Event); }
+	bool Double(double Value)
+	{ FStreamTapeEvent Event{}; Event.Kind = EStreamTapeKind::Double; Event.Number = Value; return Append(Event); }
+	bool Text(EStreamTapeKind Kind, const char* Value, rapidjson::SizeType Length)
+	{
+		const UPTRINT Base = reinterpret_cast<UPTRINT>(Input.GetData()), Pointer = reinterpret_cast<UPTRINT>(Value);
+		if (Pointer < Base) return false;
+		const UPTRINT Offset = Pointer - Base;
+		if (Offset >= static_cast<UPTRINT>(Input.Num()) || uint64(Length) > uint64(Input.Num()) - Offset - 1) return false;
+		if (Kind != EStreamTapeKind::RawNumber && Input[static_cast<int32>(Offset + Length)] != 0) return false;
+		if (!Budget.Charge(0, 0, Length)) return false;
+		FStreamTapeEvent Event{}; Event.Kind = Kind; Event.Text = {static_cast<uint32>(Offset), Length}; return Append(Event);
+	}
+	bool AddContainerCount(int32& Index)
+	{
+		if (!Budget.Charge(0, 0, 1) || !ReserveForAppend(ContainerCounts, CountCapacity)) return false;
+		Index = ContainerCounts.Add(0); return true;
+	}
+	void Reset() { Events.Empty(); ContainerCounts.Empty(); Input.Empty(); EventCapacity = CountCapacity = 0; }
+	bool Replay(FDecoder& Decoder) const;
+};
+
 /** A syntax/type-only pass. It writes no destination memory. Field order/duplicates that need DOM selection
  * fall back before conversion; array counts let the real walk reserve once, before constructing elements. */
 struct FPreflight
 {
 	struct FFrame
 	{
-		const FFieldMap* Fields = nullptr; // Plan owns every immutable map through both walks.
+		const FFieldMap* Fields = nullptr; // Plan owns every immutable map through validation and replay.
 		const FArrayProperty* Array = nullptr;
 		const FMapProperty* Map = nullptr;
 		const FProperty* Pending = nullptr;
@@ -77,12 +149,12 @@ struct FPreflight
 	FPlan& Plan;
 	const UScriptStruct* Root;
 	FJsonBudget Budget;
+	FStreamTape& Tape;
 	TArray<FFrame, TInlineAllocator<16>> Frames;
-	TArray<uint32> ContainerCounts;
 	FUtf8Scratch Scratch;
 	bool bRoot = true, bFallback = false;
-	FPreflight(FPlan& InPlan, const UScriptStruct* InRoot, int64 Bytes)
-		: Plan(InPlan), Root(InRoot), Budget({0, InPlan.Options.MaxValues, InPlan.Options.MaxWorkUnits})
+	FPreflight(FPlan& InPlan, const UScriptStruct* InRoot, int64 Bytes, FStreamTape& InTape)
+		: Plan(InPlan), Root(InRoot), Budget({0, InPlan.Options.MaxValues, InPlan.Options.MaxWorkUnits}), Tape(InTape)
 	{ Budget.Charge(0, 0, Bytes); }
 	const FProperty* Slot()
 	{
@@ -93,18 +165,18 @@ struct FPreflight
 		const auto* Out = Parent.Pending; Parent.Pending = nullptr; return Out;
 	}
 	bool Scalar() { Slot(); bRoot = false; return Budget.Charge(0, 1, 1); }
-	bool Null() { return Scalar(); }
-	bool Bool(bool) { return Scalar(); }
-	bool Int(int) { return Scalar(); }
-	bool Uint(unsigned) { return Scalar(); }
-	bool Int64(int64) { return Scalar(); }
-	bool Uint64(uint64) { return Scalar(); }
-	bool Double(double) { return Scalar(); }
-	bool RawNumber(const char*, rapidjson::SizeType, bool) { return Scalar(); }
-	bool String(const char*, rapidjson::SizeType, bool) { return Scalar(); }
+	bool Null() { return Scalar() && Tape.Unsigned(EStreamTapeKind::Null); }
+	bool Bool(bool Value) { return Scalar() && Tape.Unsigned(EStreamTapeKind::Bool, Value ? 1u : 0u); }
+	bool Int(int Value) { return Int64(Value); }
+	bool Uint(unsigned Value) { return Uint64(Value); }
+	bool Int64(int64 Value) { return Scalar() && Tape.Int64(Value); }
+	bool Uint64(uint64 Value) { return Scalar() && Tape.Unsigned(EStreamTapeKind::Uint64, Value); }
+	bool Double(double Value) { return Scalar() && Tape.Double(Value); }
+	bool RawNumber(const char* Text, rapidjson::SizeType Length, bool) { return Scalar() && Tape.Text(EStreamTapeKind::RawNumber, Text, Length); }
+	bool String(const char* Text, rapidjson::SizeType Length, bool) { return Scalar() && Tape.Text(EStreamTapeKind::String, Text, Length); }
 	bool Key(const char* Text, rapidjson::SizeType Length, bool)
 	{
-		if (!Budget.Charge(0, 1, 1) || Frames.IsEmpty()) return false;
+		if (!Budget.Charge(0, 1, 1) || Frames.IsEmpty() || !Tape.Text(EStreamTapeKind::Key, Text, Length)) return false;
 		auto& Frame = Frames.Last(); if (!Frame.Fields) return true;
 		const FUtf8StringView Name(reinterpret_cast<const UTF8CHAR*>(Text), static_cast<int32>(Length));
 		const int32 Index = MatchNextField(*Frame.Fields,Name,Frame.LastField+1,Scratch);
@@ -117,7 +189,7 @@ struct FPreflight
 	}
 	bool Begin(bool bObject)
 	{
-		if (!Budget.Charge(0, 1, 1) || Frames.Num() >= MaxDepth) return false;
+		if (!Budget.Charge(0, 1, 1) || Frames.Num() >= MaxDepth || !Tape.Unsigned(bObject ? EStreamTapeKind::Object : EStreamTapeKind::Array)) return false;
 		const bool bWasRoot = bRoot; const auto* Property = Slot(); bRoot = false;
 		FFrame Frame; Frame.bObject = bObject;
 		if (bObject)
@@ -127,8 +199,8 @@ struct FPreflight
 			else Frame.Map = CastField<FMapProperty>(Property);
 		}
 		else Frame.Array = CastField<FArrayProperty>(Property);
-		// Preorder slots match the second walk's container starts, including nested arrays.
-		if (Frame.Map || Frame.Array) Frame.CountIndex=ContainerCounts.Add(0);
+		// Preorder slots match replay container starts, including nested arrays.
+		if ((Frame.Map || Frame.Array) && !Tape.AddContainerCount(Frame.CountIndex)) return false;
 		Frames.Add(MoveTemp(Frame)); return true;
 	}
 	bool StartObject() { return Begin(true); }
@@ -136,14 +208,14 @@ struct FPreflight
 	bool EndObject(rapidjson::SizeType Count)
 	{
 		if (Frames.IsEmpty()) return false;
-		if (Frames.Last().CountIndex!=INDEX_NONE) ContainerCounts[Frames.Last().CountIndex]=Count;
-		Frames.Pop(EAllowShrinking::No); return Budget.Charge(0, 0, 1);
+		if (Frames.Last().CountIndex!=INDEX_NONE) Tape.ContainerCounts[Frames.Last().CountIndex]=Count;
+		Frames.Pop(EAllowShrinking::No); return Budget.Charge(0, 0, 1) && Tape.Unsigned(EStreamTapeKind::EndObject, Count);
 	}
 	bool EndArray(rapidjson::SizeType Count)
 	{
 		if (Frames.IsEmpty()) return false;
-		if (Frames.Last().CountIndex!=INDEX_NONE) ContainerCounts[Frames.Last().CountIndex]=Count;
-		Frames.Pop(EAllowShrinking::No); return Budget.Charge(0, 0, 1);
+		if (Frames.Last().CountIndex!=INDEX_NONE) Tape.ContainerCounts[Frames.Last().CountIndex]=Count;
+		Frames.Pop(EAllowShrinking::No); return Budget.Charge(0, 0, 1) && Tape.Unsigned(EStreamTapeKind::EndArray, Count);
 	}
 };
 
@@ -342,6 +414,30 @@ struct FDecoder
 		return !Context.bAborted;
 	}
 };
+bool FStreamTape::Replay(FDecoder& Decoder) const
+{
+	for (const FStreamTapeEvent& Event : Events)
+	{
+		bool Continued = false;
+		switch (Event.Kind)
+		{
+		case EStreamTapeKind::Null: Continued = Decoder.Null(); break;
+		case EStreamTapeKind::Bool: Continued = Decoder.Bool(Event.Unsigned != 0); break;
+		case EStreamTapeKind::Int64: Continued = Decoder.Int64(Event.Signed); break;
+		case EStreamTapeKind::Uint64: Continued = Decoder.Uint64(Event.Unsigned); break;
+		case EStreamTapeKind::Double: Continued = Decoder.Double(Event.Number); break;
+		case EStreamTapeKind::String: Continued = Decoder.String(reinterpret_cast<const char*>(Input.GetData() + Event.Text.Offset), Event.Text.Length, false); break;
+		case EStreamTapeKind::Key: Continued = Decoder.Key(reinterpret_cast<const char*>(Input.GetData() + Event.Text.Offset), Event.Text.Length, false); break;
+		case EStreamTapeKind::RawNumber: Continued = Decoder.RawNumber(reinterpret_cast<const char*>(Input.GetData() + Event.Text.Offset), Event.Text.Length, false); break;
+		case EStreamTapeKind::Object: Continued = Decoder.StartObject(); break;
+		case EStreamTapeKind::Array: Continued = Decoder.StartArray(); break;
+		case EStreamTapeKind::EndObject: Continued = Decoder.EndObject(static_cast<rapidjson::SizeType>(Event.Unsigned)); break;
+		case EStreamTapeKind::EndArray: Continued = Decoder.EndArray(static_cast<rapidjson::SizeType>(Event.Unsigned)); break;
+		}
+		if (!Continued) return false;
+	}
+	return true;
+}
 }
 
 bool FVaRestJsonConvert::Utf8ToStructStreaming(TConstArrayView<uint8> Utf8, const UScriptStruct* Struct, void* Data,
@@ -354,31 +450,28 @@ bool FVaRestJsonConvert::Utf8ToStructStreaming(TConstArrayView<uint8> Utf8, cons
 	FVaRestJsonConvertOptions Captured = Options;
 	if (!Captured.Rules) Captured.Rules = FVaRestJsonRules::DefaultSnapshot();
 	const auto Fallback = [&] { return Utf8ToStruct(Utf8, Struct, Data, Captured, OutReport); };
-	if (!Struct || !Data || Utf8.Num() >= MAX_int32 || Options.BytesResolver || Options.MaxOutputBytes < 0 || Options.MaxValues < 0 || Options.MaxWorkUnits < 0)
+	if (!Struct || !Data || Utf8.Num() >= MAX_int32 || Options.BytesResolver || Options.MaxOutputBytes != 0 || Options.MaxValues != 0 || Options.MaxWorkUnits != 0)
 		return Fallback();
 	FPlan Plan{Captured, Captured.Rules.ToSharedRef(), {}, {}, {}};
 	if (ClassifyStruct(Struct) != ESpecialStruct::None || !Plan.Struct(Struct)) return Fallback();
+	FStreamTape Tape(Utf8);
+	if (Tape.Budget.HasFailed()) { Tape.Reset(); return Fallback(); }
 	const int64 Start = BomLength(Utf8.GetData(), Utf8.Num());
-	FPreflight Probe(Plan, Struct, Utf8.Num());
-	if (Probe.Budget.HasFailed()) return Fallback();
-	// Both walks use the same bounded owned buffer and the reader's in-situ string fast path.
-	// No source views survive preflight, so restoring the bytes keeps the validating and writing walks identical.
-	TArray<uint8> Input; Input.Append(Utf8.GetData(), Utf8.Num()); Input.Add(0);
-	rapidjson::InsituStringStream ProbeStream(reinterpret_cast<char*>(Input.GetData() + Start));
-	UE::Json::Private::FAllocatorImpl ProbeAllocator; FReader ProbeReader(&ProbeAllocator);
-	const auto Validated = ProbeReader.Parse<StreamFlags | rapidjson::kParseInsituFlag>(ProbeStream, Probe);
-	if (Validated.IsError() || Start + static_cast<int64>(ProbeStream.Tell()) != Utf8.Num() || Probe.bFallback || Probe.Budget.HasFailed())
-	{ Input.Empty(); return Fallback(); }
-	// Syntax failures cannot partially alter the destination: the complete read-only validation above precedes writes.
-	if (!Utf8.IsEmpty()) FMemory::Memcpy(Input.GetData(), Utf8.GetData(), Utf8.Num());
-	Input[Utf8.Num()] = 0;
-	rapidjson::InsituStringStream Stream(reinterpret_cast<char*>(Input.GetData() + Start));
+	FPreflight Probe(Plan, Struct, Utf8.Num(), Tape);
+	bool Validated = false;
+	{
+		rapidjson::InsituStringStream Stream(reinterpret_cast<char*>(Tape.Input.GetData() + Start));
+		UE::Json::Private::FAllocatorImpl Allocator; FReader Reader(&Allocator);
+		const auto Result = Reader.Parse<StreamFlags | rapidjson::kParseInsituFlag>(Stream, Probe);
+		Validated = !Result.IsError() && Start + static_cast<int64>(Stream.Tell()) == Utf8.Num() && !Probe.bFallback && !Probe.Budget.HasFailed() && !Tape.Budget.HasFailed();
+	} // Every captured text offset refers to Tape.Input; no reader stack storage survives validation.
+	if (!Validated) { Tape.Reset(); return Fallback(); }
+	// Full syntax/shape/scratch admission precedes all destination writes. Replay never reparses or restores Input.
 	const FVaRestJson::FDocumentRef NoDocument;
 	FDecodeContext Context(Captured, NoDocument, OutReport);
-	FDecoder Decoder{Context, Struct, Data, Probe.ContainerCounts, Plan, {}, {}, 0, true, true};
-	UE::Json::Private::FAllocatorImpl Allocator; FReader Reader(&Allocator);
+	FDecoder Decoder{Context, Struct, Data, Tape.ContainerCounts, Plan, {}, {}, 0, true, true};
 	if (OutUsedStreaming) *OutUsedStreaming = true;
-	const auto Result = Reader.Parse<StreamFlags | rapidjson::kParseInsituFlag>(Stream, Decoder);
-	if (Result.IsError() && !Context.bAborted) Context.Abort(TEXT("streaming conversion diverged from validated syntax"));
-	return Finish(Context, Decoder.bRootStored && !Result.IsError(), Struct->GetName());
+	const bool Replayed = Tape.Replay(Decoder);
+	if (!Replayed && !Context.bAborted) Context.Abort(TEXT("streaming conversion diverged from validated syntax"));
+	return Finish(Context, Decoder.bRootStored && Replayed, Struct->GetName());
 }

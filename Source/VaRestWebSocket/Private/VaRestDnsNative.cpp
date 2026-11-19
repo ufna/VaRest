@@ -6,7 +6,7 @@
 
 #include "VaRestDnsNative.h"
 
-#if VAREST_HAS_PRIVATE_DNS
+#if VAREST_HAS_PRIVATE_DNS && !defined(__ANDROID__)
 
 // Deliberately no Core/UE types, callbacks, allocators or TLS in the worker's reachable source.
 #include <arpa/inet.h>

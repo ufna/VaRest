@@ -4,7 +4,11 @@
 
 #include <stdint.h>
 
-#if defined(__linux__) && defined(__x86_64__) && !defined(__ANDROID__) && defined(VAREST_USE_PRIVATE_LWS3) && VAREST_USE_PRIVATE_LWS3
+// Android candidate is explicit opt-in only. No Build.cs selector enables it.
+#if defined(VAREST_USE_PRIVATE_LWS3) && VAREST_USE_PRIVATE_LWS3 \
+	&& ((defined(__linux__) && defined(__x86_64__) && !defined(__ANDROID__)) \
+		|| (defined(__ANDROID__) && defined(__aarch64__) \
+			&& defined(VAREST_ENABLE_ANDROID_PRIVATE_DNS) && VAREST_ENABLE_ANDROID_PRIVATE_DNS))
 #define VAREST_HAS_PRIVATE_DNS 1
 
 namespace VaRest::WebSocket::Dns
