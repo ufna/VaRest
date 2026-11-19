@@ -192,6 +192,7 @@ struct FRun : IAutomationLatentCommand
         }
         if (!GEditor->PlayWorld && !PIEWorlds() && !World.IsValid() && !Runner.IsValid() && !GEditor->GetPlaySessionRequest().IsSet() && !GEditor->GetPlayInEditorSessionInfo().IsSet())
         {
+            Test.AddInfo(FString::Printf(TEXT("VAREST_M5_PIE_CLEANUP_OBSERVED profile=OrdinarySaved BeginPIE=%d EndPIE=%d playWorldGone=1 worldGone=1 runnerGone=1 playRequestGone=1 activeInfoGone=1 observedRunner=%d failed=%d"),Begins,Ends,Observed ? 1:0,Failed ? 1:0));
             Requested=false;if (!Observed || Begins!=1 || Ends!=1 || !Unchanged()) Error(TEXT("Missing actual runner completion/BeginPIE/EndPIE or unchanged prepared class"));
             if (!Failed) Test.AddInfo(FString::Printf(TEXT("VAREST_M5_PIE_PASS profile=OrdinarySaved actualPIE=1 runnerCompleted=1 EndPIE=1 worldGone=1 activeInfoGone=1 preparationCompileEvents=%d preparationOwnedPreCompileEvents=%d measuredCompileEvents=%d measuredOwnedPreCompileEvents=%d classScriptLayoutUnchanged=1 wireJournal=RootRequired"),PreparedCompileEvents,PreparedOwnedPreCompiles,Compiles-PreparedCompileEvents,OwnedPreCompiles-PreparedOwnedPreCompiles));return true;
         }

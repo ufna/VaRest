@@ -11,6 +11,7 @@ class FClientAdmissionGate;
 class FRequestSpec;
 class FNativeLifetimeControl;
 class FNativeClientSlots;
+class FNativeOperationStore;
 
 /** Move-only access authority; Control, not a notification or this token, owns the whole consumed spec. */
 class FNativeInputBorrow final
@@ -79,10 +80,17 @@ public:
 
 private:
 	friend class FNativeInputBorrow;
+	friend class FNativeClientSlots;
+	friend class FNativeOperationStore;
 	FNativeLifetimeControl();
 	static bool TryBorrowInput(FRequestSpec* Input);
 	void EnsureExitHold();
 	void AppendDeferred(FRequestSpec* Input);
+	bool CollectReadyInputOnGT(FRequestSpec* Input);
+	// Stop reentered by a reclaim callback finishes only after the current GT mutator has returned.
+	void EnterGTReclaimOnGT();
+	void LeaveGTReclaimOnGT();
+	void ReclaimStoppedOnGT();
 	std::atomic<bool> bStopped{false};
 	std::atomic<uint64> RegisteredInputs{0};
 	std::atomic<FRequestSpec*> Incoming{nullptr};
@@ -95,6 +103,8 @@ private:
 	FRequestSpec* DeferredTail = nullptr;
 	bool bPreferDeferred = false;
 	bool bCollecting = false;
+	uint32 GTReclaimDepth = 0;
+	bool bStopReclaimPending = false;
 #if WITH_DEV_AUTOMATION_TESTS
 	uint32 LastInputScanVisits = 0;
 #endif

@@ -1,5 +1,92 @@
 # VaRest 2.0 release program ledger (controller-level; per-plan ledgers live in sibling dirs)
 
+Source430 stop reclamation and failed-PIE observation (new C++ UNBUILT/UNRUN):
+
+The final native Stop previously reused one live 256-record scan and could
+permanently retain already-quiescent backlogs after the ticker was removed.
+It also checked client-slot reclamation before releasing the final counted
+input. The reviewed private correction captures the three current input lists
+once before callouts, visits each fixed operation store once, deletes only
+ready/finished/borrow-free inputs on GT and then rechecks the existing exact
+client barriers. Unresolved or genuinely late adoption remains quarantined;
+live 256-visit budgets, native authority rules and non-operation barriers stay
+unchanged. A shared Control-local GT reclaim depth defers a reentrant Stop
+until the active input/store/client/queue mutator has finished. Source001's
+missing queue-sweeper boundary was rejected and never adopted; Source002
+places ScopeExit before the queue TGuardValue, restoring that guard before
+final reclamation on every return. Five new private cases cover one/257 ready
+records, a genuinely held tail, direct store/client/input reentry, late stopped
+adoption and a real ScopeClosed trace sink reentering the queue sweep.
+
+One existing private PIE fixture gains one unconditional diagnostic statement
+inside its actual completed-cleanup condition. It records real Begin/EndPIE,
+Observed/Failed and the enclosing world/runner/request/session absence facts.
+It changes no branch, oracle, timeout, Error suppression or public API. The
+current429 failed path could not distinguish completed cleanup from its
+suppressed timeout; this future marker is UNRUN and cannot retroactively
+qualify that path. Independent source reviews accept both candidate changes;
+matching fresh full graph/native and actual cases remain required.
+
+Source429 is now qualified in its distinct producing intervals. Its fresh
+four-action plugin-only native exits0 unforced18.098s with26703 unchanged
+inputs, ten products and two fresh dependency records/3362 inputs/two GNU
+pairs (Root32ba8a08). Actual ClientScope passes one case with all18 source
+counters, genuine held-worker Hub/client retirement, callback/materialization/
+delivery0 and actual return/input/frame/clock disposal. Editor/supervisor0
+unforced32.515/32.612s, owned groups absent;45306 inputs have only two declared
+SDK metadata transitions (Rootd3bdc387). VaRest-ajz.13.5 is closed only for
+that finite live-service criterion; global Stop/unload remains separate.
+
+A separate ordinary data-only consumer receives21 exact descriptor/map/DSO/
+project/config files, with45319 protected inputs unchanged. Twelve DSOs have
+actual429 native custody; three unchanged optional DSOs and two maps remain
+honestly observed provider inputs with unproven historical producing custody,
+matching SDK BuildId and actual copy/image checks. No all15 current-source
+compilation claim is made. Actual Create saves seven genuine packages with
+one Success/0errors/10 retained warnings, Editor/supervisor0 and45354 inputs
+unchanged (Roota962df63). Real Xvfb/default-Vulkan ordinary saved PIE then
+passes eight genuine K2 typed/raw/header results and eight strict owned HTTP
+requests, normal EndPIE/world/session retirement, measured recompiles0 and
+Editor/peer0. All45381 inputs stay exact;19 warnings remain (Root66576737).
+
+Actual OmitSaved removes only the new required-leaf JsonTypes entry and saves
+only API, preserving the six other packages and the original GUIDs. SDK test
+Success/0errors, Editor/supervisor0 and45394 guarded inputs show only that
+API transition. The wrapper's final inventory check exits1 on the new owned
+SDK VT-cache directory; this failure is preserved. A separate read-only
+adjudication binds the actual SDK source/config role, explicitly post-observed
+six cache files (creation interval unproven), all original AFTER inputs and
+one API change; it never reruns Save or repairs a cache (Root7c2f8234).
+
+The subsequent real negative reaches ARM and first Case0 Config/status0/kind9
+with the exact missing SM5_RequiredRuleOnly cause and zero HTTP. Automation
+correctly fails and the peer exits normally2 with zero accepted/failed requests.
+Editor then crashes unforced with the SDK VirtualTextureSystem.cpp343 physical
+space refcount assertion. Namespace1 and both owned groups absent, all45410
+inputs unchanged; the strict reader rejects normal-exit qualification. The
+separate Root8816458a qualifies only the observed Config-before-wire facet;
+normal SDK negative exit and exact inside-Editor cleanup remain OPEN under
+VaRest-ajz.27.1. No failure is converted into a suite pass.
+
+After all negative groups drain, Root retains the exact mutant API and restores
+only the original retained API bytes. All45410 BEFORE/AFTER inputs join that
+single inverse and the original seven healthy bodies (Root60300e86). A fresh
+restored ordinary PIE passes all eight wire/K2 cases and normal EndPIE with
+Editor/peer0 unforced45.885s, namespace0 in46.020s and all45419 inputs unchanged
+(Roote885bd76). The negative SIGSEGV and cleanup gap remain in their original
+interval. This finite rule control does not close Task32, fullM5 or the Goal.
+
+Source430 changes eight existing curated members: six private HTTP Source
+members mirrored in canonical/Editor/Game, the existing Tools PIE CPP in
+canonical and the owned Smoke Editor copy, and this ledger in canonical.
+The967 curated names and860 Source members remain;854 other Source payloads
+stay byte-identical429. Twenty newly admitted source/tool destinations plus
+the existing ledger row make170 current admission rows and21 actual writes.
+No new inventory names, Engine/Host/Target changes or public pin rename. New
+CPP/native/diagnostic cleanup and broader lifecycle, cooked/platform/package/
+release qualification remain OPEN. DOM stays default, Android OFF, and owner
+deferrals for I1 Tasks16-17, Mac/LinuxArm64 and WebRTC remain unchanged.
+
 Source429 pending M5 fixture qualification and existing M6 component reconciliation:
 
 Two reviewed private fixture changes are staged, UNBUILT/UNRUN. The existing HTTP

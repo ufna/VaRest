@@ -406,6 +406,7 @@ FNativeCellSweepResult FNativeOperationStore::SweepOnGT(uint32 Budget)
 	auto Kept = Owner.Pin(); // native Control must own this store allocation through all token authorities
 	check(Kept.IsValid());
 	bSweeping = true;
+	Kept->EnterGTReclaimOnGT();
 	const uint32 Limit = FMath::Min(Budget, Capacity);
 	for (uint32 Step = 0; Step < Limit; ++Step)
 	{
@@ -444,6 +445,7 @@ FNativeCellSweepResult FNativeOperationStore::SweepOnGT(uint32 Budget)
 		++Result.Reclaimed;
 	}
 	bSweeping = false;
+	Kept->LeaveGTReclaimOnGT(); // no cell/member access after a deferred Stop inspects this store
 	return Result;
 }
 #if WITH_DEV_AUTOMATION_TESTS

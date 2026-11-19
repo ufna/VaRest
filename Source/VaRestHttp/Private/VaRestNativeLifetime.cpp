@@ -198,6 +198,7 @@ uint32 FNativeLifetimeControl::CollectInputsOnGT(uint32 Budget)
 		return 0; // payload destructors can reenter native APIs; the outer sweep remains the sole list mutator
 	TSharedRef<FNativeLifetimeControl, ESPMode::ThreadSafe> Kept = AsShared();
 	bCollecting = true;
+	EnterGTReclaimOnGT();
 #if WITH_DEV_AUTOMATION_TESTS
 	LastInputScanVisits = 0;
 #endif
@@ -226,19 +227,13 @@ uint32 FNativeLifetimeControl::CollectInputsOnGT(uint32 Budget)
 #if WITH_DEV_AUTOMATION_TESTS
 		++LastInputScanVisits;
 #endif
-		if (Input->bNativeInputReady.load(std::memory_order_acquire) && Input->bNativeInputFinished.load(std::memory_order_acquire) && (Input->NativeInputBorrows.load(std::memory_order_acquire) & FNativeInputBorrow::CountMask) == 0)
-		{
-			auto InputGate=MoveTemp(Input->NativeInputGate);
-			delete Input; // complete payload, including historical config and arbitrary callback captures, dies on GT
-			if (InputGate) InputGate->ReleaseInput(); // a reentrant destructor saw this input counted until AFTER it returned
-			const uint64 Before = RegisteredInputs.fetch_sub(1, std::memory_order_seq_cst);
-			check(Before != 0);
+		if (CollectReadyInputOnGT(Input))
 			++Collected;
-		}
 		else
 			AppendDeferred(Input);
 	}
 	bCollecting = false;
+	LeaveGTReclaimOnGT(); // a reentrant Stop can now inspect the completed outer mutation
 	return Collected;
 }
 
@@ -256,9 +251,68 @@ void FNativeLifetimeControl::StopInputsOnGT()
 	TSharedRef<FNativeLifetimeControl, ESPMode::ThreadSafe> Kept = AsShared(); // cleanup can reset the caller's last owner
 	ClientSlots->BeginStop();                                                  // every gate/store is sealed BEFORE any worker can observe Stopped
 	bStopped.store(true, std::memory_order_seq_cst);
-	ClientSlots->DropRefreshCallbacksAtStopOnGT(); // GT-owned payloads; native wake/ticket authorities retain this allocation
-	ClientSlots->SweepOperations();
-	CollectInputsOnGT();
+	bStopReclaimPending = true;
+	if (GTReclaimDepth == 0)
+		ReclaimStoppedOnGT();
+}
+
+
+bool FNativeLifetimeControl::CollectReadyInputOnGT(FRequestSpec* Input)
+{
+	if (!Input->bNativeInputReady.load(std::memory_order_acquire) || !Input->bNativeInputFinished.load(std::memory_order_acquire) ||
+		(Input->NativeInputBorrows.load(std::memory_order_acquire) & FNativeInputBorrow::CountMask) != 0)
+		return false;
+	auto InputGate = MoveTemp(Input->NativeInputGate);
+	delete Input; // arbitrary affine captures die on GT before their input count is released
+	if (InputGate) InputGate->ReleaseInput();
+	const uint64 Before = RegisteredInputs.fetch_sub(1, std::memory_order_seq_cst);
+	check(Before != 0);
+	return true;
+}
+void FNativeLifetimeControl::EnterGTReclaimOnGT()
+{
+	check(IsInGameThread() && GTReclaimDepth != MAX_uint32);
+	++GTReclaimDepth;
+}
+void FNativeLifetimeControl::LeaveGTReclaimOnGT()
+{
+	check(IsInGameThread() && GTReclaimDepth != 0);
+	if (--GTReclaimDepth == 0 && bStopReclaimPending)
+		ReclaimStoppedOnGT();
+}
+void FNativeLifetimeControl::ReclaimStoppedOnGT()
+{
+	check(IsInGameThread() && IsStopped() && GTReclaimDepth == 0 && !bCollecting);
+	const auto Kept = AsShared();
+	EnterGTReclaimOnGT(); // includes all destructor/callback reentrancy through this finite pass
+	bStopReclaimPending = false;
+	bCollecting = true;
+	// Detach each current list ONCE before any callout. Late/unpublished adoptions are not in this census.
+	FRequestSpec* const CapturedIncoming = Incoming.exchange(nullptr, std::memory_order_acq_rel);
+	FRequestSpec* const CapturedCursor = IncomingCursor;
+	FRequestSpec* const CapturedDeferred = DeferredHead;
+	IncomingCursor = nullptr;
+	DeferredHead = DeferredTail = nullptr;
+	ClientSlots->DropRefreshCallbacksAtStopOnGT();
+	ClientSlots->SweepStoppedOperationsOnGT(); // one fixed-capacity pass; no wait for held cells
+	const auto Visit = [this](FRequestSpec* Next) {
+		while (Next)
+		{
+			FRequestSpec* const Input = Next;
+			Next = Input->NativeInputNext;
+			Input->NativeInputNext = nullptr;
+			if (!CollectReadyInputOnGT(Input)) AppendDeferred(Input);
+		}
+	};
+	Visit(CapturedIncoming);
+	Visit(CapturedCursor);
+	Visit(CapturedDeferred);
+	bCollecting = false;
+	// Releasing the last input can satisfy an already recorded non-operation barrier only now.
+	ClientSlots->ReclaimStoppedClientsOnGT();
+	check(GTReclaimDepth == 1);
+	--GTReclaimDepth;
+	bStopReclaimPending = false; // nested Stop was covered; never rescan/await genuine or newly arrived work
 	if (RegisteredInputs.load(std::memory_order_seq_cst) != 0 || ClientSlots->NumOccupied() != 0)
 		EnsureExitHold();
 }

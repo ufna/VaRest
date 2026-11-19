@@ -136,6 +136,9 @@ public:
 
 private:
 	friend class FNativeClientReservation;
+	friend class FNativeLifetimeControl;
+	void SweepStoppedOperationsOnGT();
+	void ReclaimStoppedClientsOnGT();
 	friend class FNativeQueueBindingReservation;
 	enum class EDrainPhase : uint8
 	{

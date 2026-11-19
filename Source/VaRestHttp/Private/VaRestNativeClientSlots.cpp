@@ -1,6 +1,7 @@
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 
 #include "VaRestNativeClientSlots.h"
+#include "Misc/ScopeExit.h"
 #include "VaRestClientState.h"
 #include "VaRestManagedRefreshDelivery.h"
 #include "VaRestNativeScope.h"
@@ -458,6 +459,9 @@ void FNativeClientSlots::SweepQueueDrains(bool bAllowStoppingFlush)
 	// Reentrant destruction uses the same scan guard as operation reclamation: no in-progress row can be recycled.
 	if (bSweeping)
 		return;
+	Kept->EnterGTReclaimOnGT();
+	// Reverse destruction restores the row guard before a deferred Stop, including every early return.
+	ON_SCOPE_EXIT { Kept->LeaveGTReclaimOnGT(); };
 	TGuardValue<bool> Sweeping(bSweeping, true);
 	for (uint32 Index = 0; Index < Capacity && !Kept->IsStopped(); ++Index)
 	{
@@ -587,6 +591,7 @@ FNativeClientSweepResult FNativeClientSlots::SweepOperations(uint32 Budget)
 	auto Kept = Owner.Pin();
 	check(Kept.IsValid());
 	bSweeping = true;
+	Kept->EnterGTReclaimOnGT();
 	uint32 Remaining = FMath::Min(Budget, uint32(256));
 	for (uint32 Step = 0; Step < Capacity && Remaining != 0; ++Step)
 	{
@@ -603,7 +608,32 @@ FNativeClientSweepResult FNativeClientSlots::SweepOperations(uint32 Budget)
 		TryReclaim(Slot); // the exact-generation owner recorded its non-operation barrier; no fence is invented here
 	}
 	bSweeping = false;
+	Kept->LeaveGTReclaimOnGT(); // no slot/member access after a deferred Stop finalizes
 	return Result;
+}
+void FNativeClientSlots::SweepStoppedOperationsOnGT()
+{
+	check(IsInGameThread() && !bSweeping);
+	const auto Kept = Owner.Pin();
+	check(Kept && Kept->IsStopped());
+	bSweeping = true;
+	for (uint32 Index = 0; Index < Capacity; ++Index)
+	{
+		auto& Slot = Slots[Index];
+		if (Slot.Operations && Slot.Operations->NumOccupied() != 0)
+			Slot.Operations->SweepOnGT(FNativeOperationStore::Capacity);
+	}
+	bSweeping = false;
+}
+void FNativeClientSlots::ReclaimStoppedClientsOnGT()
+{
+	check(IsInGameThread() && !bSweeping);
+	const auto Kept = Owner.Pin();
+	check(Kept && Kept->IsStopped());
+	bSweeping = true;
+	for (uint32 Index = 0; Index < Capacity; ++Index)
+		TryReclaim(Slots[Index]); // preserves the owner's exact non-operation/gate/input/cell/queue barrier
+	bSweeping = false;
 }
 void FNativeClientSlots::BeginStop()
 {
