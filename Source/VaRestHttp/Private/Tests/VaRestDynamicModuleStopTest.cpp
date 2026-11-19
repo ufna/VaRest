@@ -569,7 +569,11 @@ public:
  {
   check(IsInGameThread());
   if (Cleaning) return CleanupStep();
-  if (FPlatformTime::Seconds()>=Deadline || Probe->FailedOnGT()) return Fail(TEXT("held-worker retirement deadline or actual lifecycle identity/thread failure"));
+  if (FPlatformTime::Seconds()>=Deadline || Probe->FailedOnGT())
+   return Fail(*FString::Printf(TEXT("held-worker retirement deadline or lifecycle failure: phase=%d held=%d callback=%d return=%d/%d capture=%d access=%d disposed=%d frame=%d viewReleased=%d work=%u inputs=%llu"),
+    Phase,Probe->BothHeldOnGT()?1:0,Probe->Callbacks.load(),Probe->Count(EPublication::ManagedReturnExecuted),Probe->Count(EPublication::ManagedReturnCompleted),
+    Probe->Count(EPublication::ManagedReturnCaptureRan),Probe->Count(EPublication::ManagedAccessEnded),Probe->Disposed.load(),Probe->Destroyed.load(),RecordClockReleased?1:0,
+    Gate ? Gate->NumOwnedOperations() : 0,static_cast<unsigned long long>(Gate ? Gate->NumOwnedInputs() : 0)));
   if (Phase==0)
   {
    if (!Intrinsic()) return false;
@@ -606,7 +610,20 @@ public:
   }
   if (Phase==4)
   {
-   if (Probe->Callbacks.load(std::memory_order_acquire)==0 || !OwnedQuiescent()) return false;
+   if (!ReturnedMarks()) return false;
+   if (!RecordClockReleased)
+   {
+    // The fake's completed history still owns the real managed dispatch clock view/physical lease.
+    if (!Rig || Rig->Fake->NumCalls()!=1 || !Rig->Fake->GetCall(0).bCompleted ||
+     Rig->Fake->GetCall(0).Request.RequestId!=Handle.GetId() || !Rig->Fake->GetCall(0).Request.Clock.IsValid() ||
+     !Operations || Operations->NumOccupied()!=1 || !Gate || Gate->NumOwnedOperations()!=1 || Gate->NumOwnedInputs()!=1 ||
+     Probe->Destroyed.load()!=0 || Probe->ClocksDestroyed.load()!=0)
+     return Fail(TEXT("own completed fake record did not retain its actual dispatch view before final retirement"));
+    if (!Rig->Fake->ReleaseCompletedClock(0) || Rig->Fake->GetCall(0).Request.Clock.IsValid())
+     return Fail(TEXT("own completed fake record did not release its actual dispatch clock view"));
+    RecordClockReleased=true;
+   }
+   if (!OwnedQuiescent()) return false;
    if (!Probe->CallbackOK.load(std::memory_order_acquire) || !Destination || !Destination->Verify(EVaRestTypeContainer::None,nullptr) ||
     !CompleteMarks() || Testing::LiveDynamicCarriersOnGT()!=CarrierBaseline || DynamicLifecycleTest::ObserveOnGT().WrongThread!=0)
     return Fail(TEXT("real typed return/capture/AccessEnded/Frame/input retirement did not retain its exact live-service contract"));
@@ -676,7 +693,11 @@ private:
  }
  bool CompleteMarks() const
  {
-  return Probe->Disposed.load(std::memory_order_acquire)==1 && Probe->Destroyed.load(std::memory_order_acquire)==1 &&
+  return Probe->Destroyed.load(std::memory_order_acquire)==1 && ReturnedMarks();
+ }
+ bool ReturnedMarks() const
+ {
+  return Probe->Disposed.load(std::memory_order_acquire)==1 &&
    Probe->Materializations.load()==1 && Probe->Deliveries.load()==1 && Probe->Callbacks.load()==1 &&
    Probe->PreparationDestroyed.load()==1 && Probe->CallbackDestroyed.load()==1 && Probe->WrongThread.load()==0 &&
    Probe->Count(EPublication::ManagedWorkerEnded)==1 && Probe->Count(EPublication::ManagedAccessEnded)==1 &&
@@ -688,8 +709,14 @@ private:
   if (!Cleaning) { Test.AddError(Message);Cleaning=true;CleanupDeadline=FPlatformTime::Seconds()+10.0;Probe->Release();RetireClient(); }
   return false;
  }
+ void ReleaseOwnCompletedClock()
+ {
+  if (Rig && Handle.GetId()!=0 && Rig->Fake->NumCalls()==1 && Rig->Fake->GetCall(0).bCompleted &&
+   Rig->Fake->GetCall(0).Request.RequestId==Handle.GetId() && Rig->Fake->GetCall(0).Request.Clock.IsValid())
+   Rig->Fake->ReleaseCompletedClock(0); // exact owned completed record only; never an active or foreign call
+ }
  void RetireClient()
- { if (Rig && !Retired) { Retired=true;Operations=nullptr;FClientAccess::RetireManaged(Rig->Client); } }
+ { if (Rig && !Retired) { ReleaseOwnCompletedClock();Retired=true;Operations=nullptr;FClientAccess::RetireManaged(Rig->Client); } }
  void DropClient()
  {
   RetireClient();Operations=nullptr;Rig.Reset();Handle=FVaRestRequestHandle();Gate.Reset();
@@ -730,7 +757,7 @@ private:
  FVaRestRequestHandle Handle;
  uint64 PublicationFrame=0;
  int32 Phase=0;
- bool RegisteredRoot=false,RegisteredLeaf=false,Observing=false,Retired=false,Cleaning=false;
+ bool RegisteredRoot=false,RegisteredLeaf=false,Observing=false,Retired=false,Cleaning=false,RecordClockReleased=false;
 };
 }
 
