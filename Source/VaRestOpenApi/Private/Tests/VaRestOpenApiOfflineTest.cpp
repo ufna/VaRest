@@ -143,6 +143,37 @@ bool FVaRestOpenApiLoaderOfflineTest::RunTest(const FString& Parameters)
  TestEqual(TEXT("outside-root reference refused before injected IO"),Reads,0);
  TestFalse(TEXT("failed item is reported"),Escape.Issues.IsEmpty());
  TestEqual(TEXT("failed operation provenance survives"),Escape.Model.FailedOperations.Num(),1);
+ // Parameter wire values stay strings, but date-time conversion must retain their declared array shape.
+ const auto DateAnalysis=FVaRestOpenApiLoader::Analyze(Root,Bytes(TEXT(R"json({
+  "openapi":"3.0.3","info":{"title":"Dates","version":"1"},"servers":[{"url":"https://dates.invalid"}],
+  "paths":{"/events":{"get":{"operationId":"findDates","parameters":[
+   {"name":"at","in":"query","style":"form","explode":true,"schema":{"type":"array","items":{"type":"string","format":"date-time"},"default":["2026-11-19T00:00:00Z","2026-11-20T12:30:00+02:00"]}},
+   {"name":"atCsv","in":"query","style":"form","explode":false,"schema":{"type":"array","items":{"type":"string","format":"date-time"},"default":["2026-11-19T00:00:00Z","2026-11-20T12:30:00+02:00"]}},
+   {"name":"X-Times","in":"header","schema":{"type":"array","items":{"type":"string","format":"date-time"},"default":["2026-11-19T00:00:00Z","2026-11-20T12:30:00+02:00"]}},
+   {"name":"since","in":"query","schema":{"type":"string","format":"date-time","default":"2026-11-19T00:00:00Z"}}
+  ],"responses":{"204":{"description":"no content"}}}}}
+ })json")));
+ if (!TestTrue(TEXT("date-time parameter document analyzes"),DateAnalysis.bDocumentValid) || !NoErrors(*this,DateAnalysis.Issues,TEXT("date parameters"))) return false;
+ const FString ArrayDefault=TEXT("[\"2026-11-19T00:00:00Z\",\"2026-11-20T12:30:00+02:00\"]");
+ for (const bool DateTimeAsString:{false,true})
+ {
+  FVaRestOpenApiPlanOptions Options;Options.bDateTimeAsString=DateTimeAsString;
+  const auto Dates=FVaRestOpenApiPlanner::Build(DateAnalysis,Options);
+  if (!TestTrue(TEXT("date-time parameter plan"),Dates.bValid) || !NoErrors(*this,Dates.Issues,TEXT("date plan")) ||
+   !TestEqual(TEXT("date operation retained"),Dates.Endpoints.Num(),1) || !TestEqual(TEXT("all date parameters retained"),Dates.Endpoints[0].Parameters.Num(),4)) return false;
+  const auto& Params=Dates.Endpoints[0].Parameters;
+  for (int32 Index=0;Index<3;++Index)
+  {
+   TestEqual(TEXT("date-time parameter array uses scalar string elements"),Params[Index].Type.Kind,EVaRestOpenApiValueKind::String);
+   TestEqual(TEXT("date-time parameter keeps its array pin"),Params[Index].Type.Container,EVaRestOpenApiContainer::Array);
+   TestEqual(TEXT("date-time array default keeps both exact wire strings"),Params[Index].DefaultText,ArrayDefault);
+   TestEqual(TEXT("repeat/query CSV/header CSV follow declared array semantics"),Params[Index].Style,Index==0 ? EVaRestOpenApiQueryStyle::Repeat : EVaRestOpenApiQueryStyle::Csv);
+  }
+  TestFalse(TEXT("valid date-time array defaults are not dropped as incompatible scalars"),Has(Dates.Issues,TEXT("OA-APPLY-DEFAULT")));
+  TestEqual(TEXT("scalar date-time parameter remains a scalar string"),Params[3].Type.Kind,EVaRestOpenApiValueKind::String);
+  TestEqual(TEXT("scalar date-time parameter has no container"),Params[3].Type.Container,EVaRestOpenApiContainer::None);
+  TestEqual(TEXT("scalar date-time default remains unquoted wire text"),Params[3].DefaultText,FString(TEXT("2026-11-19T00:00:00Z")));
+ }
  return true;
 }
 

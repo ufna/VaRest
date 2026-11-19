@@ -129,7 +129,8 @@ void FPlanner::Endpoints()
 			if (Input.Content.IsValid() || !Input.Schema.IsValid())
 			{ Param.Type.Kind=EVaRestOpenApiValueKind::String;Issue(Input.Location,TEXT("OA-PARAM-CONTENT"),TEXT("A content/untyped parameter uses a String pin.")); }
 			else Param.Type=Type(Input.Schema,Param.Id,FVaRestOpenApiNameAllocator::Pascal(Out.Name)+FVaRestOpenApiNameAllocator::Pascal(Input.Name)).Type;
-			if (Param.Type.Kind==EVaRestOpenApiValueKind::Bytes || Param.Type.Kind==EVaRestOpenApiValueKind::DateTime) { Param.Type.Kind=EVaRestOpenApiValueKind::String;Param.Type.Container=EVaRestOpenApiContainer::None; }
+			if (Param.Type.Kind==EVaRestOpenApiValueKind::Bytes) { Param.Type.Kind=EVaRestOpenApiValueKind::String;Param.Type.Container=EVaRestOpenApiContainer::None; }
+			else if (Param.Type.Kind==EVaRestOpenApiValueKind::DateTime) Param.Type.Kind=EVaRestOpenApiValueKind::String;
 			if (Param.Type.Kind==EVaRestOpenApiValueKind::Struct || Param.Type.Kind==EVaRestOpenApiValueKind::Json || Param.Type.Container==EVaRestOpenApiContainer::Map || Equal(Input.Style,TEXT("deepObject")))
 			{
 				Issue(Input.Location,TEXT("OA-PARAM-STYLE"),TEXT("Object/deep parameter serialization needs an explicit String value or the Query map."));
