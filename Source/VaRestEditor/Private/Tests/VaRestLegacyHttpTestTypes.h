@@ -12,10 +12,12 @@ class UVaRestLegacyHttpTestProbe : public UObject
  GENERATED_BODY()
 public:
  int32 Completes=0,Failures=0,CallCompletions=0,ResendAt=-1;
+ int32 LatentContinuations=0,LastLatentLinkage=INDEX_NONE;
  bool bOnGT=true,bFanout=false;
  FString Root;
  TArray<TWeakObjectPtr<UVaRestRequestJSON>> CallRequests;
  UFUNCTION() void Completed(UVaRestRequestJSON* Request);
  UFUNCTION() void Failed(UVaRestRequestJSON* Request);
  UFUNCTION() void CallCompleted(UVaRestRequestJSON* Request);
+ UFUNCTION() void LatentDone(int32 Linkage);
 };

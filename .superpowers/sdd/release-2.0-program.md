@@ -1,5 +1,25 @@
 # VaRest 2.0 release program ledger (controller-level; per-plan ledgers live in sibling dirs)
 
+Source423 M6 remaining acceptance cases (source checkpoint; UNBUILT/UNRUN):
+private automation adds public ApplyURL/actual LatentActionManager delivery,
+genuine native HTTP ConnectionError with per-Hub reachability, and actual owned
+Hub-stop cancellation while a legacy request is pending. An independent JSON
+case covers literal UTF-8/UTF-16LE/UTF-16BE Unicode archive goldens and public
+WriteToFile/archive/LoadJsonFromFile interoperation in a uniquely owned temporary
+directory. A separate actual Blueprint action-database/final-menu case checks
+legacy exclusion with bridge and v2 positive controls in both deprecated-action
+preference modes. Existing healthy HTTP twelve-case body and four legacy JSON
+cases are retained. These are tests of the already authored feature surface,
+not a claim of new production behavior, successful compilation, or execution.
+
+The actual Source421 native, genuine original-v1 Blueprint load/compile/GET and
+stock no-native package-filter evidence recorded below remains prior qualified
+evidence. The original assets, producer, platform selectors and production code
+are unchanged. Source423 requires its own fresh full UHT/UBT graph, complete
+commands/recursive response/unity/header/library/output inspection, guarded
+plugin build, then only the newly added Editor cases. Whole M5/M6, cooked and
+platform/lifecycle release gates and the overall Goal remain open.
+
 ## Source422 — actual original-origin migration and distribution omission qualified; docs only, 2026-11-19 MSK
 
 Current code421 is published9d1a5325 and now has genuine finite qualification. Its fresh complete Editor graph executes two plugin actions successfully, unforced22.655163s, with all26,307 protected inputs unchanged and five products. Post72542661 joins one actual dependency record with3,606 inputs, one matching SO/debug GNU pair and the unchanged SDK command/version roles. No Engine/Host action, new PCH or build-policy override occurs.
