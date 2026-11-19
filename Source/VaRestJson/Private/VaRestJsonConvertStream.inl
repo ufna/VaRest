@@ -113,8 +113,13 @@ struct FStreamTapeEvent
 		struct { uint32 Offset, Length; } Text;
 	};
 	EStreamTapeKind Kind = EStreamTapeKind::Null;
+	bool bStructKey = false;
+	int32 FieldIndex = INDEX_NONE; // uses existing padding; never a native property pointer
 };
 static_assert(sizeof(FStreamTapeEvent) == 16, "streaming tape events stay compact");
+static_assert(alignof(FStreamTapeEvent) == alignof(uint64), "streaming tape alignment stays unchanged");
+static_assert(STRUCT_OFFSET(FStreamTapeEvent, Kind) == 8 && STRUCT_OFFSET(FStreamTapeEvent, bStructKey) == 9 &&
+	STRUCT_OFFSET(FStreamTapeEvent, FieldIndex) == 12, "key selection fits the existing 16-byte event");
 struct FDecoder;
 struct FStreamTape
 {
@@ -215,6 +220,9 @@ struct FPreflight
 		auto& Frame = Frames.Last(); if (!Frame.Fields) return true;
 		const FUtf8StringView Name(reinterpret_cast<const UTF8CHAR*>(Text), static_cast<int32>(Length));
 		const int32 Index = MatchNextField(*Frame.Fields,Name,Frame.LastField+1,Scratch);
+		// Reject invalid Plan selection during validation, before any destination/report context exists.
+		if (Index != INDEX_NONE && !Frame.Fields->Fields.IsValidIndex(Index)) return false;
+		auto& Event = Tape.Events.Last(); Event.bStructKey = true; Event.FieldIndex = Index;
 		if (Index != INDEX_NONE)
 		{
 			if (Index <= Frame.LastField) bFallback = true; // exact/tier/last-occurrence selection stays in the DOM path
@@ -283,7 +291,6 @@ struct FDecoder
 		const FFieldInfo* Pending = nullptr;
 		FUtf8StringView Key;
 		uint32 Index = 0, Count = 0;
-		int32 NextField = 0;
 		bool bPath = false, bEntered = false;
 	};
 	struct FSlot
@@ -375,16 +382,20 @@ struct FDecoder
 	{
 		FNode Node; Node.Type = EVaRestJsonType::String; Node.Str = {reinterpret_cast<const UTF8CHAR*>(Value), Length, 0}; return Scalar(Node);
 	}
-	bool Key(const char* Text, rapidjson::SizeType Length, bool)
+	bool Key(const char* Text, rapidjson::SizeType Length, bool bStructKey, int32 Index)
 	{
 		if (Frames.IsEmpty()) return false;
 		auto& Frame = Frames.Last();
-		if (Frame.Map) { Frame.Key = FUtf8StringView(reinterpret_cast<const UTF8CHAR*>(Text), static_cast<int32>(Length)); return true; }
-		if (!Frame.Fields) return true;
+		// Preflight follows the same immutable Plan/slot layout; INDEX_NONE alone does not distinguish unknown struct/map keys.
+		if (!bStructKey)
+		{
+			check(!Frame.Fields && Index == INDEX_NONE);
+			if (Frame.Map) Frame.Key = FUtf8StringView(reinterpret_cast<const UTF8CHAR*>(Text), static_cast<int32>(Length));
+			return true;
+		}
+		check(Frame.Fields && (Index == INDEX_NONE || Frame.Fields->Fields.IsValidIndex(Index)));
 		if (!Context.Charge(Length, 1, int64(Length) + 1)) return false;
 		Frame.Key = FUtf8StringView(reinterpret_cast<const UTF8CHAR*>(Text), static_cast<int32>(Length));
-		const int32 Index = MatchNextField(*Frame.Fields,Frame.Key,Frame.NextField,Context.Scratch);
-		if (Index!=INDEX_NONE) Frame.NextField=Index+1;
 		Frame.Pending = Index == INDEX_NONE ? nullptr : &Frame.Fields->Fields[Index];
 		Frame.PendingPrepared = Index == INDEX_NONE ? nullptr : (*Frame.PreparedFields)[Index]; return !Context.bAborted;
 	}
@@ -474,7 +485,7 @@ bool FStreamTape::Replay(FDecoder& Decoder) const
 		case EStreamTapeKind::Uint64: Continued = Decoder.Uint64(Event.Unsigned); break;
 		case EStreamTapeKind::Double: Continued = Decoder.Double(Event.Number); break;
 		case EStreamTapeKind::String: Continued = Decoder.String(reinterpret_cast<const char*>(Input.GetData() + Event.Text.Offset), Event.Text.Length, false); break;
-		case EStreamTapeKind::Key: Continued = Decoder.Key(reinterpret_cast<const char*>(Input.GetData() + Event.Text.Offset), Event.Text.Length, false); break;
+		case EStreamTapeKind::Key: Continued = Decoder.Key(reinterpret_cast<const char*>(Input.GetData() + Event.Text.Offset), Event.Text.Length, Event.bStructKey, Event.FieldIndex); break;
 		case EStreamTapeKind::RawNumber: Continued = Decoder.RawNumber(reinterpret_cast<const char*>(Input.GetData() + Event.Text.Offset), Event.Text.Length, false); break;
 		case EStreamTapeKind::Object: Continued = Decoder.StartObject(); break;
 		case EStreamTapeKind::Array: Continued = Decoder.StartArray(); break;

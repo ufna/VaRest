@@ -91,6 +91,28 @@ bool FVaRestJsonStreamingParityTest::RunTest(const FString& Parameters)
   FVaRestJsonConvertOptions Options; Options.bStrict=Case.Strict;
   Decode(*this,Bytes(Case.Text),Dom,Stream,Case.Stream,Options);
  }
+ // Saved key selections must retain tolerant spelling tiers and distinguish unknown subtrees from struct/map keys.
+ const FCase NamedCases[]={
+  {"{\"USERID\":2,\"ignored\":{\"userId\":99,\"isActive\":false},\"bIsActive\":true,\"URL-PATH\":\"/x\",\"HTTP STATUS2\":7,\"userName\":\"n\"}",true},
+  {"{\"user_id\":5,\"userId\":6}",false},
+  {"{\"userId\":6,\"user_id\":5}",false}};
+ for (const auto Naming:{EVaRestJsonNaming::CamelCase,EVaRestJsonNaming::SnakeCase}) for (bool Strict:{false,true})
+ {
+  FVaRestJsonConvertOptions Options;Options.Naming=Naming;Options.bStrict=Strict;
+  for (const auto& Case:NamedCases)
+  {
+   FVaRestJsonTestNaming NamedDom,NamedStream;
+   TestTrue(TEXT("validated key index retains spelling tiers and duplicate fallback"),Decode(*this,Bytes(Case.Text),NamedDom,NamedStream,Case.Stream,Options));
+  }
+  FVaRestJsonBenchResponse NestedDom,NestedStream;
+  const auto NestedKeys=Bytes("{\"DATA\":{\"ITEMS\":[{\"ID\":\"bad\",\"ignored\":{\"UID\":99,\"NAME\":\"skip\"},\"NAME\":\"first\",\"STATS\":{\"id\":2,\"name\":3}},{\"ID\":3,\"NAME\":\"second\",\"STATS\":{\"ID\":4,\"\\u00c4\":5,\"\\u00e4\":6}}]}}");
+  TestEqual(TEXT("validated key indices keep array/map context and exact strict/lenient issue paths"),Decode(*this,NestedKeys,NestedDom,NestedStream,true,Options),!Strict);
+ }
+ FVaRestJsonTestInner UnknownDom,UnknownStream;UnknownDom.Id=UnknownStream.Id=91;UnknownDom.Name=UnknownStream.Name=TEXT("keep");
+ TestTrue(TEXT("unknown-only object keeps native defaults and ignores nested field-like Unicode keys"),
+  Decode(*this,Bytes("{\"\\u0130D\":{\"id\":4,\"name\":\"skip\"},\"\\u00df\":[{\"ID\":8}]}"),UnknownDom,UnknownStream,true));
+ TestEqual(TEXT("unknown-only object does not select an integer field"),UnknownStream.Id,91);
+ TestEqual(TEXT("unknown-only object does not select a string field"),UnknownStream.Name,FString(TEXT("keep")));
  // Exact64-bit and negative-zero events must survive the tape without a floating/integer reinterpretation.
  FVaRestJsonBenchItem NumericDom,NumericStream;
  TestTrue(TEXT("signed64 and double-bit events retain native parity"),Decode(*this,Bytes("{\"id\":-2147483648,\"uid\":-9223372036854775808,\"price\":-0.0}"),NumericDom,NumericStream,true));
