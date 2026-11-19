@@ -1,0 +1,23 @@
+{
+  "FileVersion": 3,
+  "Version": 1,
+  "VersionName": "source-only-original-producer",
+  "FriendlyName": "VaRest original v1 fixture producer",
+  "Description": "Opt-in Editor-only fixture author using the unchanged v1-on-5.8 VaRest provider. No runtime content.",
+  "Category": "Testing",
+  "EnabledByDefault": false,
+  "CanContainContent": false,
+  "Modules": [
+    {
+      "Name": "VaRestLegacyTagFixture",
+      "Type": "Editor",
+      "LoadingPhase": "PostEngineInit"
+    }
+  ],
+  "Plugins": [
+    {
+      "Name": "VaRest",
+      "Enabled": true
+    }
+  ]
+}

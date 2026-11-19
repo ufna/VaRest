@@ -2,7 +2,7 @@
 
 VaRest 2.0 keeps the v1 classes and serialized function names in the `VaRest` module. Existing nodes remain executable compatibility nodes; they are deprecated and hidden from new-node searches. The legacy module is scheduled for removal in **v3**, not in 2.0. C++ deprecation attributes are deferred until 2.1.
 
-This is a development version. A Blueprint fixture authored from the frozen `v1-on-5.8` API now compiles, saves and reloads on Linux Editor. It covers 108 callable functions plus the internal 109th helper through the original Make/Break Json handlers. This is a newly authored fixture, not a binary produced by the old plugin. Request behavior/lifetime and release platform checks remain open; M6 is not release-qualified.
+This is a development version. Test-only original-provider Blueprint fixtures are retained in [Tools/compat/v1-on-5.8](../Tools/compat/v1-on-5.8/README.md), with exact serialized bytes and provenance from the unchanged v1 tag built on UE5.8. Both original author/compile/save phases pass in separate Linux Editor processes. The generic fixture retains 108 callable functions and the internal 109th helper through the original Make/Break JSON handlers; the request fixture contains a separately executable GET graph. Current-v2 load/compile/real-request checks for these saved files are new and unbuilt/unrun at the Source419 checkpoint. The earlier current-generated frozen-API fixture remains a separate historical qualification. Request lifetime, packaging and release platform checks remain open; whole M6 is not release-qualified.
 
 ## Migrate one flow at a time
 

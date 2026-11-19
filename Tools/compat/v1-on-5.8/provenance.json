@@ -1,0 +1,404 @@
+{
+  "schema": 1,
+  "kind": "original-provider-on-UE5.8 Blueprint fixtures",
+  "original_tag": "2a5b51b7700cecd55a6ef64add3ad0623f5ce2a1",
+  "provider_version": "1.1-r34",
+  "engine_version": "5.8.1-0+UE5",
+  "platform": "Linux x86_64 Editor Development",
+  "original_provider_source_manifest_identity": {
+    "bytes": 6934,
+    "sha256": "c560e7c5a5667c4b4b2155e08c2bee7ab6a8214b7d70d49383ad751b276c0292"
+  },
+  "original_provider_source_members": [
+    {
+      "path": "Source/.clang-format",
+      "git_blob": "f2faa030e1f1794860b814b081fb02bbd98e7507",
+      "mode": "100644",
+      "bytes": 1439,
+      "sha256": "31e04e32cd721811a92520f9ac2ff93835148b022551936bb3296816222f103c"
+    },
+    {
+      "path": "Source/VaRest/Private/VaRest.cpp",
+      "git_blob": "f482954067ce4fb6545228df24ae1ea3c4980753",
+      "mode": "100644",
+      "bytes": 1445,
+      "sha256": "590dfd83a64496c0edcfa7d75adbe740cf4b54e7cf97c6c42d6d0662e9bea1b1"
+    },
+    {
+      "path": "Source/VaRest/Private/VaRestJsonObject.cpp",
+      "git_blob": "fb183f5cda91c4e4ed8cf244e2cd683ecac2e4a7",
+      "mode": "100644",
+      "bytes": 18875,
+      "sha256": "017c50a456ac623c564449b880c1d51756d4903a72528ff03fca949b1b9c4ce8"
+    },
+    {
+      "path": "Source/VaRest/Private/VaRestJsonParser.cpp",
+      "git_blob": "d2709686ee359aa1789686b5063d7c3c0c0325e4",
+      "mode": "100644",
+      "bytes": 26418,
+      "sha256": "34596cb996683094381749139ba1b6d12781c97c8682f52f86341d031d9754d0"
+    },
+    {
+      "path": "Source/VaRest/Private/VaRestJsonParser.h",
+      "git_blob": "80b545d071a9aa9a815cd3b9b699df983df83ee8",
+      "mode": "100644",
+      "bytes": 4087,
+      "sha256": "798d7349841e55ad5047403d7897f157b05e13473ec6c9dd5eb59b5cd5e2c826"
+    },
+    {
+      "path": "Source/VaRest/Private/VaRestJsonValue.cpp",
+      "git_blob": "043d2d99b423251f647d316a13e592da478772bb",
+      "mode": "100644",
+      "bytes": 3512,
+      "sha256": "e8070fde0e5730acf6d6b5dd370296b518f11b15a1be4aec3f90996df2b8d443"
+    },
+    {
+      "path": "Source/VaRest/Private/VaRestLibrary.cpp",
+      "git_blob": "9c6f16f868631a9ecba214c237cf5bffc383ab2a",
+      "mode": "100644",
+      "bytes": 2372,
+      "sha256": "e15b948e19eabc6483af0e7b3d111c14f5809e3d1fa8068432bae401751cee7b"
+    },
+    {
+      "path": "Source/VaRest/Private/VaRestRequestJSON.cpp",
+      "git_blob": "e5efdfdfc5834b69d8ce0c83c4dc78df270469fa",
+      "mode": "100644",
+      "bytes": 16095,
+      "sha256": "f7a22b608a60b15b3565d85ac3d061cf328a97e9e201ab7d9ee7193322876ba7"
+    },
+    {
+      "path": "Source/VaRest/Private/VaRestSettings.cpp",
+      "git_blob": "06a9a0b9c278e43250813c74f46cf42399ef533e",
+      "mode": "100644",
+      "bytes": 254,
+      "sha256": "8bee7042f6a71eb46f7a63d38c4d7e64596f242e44e8534718601bfafcc932ef"
+    },
+    {
+      "path": "Source/VaRest/Private/VaRestSubsystem.cpp",
+      "git_blob": "97daab6583897d73b877b0dbdc0f752b3524359a",
+      "mode": "100644",
+      "bytes": 6026,
+      "sha256": "81d96d6190df44d34a782f737483fc497c532d56fee285b8f0e1e9d63b4a2e93"
+    },
+    {
+      "path": "Source/VaRest/Public/VaRest.h",
+      "git_blob": "86dade5302cd9c9ee70ebceaa103a1e119ad1cea",
+      "mode": "100644",
+      "bytes": 1199,
+      "sha256": "7c07d5b3337a22c016f0394b77171e78e5063b664ce5bffed8c3fc941525cc5c"
+    },
+    {
+      "path": "Source/VaRest/Public/VaRestDefines.h",
+      "git_blob": "ec14ea474693c8eb0f95c2e30208c13d5ecdc787",
+      "mode": "100644",
+      "bytes": 820,
+      "sha256": "0e5c18de3099b7dc1d8c2fbe2bfd7d3f6c5e8f86ac8fc1c0858f1908f93855c4"
+    },
+    {
+      "path": "Source/VaRest/Public/VaRestJsonObject.h",
+      "git_blob": "690a889ed4ccc9fe46b0eb52c78f9e65895b0e1a",
+      "mode": "100644",
+      "bytes": 11449,
+      "sha256": "6c085da6695262135850cc779ccac0db5aa92c2ea45e8a8a14019fe208907386"
+    },
+    {
+      "path": "Source/VaRest/Public/VaRestJsonValue.h",
+      "git_blob": "45ba8b4033530c3f753a751e62ff49d84936dae5",
+      "mode": "100644",
+      "bytes": 2829,
+      "sha256": "70b66647b4a6aec4278db615bec31c0d0165aa4e3c1760f356f7f4815991e2ae"
+    },
+    {
+      "path": "Source/VaRest/Public/VaRestLibrary.h",
+      "git_blob": "6f52bbdf595f62c3e52afeba88ca7e6fea6ac58b",
+      "mode": "100644",
+      "bytes": 3896,
+      "sha256": "40906b751d43c4fb3a9fb6c3dbe3efaa92d0e52a62e4c8481ce2930952cb3df7"
+    },
+    {
+      "path": "Source/VaRest/Public/VaRestRequestJSON.h",
+      "git_blob": "49d0539083c0d78a6896770fc1548d5f02ebf752",
+      "mode": "100644",
+      "bytes": 11263,
+      "sha256": "6adc5b6dca369ebfc99967bad62ac91a62543dfcf54555026e23382e79bce31e"
+    },
+    {
+      "path": "Source/VaRest/Public/VaRestSettings.h",
+      "git_blob": "1220c198e12ae020db1971afe7fdb700fe449af3",
+      "mode": "100644",
+      "bytes": 570,
+      "sha256": "7f7c048553f010047283de12462b7dbb4a03ddee06b2d5d57eeaffbd569e231a"
+    },
+    {
+      "path": "Source/VaRest/Public/VaRestSubsystem.h",
+      "git_blob": "6a438d65dbf657ad7c600a3ed504c6e9cc2348de",
+      "mode": "100644",
+      "bytes": 4608,
+      "sha256": "b361a6d8945e0d156af6a932ce9c6431b419c7729a881b79a39f59512d476060"
+    },
+    {
+      "path": "Source/VaRest/Public/VaRestTypes.h",
+      "git_blob": "fbbf94ae18662a66064cd6e3071f97eb350a8e09",
+      "mode": "100644",
+      "bytes": 8860,
+      "sha256": "86913739d154150bf66caf020c636cb7cedb7d5e1edc24912bfc1590dcb446c4"
+    },
+    {
+      "path": "Source/VaRest/VaRest.Build.cs",
+      "git_blob": "675aa60da2a4e549173d115cd4f1411a67c6a5a0",
+      "mode": "100644",
+      "bytes": 839,
+      "sha256": "f36ec320610799e2c1757ed4801e4e5aabca4cc700912c87985095fd4d2a6772"
+    },
+    {
+      "path": "Source/VaRestEditor/Private/VaRestEditor.cpp",
+      "git_blob": "c3bb7d0754ee45e5a3c68988fbe5d4f04e0d1fa6",
+      "mode": "100644",
+      "bytes": 652,
+      "sha256": "f0b6c58d71f0e7e2e95ff5106260d82ba2b6422dc605aafc97ab5f30e49cf1db"
+    },
+    {
+      "path": "Source/VaRestEditor/Private/VaRest_BreakJson.cpp",
+      "git_blob": "c328a8a66cbc3eaf00a238db6c0b4d45e16e6ac1",
+      "mode": "100644",
+      "bytes": 17724,
+      "sha256": "16931e13b4a2e1f8f8f5ec7a932255b41fee5e24f919e6ce49fab9b43a0254ad"
+    },
+    {
+      "path": "Source/VaRestEditor/Public/VaRestEditor.h",
+      "git_blob": "a5e0a8ae5f43b9004ea1d098f0d17f86f4fac7d5",
+      "mode": "100644",
+      "bytes": 303,
+      "sha256": "4fa456a06f8e9e9725d49980202c1368b5c266547dbca210bbacac581a18dbbe"
+    },
+    {
+      "path": "Source/VaRestEditor/Public/VaRest_BreakJson.h",
+      "git_blob": "07d897f005847bbab4d06670bab9ce0e98e3874d",
+      "mode": "100644",
+      "bytes": 3029,
+      "sha256": "5bb43681b8c03cf2fbceb775ebcd976e3226bc0901f5120bc7b522b83a5ab912"
+    },
+    {
+      "path": "Source/VaRestEditor/VaRestEditor.Build.cs",
+      "git_blob": "c8902f6822f9c3667f29f445cc84bc1f36b23a8d",
+      "mode": "100644",
+      "bytes": 1503,
+      "sha256": "0f98305aafe54074b7054c49246f3b646b0881a42b615d00a23189d6a8cc7080"
+    },
+    {
+      "path": "VaRest.uplugin",
+      "git_blob": "09e6dd2fc92699f66a323c22f28619fc2168ef74",
+      "mode": "100644",
+      "bytes": 619,
+      "sha256": "ddf50ad7196220f67ff293b889e34b7d3fa810f5e7bbf584eb779c22387faf07"
+    }
+  ],
+  "additional_editor_producer_source": [
+    {
+      "path": "producer/VaRestLegacyTagFixture.uplugin",
+      "bytes": 564,
+      "sha256": "d9408009399a01100181e3b0fef486c6e70c0e5807d1644266629c17afe471ce"
+    },
+    {
+      "path": "producer/Source/VaRestLegacyTagFixture/VaRestLegacyTagFixture.Build.cs",
+      "bytes": 720,
+      "sha256": "0e97faea11cf2ee2c6c66c5666b5bbec92257a2397b8b88d39e535fabf1b8000"
+    },
+    {
+      "path": "producer/Source/VaRestLegacyTagFixture/Private/VaRestLegacyTagFixture.cpp",
+      "bytes": 17293,
+      "sha256": "ff70699024446983aa3060d87e19afec26dbf97d9d276b4d9ba7355d61356d30"
+    },
+    {
+      "path": "producer/Source/VaRestLegacyTagFixture/Private/VaRestLegacyV1TagFunctions.inl",
+      "bytes": 16760,
+      "sha256": "5edb1102246c290ffb9a0f0b130c3891474402c6af5d1f76ce78dbbf26ea1ae2"
+    },
+    {
+      "path": "producer/Source/VaRestLegacyTagFixture/Private/VaRestOriginalRequestFixture.cpp",
+      "bytes": 12782,
+      "sha256": "c1e65a67511c0c0afbc91f7962c8d087b2fc0190d1b6d4faf819e6a28060e20b"
+    }
+  ],
+  "producer_source_admission": {
+    "bytes": 5667,
+    "sha256": "3ed403beafcf22ff73262d1fc7730cdba71d8ec2e74fa3c9e48550bb1cd3e1f8"
+  },
+  "compile_fix_source": {
+    "path": "/w/Unreal/VaRest-recovery/takeover-20261118-from-01441/m6-original-tag-request-compile-fix-source-001/FINAL.json",
+    "bytes": 776,
+    "sha256": "4a1713ff452613155ec0fa5edb77a61cffe275f49dec9277a5be998ebbad5c5b"
+  },
+  "compile_fix_peer": {
+    "path": "/w/Unreal/VaRest-recovery/takeover-20261118-from-01441/m6-original-tag-request-compile-fix-peer-001/FINAL.json",
+    "bytes": 538,
+    "sha256": "9d9108e144d2fd2e0d0a97a7a2d07bfa7e887cd5056748f50d6b4c914b972ea7"
+  },
+  "mount_order_source": {
+    "path": "/w/Unreal/VaRest-recovery/takeover-20261118-from-01441/m6-original-tag-producer-mount-order-fix-source-001/FINAL.json",
+    "bytes": 431,
+    "sha256": "fd634601839d10c749e31c09102258c556fc0b522643c47d9ee7ba4d735a6af5"
+  },
+  "mount_order_peer": {
+    "path": "/w/Unreal/VaRest-recovery/takeover-20261118-from-01441/m6-original-tag-producer-mount-order-fix-peer-001/FINAL.json",
+    "bytes": 452,
+    "sha256": "5b28cb5aa5d6b2976d2d61738eb71748cb06775db825986cf4b8a516a9d58a81"
+  },
+  "native_qualification": {
+    "bytes": 13436,
+    "sha256": "c3111d28f598163c42bc1629a674165c2e196268955867606e24a6210ed9ef15"
+  },
+  "actual_images": [
+    {
+      "module": "libUnrealEditor-VaRestLegacyTagFixture.so",
+      "library": {
+        "bytes": 151160,
+        "sha256": "be202f6d6a870dcc4d9b8f62e931cb48b32f3b7163d990b08118647c6f2f0f09"
+      },
+      "debug": {
+        "bytes": 547376,
+        "sha256": "8f7833f9a390f1fdf61e0ba08d9208695d1f5e94e5168464d3b85987ef8db669"
+      },
+      "GNU_BuildID": "6c75be0f9998daf219ba44b0662616b62fd2a60d",
+      "producing_interval": "native003_current_fixture_compile_and_link"
+    },
+    {
+      "module": "libUnrealEditor-VaRest.so",
+      "library": {
+        "bytes": 616952,
+        "sha256": "72b2342f63e714b37c81533c22889725c8807cce0a6f35e5c7a248b3ab09c6e7"
+      },
+      "debug": {
+        "bytes": 1712680,
+        "sha256": "d9bd2f54dd5b3a74ca091624abf91989c5bc8902957224bfcab4f916b2a6451a"
+      },
+      "GNU_BuildID": "7d680f1563b91ce0716d06a6b2925044014e3bb4",
+      "producing_interval": "native001_successful_product_within_retained_failed_attempt"
+    },
+    {
+      "module": "libUnrealEditor-VaRestEditor.so",
+      "library": {
+        "bytes": 120992,
+        "sha256": "cefb97a7b0a879d4fee935c56529c8d6397faac26e9bf19dd606a01c6fd6328d"
+      },
+      "debug": {
+        "bytes": 604984,
+        "sha256": "ea90740119ec66df3e3d26d6f502e00daf7e517164c0bf02f9ed74c782d9c51b"
+      },
+      "GNU_BuildID": "b5032053d4cd3e822acf3663d412cc7d5594a847",
+      "producing_interval": "native001_successful_product_within_retained_failed_attempt"
+    }
+  ],
+  "fixtures": [
+    {
+      "path": "fixtures/BP_FromTagV1.uasset",
+      "bytes": 1375770,
+      "sha256": "e2585785b5ab3475eb411d03747e3faeedc6f41128fdddf91b0bf9c5f7fa97f5",
+      "serialized_package": "/VaRestM6Compat_2a5b51b7/BP_FromTagV1",
+      "phase": "Generate",
+      "qualified_proof": {
+        "bytes": 20520,
+        "sha256": "11f7eb5645e809a88c89b1ec5d3798c08385c8a1072b4f8cbde57ce3928a189f"
+      },
+      "actual_case": "VaRest.Compat.OriginalTagProducer.Generate",
+      "errors": 0,
+      "compile_records": [
+        [
+          "0",
+          "0",
+          "2a5b51b7700cecd55a6ef64add3ad0623f5ce2a1"
+        ]
+      ],
+      "editor": {
+        "exit_code": 0,
+        "forced": false,
+        "error": null,
+        "seconds": 33.984598852999625
+      },
+      "supervisor": {
+        "exit_code": 0,
+        "forced": false,
+        "error": null,
+        "signals": [],
+        "own_group_after": "absent",
+        "seconds": 34.07934284200019
+      },
+      "guarded_inputs": 40333,
+      "metadata_changes": 2,
+      "report_summary": {
+        "succeeded": 0,
+        "succeededWithWarnings": 1,
+        "failed": 0,
+        "notRun": 0,
+        "inProcess": 0
+      }
+    },
+    {
+      "path": "fixtures/BP_RequestFromTagV1.uasset",
+      "bytes": 103657,
+      "sha256": "9a503817009aecf5fc65c722cfcf8c5ddd531f7686a6e3e84e9ee4ab8f0267cb",
+      "serialized_package": "/VaRestM6Compat_2a5b51b7/BP_RequestFromTagV1",
+      "phase": "GenerateRequest",
+      "qualified_proof": {
+        "bytes": 20027,
+        "sha256": "64ceb08010a8e4b29a2e78dbb0f6d7d5507ce536fa97550ba39a8926cae32a52"
+      },
+      "actual_case": "VaRest.Compat.OriginalTagRequestProducer.GenerateRequest",
+      "errors": 0,
+      "compile_records": [
+        [
+          "0",
+          "0",
+          "2a5b51b7700cecd55a6ef64add3ad0623f5ce2a1"
+        ]
+      ],
+      "editor": {
+        "exit_code": 0,
+        "forced": false,
+        "error": null,
+        "seconds": 32.1672853630007
+      },
+      "supervisor": {
+        "exit_code": 0,
+        "forced": false,
+        "error": null,
+        "signals": [],
+        "own_group_after": "absent",
+        "seconds": 32.26308659999631
+      },
+      "guarded_inputs": 40339,
+      "metadata_changes": 0,
+      "report_summary": {
+        "succeeded": 0,
+        "succeededWithWarnings": 1,
+        "failed": 0,
+        "notRun": 0,
+        "inProcess": 0
+      }
+    }
+  ],
+  "coverage": {
+    "callable_function_graph_identities": 108,
+    "original_custom_MakeBreak": true,
+    "internal_109th_helper_used_by_compiler_handler": true,
+    "custom_projection_executed": true,
+    "all108_events_executed": false,
+    "request_events_executed_in_producer": false
+  },
+  "prior_failed_attempts_retained": [
+    "native001: fixture treated void SDK setters as boolean",
+    "Generate002: directory precheck ran after mount callbacks"
+  ],
+  "qualification": {
+    "original_provider_author_compile_save": "qualified two separate fresh processes",
+    "current_v2_load_compile_and_local_GET": "UNBUILT_UNRUN at Source419 checkpoint",
+    "distributed_package_and_cooked_filelist": "UNRUN"
+  },
+  "storage": {
+    "outside_Content": true,
+    "normal_plugin_discovery_stops_at_parent_descriptor": true,
+    "explicit_distribution_filter": "-/Tools/compat/...",
+    "whole_temporary_HostProject_copy_may_contain_test_files": true
+  },
+  "scope": "The original 26 production text members are unchanged tag inputs. Five additional Editor producer members author these exact saved assets. Asset identity and qualified facts are embedded here; complete raw producing records are retained by the project recovery store. Current-v2 consumer, packaging/cook/platform/whole M6 and release qualification remain separate."
+}
