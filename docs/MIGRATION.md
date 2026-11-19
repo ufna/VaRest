@@ -35,6 +35,8 @@ This is a development version. Test-only original-provider Blueprint fixtures ar
 
 **Bodies and headers.** The compatibility facade still builds v1 form/query, binary and JSON bodies. v2 validates verbs/headers and ignores GET bodies. Custom verbs that the engine cannot send a body with fail configuration instead of silently losing that body. Form query values join an existing query correctly, and repeated execution avoids accumulating the same generated query. The native `GetHttpRequest()` remains available for the invocation; a reused/canceled invocation may get a fresh engine request. Core response streaming means native callers should read body bytes through the VaRest response accessors, rather than the engine response buffer. The SDK has no public activity-timeout getter, so a custom engine activity timeout must be reapplied when a fresh engine request is created.
 
+**Send Request pins.** Connect a string to `Body` for Text, a byte array for Binary, `FVaRestMultipartData` for Multipart, or a JSON handle/supported reflected value for Json. There are no Body Kind or Content Type inputs. Set a non-multipart `Content-Type` through the advanced `Headers` input; multipart generates its own boundary and rejects a manual content type. For generated form encoding, use **Call Endpoint** with endpoint `BodyKind = Form` and a request type that produces a flat JSON object; use `Query` for values placed in the URL. **Send Request** has one typed `Response` output: select its Kind (for example Json, String or Bytes) under **Response Type** in the node Details. `Http` carries response metadata. **Call Endpoint** takes its body and response configuration from the API asset.
+
 **Response strings.** For object responses, legacy `GetResponseContentAsString()` preserves the v1 pretty JSON representation and optional string caching. Its whitespace can differ from the received entity. Native `GetResponseContent()` provides the retained response bytes.
 
 **Lifetime and cancellation.** The Hub retains admitted legacy requests until logical completion; request objects no longer call `AddToRoot`. Cancel stops the native operation and invalidates late results. Hub teardown cancels retained work. Canceled/replaced latent actions retire without triggering user execution, and replacing one no longer removes unrelated actions on the same owner. Reentrant invocations use distinct epochs. Pre-admission setup failures can report failure immediately; normal native completions are marshaled to the game thread. Native `FVaRestClient` aliases remain game-thread configured and must be released before HTTP module Stop.
@@ -88,7 +90,7 @@ The table covers the original reflected functions from tag `v1-on-5.8`. New migr
 | `UVaRestJsonObject.SetField` | Set Field with the corresponding value/array pin type |
 | `UVaRestJsonObject.GetArrayField` | Get Array Field (VaRest Json) |
 | `UVaRestJsonObject.SetArrayField` | Set Field with the corresponding value/array pin type |
-| `UVaRestJsonObject.MergeJsonObject` | Merge Json |
+| `UVaRestJsonObject.MergeJsonObject` | Merge Json for Overwrite = true; for false, use Has Field and Set Field to add only absent keys |
 | `UVaRestJsonObject.GetNumberField` | Get Number Field |
 | `UVaRestJsonObject.SetNumberField` | Set Field with the corresponding value/array pin type |
 | `UVaRestJsonObject.SetNumberFieldDouble` | Set Field with the corresponding value/array pin type |
@@ -142,10 +144,10 @@ The table covers the original reflected functions from tag `v1-on-5.8`. New migr
 | `UVaRestLibrary.GetWorldURL` | VaRestUtilityLibrary.GetWorldUrl (FVaRestWorldUrl) |
 | `UVaRestRequestJSON.SetVerb` | Send Request Verb input, or an API endpoint Verb |
 | `UVaRestRequestJSON.SetCustomVerb` | Send Request Verb input |
-| `UVaRestRequestJSON.SetContentType` | Send Request Body Kind input |
-| `UVaRestRequestJSON.SetBinaryContentType` | Send Request Content Type input |
+| `UVaRestRequestJSON.SetContentType` | Send Request infers encoding from the Body type; configure Form on an API endpoint (see Send Request pins) |
+| `UVaRestRequestJSON.SetBinaryContentType` | Content-Type in the advanced Send Request Headers input (except multipart) |
 | `UVaRestRequestJSON.SetBinaryRequestContent` | Send Request with Binary body |
-| `UVaRestRequestJSON.SetStringRequestContent` | Send Request with Text or Form body |
+| `UVaRestRequestJSON.SetStringRequestContent` | Send Request Body as String (Text); for Form use Call Endpoint, or send pre-encoded text with a Content-Type header |
 | `UVaRestRequestJSON.SetHeader` | Send Request Headers input, or client session headers |
 | `UVaRestRequestJSON.ResetData` | start a new Send Request invocation |
 | `UVaRestRequestJSON.ResetRequestData` | build a new Send Request body and headers |
@@ -153,25 +155,25 @@ The table covers the original reflected functions from tag `v1-on-5.8`. New migr
 | `UVaRestRequestJSON.Cancel` | Cancel on VaRest Request Handle |
 | `UVaRestRequestJSON.GetRequestObject` | keep the VaRest Json body passed to Send Request |
 | `UVaRestRequestJSON.SetRequestObject` | Send Request Body input |
-| `UVaRestRequestJSON.GetResponseObject` | Send Request JSON output |
+| `UVaRestRequestJSON.GetResponseObject` | Response output with Kind = Json under Response Type in Send Request Details |
 | `UVaRestRequestJSON.SetResponseObject` | assign a VaRest Json variable |
-| `UVaRestRequestJSON.GetResponseValue` | Send Request JSON output |
+| `UVaRestRequestJSON.GetResponseValue` | Response output with Kind = Json under Response Type in Send Request Details |
 | `UVaRestRequestJSON.GetURL` | response metadata and the configured client/endpoint URL |
 | `UVaRestRequestJSON.GetVerb` | Send Request Verb input or API endpoint Verb |
 | `UVaRestRequestJSON.GetStatus` | On Success / On Error and response metadata |
 | `UVaRestRequestJSON.GetResponseCode` | response Status |
 | `UVaRestRequestJSON.GetResponseHeader` | response Headers |
 | `UVaRestRequestJSON.GetAllResponseHeaders` | response Headers |
-| `UVaRestRequestJSON.GetResponseContentLength` | response Headers or response BytesDown |
-| `UVaRestRequestJSON.GetResponseContent` | Send Request Bytes output |
+| `UVaRestRequestJSON.GetResponseContentLength` | Content-Length in Http.Headers when present; otherwise the actual response byte-array length (Response Type Kind = Bytes), not BytesDown |
+| `UVaRestRequestJSON.GetResponseContent` | Response output with Kind = Bytes under Response Type in Send Request Details |
 | `UVaRestRequestJSON.SetURL` | Send Request Path input, or an API environment BaseUrl |
 | `UVaRestRequestJSON.ProcessURL` | Send Request |
 | `UVaRestRequestJSON.ApplyURL` | Send Request async completion pins |
 | `UVaRestRequestJSON.ExecuteProcessRequest` | Send Request |
 | `UVaRestRequestJSON.AddTag` | Send Request Tag input |
 | `UVaRestRequestJSON.RemoveTag` | set Tag on the next Send Request invocation |
-| `UVaRestRequestJSON.HasTag` | keep application tag state; use request Tag in metadata |
-| `UVaRestRequestJSON.GetResponseContentAsString` | Send Request String output, or To String (Json) |
+| `UVaRestRequestJSON.HasTag` | keep application tag state; Tag is exposed on queued results, not the regular Http response |
+| `UVaRestRequestJSON.GetResponseContentAsString` | Response output with Kind = String under Response Type in Send Request Details, or To String (Json) with Pretty enabled for legacy object formatting |
 | `UVaRestSubsystem.CallURL` | Send Request, Get Json, or Call Endpoint |
 | `UVaRestSubsystem.ConstructVaRestRequest` | Send Request; use Hub.GetDefaultClient for shared client state |
 | `UVaRestSubsystem.ConstructVaRestRequestExt` | Send Request with Verb and Body |
