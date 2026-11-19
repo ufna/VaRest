@@ -1,5 +1,35 @@
 # VaRest 2.0 release program ledger (controller-level; per-plan ledgers live in sibling dirs)
 
+Source427 private C++ compile corrections (UNBUILT/UNRUN):
+
+Source426 is preserved and published6161fab3 with all967 curated files exact.
+Its fresh complete11-action graph attempted nine plugin compiles. Actual native
+exited6 unforced64.711967686s; all26533 immutable inputs remained unchanged.
+Seven compiles succeeded (Http2/3/4/5/6/8 and Editor), with14 actual .o/.d
+products and seven fresh dependency records joining3861 unchanged inputs.
+Http1 and Http7 failed. Their two object outputs are genuinely absent. No Link
+ran, and all six previous library/debug/symbol products remain byte-identical
+to complete425. Root4ffe5bde retains the actual failed/partial interval;426
+is never a whole completed native parent. No runtime was launched or qualified.
+The SDK reports its local UBA executor, while all nine actual compile lines say
+NoUba; no cache reuse or successful whole-native result is inferred.
+
+Two compile-level API issues are corrected: the focused test used MakeStage,
+which exists only as another test translation unit's local helper; its exact
+setup body now belongs to a purpose-specific private stage. Three transport
+boundary calls reached a private FClientState retirement method; they now use
+the existing friend access type through one private forwarder. Visibility is
+unchanged. Production ownership, native eligibility/GT-IO guards and the three
+case oracles remain the same. Four existing Source files and this ledger change,
+with no new inventory names, public API, Build.cs, UHT or Engine/Host edit.
+
+Fresh full427 graph/closure review and guarded native/post checks must precede
+the three separate file processes and menu. Preserve exact partial426 products
+only by typed producing evidence, then allow only actual fresh scheduled outputs
+to replace them. Do not repair missing objects or reuse a historical graph.
+Whole M5/M6/Goal, global scheduler-stop file cleanup, executable unload/cooked,
+platform/package and M7 adoption remain OPEN; DOM stays default/Android OFF.
+
 Source426 ordinary SaveTo native ownership and meaningful Blueprint palette context
 (combined source checkpoint; new C++ UNBUILT/UNRUN):
 

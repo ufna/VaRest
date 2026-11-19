@@ -44,6 +44,7 @@ struct FDynamicRequestAccess
  static TSharedPtr<FDynamicCompletion, ESPMode::ThreadSafe> CompletionForStopTestOnGT(TVaRestRequest<FVaRestDynamicResult>& Request);
 #endif
 	/** Before physical Start/callouts, select this ordinary dynamic file's native cleanup. */
+	static void DropDeferredCompletionOnGT(const FVaRestExchangeRef& Exchange);
 	static bool CanUseFileWorkersOnGT();
 	static bool SelectFileCleanupOnGT(const FVaRestExchangeRef& Exchange,FDispatchTag& Dispatch,bool& bStopped);
 	static bool FileCleanupIsStoppedOnGT(const FDispatchTag& Dispatch);

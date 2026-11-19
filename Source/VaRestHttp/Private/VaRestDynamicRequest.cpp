@@ -177,6 +177,12 @@ FDynamicFileCleanupData::FDynamicFileCleanupData(FString InPath,uint64 InRequest
 FDynamicFileCleanupData::~FDynamicFileCleanupData() = default;
 FDynamicFileUse::~FDynamicFileUse() { Data->Released.Trigger(); } // no IO, lookup, Launch or GT handback
 
+void FDynamicRequestAccess::DropDeferredCompletionOnGT(const FVaRestExchangeRef& Exchange)
+{
+	check(IsInGameThread());
+	Internals(*Exchange).State->DropDeferredDynamicCompletion(Exchange);
+}
+
 bool FDynamicRequestAccess::CanUseFileWorkersOnGT()
 {
 	check(IsInGameThread());

@@ -138,6 +138,20 @@ struct FStopOnCopy
  FStopOnCopy(FStopOnCopy&&)=default;
  bool operator()(const FVaRestJson&,const FString&,TArray<uint8>&) const { return false; }
 };
+class FSetupStage final : public IVaRestStage
+{
+ TSharedRef<FState,ESPMode::ThreadSafe> S;
+public:
+ explicit FSetupStage(TSharedRef<FState,ESPMode::ThreadSafe> InState):S(MoveTemp(InState)) {}
+ FName GetStageName() const override { return TEXT("PrepublishFileSetup"); }
+ void Process(const FVaRestExchangeRef& Exchange,const FVaRestStageNext& Next,FVaRestOutcomeCallback&& Done) override
+ {
+  S->Exchange=Exchange;
+  // Existing private protocol option storage, real public request/actual MakeFinish copying; no synthetic decoder/drop.
+  if (S->Mode==TEXT("CopyStop")) Internals(*Exchange).DecodeOptions.BytesResolver=FStopOnCopy(S);
+  Next.Proceed(Exchange,MoveTemp(Done));
+ }
+};
 class FRun final : public IAutomationLatentCommand
 {
  FAutomationTestBase& Test;
@@ -231,12 +245,7 @@ public:
    auto Config=FClientAccess::InitialConfig(TEXTVIEW("https://prepublish-file.test"));
    Config.Transport=Rig->Fake;Config.Clock=InjectedClock;Config.Connectivity=Rig->Connectivity;Config.LogLevel=EVaRestLogLevel::None;
    Rig->Client=FClientAccess::Create(MoveTemp(Config));
-   Rig->Client.Use(MakeStage([S=State](const FVaRestExchangeRef& Exchange,const FVaRestStageNext& Next,FVaRestOutcomeCallback&& Done) {
-    S->Exchange=Exchange;
-    // Existing private protocol option storage, real public request/actual MakeFinish copying; no synthetic decoder/drop.
-    if (S->Mode==TEXT("CopyStop")) Internals(*Exchange).DecodeOptions.BytesResolver=FStopOnCopy(S);
-    Next.Proceed(Exchange,MoveTemp(Done));
-   }),EVaRestStageSlot::Outer);
+   Rig->Client.Use(MakeShared<FSetupStage,ESPMode::ThreadSafe>(State),EVaRestStageSlot::Outer);
    Sink=MakeShared<FTimingSink,ESPMode::ThreadSafe>();FVaRestTrace::AddSink(Sink.ToSharedRef());
    if (!Test.TestTrue(TEXT("exact own Metadata sink selects actual decode timing"),TraceMatches())) return End(false);
    Rig->Fake->Enqueue(FVaRestFakeResponse::Bytes(200,TArray<uint8>(Body)));

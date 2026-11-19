@@ -681,7 +681,7 @@ namespace VaRest::Http::PipelinePrivate
 				if (bFileCleanupStopped)
 				{
 					Ex.TempFile.Reset();
-					Ex.State->DropDeferredDynamicCompletion(Exchange);
+					FDynamicRequestAccess::DropDeferredCompletionOnGT(Exchange);
 				}
 				else RefuseUnstartedDynamicFile(); // a live unavailable worker is an observable finite Config failure
 				return;
@@ -711,7 +711,7 @@ namespace VaRest::Http::PipelinePrivate
 				return;
 			if (FDynamicRequestAccess::FileCleanupIsStoppedOnGT(ThisDispatch))
 			{
-				if (!Ex.bFinished) Ex.State->DropDeferredDynamicCompletion(Exchange);
+				if (!Ex.bFinished) FDynamicRequestAccess::DropDeferredCompletionOnGT(Exchange);
 				return;
 			}
 			if (ThisDispatch.bDynamicFilePreowned && !FDynamicRequestAccess::CanUseFileWorkersOnGT())
@@ -760,7 +760,7 @@ namespace VaRest::Http::PipelinePrivate
 				return;
 			if (FDynamicRequestAccess::FileCleanupIsStoppedOnGT(ThisDispatch))
 			{
-				if (!Ex.bFinished) Ex.State->DropDeferredDynamicCompletion(Exchange);
+				if (!Ex.bFinished) FDynamicRequestAccess::DropDeferredCompletionOnGT(Exchange);
 				return;
 			}
 			if (ThisDispatch.bDynamicFilePreowned && !FDynamicRequestAccess::CanUseFileWorkersOnGT())
