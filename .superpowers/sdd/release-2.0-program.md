@@ -1,5 +1,47 @@
 # VaRest 2.0 release program ledger (controller-level; per-plan ledgers live in sibling dirs)
 
+Source429 pending M5 fixture qualification and existing M6 component reconciliation:
+
+Two reviewed private fixture changes are staged, UNBUILT/UNRUN. The existing HTTP
+ModuleStop test CPP adds the separately opted-in HeldWorkerScopeRetirement.ClientScope
+case using its real owned Hub/client scope, native held worker, return/abandonment
+and frame/input/clock retirement observations. Source002 corrects only failure-close
+handling for a genuinely quiescent missing physical view; it never synthesizes a
+clock-release mark or changes a refused request into success. Original completed
+request and415 live-service fixtures keep their original bodies and producing
+intervals; no previous pass is rebound to this changed test CPP.
+
+The existing EndpointAuthor CPP adds an explicit Create option for a new seventh
+required-rule-only UDS and a real root DecodeOnly struct field with its own valid
+GUID rule. Its genuine saved Case0 K2 Error.Message feeds the inherited Reject
+Reason. The default six-package author, eight genuine request nodes, Arm, payload,
+wire body and runtime checks remain unchanged. A separate OmitSaved mode requires
+Root-authenticated exact enhanced-positive seven-package metadata, removes only
+the new leaf JsonTypes entry, NotifyEdited and saves only API, checking six other
+files unchanged. The enhanced seven assets are UNAUTHORED and have no positive,
+negative, cook or restored-positive qualification. Original405 six assets and
+all old proofs remain separately preserved. Real Config/missing-leaf-before-wire
+and ordinary cleanup must be measured later; a positive-only fixture failure
+must remain a failure and cannot substitute for that evidence.
+
+Rootc3b6b063 reconciles existing genuine intervals and closes only M6 components
+VaRest-xsh.1/.2/.3: actual418 legacy JSON and twelve HTTP facade cases, actual424
+ArchiveFile/ApplyURL/HubStopPending/TransportConnection successes, genuine saved421
+original-tag load and one raw35-byte GET with legacy formatting, and corrected427
+standard-menu/109-identity qualification plus published428 migration guidance.
+The424 menu failure, failed425 menu interval and earlier failed discoveries remain
+historical failures; no whole-process pass or all108 callable execution is invented.
+M6 parent, M5 and whole Goal remain OPEN. Existing427 native/four finite profiles
+and415 live-worker qualifications are carry evidence only, not new429 qualification.
+
+Source429 keeps the same967 curated names and860 Source members. One HTTP CPP is
+replaced in canonical/Editor/Game, one existing Tools author in canonical and the
+owned smoke-plugin Editor copy, and this canonical ledger: six physical destinations,
+three changed curated members, no new names, admission148 to150. All other859
+Source members remain byte-identical428 in the three source trees and ordered
+archive. Native/cook/platform/release/global scheduler-stop/unload and complete
+lifetime/rule acceptance remain separate. DOM stays default and Android OFF.
+
 Source428 documentation checkpoint (code427 finite qualification; no C++ change):
 
 Actual Source427 native passed, unforced27.310724418s, with26493 immutable inputs

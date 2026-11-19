@@ -9,6 +9,7 @@
 #include "FileHelpers.h"
 #include "K2Node.h"
 #include "K2Node_CallFunction.h"
+#include "K2Node_BreakStruct.h"
 #include "K2Node_Event.h"
 #include "K2Node_IfThenElse.h"
 #include "K2Node_VariableGet.h"
@@ -27,6 +28,7 @@
 #include "Kismet2/StructureEditorUtils.h"
 #include "Misc/AutomationTest.h"
 #include "Misc/CommandLine.h"
+#include "Misc/FileHelper.h"
 #include "Misc/PackageName.h"
 #include "Misc/Parse.h"
 #include "Misc/Paths.h"
@@ -38,6 +40,8 @@
 #include "UserDefinedStructure/UserDefinedStructEditorData.h"
 #include "VaRestApi.h"
 #include "VaRestJsonConvert.h"
+#include "VaRestJson.h"
+#include "VaRestSha256.h"
 #include "VaRestJsonRules.h"
 
 namespace VaRestM5EndpointAuthor
@@ -65,6 +69,98 @@ FGuid Add(FAutomationTestBase& Test, UUserDefinedStruct* Struct, const TCHAR* Fr
     if (!Test.TestTrue(FString::Printf(TEXT("name real field %s"), Friendly), FStructureEditorUtils::RenameVariable(Struct, Guid, Friendly))) return {};
     if (Default && !Test.TestTrue(FString::Printf(TEXT("author default %s"), Friendly), FStructureEditorUtils::ChangeVariableDefaultValue(Struct, Guid, Default))) return {};
     return Guid;
+}
+const TCHAR* RequiredRulePackage = TEXT("/VaRestM5Smoke/Endpoint001/Types/SM5_RequiredRuleOnly");
+const TCHAR* RequiredRulePath = TEXT("/VaRestM5Smoke/Endpoint001/Types/SM5_RequiredRuleOnly.SM5_RequiredRuleOnly");
+bool IsSha256(const FString& Text)
+{
+    if (Text.Len()!=64) return false;
+    for (TCHAR Ch:Text) if (!((Ch>=TEXT('0') && Ch<=TEXT('9')) || (Ch>=TEXT('a') && Ch<=TEXT('f')))) return false;
+    return true;
+}
+bool MatchesFile(const FString& Filename,const FVaRestJson& Expected)
+{
+    const auto Size=Expected[TEXT("bytes")].TryGet<int64>();
+    const FString Sha=Expected[TEXT("sha256")].AsString();
+    if (!Size || Size.GetValue()<=0 || Size.GetValue()>MAX_int32 || !IsSha256(Sha)
+        || IFileManager::Get().FileSize(*Filename)!=Size.GetValue()) return false;
+    TArray<uint8> Bytes;
+    return FFileHelper::LoadFileToArray(Bytes,*Filename) && Bytes.Num()==Size.GetValue()
+        && VaRest::Http::FSha256::Hash(Bytes).ToHex().Equals(Sha,ESearchCase::CaseSensitive);
+}
+bool OmitSavedRequiredRule(FAutomationTestBase& Test,const TArray<FString>& Packages)
+{
+    // A separate explicit API-only mutation of exact Root-qualified positive copies. Never reauthor GUIDs.
+    FString ControlFile,ControlSha;
+    if (!FParse::Value(FCommandLine::Get(),TEXT("VaRestM5RequiredRuleControl="),ControlFile)
+        || !FParse::Value(FCommandLine::Get(),TEXT("VaRestM5RequiredRuleControlSha256="),ControlSha)
+        || FPaths::IsRelative(ControlFile) || !IsSha256(ControlSha)
+        || IFileManager::Get().FileSize(*ControlFile)<=0 || IFileManager::Get().FileSize(*ControlFile)>65536)
+    { Test.AddError(TEXT("OmitSaved requires an absolute Root control and its SHA-256"));return false; }
+    TArray<uint8> ControlBytes;
+    if (!FFileHelper::LoadFileToArray(ControlBytes,*ControlFile)
+        || !VaRest::Http::FSha256::Hash(ControlBytes).ToHex().Equals(ControlSha,ESearchCase::CaseSensitive))
+    { Test.AddError(TEXT("Root omit control identity differs"));return false; }
+    auto Parsed=FVaRestJson::Parse(ControlBytes);
+    if (!Parsed.HasValue()) { Test.AddError(TEXT("Root omit control is not valid JSON"));return false; }
+    const FVaRestJson Control=Parsed.GetValue();
+    const FVaRestJson Expected=Control[TEXT("packages")];
+    if (!Control.IsObject() || Control[TEXT("schema")].AsString()!=TEXT("VaRest.M5.RequiredRuleOmit.1")
+        || !Control[TEXT("enhanced_positive_qualified")].AsBool()
+        || Control[TEXT("namespace")].AsString()!=VaRestM5Endpoint::Folder
+        || !Expected.IsArray() || Expected.Num()!=7 || Packages.Num()!=7)
+    { Test.AddError(TEXT("Root control must bind the exact seven-package enhanced positive"));return false; }
+    TArray<FString> Filenames;
+    for (int32 Index=0;Index<Packages.Num();++Index)
+    {
+        FString Filename;
+        if (FindPackage(nullptr,*Packages[Index]) || !FPackageName::TryConvertLongPackageNameToFilename(
+                Packages[Index],Filename,Index==5 ? FPackageName::GetMapPackageExtension():FPackageName::GetAssetPackageExtension()))
+        { Test.AddError(TEXT("OmitSaved requires cold, mounted saved packages"));return false; }
+        Filename=FPaths::ConvertRelativePathToFull(Filename);FPaths::NormalizeFilename(Filename);
+        if (Expected[Index][TEXT("package")].AsString()!=Packages[Index]
+            || Expected[Index][TEXT("filename")].AsString()!=Filename || !MatchesFile(Filename,Expected[Index]))
+        { Test.AddError(TEXT("Saved positive package identity differs before API-only omission"));return false; }
+        Filenames.Add(MoveTemp(Filename));
+    }
+    TStrongObjectPtr<UVaRestApi> Api(LoadObject<UVaRestApi>(nullptr,VaRestM5Endpoint::ApiPath));
+    auto* Root=LoadObject<UUserDefinedStruct>(nullptr,VaRestM5Endpoint::RootPath);
+    auto* Leaf=LoadObject<UUserDefinedStruct>(nullptr,RequiredRulePath);
+    if (!Api || !Root || !Leaf || Api->GetOutermost()->IsDirty() || Api->JsonTypes.Num()!=4
+        || Api->TypesFolder!=FString(VaRestM5Endpoint::Folder)+TEXT("/Types"))
+    { Test.AddError(TEXT("Saved enhanced API/rule owner differs"));return false; }
+    int32 LeafIndex=INDEX_NONE,RootIndex=INDEX_NONE;
+    for (int32 Index=0;Index<Api->JsonTypes.Num();++Index)
+    {
+        if (Api->JsonTypes[Index].Type==Leaf) { if (LeafIndex!=INDEX_NONE) return false;LeafIndex=Index; }
+        if (Api->JsonTypes[Index].Type==Root) { if (RootIndex!=INDEX_NONE) return false;RootIndex=Index; }
+    }
+    if (LeafIndex==INDEX_NONE || RootIndex==INDEX_NONE || Api->JsonTypes[LeafIndex].Fields.Num()!=1)
+    { Test.AddError(TEXT("Required leaf must have exactly one saved own rule"));return false; }
+    const auto& LeafRule=Api->JsonTypes[LeafIndex].Fields[0];
+    const auto* LeafField=FindFProperty<FBoolProperty>(Leaf,Leaf->FindPropertyNameFromGuid(LeafRule.Field));
+    int32 DecodeOnlyDependencies=0;
+    for (const auto& FieldRule:Api->JsonTypes[RootIndex].Fields)
+    {
+        const auto* Field=FindFProperty<FStructProperty>(Root,Root->FindPropertyNameFromGuid(FieldRule.Field));
+        if (Field && Field->Struct==Leaf && FieldRule.Json==TEXT("requiredRuleResponse")
+            && FieldRule.Presence==EVaRestJsonPresence::DecodeOnly) ++DecodeOnlyDependencies;
+    }
+    if (!LeafField || LeafRule.Json!=TEXT("leafValue") || DecodeOnlyDependencies!=1)
+    { Test.AddError(TEXT("Saved root/leaf actual GUID dependency differs"));return false; }
+    // Recheck the complete positive immediately before the sole intentional mutation/save.
+    for (int32 Index=0;Index<Filenames.Num();++Index)
+        if (!MatchesFile(Filenames[Index],Expected[Index])) { Test.AddError(TEXT("Positive changed before omission"));return false; }
+    Api->Modify();Api->JsonTypes.RemoveAt(LeafIndex);Api->NotifyEdited();Api->GetOutermost()->MarkPackageDirty();
+    FSavePackageArgs Save;Save.TopLevelFlags=RF_Public|RF_Standalone;Save.SaveFlags=SAVE_NoError;
+    if (!UPackage::SavePackage(Api->GetOutermost(),Api.Get(),*Filenames[3],Save))
+    { Test.AddError(TEXT("API-only omit save failed; retain failed copies"));return false; }
+    for (int32 Index=0;Index<Filenames.Num();++Index)
+        if (Index!=3 && !MatchesFile(Filenames[Index],Expected[Index]))
+        { Test.AddError(TEXT("API-only omit changed another saved package"));return false; }
+    Test.AddInfo(FString::Printf(TEXT("VAREST_M5_ENDPOINT_REQUIRED_RULE_OMITTED api=%s missing=%s removed=1 saved=1 unchangedOtherPackages=6 runtimeCookWire=UNRUN"),
+        VaRestM5Endpoint::ApiPath,RequiredRulePath));
+    return true;
 }
 void Rule(FVaRestApiJsonTypeRules& Type, FGuid Guid, const TCHAR* Wire, EVaRestJsonPresence Presence = EVaRestJsonPresence::Always,
     bool bNullable = false, bool bBase64 = false)
@@ -158,14 +254,27 @@ struct FGraph
         if (!Good) return nullptr;
         N->AllocateDefaultPins();return N; // Real product virtual AllocateDefaultPins/ExpandNode, no copied expansion.
     }
-    void Reject(UK2Node* Request,UEdGraphPin* Exec,const TCHAR* Reason)
+    void Reject(UK2Node* Request,UEdGraphPin* Exec,const TCHAR* Reason,bool bObserveMessage=false)
     {
         auto* N=Call(GET_FUNCTION_NAME_CHECKED(AVaRestM5EndpointRunner,Reject));
         N->FindPinChecked(TEXT("Reason"))->DefaultValue=Reason;
+        if (bObserveMessage)
+        {
+            auto* Break=Node<UK2Node_BreakStruct>();Break->StructType=FVaRestError::StaticStruct();Break->AllocateDefaultPins();
+            UEdGraphPin* Input=nullptr;
+            for (auto* Candidate:Break->Pins)
+                if (Candidate && Candidate->Direction==EGPD_Input && Candidate->PinType.PinCategory==UEdGraphSchema_K2::PC_Struct
+                    && Candidate->PinType.PinSubCategoryObject==FVaRestError::StaticStruct())
+                { if (Input) { Fail(TEXT("Actual error BreakStruct input is ambiguous"));return; }Input=Candidate; }
+            auto* Message=Break->FindPin(GET_MEMBER_NAME_CHECKED(FVaRestError,Message));
+            if (!Input || !Message || Message->Direction!=EGPD_Output || Message->PinType.PinCategory!=UEdGraphSchema_K2::PC_String)
+            { Fail(TEXT("Actual error BreakStruct Message is unavailable"));return; }
+            Wire(Request->FindPin(TEXT("Error")),Input);Wire(Message,N->FindPin(TEXT("Reason")));
+        }
         Wire(Exec,N->GetExecPin());Wire(Request->FindPin(TEXT("Http")),N->FindPin(TEXT("Http")));Wire(Request->FindPin(TEXT("Error")),N->FindPin(TEXT("Error")));
     }
 };
-bool AuthorRunner(FAutomationTestBase& Test,UVaRestApi* Api,UScriptStruct* Root,UEnum* Enum)
+bool AuthorRunner(FAutomationTestBase& Test,UVaRestApi* Api,UScriptStruct* Root,UEnum* Enum,bool bRequiredRuleOnly)
 {
     using namespace VaRestM5Endpoint;
     FModuleManager::LoadModuleChecked<IModuleInterface>(TEXT("VaRestEditor"));
@@ -211,7 +320,7 @@ bool AuthorRunner(FAutomationTestBase& Test,UVaRestApi* Api,UScriptStruct* Root,
         G.Wire(Set->FindPin(UEdGraphSchema_K2::PN_Then),Check->GetExecPin());G.Wire(Request->FindPin(TEXT("Http")),Check->FindPin(TEXT("Http")));G.Wire(Request->FindPin(TEXT("Error")),Check->FindPin(TEXT("Error")));
         if (I==6) G.Wire(Request->FindPin(TEXT("ErrorBodyValid")),Check->FindPin(TEXT("bErrorBodyValid")));
         auto* Accepted=G.Node<UK2Node_IfThenElse>();Accepted->AllocateDefaultPins();G.Wire(Check->GetThenPin(),Accepted->GetExecPin());G.Wire(Check->GetReturnValuePin(),Accepted->GetConditionPin());Previous=Accepted->GetThenPin();
-        G.Reject(Request,Request->FindPin(I==6 ? TEXT("OnSuccess"):TEXT("OnError")),TEXT("Unexpected primary outcome"));
+        G.Reject(Request,Request->FindPin(I==6 ? TEXT("OnSuccess"):TEXT("OnError")),TEXT("Unexpected primary outcome"),bRequiredRuleOnly && I==0);
         G.Reject(Request,Request->FindPin(TEXT("OnTypedOutputUnavailable")),TEXT("Actual typed output unavailable"));
     }
     if (!G.Good) return false;
@@ -257,7 +366,11 @@ bool FVaRestM5EndpointAuthor::RunTest(const FString& Parameters)
     using namespace VaRestM5EndpointAuthor;
     if (!Dedicated() || Parameters != TEXT("Endpoint001") || !GEditor || !GEditor->Trans)
     { AddError(TEXT("Requires the dedicated unattended nowrite real Editor process with transaction buffer")); return false; }
-    const TArray<FString> Packages {
+    FString RequiredRuleMode;FParse::Value(FCommandLine::Get(),TEXT("VaRestM5RequiredRule="),RequiredRuleMode);
+    const bool bRequiredRuleOnly=RequiredRuleMode==TEXT("Create");
+    if (!RequiredRuleMode.IsEmpty() && !bRequiredRuleOnly && RequiredRuleMode!=TEXT("OmitSaved"))
+    { AddError(TEXT("Unknown required-rule fixture mode"));return false; }
+    TArray<FString> Packages {
         TEXT("/VaRestM5Smoke/Endpoint001/Types/SM5_State"),
         TEXT("/VaRestM5Smoke/Endpoint001/Types/SM5_Nested"),
         TEXT("/VaRestM5Smoke/Endpoint001/Types/SM5_Response"),
@@ -265,6 +378,8 @@ bool FVaRestM5EndpointAuthor::RunTest(const FString& Parameters)
         TEXT("/VaRestM5Smoke/Endpoint001/SM5_Runner"),
         TEXT("/VaRestM5Smoke/Endpoint001/SM5_Map")
     };
+    if (!RequiredRuleMode.IsEmpty()) Packages.Add(RequiredRulePackage);
+    if (RequiredRuleMode==TEXT("OmitSaved")) return OmitSavedRequiredRule(*this,Packages);
     FString OutputFolder;
     if (!FPackageName::TryConvertLongPackageNameToFilename(FString(Folder), OutputFolder)
         || IFileManager::Get().DirectoryExists(*OutputFolder))
@@ -322,6 +437,20 @@ bool FVaRestM5EndpointAuthor::RunTest(const FString& Parameters)
     ScalarMap.PinValueType.TerminalCategory = UEdGraphSchema_K2::PC_Int;
     Rule(RootRules, Add(*this, Root.Get(), TEXT("Scalar Map"), ScalarMap), TEXT("scalarMap"));
     Rule(RootRules, Add(*this, Root.Get(), TEXT("Stamp"), Pin(UEdGraphSchema_K2::PC_Struct, TBaseStructure<FDateTime>::Get())), TEXT("stamp"));
+    TStrongObjectPtr<UUserDefinedStruct> RequiredRuleOnly;
+    FVaRestApiJsonTypeRules RequiredRules;
+    if (bRequiredRuleOnly)
+    {
+        UPackage* RequiredPackage=CreatePackage(RequiredRulePackage);
+        RequiredRuleOnly.Reset(FStructureEditorUtils::CreateUserDefinedStruct(RequiredPackage,TEXT("SM5_RequiredRuleOnly"),AssetFlags));
+        if (!RequiredRuleOnly) { AddError(TEXT("Cannot author required-rule-only UDS"));return false; }
+        RequiredRules.Type=RequiredRuleOnly.Get();
+        const FGuid LeafGuid=FirstBoolean(*this,RequiredRuleOnly.Get(),TEXT("Leaf Value"));
+        const FGuid DependencyGuid=Add(*this,Root.Get(),TEXT("Required Rule Response"),Pin(UEdGraphSchema_K2::PC_Struct,RequiredRuleOnly.Get()));
+        if (!LeafGuid.IsValid() || !DependencyGuid.IsValid()) return false;
+        Rule(RequiredRules,LeafGuid,TEXT("leafValue"));
+        Rule(RootRules,DependencyGuid,TEXT("requiredRuleResponse"),EVaRestJsonPresence::DecodeOnly);
+    }
     if (!RenamedGuid.IsValid() || !SanitizedGuid.IsValid()) return false;
     for (const auto* Type : { &NestedRules, &RootRules })
         for (const FVaRestJsonFieldRule& Field : Type->Fields)
@@ -332,6 +461,7 @@ bool FVaRestM5EndpointAuthor::RunTest(const FString& Parameters)
     FVaRestJsonEnumRule One; One.Enumerator = State->GetNameByIndex(1); One.Json = TEXT("wire-ONE");
     EnumRules.Enums = { Unset, One }; // Index 2 intentionally uses its real prettified authored display text.
     Api->JsonTypes = { RootRules, NestedRules, EnumRules };
+    if (bRequiredRuleOnly) Api->JsonTypes.Add(RequiredRules);
     Api->TypesFolder = FString(Folder) + TEXT("/Types");
     FVaRestApiEnvironment Environment; Environment.Name = TEXT("Endpoint"); int32 Port=18765; FParse::Value(FCommandLine::Get(),TEXT("VaRestM5ServerPort="),Port);
     if (Port<1024 || Port>65535) { AddError(TEXT("Invalid owned loopback server port"));return false; }
@@ -364,20 +494,24 @@ bool FVaRestM5EndpointAuthor::RunTest(const FString& Parameters)
     FVaRestApiValidationContext Validation; Api->Validate(Validation);
     if (!TestFalse(TEXT("actual API validation has no configuration/rule errors"), Validation.HasErrors())) return false;
 
-    const TArray<UObject*> Assets { State.Get(), Nested.Get(), Root.Get(), Api.Get() };
+    TArray<UObject*> Assets { State.Get(), Nested.Get(), Root.Get(), Api.Get() };
+    if (bRequiredRuleOnly) Assets.Add(RequiredRuleOnly.Get());
     if (!IFileManager::Get().MakeDirectory(*OutputFolder, true)) { AddError(TEXT("Cannot create fresh owned output namespace")); return false; }
     for (int32 Index = 0; Index != Assets.Num(); ++Index)
     {
         UObject* Asset = Assets[Index]; UPackage* Package = Asset->GetOutermost();
         FAssetRegistryModule::AssetCreated(Asset); Package->MarkPackageDirty();
-        const FString Filename = FPackageName::LongPackageNameToFilename(Packages[Index], FPackageName::GetAssetPackageExtension());
+        const FString& SavedPackage=Packages[Index==4 ? 6:Index];
+        const FString Filename = FPackageName::LongPackageNameToFilename(SavedPackage, FPackageName::GetAssetPackageExtension());
         if (!IFileManager::Get().MakeDirectory(*FPaths::GetPath(Filename), true)) { AddError(TEXT("Cannot create owned type directory")); return false; }
         FSavePackageArgs Save; Save.TopLevelFlags = RF_Public | RF_Standalone; Save.SaveFlags = SAVE_NoError;
         if (!UPackage::SavePackage(Package, Asset, *Filename, Save)) { AddError(TEXT("Owned fixture save failed; retain partial output as failed evidence, never overwrite it")); return false; }
-        AddInfo(FString::Printf(TEXT("VAREST_M5_ENDPOINT_SAVED package=%s object=%s filename=%s"), *Packages[Index], *Asset->GetPathName(), *Filename));
+        AddInfo(FString::Printf(TEXT("VAREST_M5_ENDPOINT_SAVED package=%s object=%s filename=%s"), *SavedPackage, *Asset->GetPathName(), *Filename));
     }
-    if (!VaRestM5EndpointGraph::AuthorRunner(*this,Api.Get(),Root.Get(),State.Get())) return false;
-    AddInfo(FString::Printf(TEXT("VAREST_M5_ENDPOINT_AUTHORED proof=A namespace=%s renamedFieldGuid=%s sanitizedFieldGuid=%s editorDefaultConversion=PASS packages=6 runtimeCookWireMutants=UNRUN wholeTask14=OPEN"),
+    if (!VaRestM5EndpointGraph::AuthorRunner(*this,Api.Get(),Root.Get(),State.Get(),bRequiredRuleOnly)) return false;
+    if (bRequiredRuleOnly)
+        AddInfo(FString::Printf(TEXT("VAREST_M5_ENDPOINT_REQUIRED_RULE_AUTHORED namespace=%s leaf=%s packages=7 genuineNativeK2=8 runtimeCookWireMutants=UNRUN wholeTask14=OPEN"),Folder,RequiredRulePath));
+    else AddInfo(FString::Printf(TEXT("VAREST_M5_ENDPOINT_AUTHORED proof=A namespace=%s renamedFieldGuid=%s sanitizedFieldGuid=%s editorDefaultConversion=PASS packages=6 runtimeCookWireMutants=UNRUN wholeTask14=OPEN"),
         Folder, *RenamedGuid.ToString(EGuidFormats::Digits), *SanitizedGuid.ToString(EGuidFormats::Digits)));
     return true;
 }

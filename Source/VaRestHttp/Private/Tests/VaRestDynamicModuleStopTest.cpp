@@ -11,6 +11,7 @@
 #include "VaRestNativeLifetimeService.h"
 #include "VaRestNativeOperationStore.h"
 #include "VaRestNativeScope.h"
+#include "VaRestHubRuntime.h"
 #include "VaRestHttpTesting.h"
 #include "VaRestClock.h"
 #include "VaRestTrace.h"
@@ -767,6 +768,242 @@ bool FVaRestDynamicHeldWorkerRetirementTest::RunTest(const FString& Parameters)
 {
  if (!FPlatformProcess::SupportsMultithreading()) { AddError(TEXT("held-worker retirement requires a genuine managed native worker"));return false; }
  ADD_LATENT_AUTOMATION_COMMAND(VaRest::Http::HeldRetirementFixture::FRun(*this));
+ return true;
+}
+
+namespace VaRest::Http::HeldRetirementFixture
+{
+// The real Hub owner retires this scope while its managed parser is held. Unlike the LIVE
+// case above, no public result or reflected materialization is permitted after gate closure.
+class FScopeStopRun final : public IAutomationLatentCommand
+{
+public:
+ explicit FScopeStopRun(FAutomationTestBase& InTest)
+  : Test(InTest),Probe(MakeShared<FProbe,ESPMode::ThreadSafe>()),Deadline(FPlatformTime::Seconds()+30.0),CarrierBaseline(Testing::LiveDynamicCarriersOnGT()) {}
+ ~FScopeStopRun() override { Probe->Release(); }
+ bool Update() override
+ {
+  check(IsInGameThread());
+  if (Closing) return CloseStep();
+  if (FPlatformTime::Seconds()>=Deadline || Probe->FailedOnGT())
+   return Fail(TEXT("held scope retirement deadline or native identity/thread failure; retaining owned cleanup until quiescent"));
+  if (Phase==0)
+  {
+   if (!Intrinsic()) return false;
+   RegisteredRoot=FVaRestDynamicNativeTypes::RegisterGameThreadType(FVaRestDynamicLifecycleRoot::StaticStruct(),TEXT("VaRest.Test.GT.Optional.Root.v1"));
+   if (!RegisteredRoot) return Fail(TEXT("owned scope Root registration refused"));
+   Advance();return false;
+  }
+  if (Phase==1)
+  {
+   if (GFrameCounter<=PublicationFrame || !Intrinsic()) return false;
+   RegisteredLeaf=FVaRestDynamicNativeTypes::RegisterGameThreadType(FVaRestDynamicLifecycleLeaf::StaticStruct(),TEXT("VaRest.Test.GT.Optional.Leaf.v1"));
+   if (!RegisteredLeaf) return Fail(TEXT("owned scope Optional leaf registration refused"));
+   Advance();return false;
+  }
+  if (Phase==2)
+  {
+   if (GFrameCounter<=PublicationFrame || !Intrinsic()) return false;
+   if (!Start()) return Fail(TEXT("actual Hub managed held-worker scope setup refused"));
+   Phase=3;return false;
+  }
+  if (Phase==3)
+  {
+   if (!Probe->BothHeldOnGT()) return false;
+   if (!Operations || Operations->NumOccupied()!=1 || !Gate || Gate->NumOwnedOperations()!=1 || Gate->NumOwnedInputs()!=1 ||
+    !RetainedWhileHeld() || !BindObserver())
+    return Fail(TEXT("actual parsed worker/original GTK owners were not held under the matching operation"));
+   // The actual Hub sequence closes all gates, retires its clients, then requests native scope retirement.
+   // No raw store survives that call: its owning slot may subsequently retire/recycle.
+   RetireOwner();
+   if (!Runtime || !Runtime->IsClosedOnGT() || !Gate->IsClosed() || !LiveControl() || !RetainedWhileHeld())
+    return Fail(TEXT("actual Hub retirement did not close admission and suppress return while the worker stayed held"));
+   if (!ReleaseOwnCompletedClock()) return Fail(TEXT("matching completed physical clock view could not be released"));
+   PublicationFrame=GFrameCounter;Phase=4;return false;
+  }
+  if (Phase==4)
+  {
+   if (GFrameCounter<=PublicationFrame) return false;
+   if (!RecordClockReleased || !RetainedWhileHeld() || !Runtime->IsClosedOnGT() || !Gate->IsClosed() ||
+    Gate->NumOwnedOperations()!=1 || Gate->NumOwnedInputs()!=1 || !WeakAccess.IsValid() || !LiveControl())
+    return Fail(TEXT("closed scope lost its real held authority or prematurely disposed the worker-borrowed GTK owners"));
+   RetainedBeforeRelease=true;
+   Probe->Release();Phase=5;return false;
+  }
+  if (Phase==5)
+  {
+   if (!OwnedQuiescent() || WeakDestination.IsValid()) return false;
+   if (!ReturnMarks() || !Runtime || !Runtime->IsClosedOnGT() || !Gate->IsClosed() || !LiveControl() ||
+    Testing::LiveDynamicCarriersOnGT()!=CarrierBaseline)
+    return Fail(TEXT("actual closed-scope return did not retire only its own GTK/frame/input owners under a live service"));
+   DropQuiescentOwners();Phase=6;return false;
+  }
+  if (WeakClock.IsValid()) return false;
+  if (!RetainedBeforeRelease || !RecordClockReleased || !ReturnMarks() || Probe->ClocksDestroyed.load()!=1 || !LiveControl())
+   return Fail(TEXT("closed-scope final original clock/return retirement was not exactly once on GT"));
+  Test.AddInfo(FString::Printf(TEXT("DynamicHeldScope: retired=1 retainedBeforeRelease=1 viewReleased=1 callback=%d materialized=%d delivered=%d return=%d/%d capture=%d/%d access=%d disposed=%d frame=%d work=%u inputs=%llu clock=%d live=1 result=1"),
+   Probe->Callbacks.load(),Probe->Materializations.load(),Probe->Deliveries.load(),Probe->Count(EPublication::ManagedReturnExecuted),
+   Probe->Count(EPublication::ManagedReturnCompleted),Probe->Count(EPublication::ManagedReturnCaptureRan),Probe->Count(EPublication::ManagedReturnCaptureAbandoned),
+   Probe->Count(EPublication::ManagedAccessEnded),Probe->Disposed.load(),Probe->Destroyed.load(),Gate->NumOwnedOperations(),
+   static_cast<unsigned long long>(Gate->NumOwnedInputs()),Probe->ClocksDestroyed.load()));
+  CleanupTypes();return true;
+ }
+private:
+ bool Intrinsic()
+ {
+  FVaRestDynamicResultConfig Config;Config.ResponseType.Kind=EVaRestTypeKind::Struct;Config.ResponseType.Type=FVaRestJson::StaticStruct();
+  FString Error,Code;const auto State=FDynamicTypedState::CreateOnGT(Config,Error,&Code);
+  if (!State && Code==TEXT("EditorMutationHooksUnavailable")) { Fail(TEXT("real editor mutation hooks are unavailable"));return false; }
+  return State.IsValid();
+ }
+ void Advance() { PublicationFrame=GFrameCounter;++Phase; }
+ bool Start()
+ {
+  const auto Trace=ModuleStopFixture::ObserveTraceSelectionOnGT(false,nullptr);
+  if (!Trace.MembershipMatches || !Trace.MaskMatches)
+  { Test.AddInfo(FString::Printf(TEXT("held scope actual trace state: sinks=%d mask=%u"),Trace.SinkCount,Trace.Mask));return false; }
+  Rig=MakeUnique<Testing::FTestRig>(TEXTVIEW("https://held-scope-retirement.test"));Rig->Fake->bCompleteOnWorker=false;
+  const auto Clock=MakeShared<FClock,ESPMode::ThreadSafe>(Rig->Clock,Probe);WeakClock=Clock;
+  FVaRestTraceScope Info;Info.Label=TEXT("DynamicHeldWorkerScopeRetirement");FString Error;
+  Runtime=FHubRuntime::CreateOnGT(MoveTemp(Info),TEXT("HeldWorkerScopeRetirement"),Error);
+  if (!Runtime) return false;
+  ScopeId=Runtime->ScopeId();Runtime->ConnectivityOnGT()->ReportOnline(); // this owned host, never the default reachability
+  auto Initial=FClientAccess::InitialConfig(TEXTVIEW("https://held-scope-retirement.test"));
+  Initial.Transport=Rig->Fake;Initial.Clock=Clock;Initial.LogLevel=EVaRestLogLevel::None;
+  Rig->Client=Runtime->CreateClientOnGT(MoveTemp(Initial),Error);
+  const auto State=FClientAccess::State(Rig->Client);
+  if (!State || State->GetScopeId()!=ScopeId || !State->GetManagedLifetime().IsValid()) return false;
+  const auto& Registration=State->GetManagedLifetime();Control=Registration.Control;Gate=Registration.Gate;Operations=Registration.Operations;
+  if (!LiveControl() || !Operations || Operations->NumOccupied()!=0 || Gate->IsClosed()) return false;
+  auto Destination=MakeShared<ModuleStopFixture::FDestination,ESPMode::ThreadSafe>();
+  if (!Destination->Initialize(EVaRestTypeContainer::None,nullptr)) return false;
+  WeakDestination=Destination; // the runner never keeps an extra strong destination/preparation owner
+  FVaRestDynamicResultConfig Config;Config.ResponseType.Kind=EVaRestTypeKind::Struct;
+  Config.ResponseType.Type=FVaRestDynamicLifecycleRoot::StaticStruct();Config.Budget=Runtime->DynamicBudgetOnGT();
+  auto Request=Rig->Client.RequestDynamic(TEXTVIEW("GET"),TEXTVIEW("/held-scope"),MoveTemp(Config));
+  if (!FDynamicRequestAccess::BindModuleStopProbeOnGT(Request,Probe) ||
+   !FDynamicRequestAccess::SetPreparationOnGT(Request,[Owned=MoveTemp(Destination),Marker=MakeShared<FCapture,ESPMode::ThreadSafe>(Probe,true)](FDynamicPrepareToken& Token) { (void)Marker;Owned->Prepare(Token); }))
+  { FDynamicRequestAccess::DiscardOnGT(Request);return false; }
+  Rig->Fake->Enqueue(FVaRestFakeResponse::Text(200,TEXT("{\"name\":\"stop-native\",\"maybe\":{\"text\":\"nested\",\"number\":23}}"),TEXTVIEW("application/json")));
+  Handle=MoveTemp(Request).OnComplete([Native=Probe,Marker=MakeShared<FCapture,ESPMode::ThreadSafe>(Probe,false)](const TVaRestResult<FVaRestDynamicResult>& Result) {
+   (void)Marker;Native->PublicResult(!Result.Error.IsError() && Result.Value.IsSet());
+  }).Send();
+  return Handle.GetId()!=0;
+ }
+ bool BindObserver()
+ {
+  bool Bound=false;const auto Identity=Probe->IdentityOnGT();
+  const auto State=FClientAccess::State(Rig->Client);
+  if (!State || State->GetScopeId()!=ScopeId || Identity.Request!=Handle.GetId() || Identity.Client!=State->GetClientId()) return false;
+  State->ForEachInFlight([&](FExchangeState& Exchange) {
+   if (Exchange.RequestId!=Identity.Request || Exchange.ClientId!=Identity.Client) return;
+   auto Access=Exchange.NativeCompletion.Pin();
+   if (Access) { WeakAccess=Access;Bound=Access->ObserveRetirementForTestsOnGT(Identity,Probe); }
+   Access.Reset();
+   if (Access.IsValid()) Bound=false;
+  });
+  const auto Clock=WeakClock.Pin();
+  return Bound && Clock && Probe->ClockOnGT()==static_cast<uint64>(reinterpret_cast<UPTRINT>(Clock.Get()));
+ }
+ bool LiveControl() const
+ { return Control && Control==NativeControlForNewClientOnGT() && !Control->IsStopped() && !Control->IsExitRetentionRequested(); }
+ bool RetainedWhileHeld() const
+ {
+  return Probe->BothHeldOnGT() && WeakDestination.IsValid() && Probe->PreparationDestroyed.load()==0 && Probe->CallbackDestroyed.load()==0 &&
+   Probe->Callbacks.load()==0 && Probe->Materializations.load()==0 && Probe->Deliveries.load()==0 && Probe->Disposed.load()==0 &&
+   Probe->Destroyed.load()==0 && Probe->ClocksDestroyed.load()==0 && Probe->WrongThread.load()==0 &&
+   Probe->Count(EPublication::ManagedWorkerEnded)==0 && Probe->Count(EPublication::ManagedReturnExecuted)==0 &&
+   Probe->Count(EPublication::ManagedReturnCompleted)==0 && Probe->Count(EPublication::ManagedReturnCaptureRan)==0 &&
+   Probe->Count(EPublication::ManagedReturnCaptureAbandoned)==0 && Probe->Count(EPublication::ManagedAccessEnded)==0;
+ }
+ bool ReturnMarks() const
+ {
+  return Probe->Disposed.load(std::memory_order_acquire)==1 && Probe->Destroyed.load()==1 &&
+   Probe->PreparationDestroyed.load()==1 && Probe->CallbackDestroyed.load()==1 && Probe->WrongThread.load()==0 &&
+   Probe->Callbacks.load()==0 && Probe->Materializations.load()==0 && Probe->Deliveries.load()==0 &&
+   Probe->Count(EPublication::ManagedWorkerEnded)==1 && Probe->Count(EPublication::ManagedReturnExecuted)==1 &&
+   Probe->Count(EPublication::ManagedReturnCompleted)==1 && Probe->Count(EPublication::ManagedReturnCaptureRan)==1 &&
+   Probe->Count(EPublication::ManagedReturnCaptureAbandoned)==0 && Probe->Count(EPublication::ManagedAccessEnded)==1;
+ }
+ bool ReleaseOwnCompletedClock()
+ {
+  if (RecordClockReleased) return true;
+  if (!Rig || Handle.GetId()==0 || Rig->Fake->NumCalls()!=1 || !Rig->Fake->GetCall(0).bCompleted ||
+   Rig->Fake->GetCall(0).Request.RequestId!=Handle.GetId() || !Rig->Fake->GetCall(0).Request.Clock.IsValid()) return false;
+  RecordClockReleased=Rig->Fake->ReleaseCompletedClock(0) && !Rig->Fake->GetCall(0).Request.Clock.IsValid();
+  return RecordClockReleased;
+ }
+ void RetireOwner()
+ {
+  Operations=nullptr; // no raw store access after the owner may retire/recycle its client slot
+  if (Runtime && !Retired) { Retired=true;Runtime->RetireOnGT(); }
+ }
+ bool OwnedQuiescent() const
+ { return (!Gate || (Gate->NumOwnedOperations()==0 && Gate->NumOwnedInputs()==0)) && !WeakAccess.IsValid(); }
+ void DropQuiescentOwners()
+ {
+  check(OwnedQuiescent());
+  Rig.Reset();Handle=FVaRestRequestHandle();Runtime.Reset();
+ }
+ bool Fail(const TCHAR* Message)
+ {
+  if (!Closing) { Test.AddError(Message);Closing=true;RetireOwner();Probe->Release(); }
+  return false;
+ }
+ bool CloseStep()
+ {
+  Probe->Release();RetireOwner();
+  if (Handle.GetId()!=0 && !RecordClockReleased && !ReleaseOwnCompletedClock())
+  {
+   // Failure may precede physical Start, or its matching completed view may already be absent.
+   // This is not a successful view-release observation and never sets RecordClockReleased.
+   const int32 Calls=Rig ? Rig->Fake->NumCalls() : -1;
+   const bool NoPhysical=Rig && (Calls==0 || (Calls==1 && Rig->Fake->GetCall(0).bCompleted &&
+    Rig->Fake->GetCall(0).Request.RequestId==Handle.GetId() && !Rig->Fake->GetCall(0).Request.Clock.IsValid()));
+   const bool NoWorker=!Probe->BothHeldOnGT() || Probe->Count(EPublication::ManagedWorkerEnded)==1;
+   if (!OwnedQuiescent() || !NoPhysical || !NoWorker) return false;
+  }
+  if (!OwnedQuiescent()) return false; // no timeout frees a rig/frame/clock still referenced by native work
+  DropQuiescentOwners();
+  if (WeakAccess.IsValid() || WeakDestination.IsValid() || WeakClock.IsValid()) return false;
+  CleanupTypes();return true; // remains an automation failure; no synthetic lifecycle pass
+ }
+ void CleanupTypes()
+ {
+  if (RegisteredRoot) { RegisteredRoot=false;FVaRestDynamicNativeTypes::UnregisterGameThreadType(FVaRestDynamicLifecycleRoot::StaticStruct()); }
+  if (RegisteredLeaf) { RegisteredLeaf=false;FVaRestDynamicNativeTypes::UnregisterGameThreadType(FVaRestDynamicLifecycleLeaf::StaticStruct()); }
+ }
+ FAutomationTestBase& Test;
+ TSharedRef<FProbe,ESPMode::ThreadSafe> Probe;
+ const double Deadline;
+ const int32 CarrierBaseline;
+ TUniquePtr<Testing::FTestRig> Rig;
+ TSharedPtr<FHubRuntime,ESPMode::ThreadSafe> Runtime;
+ TSharedPtr<FNativeLifetimeControl,ESPMode::ThreadSafe> Control;
+ TSharedPtr<FClientAdmissionGate,ESPMode::ThreadSafe> Gate;
+ FNativeOperationStore* Operations=nullptr;
+ TWeakPtr<FManagedCompletionAccess,ESPMode::ThreadSafe> WeakAccess;
+ TWeakPtr<ModuleStopFixture::FDestination,ESPMode::ThreadSafe> WeakDestination;
+ TWeakPtr<FClock,ESPMode::ThreadSafe> WeakClock;
+ FVaRestRequestHandle Handle;
+ uint64 ScopeId=0,PublicationFrame=0;
+ int32 Phase=0;
+ bool RegisteredRoot=false,RegisteredLeaf=false,Retired=false,Closing=false,RecordClockReleased=false,RetainedBeforeRelease=false;
+};
+}
+
+IMPLEMENT_COMPLEX_AUTOMATION_TEST(FVaRestDynamicHeldWorkerScopeRetirementTest,"VaRest.Http.Dynamic.HeldWorkerScopeRetirement",
+ (WITH_EDITOR ? EAutomationTestFlags::EditorContext : (EAutomationTestFlags::ClientContext | EAutomationTestFlags::ServerContext)) | EAutomationTestFlags::EngineFilter)
+void FVaRestDynamicHeldWorkerScopeRetirementTest::GetTests(TArray<FString>& Names,TArray<FString>& Parameters) const
+{
+ if (FParse::Param(FCommandLine::Get(),TEXT("VaRestM5HeldScopeStopProof"))) { Names.Add(TEXT("ClientScope"));Parameters.Add(TEXT("ClientScope")); }
+}
+bool FVaRestDynamicHeldWorkerScopeRetirementTest::RunTest(const FString& Parameters)
+{
+ if (!FParse::Param(FCommandLine::Get(),TEXT("VaRestM5HeldScopeStopProof")) || Parameters!=TEXT("ClientScope"))
+ { AddError(TEXT("select the dedicated ClientScope fixture with -VaRestM5HeldScopeStopProof"));return false; }
+ if (!FPlatformProcess::SupportsMultithreading()) { AddError(TEXT("scope retirement requires a genuine managed native worker"));return false; }
+ ADD_LATENT_AUTOMATION_COMMAND(VaRest::Http::HeldRetirementFixture::FScopeStopRun(*this));
  return true;
 }
 #endif
