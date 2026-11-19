@@ -1,5 +1,13 @@
 # VaRest 2.0 release program ledger (controller-level; per-plan ledgers live in sibling dirs)
 
+## Source413 — prepared scalar dispatch; C++ UNBUILT, 2026-11-19 MSK
+
+Source412 is published as 10be8afd with all 952 curated payloads and exact remote readback. Its fresh C#/UBT metadata run exits 0 in 7.942 seconds: 52,004 protected inputs, 11 declared metadata changes, no new generated files, unknown changes or early compilation. This validates the shared ModuleRules references with AndroidQualificationOptIn false. Its seven-action graph is retained but deliberately not built; the following reviewed M7 delta is combined before a fresh full graph and one C++ build.
+
+Source413 prepares bool and non-enum numeric dispatch policies once per native conversion plan. Stable Plan-owned heap layouts pair each immutable struct field map with its policy array; array/map frames resolve their scalar policy once. Supported Bool/Number tokens keep the identical FNode, exactly one Context.Visit and the existing checked DecodeBool/DecodeInteger/DecodeFloatingPoint helpers. Other tokens, enums, nullable-null, paths, reports, strict/lenient coercion, map commit and scratch retirement retain their existing paths. Tape, caps, replay, default DOM, public API and benchmark remain unchanged. New plan metadata is outside the tape account; no aggregate heap bound or speedup is claimed.
+
+Candidate c345c0ec, independent peer f283719b and Root 56b27ce7 verify source identities, stable lifetimes/index alignment and four exact patch roundtrips, with no blocking source finding. Existing parity coverage adds strict/lenient byte-array, bool/numeric fields and numeric map failures/recovery. New C++ build, regression and timing are UNRUN at this checkpoint. Source411's actual 135 passing semantics and large-fixture 0.990x pilot retain their own interval; the >=1.5x adoption gate is unmet and DOM remains default. Android UE/device/provider lifecycle, production pin controls, full worker/cooked closure and whole Goal remain OPEN.
+
 ## Source412 — default-OFF Android provider route and M7 budget fast path; new C++ UNBUILT, 2026-11-19 MSK
 
 Source411 is published as 9c967feb with 947 exact payloads. Its full fresh ordinary Editor graph contains 26 plugin Compile and 12 Link actions, 88 products and no Engine/Host Compile or new PCH. All 38 actions exit 0 in 207.207 seconds, with 21,630 protected inputs unchanged. Actual 26 dependency records join 4,657 PRE paths without post-only or changed inputs; 12 SO/debug GNU BuildIDs match. Post proof a219ef1c retains actual NoUba execution and the two existing Inspector refcount deprecation warnings.

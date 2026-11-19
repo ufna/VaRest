@@ -8,21 +8,49 @@ using FReader = rapidjson::GenericReader<rapidjson::UTF8<>, rapidjson::UTF8<>, U
 constexpr unsigned StreamFlags = rapidjson::kParseIterativeFlag | rapidjson::kParseValidateEncodingFlag | rapidjson::kParseFullPrecisionFlag;
 static_assert((StreamFlags & rapidjson::kParseIterativeFlag) != 0);
 
+struct FPreparedScalar
+{
+	const FBoolProperty* Bool = nullptr;
+	const FNumericProperty* Numeric = nullptr;
+	bool bFloating = false;
+	explicit FPreparedScalar(const FBoolProperty* Value) : Bool(Value) {}
+	explicit FPreparedScalar(const FNumericProperty* Value) : Numeric(Value), bFloating(Value->IsFloatingPoint()) {}
+	bool Read(const FNode& Value, void* Address, FDecodeContext& Context) const
+	{
+		if (Bool) return DecodeBool(Value, Bool, Address, Context);
+		return bFloating ? DecodeFloatingPoint(Value, Numeric, Address, Context) : DecodeInteger(Value, Numeric, Address, Context);
+	}
+};
+struct FStructPlan
+{
+	FFieldMapRef Fields;
+	TArray<const FPreparedScalar*> Scalars;
+	explicit FStructPlan(FFieldMapRef InFields) : Fields(MoveTemp(InFields)) {}
+};
 struct FPlan
 {
 	const FVaRestJsonConvertOptions& Options;
 	TSharedRef<const FVaRestJsonRuleSnapshot, ESPMode::ThreadSafe> Rules;
 	TSet<const UScriptStruct*> Visiting, Ready;
-	TMap<const UScriptStruct*, FFieldMapRef> Maps;
+	// Heap pointees remain stable across recursive map growth; all metadata is immutable during validation/replay.
+	TMap<const UScriptStruct*, TUniquePtr<FStructPlan>> Maps;
+	TMap<const FProperty*, TUniquePtr<FPreparedScalar>> Scalars;
+	const FPreparedScalar* FindScalar(const FProperty* Value) const
+	{ const auto* Found = Scalars.Find(Value); return Found ? Found->Get() : nullptr; }
 	bool Struct(const UScriptStruct* Type, int32 Depth = 0)
 	{
 		// Native layouts have the caller's ordinary immutable lifetime contract. Reflected GTK qualification stays separate.
 		if (!Type || Type->IsA<UUserDefinedStruct>() || !Type->GetCppStructOps() || Depth >= MaxDepth || ClassifyStruct(Type) == ESpecialStruct::Json) return false;
 		if (ClassifyStruct(Type) != ESpecialStruct::None || Ready.Contains(Type)) return true;
 		if (Visiting.Contains(Type)) return false;
-		Visiting.Add(Type); const auto Fields = GetFieldMap(Type, Options.Naming, Rules); Maps.Add(Type, Fields);
+		Visiting.Add(Type); const auto Fields = GetFieldMap(Type, Options.Naming, Rules);
+		auto* Layout = Maps.Add(Type, MakeUnique<FStructPlan>(Fields)).Get();
 		bool bValid = Fields->Error.IsEmpty();
-		for (const auto& Field : Fields->Fields) if (bValid) bValid = Property(Field.Property, Depth + 1);
+		for (const auto& Field : Fields->Fields) if (bValid)
+		{
+			bValid = Property(Field.Property, Depth + 1);
+			if (bValid) Layout->Scalars.Add(FindScalar(Field.Property));
+		}
 		Visiting.Remove(Type); if (bValid) Ready.Add(Type); return bValid;
 	}
 	bool Property(const FProperty* Value, int32 Depth)
@@ -41,7 +69,16 @@ struct FPlan
 		}
 		// Set/map/optional semantics continue to use their existing decoder, including enum-key collision rules.
 		if (Value->IsA<FSetProperty>() || Value->IsA<FMapProperty>() || Value->IsA<FOptionalProperty>()) return false;
-		FString Detail; return IsSupported(Value, Detail);
+		FString Detail; if (!IsSupported(Value, Detail)) return false;
+		if (!Scalars.Contains(Value))
+		{
+			if (const auto* Bool = CastField<FBoolProperty>(Value)) Scalars.Add(Value, MakeUnique<FPreparedScalar>(Bool));
+			else if (const auto* Numeric = CastField<FNumericProperty>(Value))
+			{
+				if (!Numeric->GetIntPropertyEnum()) Scalars.Add(Value, MakeUnique<FPreparedScalar>(Numeric));
+			}
+		}
+		return true;
 	}
 };
 const UScriptStruct* OrdinaryStruct(const FProperty* Property)
@@ -193,7 +230,7 @@ struct FPreflight
 		if (bObject)
 		{
 			const auto* Type = bWasRoot ? Root : OrdinaryStruct(Property);
-			if (Type && ClassifyStruct(Type) == ESpecialStruct::None) Frame.Fields = &Plan.Maps.FindChecked(Type).Get();
+			if (Type && ClassifyStruct(Type) == ESpecialStruct::None) Frame.Fields = &Plan.Maps.FindChecked(Type)->Fields.Get();
 			else Frame.Map = CastField<FMapProperty>(Property);
 		}
 		else Frame.Array = CastField<FArrayProperty>(Property);
@@ -237,6 +274,9 @@ struct FDecoder
 	struct FFrame
 	{
 		const FFieldMap* Fields = nullptr; // Borrowed only while the owning Plan remains alive.
+		const TArray<const FPreparedScalar*>* PreparedFields = nullptr;
+		const FPreparedScalar* PendingPrepared = nullptr;
+		const FPreparedScalar* ValuePrepared = nullptr;
 		const FArrayProperty* Array = nullptr;
 		FMapScratch* Map = nullptr;
 		void* Address = nullptr;
@@ -252,6 +292,7 @@ struct FDecoder
 		void* Address = nullptr;
 		bool bRoot = false, bPath = false, bNullable = false;
 		FMapScratch* Map = nullptr;
+		const FPreparedScalar* Prepared = nullptr;
 	};
 	FDecodeContext& Context;
 	const UScriptStruct* Root;
@@ -279,7 +320,7 @@ struct FDecoder
 		{
 			if (Parent.Index >= Parent.Count) { Context.Abort(TEXT("streaming array count changed after validation")); return Out; }
 			FScriptArrayHelper Helper(Parent.Array, Parent.Address);
-			Out.Property = Parent.Array->Inner; Out.Address = Helper.GetRawPtr(Parent.Index);
+			Out.Property = Parent.Array->Inner; Out.Address = Helper.GetRawPtr(Parent.Index); Out.Prepared = Parent.ValuePrepared;
 			Context.Path.Add(FSegment{FUtf8StringView(), static_cast<int32>(Parent.Index++)}); Out.bPath = true;
 		}
 		else if (Parent.Map)
@@ -288,12 +329,13 @@ struct FDecoder
 			Context.Path.Add(FSegment{Parent.Key, -1}); Out.bPath = true;
 			if (!Context.Charge((int64(Parent.Key.Len()) + 1) * sizeof(TCHAR) * 2, 1, Parent.Key.Len())
 				|| !DecodeMapKey(Parent.Key, Out.Map->Property->KeyProp, Out.Map->Key, Context)) return Out;
-			Out.Property = Out.Map->Property->ValueProp; Out.Address = Out.Map->Value;
+			Out.Property = Out.Map->Property->ValueProp; Out.Address = Out.Map->Value; Out.Prepared = Parent.ValuePrepared;
 		}
 		else if (Parent.Pending)
 		{
 			Out.Property = Parent.Pending->Property; Out.Address = Out.Property->ContainerPtrToValuePtr<void>(Parent.Address);
-			Out.bNullable = Parent.Pending->Rule.bNullable; Parent.Pending = nullptr;
+			Out.bNullable = Parent.Pending->Rule.bNullable; Out.Prepared = Parent.PendingPrepared;
+			Parent.Pending = nullptr; Parent.PendingPrepared = nullptr;
 			Context.Path.Add(FSegment{Parent.Key, -1}); Out.bPath = true;
 		}
 		return Out;
@@ -304,7 +346,11 @@ struct FDecoder
 		if (SlotValue.bRoot) bRootStored = DecodeStruct(Value, Root, SlotValue.Address, Context);
 		else if (SlotValue.Property && !(SlotValue.bNullable && Value.Type == EVaRestJsonType::Null))
 		{
-			const bool bStored = DecodeField(Value, SlotValue.Property, SlotValue.Address, Context);
+			// Preserve DecodeValue's one visit and the same scalar helpers; all other tokens keep DecodeField.
+			const bool bPrepared = SlotValue.Prepared && (Value.Type == EVaRestJsonType::Bool || Value.Type == EVaRestJsonType::Number);
+			const bool bStored = bPrepared
+				? Context.Visit(Value, SlotValue.Property->GetElementSize()) && SlotValue.Prepared->Read(Value, SlotValue.Address, Context)
+				: DecodeField(Value, SlotValue.Property, SlotValue.Address, Context);
 			if (bStored && SlotValue.Map)
 			{ FScriptMapHelper Helper(SlotValue.Map->Property, SlotValue.Map->Address); Helper.AddPair(SlotValue.Map->Key, SlotValue.Map->Value); }
 		}
@@ -339,7 +385,8 @@ struct FDecoder
 		Frame.Key = FUtf8StringView(reinterpret_cast<const UTF8CHAR*>(Text), static_cast<int32>(Length));
 		const int32 Index = MatchNextField(*Frame.Fields,Frame.Key,Frame.NextField,Context.Scratch);
 		if (Index!=INDEX_NONE) Frame.NextField=Index+1;
-		Frame.Pending = Index == INDEX_NONE ? nullptr : &Frame.Fields->Fields[Index]; return !Context.bAborted;
+		Frame.Pending = Index == INDEX_NONE ? nullptr : &Frame.Fields->Fields[Index];
+		Frame.PendingPrepared = Index == INDEX_NONE ? nullptr : (*Frame.PreparedFields)[Index]; return !Context.bAborted;
 	}
 	bool Begin(bool bObject)
 	{
@@ -349,7 +396,8 @@ struct FDecoder
 		{
 			FNode Value; Value.Type = EVaRestJsonType::Object;
 			if ((!Into.bRoot && !Context.Visit(Value, Into.Property->GetElementSize())) || !Context.Visit(Value, Struct->GetStructureSize()) || !Context.Enter()) return false;
-			Frame.bEntered = true; Frame.Address = Into.Address; Frame.Fields = &Plan.Maps.FindChecked(Struct).Get();
+			const auto& Layout = *Plan.Maps.FindChecked(Struct);
+			Frame.bEntered = true; Frame.Address = Into.Address; Frame.Fields = &Layout.Fields.Get(); Frame.PreparedFields = &Layout.Scalars;
 			const int32 Fields = Frame.Fields->Fields.Num();
 			if (!Context.Elements(Fields, sizeof(int32) + sizeof(uint8)) || !Context.Charge(0, Fields, Fields)) return false;
 		}
@@ -375,6 +423,7 @@ struct FDecoder
 			{
 				Frame.Map = MapScratch.Add_GetRef(MakeUnique<FMapScratch>(Map, Into.Address)).Get();
 			}
+			Frame.ValuePrepared = Plan.FindScalar(Map->ValueProp);
 			FScriptMapHelper Helper(Map, Into.Address); Helper.EmptyValues(static_cast<int32>(Count));
 		}
 		else if (!bObject && Into.Property && Into.Property->IsA<FArrayProperty>())
@@ -384,7 +433,7 @@ struct FDecoder
 			if (!ContainerCount(Frame.Count)) return false;
 			if (!Context.Visit(Value, Into.Property->GetElementSize()) || !Context.Enter()
 				|| !Context.Elements(Frame.Count, Frame.Array->Inner->GetElementSize())) return false;
-			Frame.bEntered = true;
+			Frame.bEntered = true; Frame.ValuePrepared = Plan.FindScalar(Frame.Array->Inner);
 			FScriptArrayHelper Helper(Frame.Array, Frame.Address); Helper.EmptyValues(Frame.Count); Helper.AddValues(Frame.Count);
 		}
 		else
@@ -450,7 +499,7 @@ bool FVaRestJsonConvert::Utf8ToStructStreaming(TConstArrayView<uint8> Utf8, cons
 	const auto Fallback = [&] { return Utf8ToStruct(Utf8, Struct, Data, Captured, OutReport); };
 	if (!Struct || !Data || Utf8.Num() >= MAX_int32 || Options.BytesResolver || Options.MaxOutputBytes != 0 || Options.MaxValues != 0 || Options.MaxWorkUnits != 0)
 		return Fallback();
-	FPlan Plan{Captured, Captured.Rules.ToSharedRef(), {}, {}, {}};
+	FPlan Plan{Captured, Captured.Rules.ToSharedRef(), {}, {}, {}, {}};
 	if (ClassifyStruct(Struct) != ESpecialStruct::None || !Plan.Struct(Struct)) return Fallback();
 	FStreamTape Tape(Utf8);
 	if (Tape.Budget.HasFailed()) { Tape.Reset(); return Fallback(); }

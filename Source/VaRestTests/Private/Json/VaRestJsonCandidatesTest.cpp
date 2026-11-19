@@ -96,6 +96,27 @@ bool FVaRestJsonStreamingParityTest::RunTest(const FString& Parameters)
  TestTrue(TEXT("signed64 and double-bit events retain native parity"),Decode(*this,Bytes("{\"id\":-2147483648,\"uid\":-9223372036854775808,\"price\":-0.0}"),NumericDom,NumericStream,true));
  TestEqual(TEXT("minimum signed64 is copied exactly"),NumericStream.Uid,MIN_int64);
  TestTrue(TEXT("negative-zero double bits match DOM"),FMemory::Memcmp(&NumericDom.Price,&NumericStream.Price,sizeof(double))==0);
+ // Prepared array-inner byte policies retain unsigned range/defaults and old null/string diagnostics.
+ for (bool Strict:{false,true})
+ {
+  FVaRestJsonTestBlob ByteDom,ByteStream;FVaRestJsonConvertOptions Options;Options.bStrict=Strict;
+  TestEqual(TEXT("prepared numeric array policies keep strict/lenient diagnostics"),
+   Decode(*this,Bytes("{\"data\":[0,255,256,-1,1.5,null,\"7\",true,4]}"),ByteDom,ByteStream,true,Options),!Strict);
+  if (TestEqual(TEXT("prepared array keeps every validated element"),ByteStream.Data.Num(),9))
+  {
+   TestEqual(TEXT("maximum byte remains exact"),ByteStream.Data[1],uint8(255));
+   TestEqual(TEXT("failed byte range preserves its default"),ByteStream.Data[2],uint8(0));
+   TestEqual(TEXT("healthy byte after failures remains decoded"),ByteStream.Data[8],uint8(4));
+  }
+  FVaRestJsonBenchItem ScalarDom,ScalarStream;
+  const auto ScalarInput=Bytes("{\"id\":2147483648,\"uid\":18446744073709551615,\"price\":false,\"weight\":1.25,\"active\":1,\"ignored\":13,\"stats\":{\"ok\":7,\"overflow\":2147483648,\"fraction\":1.5,\"bool\":true,\"null\":null,\"text\":\"8\",\"after\":9}}");
+  TestEqual(TEXT("prepared bool/numeric fields and map policies keep diagnostics and commits"),
+   Decode(*this,ScalarInput,ScalarDom,ScalarStream,true,Options),!Strict);
+  TestEqual(TEXT("bool numeric coercion keeps strict behavior"),ScalarStream.Active,!Strict);
+  TestEqual(TEXT("prepared double uses the existing conversion"),ScalarStream.Weight,1.25);
+  TestEqual(TEXT("healthy map entry after failed prepared values commits"),ScalarStream.Stats.FindRef(TEXT("after")),9);
+  TestFalse(TEXT("failed prepared map value is not committed"),ScalarStream.Stats.Contains(TEXT("overflow")));
+ }
  // Nonzero caller limits retain the existing DOM account, including successful bounded calls.
  for (int32 Limit=0;Limit<3;++Limit)
  {
