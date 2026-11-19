@@ -1,5 +1,13 @@
 # VaRest 2.0 release program ledger (controller-level; per-plan ledgers live in sibling dirs)
 
+## Source420 — current original-tag request consumer SDK compatibility; corrected C++ UNBUILT/UNRUN, 2026-11-19 MSK
+
+Source419 is published as be7d00a2 with all963 curated members exact. Its fresh complete current Editor graph contains exactly two plugin actions, Compile VaRestEditor and Link VaRestEditor, five products and no Engine/Host action, new PCH or WriteMetadata. Full command/recursive-response/unity/header/ordered-library and output closure were inspected, with five genuine product preimages retained.
+
+Actual native001 fails exit6 unforced in5.774675s because the new private request-consumer test uses TAtomic<int32>::FetchAdd twice and includes the unavailable Misc/LexFromString.h. All26,222 protected inputs remain unchanged; the previous three SO/debug/symbol products stay exact, while UBT's two owned compile outputs are genuinely absent. Root1a9a806f retains the actual failure and process-group absence. No post-build qualification, current-v2 fixture load or HTTP request is claimed. The two qualified old-provider assets and all original production sources/proofs remain preserved; the failed current build does not invalidate their distinct producing intervals.
+
+Source420 changes only the private consumer CPP to supported atomic increments and overflow-safe decimal port parsing, retaining the exact loopback host/path, decimal-only input, positive port<=65535, callback counts/GT/identity and cleanup oracles. The missing lexical include is removed. No producer, saved asset, runtime transport, public API, observer header or build configuration changes. This source correction needs its own fresh full graph/build/post and two no-build current-v2 consumer phases; package/cook, full M6 and whole Goal remain OPEN. DOM remains default and Android selectors remain OFF.
+
 ## Source419 — genuine original-provider Blueprint assets and current consumer source; new C++ UNBUILT/UNRUN, 2026-11-19 MSK
 
 Source418 is qualified in its finite normal Linux Editor interval: native four plugin actions pass0, all20,903 guarded inputs unchanged and ten products. Its actual ordinary OpenApi/Compat/Socket.IO selection passes30/0, with43 retained warnings, unforced Editor/supervisor exit0 and only two declared SDK metadata transitions among39,500 inputs (Root80dd7c22). The two finite defects are closed; whole feature/release gates remain separate.

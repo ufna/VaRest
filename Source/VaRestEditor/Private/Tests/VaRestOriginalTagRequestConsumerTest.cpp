@@ -5,13 +5,13 @@ void UVaRestOriginalTagRequestObserver::Complete(UVaRestRequestJSON* Request)
 {
  if (!IsInGameThread()) bOnGT.Store(false);
  if (Request!=ExpectedRequest.Load()) bIdentity.Store(false);
- CompleteCount.FetchAdd(1);
+ CompleteCount++;
 }
 void UVaRestOriginalTagRequestObserver::Fail(UVaRestRequestJSON* Request)
 {
  if (!IsInGameThread()) bOnGT.Store(false);
  if (Request!=ExpectedRequest.Load()) bIdentity.Store(false);
- FailureCount.FetchAdd(1);
+ FailureCount++;
 }
 
 #if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
@@ -29,7 +29,6 @@ void UVaRestOriginalTagRequestObserver::Fail(UVaRestRequestJSON* Request)
 #include "Misc/AutomationTest.h"
 #include "Misc/CommandLine.h"
 #include "Misc/CoreDelegates.h"
-#include "Misc/LexFromString.h"
 #include "Misc/PackageName.h"
 #include "Misc/Parse.h"
 #include "Misc/Paths.h"
@@ -54,8 +53,15 @@ bool Requested(FString& Url)
  const FString Tail=Url.Mid(Prefix.Len());int32 Slash=INDEX_NONE;
  if (!Tail.FindChar(TCHAR('/'),Slash) || Slash<=0 || Tail.Mid(Slash)!=TEXT("/varest-original-fixture")) return false;
  const FString PortText=Tail.Left(Slash);
- for (TCHAR Unit:PortText) if (Unit<TCHAR('0') || Unit>TCHAR('9')) return false;
- int32 Port=0;return LexTryParseString(Port,*PortText) && Port>0 && Port<=65535;
+ int32 Port=0;
+ for (TCHAR Unit:PortText)
+ {
+  if (Unit<TCHAR('0') || Unit>TCHAR('9')) return false;
+  const int32 Digit=int32(Unit-TCHAR('0'));
+  if (Port>(65535-Digit)/10) return false;
+  Port=Port*10+Digit;
+ }
+ return Port>0 && Port<=65535;
 }
 class FRun final : public IAutomationLatentCommand
 {
