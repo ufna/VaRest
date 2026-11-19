@@ -94,13 +94,13 @@ public:
  virtual bool Update() override
  {
   if (!Probe && !Initialize()) return true;
-  if (Case==10) return true;
+  if (Case==12) return true;
   if (!bStarted) return BeginCase();
-  if (Case>=8) return UpdateCallURLRetirementCase();
+  if (Case==8 || Case==9) return UpdateCallURLRetirementCase();
   if (FPlatformTime::Seconds()-StartedAt>30) { Test.AddError(FString::Printf(TEXT("legacy HTTP owned terminal barrier timed out at case %d: starts=%d completed=%d"),Case,Observer->Started.Num(),Observer->Completed.Num())); return true; }
   if (Observer->Started.Num()!=ExpectedStarts || Observer->Completed.Num()!=ExpectedStarts || GFrameCounter<=Observer->LastCompletedFrame) return false;
   if ((Case==0 || Case==3 || Case==4) && !Observer->RequestBodies.Contains(CurrentRequestId)) return false;
-  const int32 Want=Case==5 ? 0 : Case==2 ? 2 : Case==7 ? 0 : 1;
+  const int32 Want=Case==5 ? 0 : (Case==2 || Case==10 || Case==11) ? 2 : Case==7 ? 0 : 1;
   if (Probe->Completes-BeforeComplete!=Want || (Case==7 && Probe->CallCompletions!=65)) return false;
   Test.TestEqual(TEXT("no failure event for HTTP responses or explicit silent cancel"),Probe->Failures,0);
   Test.TestEqual(TEXT("native complete count agrees with dynamic events"),Counts->Complete,Probe->Completes);
@@ -152,6 +152,13 @@ public:
    Test.TestEqual(TEXT("non-JSON body remains accessible"),Request->GetResponseContentAsString(),FString(TEXT("not-json")));
   }
   else if (Case==2) Test.TestEqual(TEXT("reentrant repeat does not duplicate form query"),Request->GetURL(),Root+TEXT("/form?space%20key=a%26b"));
+  else if (Case==10 || Case==11)
+  {
+   const FString Expected=Root+(Case==10 ? TEXT("/form-fragment?space%20key=a%26b#section?fragment=only") : TEXT("/form-query?existing=1&space%20key=a%26b#section?fragment=only"));
+   Test.TestEqual(TEXT("reentrant form repeat preserves query and fragment without duplicate pairs"),Request->GetURL(),Expected);
+   Test.TestEqual(TEXT("actual engine mock matches form query before fragment"),Request->GetResponseCode(),Case==10 ? 202 : 203);
+   Test.TestEqual(TEXT("actual fragment form route response"),Request->GetResponseObject()->GetIntegerField(TEXT("form")),Case==10 ? 1 : 2);
+  }
   else if (Case==3)
   {
    Test.TestTrue(TEXT("top-level JSON array stays valid"),Request->bIsValidJsonResponse);
@@ -191,6 +198,8 @@ private:
   FString Patterns=Root+TEXT("/json++POST->201++{\"ok\":7}++Content-Type:application/json,X-M6:present ")+
    Root+TEXT("/plain->422++not-json++Content-Type:text/plain ")+
    Root+TEXT("/binary++POST->200++[1,2]++Content-Type:application/json ")+
+   Root+TEXT("/form-fragment?space%20key=a%26b++GET->202++{\"form\":1}++Content-Type:application/json ")+
+   Root+TEXT("/form-query?existing=1&space%20key=a%26b++GET->203++{\"form\":2}++Content-Type:application/json ")+
    Root+TEXT("->200++{\"ok\":7}++Content-Type:application/json");
   if (!OriginalMock.IsEmpty()) Patterns+=TEXT(" ")+OriginalMock;
   MockVariable->Set(*Patterns,ECVF_SetByConsole,OverrideTag);
@@ -204,9 +213,9 @@ private:
  }
  bool BeginCase()
  {
-  if (Case>=8) return BeginCallURLRetirementCase();
+  if (Case==8 || Case==9) return BeginCallURLRetirementCase();
   StartedAt=FPlatformTime::Seconds(); BeforeComplete=Probe->Completes;
-  ExpectedStarts=Observer->Started.Num()+(Case==2 ? 2 : Case==7 ? 65 : 1); bStarted=true;
+  ExpectedStarts=Observer->Started.Num()+((Case==2 || Case==10 || Case==11) ? 2 : Case==7 ? 65 : 1); bStarted=true;
   Test.AddInfo(FString::Printf(TEXT("LegacyHttpCase %d"),Case));
   if (Case==7)
   {
@@ -225,6 +234,11 @@ private:
   if (Case==0) { Path=TEXT("/json"); Request->SetVerb(EVaRestRequestVerb::POST); Request->SetContentType(EVaRestRequestContentType::json); Request->GetRequestObject()->SetIntegerField(TEXT("n"),9); }
   else if (Case==1) Path=TEXT("/plain");
   else if (Case==2) { Path=TEXT("/form"); Request->GetRequestObject()->SetStringField(TEXT("space key"),TEXT("a&b")); Probe->ResendAt=Probe->Completes+1; }
+  else if (Case==10 || Case==11)
+  {
+   Path=Case==10 ? TEXT("/form-fragment#section?fragment=only") : TEXT("/form-query?existing=1#section?fragment=only");
+   Request->GetRequestObject()->SetStringField(TEXT("space key"),TEXT("a&b")); Probe->ResendAt=Probe->Completes+1;
+  }
   else if (Case==3) { Path=TEXT("/binary"); Request->SetVerb(EVaRestRequestVerb::POST); Request->SetContentType(EVaRestRequestContentType::binary); Request->SetBinaryRequestContent({0,255,7}); Request->SetBinaryContentType(TEXT("application/x-binary")); Request->SetHeader(TEXT("Content-Type"),TEXT("application/x-override")); }
   else if (Case==4) { Request->SetVerb(EVaRestRequestVerb::CUSTOM); Request->SetCustomVerb(TEXT("PATCH")); Request->SetContentType(EVaRestRequestContentType::json); Request->GetRequestObject()->SetIntegerField(TEXT("n"),9); }
   Request->ProcessURL(TEXT("  ")+Root+Path+TEXT(" \t"));
@@ -236,6 +250,11 @@ private:
   {
    Test.TestEqual(TEXT("binary engine payload size"),Engine->GetContentLength(),uint64(3));
    Test.TestEqual(TEXT("explicit legacy header wins"),Engine->GetHeader(TEXT("Content-Type")),FString(TEXT("application/x-override")));
+  }
+  if (Case==10 || Case==11)
+  {
+   const FString Expected=Root+(Case==10 ? TEXT("/form-fragment?space%20key=a%26b#section?fragment=only") : TEXT("/form-query?existing=1&space%20key=a%26b#section?fragment=only"));
+   Test.TestEqual(TEXT("first actual request inserts form before the intact fragment"),Engine->GetURL(),Expected);
   }
   if (Case==4) Test.TestEqual(TEXT("custom verb staging"),Engine->GetVerb(),FString(TEXT("PATCH")));
   if (Case==5) Request->Cancel();

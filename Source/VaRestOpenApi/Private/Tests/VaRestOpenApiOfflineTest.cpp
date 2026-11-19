@@ -6,6 +6,10 @@
 #include "VaRestOpenApiReimport.h"
 #include "VaRestOpenApiImportOptions.h"
 #include "VaRestOpenApiFactory.h"
+#include "VaRestOpenApiLibrary.h"
+#include "Editor.h"
+#include "Editor/Transactor.h"
+#include "EditorFramework/AssetImportData.h"
 #include "VaRestHttpSettings.h"
 #include "AssetImportTask.h"
 #include "CoreGlobals.h"
@@ -635,10 +639,14 @@ bool FVaRestOpenApiSourceNoopOfflineTest::RunTest(const FString& Parameters)
  FOwnedAssets Owned;
  const FString Directory=FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir()/TEXT("VaRestOpenApiQualification")/FGuid::NewGuid().ToString(EGuidFormats::Digits));
  const FString Filename=Directory/TEXT("source-noop.json");
+ const FString ReferencedFilename=Directory/TEXT("source-types.json");
+ const FString SourceWithReferences=FString(Source).Replace(TEXT("\"#/components/schemas/Pet\""),TEXT("\"source-types.json#/components/schemas/Pet\""));
  if (!TestFalse(TEXT("source fixture never overwrites a preexisting file"),IFileManager::Get().FileExists(*Filename)) ||
+  !TestFalse(TEXT("referenced fixture never overwrites a preexisting file"),IFileManager::Get().FileExists(*ReferencedFilename)) ||
   !TestTrue(TEXT("create owned source fixture directory"),IFileManager::Get().MakeDirectory(*Directory,true))) return false;
- ON_SCOPE_EXIT { IFileManager::Get().Delete(*Filename,false,true); IFileManager::Get().DeleteDirectory(*Directory,false,false); };
- if (!TestTrue(TEXT("write actual initial source file"),FFileHelper::SaveStringToFile(Source,*Filename))) return false;
+ ON_SCOPE_EXIT { IFileManager::Get().Delete(*Filename,false,true); IFileManager::Get().Delete(*ReferencedFilename,false,true); IFileManager::Get().DeleteDirectory(*Directory,false,false); };
+ if (!TestTrue(TEXT("write actual referenced type source"),FFileHelper::SaveStringToFile(Source,*ReferencedFilename)) ||
+  !TestTrue(TEXT("write actual initial source file"),FFileHelper::SaveStringToFile(SourceWithReferences,*Filename))) return false;
  const auto Loaded=AnalyzeLocalFile(Filename,false);
  if (!TestTrue(TEXT("real source reader accepts fixture"),Loaded.Analysis.bDocumentValid) || !NoErrors(*this,Loaded.Analysis.Issues,TEXT("source load"))) return false;
  TStrongObjectPtr<UVaRestOpenApiImportOptions> ImportOptions(NewObject<UVaRestOpenApiImportOptions>());
@@ -658,6 +666,52 @@ bool FVaRestOpenApiSourceNoopOfflineTest::RunTest(const FString& Parameters)
  if (!TestEqual(TEXT("one selected initial endpoint"),Api->Endpoints.Num(),1) ||
   !TestEqual(TEXT("fixture creates real struct and enum packages"),Applied.AdditionalObjects.Num(),2)) return false;
  const FGuid EndpointId=Api->Endpoints[0].Id;
+ int32 RootDocuments=0,ReferencedDocuments=0;
+ for (const auto& Document:Loaded.Source[TEXT("documents")].Elements())
+ { RootDocuments+=Equal(Document[TEXT("location")].AsString(),Filename) ? 1:0;ReferencedDocuments+=Equal(Document[TEXT("location")].AsString(),ReferencedFilename) ? 1:0; }
+ if (!TestEqual(TEXT("actual source records the root fingerprint once"),RootDocuments,1) ||
+  !TestEqual(TEXT("actual source records the external type fingerprint once"),ReferencedDocuments,1) ||
+  !TestEqual(TEXT("actual source tracks root and referenced document"),Loaded.Source[TEXT("documents")].Num(),2) ||
+  !TestNotNull(TEXT("source-backed API has real import data"),Api->AssetImportData.Get()) ||
+  !TestNotNull(TEXT("same-source selection observes the real editor Undo buffer"),GEditor ? GEditor->Trans.Get() : nullptr)) return false;
+ // Direct Apply does not fill factory source-file metadata; use its same public SDK setter with actual read fingerprints.
+ TArray<FAssetImportInfo::FSourceFile> ImportFiles;
+ for (const auto& Document:Loaded.Source[TEXT("documents")].Elements())
+ {
+  FMD5Hash Hash;LexFromString(Hash,*Document[TEXT("hash")].AsString());
+  ImportFiles.Emplace(UAssetImportData::SanitizeImportFilename(Document[TEXT("location")].AsString(),Api->GetOutermost()),FDateTime(0),Hash);
+ }
+ Api->AssetImportData->SetSourceFiles(MoveTemp(ImportFiles));
+ const auto SelectSameSource=[&](const FString& SelectedFilename)
+ {
+  const FVaRestApiImportState BeforeSelection=Api->ImportState;
+  const auto BeforeManifest=DecodeState(BeforeSelection);if (!TestTrue(TEXT("source-selection baseline decodes"),BeforeManifest.IsSet())) return false;
+  const auto BeforeDocuments=BeforeManifest.GetValue()[TEXT("source")][TEXT("documents")].Clone();
+  if (!TestEqual(TEXT("source-selection baseline retains both real fingerprints"),BeforeDocuments.Num(),2)) return false;
+  auto* ImportData=Api->AssetImportData.Get();const FString SourceFiles=ImportData->GetSourceData().ToJson();
+  auto* Transactions=GEditor->Trans.Get();const int32 QueueLength=Transactions->GetQueueLength(),UndoCount=Transactions->GetUndoCount();
+  const SIZE_T UndoSize=Transactions->GetUndoSize();const bool TransactionActive=Transactions->IsActive();
+  TArray<const FTransaction*> UndoEntries;for (int32 Index=0;Index<QueueLength;++Index) UndoEntries.Add(Transactions->GetTransaction(Index));
+  TArray<TPair<UPackage*,bool>> Dirty;for (const auto& Object:Owned.Objects) if (Object.IsValid()) Dirty.Emplace(Object->GetOutermost(),Object->GetOutermost()->IsDirty());
+  bool Same=TestTrue(TEXT("public same-canonical file selection succeeds"),UVaRestOpenApiLibrary::ChangeFileSource(Api,SelectedFilename));
+  Same&=TestEqual(TEXT("same-file selection preserves importer"),Api->ImportState.Importer,BeforeSelection.Importer);
+  Same&=TestEqual(TEXT("same-file selection preserves import-state version"),Api->ImportState.Version,BeforeSelection.Version);
+  Same&=TestTrue(TEXT("same-file selection preserves complete compressed import state"),Api->ImportState.Blob==BeforeSelection.Blob);
+  const auto AfterManifest=DecodeState(Api->ImportState);
+  if (!TestTrue(TEXT("source-selection result decodes"),AfterManifest.IsSet())) return false;
+  Same&=TestTrue(TEXT("same-file selection preserves every referenced-document fingerprint"),AfterManifest.GetValue()[TEXT("source")][TEXT("documents")].Equals(BeforeDocuments));
+  Same&=TestTrue(TEXT("same-file selection preserves import-data object"),Api->AssetImportData.Get()==ImportData);
+  Same&=TestEqual(TEXT("same-file selection preserves both source files"),ImportData->GetSourceFileCount(),2);
+  Same&=TestTrue(TEXT("same-file selection preserves source filenames/hashes/timestamps"),ImportData->GetSourceData().ToJson().Equals(SourceFiles,ESearchCase::CaseSensitive));
+  for (const auto& Entry:Dirty) Same&=TestEqual(TEXT("same-file selection preserves existing package dirty state"),Entry.Key->IsDirty(),Entry.Value);
+  Same&=TestTrue(TEXT("same-file selection preserves actual Undo buffer identity"),GEditor->Trans.Get()==Transactions);
+  Same&=TestEqual(TEXT("same-file selection adds no Undo transaction"),Transactions->GetQueueLength(),QueueLength);
+  Same&=TestEqual(TEXT("same-file selection preserves Undo/Redo position"),Transactions->GetUndoCount(),UndoCount);
+  Same&=TestEqual(TEXT("same-file selection preserves Undo storage"),Transactions->GetUndoSize(),UndoSize);
+  Same&=TestEqual(TEXT("same-file selection leaves active transaction state unchanged"),Transactions->IsActive(),TransactionActive);
+  for (int32 Index=0;Index<QueueLength;++Index) Same&=TestTrue(TEXT("same-file selection preserves each actual Undo entry"),Transactions->GetTransaction(Index)==UndoEntries[Index]);
+  return Same;
+ };
  TArray<TPair<UPackage*,uint32>> PackageFlags;
  for (const auto& Object:Owned.Objects) if (Object.IsValid())
  {
@@ -665,11 +719,15 @@ bool FVaRestOpenApiSourceNoopOfflineTest::RunTest(const FString& Parameters)
   PackageFlags.Emplace(ObjectPackage,uint32(ObjectPackage->GetPackageFlags()));
  }
  const FVaRestApiImportState InitialState=Api->ImportState;
- const FString Extra=FString(Source).Replace(TEXT("\"paths\":{"),TEXT("\"paths\":{\"/ignored\":{\"get\":{\"operationId\":\"ignored\",\"responses\":{\"200\":{\"description\":\"ok\"}}}},"));
- const auto ExtraLoaded=FVaRestOpenApiLoader::Analyze(Filename,Bytes(Extra));
+ if (!SelectSameSource(Filename)) return false;
+ const FString Extra=SourceWithReferences.Replace(TEXT("\"paths\":{"),TEXT("\"paths\":{\"/ignored\":{\"get\":{\"operationId\":\"ignored\",\"responses\":{\"200\":{\"description\":\"ok\"}}}},"));
+ if (!TestTrue(TEXT("write source containing only an unselected operation addition"),FFileHelper::SaveStringToFile(Extra,*Filename))) return false;
+ const auto ExtraLoaded=AnalyzeLocalFile(Filename,false).Analysis;
  if (!TestTrue(TEXT("ignored operation addition is genuinely valid"),ExtraLoaded.bDocumentValid) ||
-  !TestEqual(TEXT("upstream now has two real operations"),ExtraLoaded.Model.Operations.Num(),2) ||
-  !TestTrue(TEXT("write source containing only an unselected operation addition"),FFileHelper::SaveStringToFile(Extra,*Filename))) return false;
+  !TestEqual(TEXT("upstream now has two real operations"),ExtraLoaded.Model.Operations.Num(),2)) return false;
+ const FString EquivalentFilename=Directory/TEXT("./source-noop.json");
+ if (!TestTrue(TEXT("alternate spelling resolves to the same canonical source"),Equal(FPaths::ConvertRelativePathToFull(EquivalentFilename),Loaded.Source[TEXT("location")].AsString())) ||
+  !SelectSameSource(EquivalentFilename)) return false;
  const auto Unchanged=[&]()
  {
   TestEqual(TEXT("no-op preserves importer identity"),Api->ImportState.Importer,InitialState.Importer);
@@ -708,7 +766,8 @@ bool FVaRestOpenApiSourceNoopOfflineTest::RunTest(const FString& Parameters)
  if (!NoErrors(*this,AfterOption.Issues,TEXT("source after option edit")) || !TestTrue(TEXT("source wrapper respects committed options without discovery churn"),AfterOption.Api==Api && AfterOption.bNoChanges)) return false;
  TestTrue(TEXT("option control state survives the next source no-op"),Api->ImportState.Blob==OptionState.Blob);
  const FString Content=Extra.Replace(TEXT("Original summary"),TEXT("Selected source update"));
- if (!TestTrue(TEXT("write a genuine selected operation update"),FFileHelper::SaveStringToFile(Content,*Filename))) return false;
+ if (!TestTrue(TEXT("write a genuine selected operation update"),FFileHelper::SaveStringToFile(Content,*Filename)) ||
+  !SelectSameSource(Filename)) return false; // same path must not advance fingerprints before actual selected-content reimport
  const auto Changed=FVaRestOpenApiReimporter::FromSource(Api,true); Owned.Keep(Changed);
  if (!NoErrors(*this,Changed.Issues,TEXT("selected source update")) || !TestTrue(TEXT("selected content update still commits"),Changed.Api==Api && !Changed.bNoChanges) ||
   !TestEqual(TEXT("unselected operation remains unimported"),Api->Endpoints.Num(),1)) return false;

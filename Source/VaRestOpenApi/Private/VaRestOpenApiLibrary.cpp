@@ -59,6 +59,8 @@ bool UVaRestOpenApiLibrary::ChangeFileSource(UVaRestApi* Api,const FString& File
 	const auto State=DecodeState(Api->ImportState);if (!State.IsSet()) return false;
 	FVaRestOpenApiReadRequest Request;Request.Uri=FPaths::ConvertRelativePathToFull(Filename);Request.RootBase=FPaths::GetPath(Request.Uri);FVaRestOpenApiReadResult Read;
 	if (!ReadSourceFile(Request,Read)) { FVaRestOpenApiIssue Issue;Issue.Code=TEXT("OA-DOC-READ");Issue.Message=Read.Error;Issue.Document=Filename;Report(MakeArrayView(&Issue,1));return false; }
+	const auto& Previous=State.GetValue()[TEXT("source")];
+	if (Equal(Previous[TEXT("kind")].AsString(),TEXT("file")) && Equal(Previous[TEXT("location")].AsString(),Read.CanonicalUri)) return true;
 	auto Updated=State.GetValue().Clone();auto Documents=FVaRestJson::Array();Documents.Add(SourceRecord(Read.CanonicalUri,Read.Bytes));
 	Updated.Set(TEXT("source"),FVaRestJson::Object().Set(TEXT("kind"),TEXT("file")).Set(TEXT("location"),Read.CanonicalUri).Set(TEXT("documents"),Documents));
 	FVaRestApiImportState Encoded;if (!EncodeState(Updated,Encoded)) return false;

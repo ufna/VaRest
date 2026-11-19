@@ -403,7 +403,12 @@ void UVaRestRequestJSON::ProcessRequest()
 		}
 		if (RequestContentType==EVaRestRequestContentType::x_www_form_urlencoded_url)
 		{
-			if (!Form.IsEmpty()) Url+=(Url.Contains(TEXT("?")) ? TEXT("&") : TEXT("?"))+Form;
+			if (!Form.IsEmpty())
+			{
+				int32 FragmentAt=INDEX_NONE;
+				if (!Url.FindChar(TEXT('#'),FragmentAt)) FragmentAt=Url.Len();
+				Url.InsertAt(FragmentAt,(Url.Left(FragmentAt).Contains(TEXT("?")) ? TEXT("&") : TEXT("?"))+Form);
+			}
 			if (!StringRequestContent.IsEmpty()) Body=LegacyTextBody(StringRequestContent);
 		}
 		else Body=LegacyTextBody(StringRequestContent.IsEmpty() ? Form : StringRequestContent);
