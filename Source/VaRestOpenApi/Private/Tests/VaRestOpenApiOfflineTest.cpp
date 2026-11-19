@@ -237,6 +237,9 @@ bool FVaRestOpenApiUrlReferencesOfflineTest::RunTest(const FString& Parameters)
  FVaRestOpenApiReadRequest Boundary;Boundary.bUrl=true;Boundary.Uri=CanonicalRoot;Boundary.RootBase=TEXT("https://specs.invalid/team/");
  for (const auto& Pair:TArray<TPair<FString,FString>>{
   {TEXT("?rev=2"),Revision2},{TEXT("#schema"),CanonicalRoot},
+  {TEXT("."),TEXT("https://specs.invalid/team/")},{TEXT("nested/.."),TEXT("https://specs.invalid/team/")},
+  {TEXT("nested/."),TEXT("https://specs.invalid/team/nested/")},
+  {TEXT("nested/..?rev=4#schema"),TEXT("https://specs.invalid/team/?rev=4")},
   {TEXT("nested/../next%20doc.json?rev=4#schema"),TEXT("https://specs.invalid/team/next%20doc.json?rev=4")},
   {TEXT("//SPECS.INVALID:443/team/other.json"),TEXT("https://specs.invalid/team/other.json")}})
  {
@@ -247,12 +250,17 @@ bool FVaRestOpenApiUrlReferencesOfflineTest::RunTest(const FString& Parameters)
  for (const FString& Target:{FString(TEXT("../outside.json")),FString(TEXT("/team-other/spec.json")),
   FString(TEXT("https://other.invalid/team/spec.json")),FString(TEXT("http://specs.invalid/team/spec.json")),
   FString(TEXT("https://user@specs.invalid/team/spec.json")),FString(TEXT("%2e%2e/outside.json")),
-  FString(TEXT("child%2foutside.json")),FString(TEXT("?rev=2\r\nInjected:yes"))})
+  FString(TEXT("child%2foutside.json")),FString(TEXT("?rev=2\r\nInjected:yes")),FString(TEXT(".."))})
  {
   FString Error;const auto Redirect=SourceRedirect(Boundary,CanonicalRoot,Target,Error);
   TestFalse(TEXT("unconfined or malformed redirect is refused"),Redirect.IsSet());
   TestFalse(TEXT("refused redirect has a diagnostic"),Error.IsEmpty());
  }
+ FVaRestOpenApiReadRequest OriginBoundary=Boundary;OriginBoundary.Uri=TEXT("https://specs.invalid/Root.json");OriginBoundary.RootBase=TEXT("https://specs.invalid/");
+ FString RootError;const auto RootRedirect=SourceRedirect(OriginBoundary,OriginBoundary.Uri,TEXT("nested/.."),RootError);
+ if (TestTrue(TEXT("terminal parent segment can resolve to the admitted origin root"),RootRedirect.IsSet()))
+  TestEqual(TEXT("origin root has exactly one trailing slash"),RootRedirect.GetValue().Uri,FString(TEXT("https://specs.invalid/")));
+ TestTrue(TEXT("origin-root redirect has no error"),RootError.IsEmpty());
  const TCHAR NullName[]=TEXT("next\0doc.json");
  const FString NullRedirect(UE_ARRAY_COUNT(NullName)-1,NullName);
  TestTrue(TEXT("raw redirect fixture contains its counted interior null and suffix"),NullRedirect.Len()==UE_ARRAY_COUNT(NullName)-1 && NullRedirect[4]==0 && NullRedirect.EndsWith(TEXT("doc.json")));

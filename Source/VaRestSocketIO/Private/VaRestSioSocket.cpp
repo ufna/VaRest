@@ -27,7 +27,13 @@ FVaRestSioSocket FVaRestSioSocketWeak::Pin() const
 FVaRestSioNamespace FVaRestSioSocket::Namespace(FStringView Name) const
 {
 	check(IsInGameThread());
-	if (auto* View = StateOnGT()) { const TStrongObjectPtr<UVaRestSioState> Pin(View); if (const auto Row = View->Ensure(Name)) return FVaRestSioNamespace(*this, Row->Name); }
+	if (auto* View = StateOnGT())
+	{
+		const TStrongObjectPtr<UVaRestSioState> Pin(View);
+		if (!Name.IsEmpty() && !FVaRestSioCodec::IsValidNamespace(Name))
+		{ View->ReportConfig(TEXT("Socket.IO namespace must start with '/' and contain neither ',' nor '?'")); return {}; }
+		if (const auto Row = View->Ensure(Name)) return FVaRestSioNamespace(*this, Row->Name);
+	}
 	return {};
 }
 FVaRestSioNamespace FVaRestSioSocket::DefaultNamespace() const

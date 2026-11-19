@@ -47,6 +47,8 @@ struct FCase : TSharedFromThis<FCase,ESPMode::ThreadSafe>
  bool bExpectBytesDecode=false;
  bool bExpectDrop=false;
  int32 Phase=0,Connected=0,Events=0,Once=0,Binary=0,Acked=0,TimedOut=0,Errors=0;
+ int32 NamespaceConfigErrors=0;
+ bool bExpectNamespaceConfig=false;
  double Deadline=0;
  bool Cleaned=false;
  static TSharedPtr<FCase,ESPMode::ThreadSafe> Pin(const TWeakPtr<FCase,ESPMode::ThreadSafe>& Weak,const TSharedRef<std::atomic<bool>,ESPMode::ThreadSafe>& Wrong)
@@ -101,7 +103,12 @@ struct FCase : TSharedFromThis<FCase,ESPMode::ThreadSafe>
   {
    if (auto S=Pin(Weak,Wrong))
    {
-    if (S->bTypedBytes && S->bExpectBytesDecode && Error.Kind==EVaRestErrorKind::Decode)
+    if (S->bExpectNamespaceConfig && Error.Kind==EVaRestErrorKind::Config)
+    {
+     ++S->NamespaceConfigErrors;
+     S->Test.TestEqual(TEXT("invalid namespace reports its public spelling rule"),Error.Message,FString(TEXT("Socket.IO namespace must start with '/' and contain neither ',' nor '?'")));
+    }
+    else if (S->bTypedBytes && S->bExpectBytesDecode && Error.Kind==EVaRestErrorKind::Decode)
     {
      ++S->BytesDecodeErrors;
      S->Test.TestTrue(TEXT("strict byte decode failure keeps the positional path"),Error.Message.Contains(TEXT("[0]")));
@@ -110,6 +117,17 @@ struct FCase : TSharedFromThis<FCase,ESPMode::ThreadSafe>
     else { ++S->Errors; S->Test.AddError(Error.Message); }
    }
   });
+  if (!bRecovery && !bTypedBytes)
+  {
+   bExpectNamespaceConfig=true;
+   for (const TCHAR* InvalidNamespace:{TEXT("room"),TEXT("/bad,room"),TEXT("/room?query")})
+    Test.TestFalse(TEXT("invalid namespace returns no public handle"),Socket.Namespace(InvalidNamespace).IsValid());
+   bExpectNamespaceConfig=false;
+   Test.TestEqual(TEXT("each invalid public namespace synchronously reports Config on GT"),NamespaceConfigErrors,3);
+   Test.TestEqual(TEXT("invalid namespaces do not start transport attempts"),Fake->NumAttempts(),0);
+   Test.TestTrue(TEXT("valid namespace remains available"),Socket.Namespace(TEXT("/room")).IsValid());
+   Test.TestEqual(TEXT("empty namespace preserves its existing default alias"),FString(Socket.Namespace(TEXT("")).GetName()),FString(TEXT("/room")));
+  }
   Socket.OnDisconnect(nullptr,[Weak,Wrong](const FVaRestSioDisconnect& Info)
   { if (auto S=Pin(Weak,Wrong)) { ++S->Disconnected; S->LastDisconnect=Info; } });
   Socket.OnRetryScheduled(nullptr,[Weak,Wrong](const FVaRestSocketStatus& Status,const FVaRestSocketClose& Close)

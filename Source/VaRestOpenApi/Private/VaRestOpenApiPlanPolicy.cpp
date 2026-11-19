@@ -17,9 +17,11 @@ FString ResolveHttpReference(const FString& Base,const FString& Relative,bool bB
 	if (!Relative.StartsWith(TEXT("/"))) Path=bBaseDirectory ? (Path.EndsWith(TEXT("/")) ? Path : Path+TEXT("/"))+Relative : Path.Left(Path.Find(TEXT("/"),ESearchCase::CaseSensitive,ESearchDir::FromEnd)+1)+Relative;
 	else Path=Relative;
 	FString Tail;Mark=Path.Find(TEXT("?"));if (Mark!=INDEX_NONE) { Tail=Path.Mid(Mark);Path=Path.Left(Mark); }
+	// A terminal dot segment still identifies a directory after normalization.
+	const bool Directory=Path.EndsWith(TEXT("/")) || Path.EndsWith(TEXT("/.")) || Path.EndsWith(TEXT("/.."));
 	TArray<FString> Parts,Normalized;Path.ParseIntoArray(Parts,TEXT("/"),false);
 	for (const auto& Part:Parts) { if (Equal(Part,TEXT(".."))) { if (!Normalized.IsEmpty()) Normalized.Pop(EAllowShrinking::No); }else if (!Part.IsEmpty() && !Equal(Part,TEXT("."))) Normalized.Add(Part); }
-	return Origin+TEXT("/")+FString::Join(Normalized,TEXT("/"))+(Path.EndsWith(TEXT("/")) && !Normalized.IsEmpty() ? TEXT("/") : TEXT(""))+Tail;
+	return Origin+TEXT("/")+FString::Join(Normalized,TEXT("/"))+(Directory && !Normalized.IsEmpty() ? TEXT("/") : TEXT(""))+Tail;
 }
 FString FPlanner::ServerUrl(const FVaRestJson& Server,const FVaRestOpenApiLocation& Location)
 {
