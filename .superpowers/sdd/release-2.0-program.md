@@ -1,5 +1,15 @@
 # VaRest 2.0 release program ledger (controller-level; per-plan ledgers live in sibling dirs)
 
+## Source421 — preserve v1 JSON string formatting and check wire bytes independently; test C++ UNBUILT/UNRUN, 2026-11-19 MSK
+
+Source420 is published6adda664 with963 curated members exact. Its fresh matching Editor graph builds two plugin actions successfully, unforced22.752704s, with all26,257 protected inputs unchanged and five products. Post c69307a0 validates one real dependency record with3,606 inputs, one SO/debug GNU pair and both SDK parent roles. No Engine/Host action or new PCH is used.
+
+The current generic consumer passes1/0 against the actual original-provider Blueprint: load/compile and saved CustomProjection succeed, warnings remain retained, Editor/supervisor exit0 unforced38.170459/38.268449s and44,843 inputs have only two declared SDK metadata changes. Root3198393a retains this finite Source420 qualification. A separate current request process compiles the old saved BP with0errors and performs one genuine GET200 with exactly35 expected wire bytes. It then fails one test oracle: the BP string is formatted JSON rather than the compact wire entity. Editor255/supervisor1 exit unforced; all44,850 inputs stay unchanged. Rootf34b09b6 preserves the failure, wire/server cleanup and exact original/copied assets; no successful request-case claim is made.
+
+The unchanged original tag explicitly implements valid-JSON GetResponseContentAsString by EncodeJson and optional string caching. Its default SDK pretty policy uses platform line terminators, tabs and spaces. Current production retains that contract. Source421 corrects only the private consumer test: require exact original pretty formatting from the BP and cached native getter, and separately require the current native response-byte getter to match the exact compact wire entity. Status, parsed marker/value17, BP/native callback counts, GT/identity, two-frame terminal checks, cleanup, old producer and both saved assets stay unchanged. This is a test contract correction with an additional byte assertion, not a production API change.
+
+The corrected C++ needs its own fresh full graph/native/post and new current-v2 generic/request processes. Source420 and earlier failures remain distinct intervals. Package/cook, whole M6 and whole Goal remain OPEN; DOM stays default and Android selectors stay OFF.
+
 ## Source420 — current original-tag request consumer SDK compatibility; corrected C++ UNBUILT/UNRUN, 2026-11-19 MSK
 
 Source419 is published as be7d00a2 with all963 curated members exact. Its fresh complete current Editor graph contains exactly two plugin actions, Compile VaRestEditor and Link VaRestEditor, five products and no Engine/Host action, new PCH or WriteMetadata. Full command/recursive-response/unity/header/ordered-library and output closure were inspected, with five genuine product preimages retained.

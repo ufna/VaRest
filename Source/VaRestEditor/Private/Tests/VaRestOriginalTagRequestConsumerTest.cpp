@@ -16,6 +16,7 @@ void UVaRestOriginalTagRequestObserver::Fail(UVaRestRequestJSON* Request)
 
 #if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
 #include "CoreGlobals.h"
+#include "Containers/StringConv.h"
 #include "EdGraph/EdGraph.h"
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintGeneratedClass.h"
@@ -43,6 +44,8 @@ namespace VaRestOriginalRequestConsumer
 const TCHAR* MountRoot=TEXT("/VaRestM6Compat_2a5b51b7/");
 const TCHAR* PackageName=TEXT("/VaRestM6Compat_2a5b51b7/BP_RequestFromTagV1");
 const TCHAR* ExpectedBody=TEXT("{\"producer\":\"v1-on-5.8\",\"value\":17}");
+// v1's valid-JSON string getter intentionally calls EncodeJson and caches pretty JSON.
+const TCHAR* ExpectedLegacyBody=TEXT("{") LINE_TERMINATOR TEXT("\t\"producer\": \"v1-on-5.8\",") LINE_TERMINATOR TEXT("\t\"value\": 17") LINE_TERMINATOR TEXT("}");
 bool Requested(FString& Url)
 {
  if (!FCommandLine::IsInitialized() || !FParse::Param(FCommandLine::Get(),TEXT("VaRestLegacyOriginalRequestConsumer")) ||
@@ -169,10 +172,13 @@ private:
  {
   const int32 Complete=CompleteProperty->GetPropertyValue_InContainer(Instance.Get()),Fail=FailureProperty->GetPropertyValue_InContainer(Instance.Get());
   const FString Body=BodyProperty->GetPropertyValue_InContainer(Instance.Get());
+  const auto& Raw=Request->GetResponseContent();const FTCHARToUTF8 ExpectedRaw(ExpectedBody);
   auto* Json=Request->GetResponseObject();
   return Test.TestTrue(TEXT("both BP and native delegates delivered exactly once on GT"),Complete==1 && Fail==0 && Observer->CompleteCount.Load()==1 && Observer->FailureCount.Load()==0 && Observer->bOnGT.Load() && Observer->bIdentity.Load()) &&
    Test.TestEqual(TEXT("BP callback recorded actual HTTP status"),StatusProperty->GetPropertyValue_InContainer(Instance.Get()),200) &&
-   Test.TestEqual(TEXT("BP callback recorded exact raw response body"),Body,FString(ExpectedBody)) &&
+   Test.TestEqual(TEXT("BP callback retains original v1 pretty JSON string contract"),Body,FString(ExpectedLegacyBody)) &&
+   Test.TestEqual(TEXT("cached legacy string getter retains original v1 formatting"),Request->GetResponseContentAsString(),FString(ExpectedLegacyBody)) &&
+   Test.TestTrue(TEXT("native byte getter retains exact wire response entity"),Raw.Num()==ExpectedRaw.Length() && FMemory::Memcmp(Raw.GetData(),ExpectedRaw.Get(),ExpectedRaw.Length())==0) &&
    Test.TestTrue(TEXT("actual JSON response has expected original marker/value"),Json && Json->GetStringField(TEXT("producer"))==TEXT("v1-on-5.8") && Json->GetIntegerField(TEXT("value"))==17) &&
    Test.TestEqual(TEXT("owned request is terminal"),Request->GetStatus(),EVaRestRequestStatus::Succeeded);
  }
