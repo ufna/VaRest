@@ -97,6 +97,9 @@ FManagedCompletionPayload::~FManagedCompletionPayload()
 {
 	check(IsInGameThread() && bDataDisposed && !Ref.IsValid());
 	check(!ReturnedCompletion.IsHeld() && !WorkerPermission.IsHeld() && !DeliveryWorker.IsHeld());
+#if WITH_DEV_AUTOMATION_TESTS
+	if (RetirementObserver) RetirementObserver->FrameDestroyed(RetirementIdentity, FPlatformTLS::GetCurrentThreadId(), IsInGameThread());
+#endif
 }
 void FManagedCompletionPayload::DisposeDataOnGT(bool bDiscarded)
 {
@@ -121,6 +124,9 @@ void FManagedCompletionPayload::DisposeDataOnGT(bool bDiscarded)
 	bQueuedGTK = false;
 	bDataDisposed = true;
 	bCleaning = false;
+#if WITH_DEV_AUTOMATION_TESTS
+	if (RetirementObserver) RetirementObserver->DataDisposed(RetirementIdentity, FPlatformTLS::GetCurrentThreadId(), IsInGameThread());
+#endif
 }
 void FManagedCompletionPayload::ServiceReadyOnGT(bool bStopped)
 {
@@ -214,6 +220,24 @@ FManagedCompletionAccess::~FManagedCompletionAccess()
 	if (bDropHere)
 		Completion.Reset(); // LAST cell access; exact Ref retains allocation through full native settle method
 }
+#if WITH_DEV_AUTOMATION_TESTS
+bool FManagedCompletionAccess::ObserveRetirementForTestsOnGT(VaRest::ModuleStopTest::FWorkerIdentity Expected,
+	TSharedRef<IManagedFrameRetirementObserver, ESPMode::ThreadSafe> Observer)
+{
+	check(IsInGameThread());
+	if (!Owner || Owner->RetirementObserver || Owner->bDataDisposed || !StopProbe || !Ref.IsValid()) return false;
+	const auto& Exchange = Internals(Owner->Exchange());
+	if (Expected.Route != VaRest::ModuleStopTest::ERoute::Managed || Expected.Request != Exchange.RequestId ||
+		Expected.Client != Exchange.ClientId || Expected.Cell != Ref.Cell.Index || Expected.CellGeneration != Ref.Cell.Generation ||
+		Expected.Generation != Owner->WorkerGeneration || Expected.Route != StopIdentity.Route ||
+		Expected.Request != StopIdentity.Request || Expected.Client != StopIdentity.Client || Expected.Generation != StopIdentity.Generation ||
+		Expected.Cell != StopIdentity.Cell || Expected.CellGeneration != StopIdentity.CellGeneration ||
+		!Expected.NativeToken || Expected.NativeToken != StopIdentity.NativeToken) return false;
+	Owner->RetirementIdentity = StopIdentity;
+	Owner->RetirementObserver = MoveTemp(Observer);
+	return true;
+}
+#endif
 void FManagedCompletionAccess::QueueCancel()
 {
 	const auto Self = AsShared();

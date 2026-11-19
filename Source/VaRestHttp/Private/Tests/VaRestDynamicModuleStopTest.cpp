@@ -4,6 +4,8 @@
 #include "VaRestDynamicLifecycleTestTypes.h"
 #include "VaRestDynamicRequestAccess.h"
 #include "VaRestDynamicBridge.h"
+#include "VaRestManagedCompletion.h"
+#include "HAL/PlatformTLS.h"
 #include "VaRestDynamicTypes.h"
 #include "VaRestClientState.h"
 #include "VaRestNativeLifetimeService.h"
@@ -464,6 +466,280 @@ bool FVaRestDynamicModuleStopTest::RunTest(const FString& Parameters)
  const auto Probe=Witnesses[0]->CreateProbeOnGT(Case+TEXT(".Trace")+Trace);
  if (!Probe) { AddError(TEXT("native early-opened evidence channel/current module witness setup failed"));return false; }
  ADD_LATENT_AUTOMATION_COMMAND(FRun(*this,Case,Trace==TEXT("Timings"),*Witnesses[0],Probe));
+ return true;
+}
+
+namespace VaRest::Http::HeldRetirementFixture
+{
+using namespace VaRest::ModuleStopTest;
+constexpr int32 EventCount = static_cast<int32>(EPublication::ManagedReturnCaptureAbandoned) + 1;
+
+// The worker and Frame retain only this plain native observation state, never the runner/clock/destination.
+class FProbe final : public INativeProbe, public IManagedFrameRetirementObserver
+{
+public:
+ void HoldAfterNativeParse(FWorkerIdentity Id,bool Parsed,bool Timing,uint64 Clock,uint32 Thread,bool OnGT) override
+ {
+  if (OnGT || !Parsed || Timing || !Clock || !Thread || Id.Route!=ERoute::Managed || Id.Generation!=1 || !Id.NativeToken || Entered.exchange(true,std::memory_order_acq_rel))
+  { Failed.store(true,std::memory_order_release);return; }
+  Identity=Id;ClockAddress=Clock;
+  Held.store(true,std::memory_order_release); // immutable identity/clock values published to GT
+  const double Limit=FPlatformTime::Seconds()+15.0;
+  while (!Released.load(std::memory_order_acquire) && FPlatformTime::Seconds()<Limit) FPlatformProcess::SleepNoStats(0.001f);
+  if (!Released.load(std::memory_order_acquire)) Failed.store(true,std::memory_order_release);
+ }
+ void Published(FWorkerIdentity Id,EPublication Event,uint32 Thread,bool OnGT,bool Stopped) override
+ {
+  if (!Matches(Id) || !Thread || Stopped || Event==EPublication::OrdinaryReady) Failed.store(true,std::memory_order_release);
+  const int32 Index=static_cast<int32>(Event);
+  if (Index<0 || Index>=EventCount) { Failed.store(true,std::memory_order_release);return; }
+  if ((Event==EPublication::ManagedReturnExecuted || Event==EPublication::ManagedReturnCompleted) && !OnGT)
+   Failed.store(true,std::memory_order_release);
+  Events[Index].fetch_add(1,std::memory_order_release);
+ }
+ void DataDisposed(FWorkerIdentity Id,uint32 Thread,bool OnGT) override
+ { RecordFrame(Id,Thread,OnGT,Disposed); }
+ void FrameDestroyed(FWorkerIdentity Id,uint32 Thread,bool OnGT) override
+ { RecordFrame(Id,Thread,OnGT,Destroyed); }
+ void ReflectedMaterializationOnGT() override { RecordGT(Materializations); }
+ void UserDeliveryOnGT() override { RecordGT(Deliveries); }
+ bool BothHeldOnGT() const override { check(IsInGameThread());return Held.load(std::memory_order_acquire); }
+ bool FailedOnGT() const override { check(IsInGameThread());return Failed.load(std::memory_order_acquire); }
+ bool ArmOnGT() override { FailOnGT();return false; } // this fixture never arms a shutdown witness
+ void SetupOnGT(bool,bool,bool,bool) override { FailOnGT(); }
+ bool ObserveClockOnGT(bool,uint32,uint64,uint64,int64,int64,int64,int64) override { FailOnGT();return false; }
+ void FailOnGT() override { check(IsInGameThread());Failed.store(true,std::memory_order_release);Release(); }
+ void Release() { Released.store(true,std::memory_order_release); }
+ FWorkerIdentity IdentityOnGT() const { check(IsInGameThread() && Held.load(std::memory_order_acquire));return Identity; }
+ uint64 ClockOnGT() const { check(IsInGameThread() && Held.load(std::memory_order_acquire));return ClockAddress; }
+ int32 Count(EPublication Event) const { return Events[static_cast<int32>(Event)].load(std::memory_order_acquire); }
+ void PublicResult(bool Good) { CallbackOK.store(Good,std::memory_order_release);RecordGT(Callbacks); }
+ void CaptureDestroyed(bool Preparation) { RecordGT(Preparation ? PreparationDestroyed : CallbackDestroyed); }
+ void ClockDestroyed() { RecordGT(ClocksDestroyed); }
+ std::atomic<int32> Disposed{0},Destroyed{0},Materializations{0},Deliveries{0},Callbacks{0};
+ std::atomic<int32> PreparationDestroyed{0},CallbackDestroyed{0},ClocksDestroyed{0},WrongThread{0};
+ std::atomic<bool> CallbackOK{false};
+private:
+ bool Matches(FWorkerIdentity Id) const
+ {
+  if (!Held.load(std::memory_order_acquire)) return false;
+  return Id.Route==Identity.Route && Id.Request==Identity.Request && Id.Client==Identity.Client &&
+   Id.Generation==Identity.Generation && Id.Cell==Identity.Cell && Id.CellGeneration==Identity.CellGeneration && Id.NativeToken==Identity.NativeToken;
+ }
+ void RecordGT(std::atomic<int32>& Counter)
+ { if (!IsInGameThread()) WrongThread.fetch_add(1,std::memory_order_relaxed);Counter.fetch_add(1,std::memory_order_release); }
+ void RecordFrame(FWorkerIdentity Id,uint32 Thread,bool OnGT,std::atomic<int32>& Counter)
+ {
+  if (!Matches(Id) || !Thread || !OnGT) Failed.store(true,std::memory_order_release);
+  RecordGT(Counter);
+ }
+ FWorkerIdentity Identity;
+ uint64 ClockAddress=0;
+ std::atomic<int32> Events[EventCount]{};
+ std::atomic<bool> Entered{false},Held{false},Released{false},Failed{false};
+};
+struct FCapture
+{
+ TSharedRef<FProbe,ESPMode::ThreadSafe> Probe;
+ bool Preparation;
+ FCapture(TSharedRef<FProbe,ESPMode::ThreadSafe> InProbe,bool InPreparation) : Probe(MoveTemp(InProbe)),Preparation(InPreparation) {}
+ ~FCapture() { Probe->CaptureDestroyed(Preparation); }
+};
+class FClock final : public IVaRestClock
+{
+public:
+ FClock(TSharedRef<FVaRestVirtualClock,ESPMode::ThreadSafe> InClock,TSharedRef<FProbe,ESPMode::ThreadSafe> InProbe)
+  : Clock(MoveTemp(InClock)),Probe(MoveTemp(InProbe)) {}
+ ~FClock() override { Probe->ClockDestroyed(); }
+ double Now() const override { return Clock->Now(); }
+ FVaRestTimerHandle SetTimer(double Delay,TUniqueFunction<void()>&& Callback) override
+ { check(IsInGameThread());return Clock->SetTimer(Delay,MoveTemp(Callback)); }
+ void ClearTimer(FVaRestTimerHandle& Handle) override { check(IsInGameThread());Clock->ClearTimer(Handle); }
+private:
+ TSharedRef<FVaRestVirtualClock,ESPMode::ThreadSafe> Clock;
+ TSharedRef<FProbe,ESPMode::ThreadSafe> Probe;
+};
+
+class FRun final : public IAutomationLatentCommand
+{
+public:
+ explicit FRun(FAutomationTestBase& InTest) : Test(InTest),Probe(MakeShared<FProbe,ESPMode::ThreadSafe>()),Deadline(FPlatformTime::Seconds()+30.0),CarrierBaseline(Testing::LiveDynamicCarriersOnGT()) {}
+ ~FRun() override { Probe->Release();Destination.Reset();DropClient();CleanupTypes(); }
+ bool Update() override
+ {
+  check(IsInGameThread());
+  if (Cleaning) return CleanupStep();
+  if (FPlatformTime::Seconds()>=Deadline || Probe->FailedOnGT()) return Fail(TEXT("held-worker retirement deadline or actual lifecycle identity/thread failure"));
+  if (Phase==0)
+  {
+   if (!Intrinsic()) return false;
+   RegisteredRoot=FVaRestDynamicNativeTypes::RegisterGameThreadType(FVaRestDynamicLifecycleRoot::StaticStruct(),TEXT("VaRest.Test.GT.Optional.Root.v1"));
+   if (!RegisteredRoot) return Fail(TEXT("owned native Root registration refused"));
+   Advance();return false;
+  }
+  if (Phase==1)
+  {
+   if (GFrameCounter<=PublicationFrame || !Intrinsic()) return false;
+   RegisteredLeaf=FVaRestDynamicNativeTypes::RegisterGameThreadType(FVaRestDynamicLifecycleLeaf::StaticStruct(),TEXT("VaRest.Test.GT.Optional.Leaf.v1"));
+   if (!RegisteredLeaf) return Fail(TEXT("owned native Optional leaf registration refused"));
+   Advance();return false;
+  }
+  if (Phase==2)
+  {
+   if (GFrameCounter<=PublicationFrame || !Intrinsic()) return false;
+   if (!Start()) return Fail(TEXT("real live-service managed RequestDynamic setup refused"));
+   Phase=3;return false;
+  }
+  if (Phase==3)
+  {
+   if (!Probe->BothHeldOnGT()) return false;
+   if (Probe->IdentityOnGT().Request!=Handle.GetId() || Testing::LiveDynamicCarriersOnGT()!=CarrierBaseline ||
+    Probe->Materializations.load()!=0 || Probe->Callbacks.load()!=0 || Probe->Disposed.load()!=0 || Probe->Destroyed.load()!=0 ||
+    Probe->Count(EPublication::ManagedWorkerEnded)!=0 || Probe->Count(EPublication::ManagedReturnExecuted)!=0 ||
+    Probe->Count(EPublication::ManagedReturnCompleted)!=0 || Probe->Count(EPublication::ManagedReturnCaptureRan)!=0 ||
+    Probe->Count(EPublication::ManagedReturnCaptureAbandoned)!=0 || Probe->Count(EPublication::ManagedAccessEnded)!=0 ||
+    !Operations || Operations->NumOccupied()!=1 || !Gate || Gate->NumOwnedOperations()!=1)
+    return Fail(TEXT("actual parsed worker was not still held with an occupied owned operation before return/materialization"));
+   if (!BindObserver()) return Fail(TEXT("private observer did not bind under the matching actual shared Access"));
+   // BindObserver's only strong Access pin has been explicitly reset and its scope returned before this release.
+   Probe->Release();Phase=4;return false;
+  }
+  if (Phase==4)
+  {
+   if (Probe->Callbacks.load(std::memory_order_acquire)==0 || !OwnedQuiescent()) return false;
+   if (!Probe->CallbackOK.load(std::memory_order_acquire) || !Destination || !Destination->Verify(EVaRestTypeContainer::None,nullptr) ||
+    !CompleteMarks() || Testing::LiveDynamicCarriersOnGT()!=CarrierBaseline || DynamicLifecycleTest::ObserveOnGT().WrongThread!=0)
+    return Fail(TEXT("real typed return/capture/AccessEnded/Frame/input retirement did not retain its exact live-service contract"));
+   Destination.Reset();DropClient();Phase=5;return false;
+  }
+  if (WeakClock.IsValid() || Probe->ClocksDestroyed.load(std::memory_order_acquire)==0) return false;
+  if (Probe->ClocksDestroyed.load()!=1 || Probe->WrongThread.load()!=0 || !CompleteMarks() || Control->IsStopped() || Control->IsExitRetentionRequested())
+   return Fail(TEXT("last original clock/affine retirement was not exactly once on GT while the real service stayed live"));
+  CleanupTypes();return true;
+ }
+private:
+ bool Intrinsic()
+ {
+  FVaRestDynamicResultConfig Config;Config.ResponseType.Kind=EVaRestTypeKind::Struct;Config.ResponseType.Type=FVaRestJson::StaticStruct();
+  FString Error,Code;const auto State=FDynamicTypedState::CreateOnGT(Config,Error,&Code);
+  if (!State && Code==TEXT("EditorMutationHooksUnavailable")) { Fail(TEXT("real editor mutation hooks are unavailable"));return false; }
+  return State.IsValid();
+ }
+ void Advance() { PublicationFrame=GFrameCounter;++Phase; }
+ bool Start()
+ {
+  const auto Trace=ModuleStopFixture::ObserveTraceSelectionOnGT(false,nullptr);
+  if (!Trace.MembershipMatches || !Trace.MaskMatches) return false;
+  Rig=MakeUnique<Testing::FTestRig>(TEXTVIEW("https://held-retirement.test"));Rig->Fake->bCompleteOnWorker=false;
+  const auto Clock=MakeShared<FClock,ESPMode::ThreadSafe>(Rig->Clock,Probe);
+  WeakClock=Clock;
+  FVaRestTraceScope Info;Info.Label=TEXT("DynamicHeldWorkerRetirement");
+  const auto Scope=FNativeScopeLifetime::Open(MoveTemp(Info),Rig->Clock->Now());if (!Scope) return false;
+  auto Initial=FClientAccess::InitialConfig(TEXTVIEW("https://held-retirement.test"));
+  Initial.Transport=Rig->Fake;Initial.Clock=Clock;Initial.Connectivity=Rig->Connectivity;Initial.LogLevel=EVaRestLogLevel::None;
+  FName Error;Rig->Client=FClientAccess::CreateManaged(MoveTemp(Initial),Scope.ToSharedRef(),Error);
+  const auto State=FClientAccess::State(Rig->Client);if (!State || !State->GetManagedLifetime().IsValid()) return false;
+  const auto& Registration=State->GetManagedLifetime();Control=Registration.Control;Gate=Registration.Gate;Operations=Registration.Operations;
+  if (Control!=NativeControlForNewClientOnGT() || Control->IsStopped() || Control->IsExitRetentionRequested() || !Operations || Operations->NumOccupied()!=0) return false;
+  DynamicLifecycleTest::BeginObservationOnGT();Observing=true;
+  Destination=MakeShared<ModuleStopFixture::FDestination,ESPMode::ThreadSafe>();
+  if (!Destination->Initialize(EVaRestTypeContainer::None,nullptr)) return false;
+  FVaRestDynamicResultConfig Config;Config.ResponseType.Kind=EVaRestTypeKind::Struct;Config.ResponseType.Type=FVaRestDynamicLifecycleRoot::StaticStruct();
+  auto Request=Rig->Client.RequestDynamic(TEXTVIEW("GET"),TEXTVIEW("/held"),MoveTemp(Config));
+  if (!FDynamicRequestAccess::BindModuleStopProbeOnGT(Request,Probe) ||
+   !FDynamicRequestAccess::SetPreparationOnGT(Request,[Owned=Destination,Marker=MakeShared<FCapture,ESPMode::ThreadSafe>(Probe,true)](FDynamicPrepareToken& Token){ (void)Marker;Owned->Prepare(Token); }))
+  { FDynamicRequestAccess::DiscardOnGT(Request);return false; }
+  Rig->Fake->Enqueue(FVaRestFakeResponse::Text(200,TEXT("{\"name\":\"stop-native\",\"maybe\":{\"text\":\"nested\",\"number\":23}}"),TEXTVIEW("application/json")));
+  Handle=MoveTemp(Request).OnComplete([Native=Probe,Marker=MakeShared<FCapture,ESPMode::ThreadSafe>(Probe,false)](const TVaRestResult<FVaRestDynamicResult>& Result) {
+   (void)Marker;Native->PublicResult(!Result.Error.IsError() && Result.Value.IsSet() && Result.Value->GetType().Availability==EVaRestDynamicAvailability::Available);
+  }).Send();
+  return Handle.GetId()!=0;
+ }
+ bool BindObserver()
+ {
+  bool Bound=false;const auto Identity=Probe->IdentityOnGT();
+  const auto State=FClientAccess::State(Rig->Client);if (!State) return false;
+  State->ForEachInFlight([&](FExchangeState& Exchange) {
+   if (Exchange.RequestId!=Identity.Request || Exchange.ClientId!=Identity.Client) return;
+   auto Access=Exchange.NativeCompletion.Pin();
+   if (Access) { WeakAccess=Access;Bound=Access->ObserveRetirementForTestsOnGT(Identity,Probe); }
+   Access.Reset();
+   Test.TestFalse(TEXT("fixture's temporary actual Access root is dropped before native gate release"),Access.IsValid());
+  });
+  const auto Clock=WeakClock.Pin();
+  return Bound && Clock && Probe->ClockOnGT()==static_cast<uint64>(reinterpret_cast<UPTRINT>(Clock.Get()));
+ }
+ bool OwnedQuiescent() const
+ {
+  return Operations && Operations->NumOccupied()==0 && Gate && Gate->NumOwnedOperations()==0 &&
+   Control && Gate->NumOwnedInputs()==0 && !WeakAccess.IsValid();
+ }
+ bool CompleteMarks() const
+ {
+  return Probe->Disposed.load(std::memory_order_acquire)==1 && Probe->Destroyed.load(std::memory_order_acquire)==1 &&
+   Probe->Materializations.load()==1 && Probe->Deliveries.load()==1 && Probe->Callbacks.load()==1 &&
+   Probe->PreparationDestroyed.load()==1 && Probe->CallbackDestroyed.load()==1 && Probe->WrongThread.load()==0 &&
+   Probe->Count(EPublication::ManagedWorkerEnded)==1 && Probe->Count(EPublication::ManagedAccessEnded)==1 &&
+   Probe->Count(EPublication::ManagedReturnExecuted)==1 && Probe->Count(EPublication::ManagedReturnCompleted)==1 &&
+   Probe->Count(EPublication::ManagedReturnCaptureRan)==1 && Probe->Count(EPublication::ManagedReturnCaptureAbandoned)==0;
+ }
+ bool Fail(const TCHAR* Message)
+ {
+  if (!Cleaning) { Test.AddError(Message);Cleaning=true;CleanupDeadline=FPlatformTime::Seconds()+10.0;Probe->Release();RetireClient(); }
+  return false;
+ }
+ void RetireClient()
+ { if (Rig && !Retired) { Retired=true;Operations=nullptr;FClientAccess::RetireManaged(Rig->Client); } }
+ void DropClient()
+ {
+  RetireClient();Operations=nullptr;Rig.Reset();Handle=FVaRestRequestHandle();Gate.Reset();
+ }
+ bool CleanupStep()
+ {
+  Probe->Release();
+  // RetireClient cleared the raw store pointer BEFORE the client row may retire/recycle; inspect owned gates only.
+  if (Rig && Gate && (Gate->NumOwnedOperations()!=0 || Gate->NumOwnedInputs()!=0 || WeakAccess.IsValid()))
+  {
+   if (FPlatformTime::Seconds()<CleanupDeadline) return false;
+   Test.AddError(FString::Printf(TEXT("owned failure cleanup timed out: work=%u inputs=%llu AccessAlive=%d; no synthetic cleanup/retirement pass"),
+    Gate->NumOwnedOperations(),static_cast<unsigned long long>(Gate->NumOwnedInputs()),WeakAccess.IsValid()?1:0));
+  }
+  Destination.Reset();DropClient();
+  if (WeakClock.IsValid() && FPlatformTime::Seconds()<CleanupDeadline) return false;
+  if (WeakClock.IsValid()) Test.AddError(TEXT("owned clock remains retained after finite failure cleanup; lifecycle qualification FAILED"));
+  CleanupTypes();return true;
+ }
+ void CleanupTypes()
+ {
+  if (Observing) { DynamicLifecycleTest::EndObservationOnGT();Observing=false; }
+  if (RegisteredRoot) { FVaRestDynamicNativeTypes::UnregisterGameThreadType(FVaRestDynamicLifecycleRoot::StaticStruct());RegisteredRoot=false; }
+  if (RegisteredLeaf) { FVaRestDynamicNativeTypes::UnregisterGameThreadType(FVaRestDynamicLifecycleLeaf::StaticStruct());RegisteredLeaf=false; }
+ }
+ FAutomationTestBase& Test;
+ TSharedRef<FProbe,ESPMode::ThreadSafe> Probe;
+ const double Deadline;
+ double CleanupDeadline=0;
+ const int32 CarrierBaseline;
+ TUniquePtr<Testing::FTestRig> Rig;
+ TSharedPtr<ModuleStopFixture::FDestination,ESPMode::ThreadSafe> Destination;
+ TSharedPtr<FNativeLifetimeControl,ESPMode::ThreadSafe> Control;
+ TSharedPtr<FClientAdmissionGate,ESPMode::ThreadSafe> Gate;
+ FNativeOperationStore* Operations=nullptr;
+ TWeakPtr<FManagedCompletionAccess,ESPMode::ThreadSafe> WeakAccess;
+ TWeakPtr<FClock,ESPMode::ThreadSafe> WeakClock;
+ FVaRestRequestHandle Handle;
+ uint64 PublicationFrame=0;
+ int32 Phase=0;
+ bool RegisteredRoot=false,RegisteredLeaf=false,Observing=false,Retired=false,Cleaning=false;
+};
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestDynamicHeldWorkerRetirementTest,"VaRest.Http.Dynamic.HeldWorkerRetirement",
+ (WITH_EDITOR ? EAutomationTestFlags::EditorContext : (EAutomationTestFlags::ClientContext | EAutomationTestFlags::ServerContext)) | EAutomationTestFlags::EngineFilter)
+bool FVaRestDynamicHeldWorkerRetirementTest::RunTest(const FString& Parameters)
+{
+ if (!FPlatformProcess::SupportsMultithreading()) { AddError(TEXT("held-worker retirement requires a genuine managed native worker"));return false; }
+ ADD_LATENT_AUTOMATION_COMMAND(VaRest::Http::HeldRetirementFixture::FRun(*this));
  return true;
 }
 #endif

@@ -19,6 +19,16 @@ class FManagedCancelTask;
 class FClientState;
 using FManagedCompletionRef = TSharedRef<FManagedCompletionAccess, ESPMode::ThreadSafe>;
 using FManagedCompletionKernel = TUniqueFunction<void(FManagedCompletionRef)>;
+#if WITH_DEV_AUTOMATION_TESTS
+/** Private value-only observation. Implementations own native counters only and never reenter affine code. */
+class IManagedFrameRetirementObserver
+{
+public:
+	virtual ~IManagedFrameRetirementObserver() = default;
+	virtual void DataDisposed(VaRest::ModuleStopTest::FWorkerIdentity Identity, uint32 Thread, bool OnGT) = 0;
+	virtual void FrameDestroyed(VaRest::ModuleStopTest::FWorkerIdentity Identity, uint32 Thread, bool OnGT) = 0;
+};
+#endif
 
 /** One actual completion's affine data, inside the existing operation anchor. No handler/finish/task functor is a worker capture. */
 class FManagedCompletionPayload final
@@ -63,6 +73,10 @@ private:
 	bool bDataDisposed = false;
 	bool bCleaning = false;
 	bool bServicing = false;
+#if WITH_DEV_AUTOMATION_TESTS
+	TSharedPtr<IManagedFrameRetirementObserver, ESPMode::ThreadSafe> RetirementObserver;
+	VaRest::ModuleStopTest::FWorkerIdentity RetirementIdentity;
+#endif
 };
 
 /** Native-only shared access to the ONE already-reserved completion tail; actual worker has a separate existing permission. */
@@ -90,6 +104,11 @@ public:
 	} // caller holds this actual shared access through EVERY use
 	TSharedPtr<FNativeLifetimeControl, ESPMode::ThreadSafe> Control() const { return Ref.Control; }
 	const FNativeOperationRef& Reference() const { return Ref; } // identity only; this Access owns actual completion authority
+#if WITH_DEV_AUTOMATION_TESTS
+	/** GT, under this actual shared Access; identity alone never grants payload access. No worker uses the observer. */
+	bool ObserveRetirementForTestsOnGT(VaRest::ModuleStopTest::FWorkerIdentity Expected,
+		TSharedRef<IManagedFrameRetirementObserver, ESPMode::ThreadSafe> Observer);
+#endif
 
 private:
 	friend class FManagedCompletionWorker;
