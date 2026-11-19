@@ -35,6 +35,7 @@ bool FVaRestLegacyActionMenuTest::RunTest(const FString& Parameters)
  if (!TestTrue(TEXT("action database/menu checks run on the game thread"),IsInGameThread())) return false;
  TSet<const UFunction*> Legacy;
  TArray<UClass*> Classes;
+ int32 CallableCount=0,HelperCount=0;
  bool Ok=TestEqual(TEXT("the frozen manifest retains all 109 identities"),int32(UE_ARRAY_COUNT(TaggedFunctions)),109);
  for (const auto& Row:TaggedFunctions)
  {
@@ -44,13 +45,19 @@ bool FVaRestLegacyActionMenuTest::RunTest(const FString& Parameters)
   if (!TestNotNull(Row.Name,Function)) return false;
   Classes.AddUnique(Owner); Legacy.Add(Function);
   const FString Label=FString(Row.Owner)+TEXT(".")+Row.Name;
-  Ok&=TestTrue(*Label,Function->HasAnyFunctionFlags(FUNC_BlueprintCallable)
+  const bool IsHelper=FString(Row.Owner)==TEXT("/Script/VaRest.VaRestSubsystem")
+   && FString(Row.Name)==TEXT("StaticConstructVaRestJsonObject");
+  const bool IsCallable=Function->HasAnyFunctionFlags(FUNC_BlueprintCallable);
+  CallableCount+=IsCallable ? 1 : 0; HelperCount+=IsHelper ? 1 : 0;
+  Ok&=TestTrue(*Label,(IsHelper ? !IsCallable && Function->HasAnyFunctionFlags(FUNC_Static) : IsCallable)
    && !Function->HasAnyFunctionFlags(FUNC_BlueprintEvent)
    && Function->HasMetaData(TEXT("DeprecatedFunction"))
    && !Function->GetMetaData(TEXT("DeprecationMessage")).IsEmpty()
    && Function->GetBoolMetaData(TEXT("BlueprintInternalUseOnly")));
  }
  Ok&=TestEqual(TEXT("frozen identities resolve to 109 distinct live functions"),Legacy.Num(),109);
+ Ok&=TestEqual(TEXT("frozen public callable functions remain exactly 108"),CallableCount,108);
+ Ok&=TestEqual(TEXT("exact original non-Callable static helper identity occurs once"),HelperCount,1);
  if (!Ok) return false;
 
  const UClass* OldMake=UVaRest_MakeJson::StaticClass();

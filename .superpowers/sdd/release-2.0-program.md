@@ -1,5 +1,26 @@
 # VaRest 2.0 release program ledger (controller-level; per-plan ledgers live in sibling dirs)
 
+Source425 private menu-oracle correction (new CPP UNBUILT/UNRUN):
+actual Source424 native passed2/0 in23.852431232s with all26412 immutable inputs
+unchanged, fresh1.d3643 dependencies/oneGNU pair/SDK parents checked(919a8692).
+Actual five-case runtime exited1 unforced69.164518353s; four cases passed:
+ArchiveFile and public ApplyURL, actual HubStopPending, native TransportConnection.
+Their exact owned-file/Scope/Client/Request/GT/latent/GC oracles qualified separately
+(a87971dc); warnings1/6/5/565 including existing SDL/EOS startup noise are retained.
+All44997 inputs had only two declared SDK metadata transitions, no unexpected drift.
+The five-case suite remains FAILED: menu stopped before database/menu enumeration
+because its new test incorrectly required BlueprintCallable for all109 identities.
+
+Correct ONLY the private test predicate: the exact original static construction
+helper has never been BlueprintCallable; require108 actualCallable functions plus
+that one nonCallable Static helper, while preserving all109 metadata/deprecation/
+internal/nonEvent checks and the whole database/menu/positive-control/restoration
+suffix. No production metadata/API change. Fresh full Source425 graph/native then
+ONLY ActionMenuSelectivity run are required; the four actual successful cases
+carry without repeating the30s connection mock. WholeM5/M6/Goal remain open.
+The separately tracked M5 prepublication SaveTo ownership defect12.2.1 is in
+source design; no production cleanup fix or module-unload qualification is claimed.
+
 Source424 finite M6 test link-dependency correction (UNBUILT/UNRUN):
 actual Source423 native exited6 after both plugin Compile actions and the Tests
 Link succeeded; Editor Link reported undefined FHttpModule::Get at the new
