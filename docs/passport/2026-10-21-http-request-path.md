@@ -1,5 +1,66 @@
 # HTTP request path: v1 vs v2 (2026-10-21)
 
+## Current quiet rerun: Source436 binaries, recorded with Source437 documentation
+
+This section records seven JSON invocations and three separate HTTP invocations after the
+original benchmark protocol. The historical measurements below remain evidence for their
+producing versions. These runs use the ordinary Linux x86_64 Development Editor consumer,
+UE 5.8.1, `UnrealEditor-Cmd -nullrhi`, and the SDK clang 20.1.8 toolchain. They are
+`--no-build` runs of the qualified Source436 binaries; Source437 changes documentation only.
+Later Source438 edits add private HTTP queue/disk measurement code and do not produce these numbers.
+
+Root selected observed low-load windows with all other owned SDK/runtime/Git jobs drained.
+Host aggregate/per-core counters and load are retained per invocation; these were shared-host
+observations, without exclusive CPU ownership, a fixed clock or a cleared OS cache. Each run
+used a fresh private network namespace, loopback UP and zero effective capabilities. Every
+protected input remained byte-identical for its invocation. All Editor and supervisor exits
+were zero and unforced, and their owned process groups drained. Startup warnings were retained;
+these results do not claim pristine output or absence of all engine network attempts.
+
+### Current method and results
+
+Three independent `Bench.VaRest.Http.RequestPath` invocations used explicit `-nollm`.
+The official plain HTTP fixture server ran inside the same private namespace, bound to
+127.0.0.1 at an OS-selected port, with readiness and ownership recorded. No TLS fixture or
+external peer was used. The server exited zero after the planned SIGINT and was reaped.
+The benchmark retained the original one excluded warm-up, interleaved paths, 9 timed runs
+for 944,204 bytes and 5 for 9,448,081 bytes, item-count assertions, GC/settle behavior and
+the full-precision native assertion that v2 GT time is below the logging-disabled v1 path.
+
+The v1 rows use the current `UVaRestRequestJSON` compatibility shim; this is not an
+execution of the original v1 tag binary. The independently produced original-v1 compatibility
+fixtures belong to the M6 compatibility gate, not this timing comparison.
+
+| Input bytes | Current path | Samples/invocation | Latency ms | Total GT ms | Longest step ms |
+|---|---|---|---|---|---|
+| 944204 | v1 UVaRestRequestJSON, as shipped (logs the body on desktop) | 9 | 21.11 | 20.35 | 20.20 |
+| 944204 | v1 UVaRestRequestJSON, LogVaRest off | 9 | 21.35 | 20.53 | 20.24 |
+| 944204 | v2 FVaRestClient -> FVaRestJson (Basic log) | 9 | 5.53 | 0.36 | 0.05 |
+| 9448081 | v1 UVaRestRequestJSON, as shipped (logs the body on desktop) | 5 | 177.85 | 169.48 | 168.52 |
+| 9448081 | v1 UVaRestRequestJSON, LogVaRest off | 5 | 176.14 | 168.01 | 167.19 |
+| 9448081 | v2 FVaRestClient -> FVaRestJson (Basic log) | 5 | 47.45 | 2.59 | 0.07 |
+
+Values are medians of three per-invocation medians. For the large fixture, v2 uses 2.59 ms
+total GT time and a 0.07 ms longest step, compared with 168.01/167.19 ms for the current
+v1 shim with logging disabled. Latency includes loopback transfer and decode; the pump
+counts its active steps and omits sleeps. These measurements are not a frame-time guarantee
+or an estimate of real-network latency. Host state and the producing SDK/source are part
+of the result, so differences from the historical table are not a causal code-change estimate.
+
+All three runs reported 617 warning lines and zero global error lines. Existing engine
+startup warnings and isolated-namespace DNS/UDP warnings remain disclosed. Every protected
+input was byte-identical, with ordinary Editor, supervisor and owned server exits zero.
+
+Evidence: retained Root aggregate `source437-M7-three-HTTP-quiet-Root-readback-001.json`
+(`ec515544da0814de28e7ae3503d2b2f7a986a8ff8e7b9dd5c93c6ee93f06f30b`)
+under `/w/Unreal/VaRest-recovery/takeover-20261118-from-01441/` pins all three raw reports,
+original native assertions, process outcomes, host conditions and custody maps. The separate
+[JSON passport](2026-10-19-json-bench.md) records the seven quiet JSON invocations.
+Queue/disk measurement, platform, build and whole-release gates remain separate.
+
+---
+
+
 ## Machine and build
 
 | | |

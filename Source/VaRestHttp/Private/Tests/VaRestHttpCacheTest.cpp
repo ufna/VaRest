@@ -6,13 +6,70 @@
 #include "Misc/AutomationTest.h"
 #include "Misc/ScopeExit.h"
 #include "Misc/Paths.h"
+#include "HAL/FileManager.h"
+#include "HAL/PlatformTime.h"
+#include "HAL/LowLevelMemTracker.h"
+#include "Misc/CommandLine.h"
+#include "Misc/Parse.h"
+#include "Misc/FileHelper.h"
 #include "UObject/Package.h"
 #include "VaRestHttpSettings.h"
 #include "VaRestClientState.h"
 #include "VaRestDiskCache.h"
 #include "VaRestIdentity.h"
 #include "VaRestPersistence.h"
+#include "VaRestJson.h"
 #include <limits>
+
+
+namespace
+{
+    // Opt-in observations of existing test-owned work; this never changes executor limits or admission.
+    struct FVaRestM7CacheMeasure
+    {
+        struct FMark { double At=0;uint64 Launched=0,Delivered=0;int64 Pending=0; };
+        bool Enabled=false;FString Directory,Path;FVaRestJson Data,Rows;
+        explicit FVaRestM7CacheMeasure(const TCHAR* Selector,const TCHAR* Leaf)
+        {
+            Enabled=FParse::Value(FCommandLine::Get(),TEXT("VaRestM7DiskReportDir="),Directory);
+            if (!Enabled) return;
+            Path=FPaths::Combine(Directory,Leaf);Data=FVaRestJson::Object();Rows=FVaRestJson::Array();
+            Data.Set(TEXT("schema"),TEXT("VaRest.M7.DiskAdmissionMeasurement.1"));Data.Set(TEXT("selector"),Selector);
+            Data.Set(TEXT("default_disk_policy_bytes"),64LL*1024*1024);Data.Set(TEXT("default_read_logical_reservation_bytes"),112LL*1024*1024);
+            Data.Set(TEXT("executor_logical_limit_bytes"),128LL*1024*1024);Data.Set(TEXT("runtime_LLM_enabled"),bool(LLM_IS_ENABLED()));
+            Data.Set(TEXT("notes"),TEXT("Existing test workloads; no timing threshold. GT submission and time through owned completion/drain are separate; asynchronous time includes IO, queue and GT pumping, not pure disk service. Fixture preparation is outside measured submissions. Existing Find observation-helper setup is included where that helper is the named submitted operation. Logical charges are not RSS. A successful physical12MiB read is unmeasured. Scripted HTTP counts, where present, use fake transport; no physical network claim. Report write is outside measured cache work."));
+        }
+        bool Valid() const { return !Enabled || (!FPaths::IsRelative(Directory) && IFileManager::Get().DirectoryExists(*Directory) && !IFileManager::Get().FileExists(*Path)); }
+        FMark Mark(bool bBefore=false) const
+        {
+            if (!Enabled) return {};
+            FMark Result;if (!bBefore) Result.At=FPlatformTime::Seconds();
+            Result.Launched=VaRest::Http::PersistenceCounters().Launched.load();Result.Delivered=VaRest::Http::PersistenceCounters().Delivered.load();Result.Pending=VaRest::Http::Testing::PersistencePendingBytesForTest();
+            if (bBefore) Result.At=FPlatformTime::Seconds();return Result;
+        }
+        void Record(const TCHAR* Name,const FMark& Before,const FMark& Submitted,const FMark& Completed,bool bCompletion=true)
+        {
+            if (!Enabled) return;
+            FVaRestJson Row=FVaRestJson::Object();Row.Set(TEXT("stage"),Name);Row.Set(TEXT("GT_submission_ms"),(Submitted.At-Before.At)*1000.0);
+            Row.Set(TEXT("executor_launches_during_submission"),Submitted.Launched-Before.Launched);Row.Set(TEXT("pending_logical_bytes_after_submission"),Submitted.Pending);
+            Row.Set(TEXT("owned_completion_observed"),bCompletion);
+            if (bCompletion)
+            {
+                Row.Set(TEXT("submission_to_owned_completion_or_drain_ms"),(Completed.At-Before.At)*1000.0);
+                Row.Set(TEXT("after_submission_to_owned_completion_or_drain_ms"),(Completed.At-Submitted.At)*1000.0);
+                Row.Set(TEXT("executor_launches_through_completion"),Completed.Launched-Before.Launched);Row.Set(TEXT("executor_deliveries_through_completion"),Completed.Delivered-Before.Delivered);
+                Row.Set(TEXT("pending_logical_bytes_after_completion"),Completed.Pending);
+            }
+            Rows.Add(Row);
+        }
+        bool Finish()
+        {
+            if (!Enabled) return true;
+            Data.Set(TEXT("stages"),Rows);
+            return FFileHelper::SaveStringToFile(Data.ToString(),*Path,FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM,&IFileManager::Get(),FILEWRITE_NoReplaceExisting);
+        }
+    };
+}
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestCacheRefreshAndAccountsTest,"VaRest.Http.Cache.RefreshAndAccounts",
  EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
@@ -361,6 +418,8 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestCacheReadContentionTest,"VaRest.Http.Cac
 bool FVaRestCacheReadContentionTest::RunTest(const FString& Parameters)
 {
     using namespace VaRest::Http; using namespace VaRest::Http::Testing; using namespace VaRest::Http::CacheTestPrivate;
+    FVaRestM7CacheMeasure Measure(TEXT("VaRest.Http.Cache.OptionalReadContention"),TEXT("Cache-OptionalReadContention.json"));
+    if (Measure.Enabled && !TestTrue(TEXT("fresh absolute M7 disk report destination"),Measure.Valid())) return false;
     FScopedPersistenceTest Disk; FScopedCacheControls Controls; FTestRig Rig; FCleanup Cleanup(Rig);
     Rig.Client.WithStorageDirectories(Disk.Root,Disk.Root).WithCache(FVaRestCachePolicy::MemoryAndDisk());
     const auto State=FClientAccess::State(Rig.Client); auto Store=State->GetDiskCacheFor(*State->GetConfig(),64*1024*1024);
@@ -391,6 +450,81 @@ bool FVaRestCacheReadContentionTest::RunTest(const FString& Parameters)
     Barrier->Released=true;
     if (!TestTrue(TEXT("release first disk"),Disk.Drain()) || !TestTrue(TEXT("first wire"),Rig.Wait(A))) return false;
     TestEqual(TEXT("two physical responses"),Rig.Fake->NumCalls(),2);
+    if (Measure.Enabled)
+    {
+        Measure.Data.Set(TEXT("transport"),TEXT("scripted_fake_HTTP_transport"));
+        Measure.Data.Set(TEXT("original_cold_requests"),2);Measure.Data.Set(TEXT("original_cold_hits"),int32(A->Response.bFromCache)+int32(B->Response.bFromCache));
+        Measure.Data.Set(TEXT("original_cold_scripted_transport_calls"),Rig.Fake->NumCalls());
+        Measure.Data.Set(TEXT("original_cold_hit_rate"),(int32(A->Response.bFromCache)+int32(B->Response.bFromCache))/2.0);
+        Measure.Data.Set(TEXT("original_cold_pair_measures_lost_eligible_hits"),false);
+        // Reuse the existing DiskLifecycle seed/clear path. These two keys are first proved disk-eligible.
+        FTestRig WarmRig;FCleanup WarmCleanup(WarmRig);
+        WarmRig.Client.WithStorageDirectories(FPaths::Combine(Disk.Root,TEXT("M7Warm")),FPaths::Combine(Disk.Root,TEXT("M7Warm"))).WithCache(FVaRestCachePolicy::MemoryAndDisk());
+        const auto WarmState=FClientAccess::State(WarmRig.Client);
+        WarmState->GetDiskCacheFor(*WarmState->GetConfig(),64*1024*1024);
+        if (!TestTrue(TEXT("warm measurement store initialized"),Disk.Drain())) return false;
+        for (const TCHAR* Path : {TEXT("/m7-first"),TEXT("/m7-second")})
+        {
+            WarmRig.Fake->Enqueue(Response(200,Path));auto Seed=MakeOutcome<FString>();
+            Observe(WarmRig.Client.Get<FString>(Path),Seed).Send();
+            if (!TestTrue(TEXT("warm measurement seed complete"),WarmRig.Wait(Seed)) || !TestTrue(TEXT("warm measurement seed durable"),Disk.Drain())) return false;
+        }
+        const int32 SeedTransportCalls=WarmRig.Fake->NumCalls();
+        WarmState->GetMemoryCache().Clear();int32 SequentialHits=0;
+        const uint64 SequentialLaunches=PersistenceCounters().Launched.load();
+        for (const TCHAR* Path : {TEXT("/m7-first"),TEXT("/m7-second")})
+        {
+            auto Seen=MakeOutcome<FString>();auto Request=Observe(WarmRig.Client.Get<FString>(Path),Seen);
+            const auto Before=Measure.Mark(true);auto Handle=MoveTemp(Request).Send();const auto Submitted=Measure.Mark();
+            TestFalse(TEXT("warm sequential completion noninline"),Seen->IsDone());
+            if (!TestTrue(TEXT("warm sequential result"),WarmRig.Wait(Seen)) || !TestTrue(TEXT("warm sequential owned drain"),Disk.Drain())) return false;
+            Measure.Record(Path,Before,Submitted,Measure.Mark());
+            if (!TestTrue(TEXT("same seeded disk bytes"),Seen->Response.bFromCache && Seen->Value.IsSet() && Seen->Value.GetValue()==Path)) return false;
+            ++SequentialHits;
+        }
+        TestEqual(TEXT("warm sequential pair uses no transport"),WarmRig.Fake->NumCalls(),SeedTransportCalls);
+        Measure.Data.Set(TEXT("warm_sequential_eligible_requests"),2);Measure.Data.Set(TEXT("warm_sequential_hits"),SequentialHits);
+        Measure.Data.Set(TEXT("warm_sequential_hit_rate"),SequentialHits/2.0);
+        Measure.Data.Set(TEXT("warm_sequential_executor_launches"),PersistenceCounters().Launched.load()-SequentialLaunches);
+        Measure.Data.Set(TEXT("warm_sequential_scripted_transport_calls"),WarmRig.Fake->NumCalls()-SeedTransportCalls);
+        WarmState->GetMemoryCache().Clear();
+        WarmRig.Fake->SetResponder([](const FVaRestTransportRequest& Request)
+        {
+            auto Reply=Response(200,Request.Url.EndsWith(TEXT("/m7-second")) ? TEXT("m7-second-own-scripted-transport") : TEXT("m7-first-own-scripted-transport"));
+            Reply.Headers.Set(TEXT("Set-Cookie"),TEXT("do-not-store"));return Reply;
+        });
+        FScopedPersistenceHooks WarmHooks(Directory(WarmRig));auto WarmBarrier=MakeShared<FPersistenceBarrier,ESPMode::ThreadSafe>();WarmHooks.Hooks->BeforeRead=WarmBarrier;
+        ON_SCOPE_EXIT { WarmBarrier->Released=true;Disk.Drain();WarmRig.Client.CancelAll();WarmRig.Drain(); };
+        auto First=MakeOutcome<FString>();auto FirstRequest=Observe(WarmRig.Client.Get<FString>(TEXT("/m7-first")),First);
+        const auto FirstBefore=Measure.Mark(true);auto FirstHandle=MoveTemp(FirstRequest).Send();const auto FirstSubmitted=Measure.Mark();
+        if (!TestTrue(TEXT("warm first real read held"),PumpUntil([WarmBarrier]{return WarmBarrier->Entered.load();}))) return false;
+        const uint64 BeforeSecondLaunches=PersistenceCounters().Launched.load();
+        TestEqual(TEXT("warm default read actual112MiB"),PersistencePendingBytesForTest(),112LL*1024*1024);
+        auto Second=MakeOutcome<FString>();auto SecondRequest=Observe(WarmRig.Client.Get<FString>(TEXT("/m7-second")),Second);
+        const auto SecondBefore=Measure.Mark(true);auto SecondHandle=MoveTemp(SecondRequest).Send();const auto SecondSubmitted=Measure.Mark();
+        TestFalse(TEXT("warm fallback noninline"),Second->IsDone());TestTrue(TEXT("warm runtime remains open"),PersistenceAccepting());
+        if (!TestTrue(TEXT("warm refused read resolves own transport"),WarmRig.Wait(Second))) return false;
+        Measure.Record(TEXT("warm_second_optional_read_refused_then_scripted_transport"),SecondBefore,SecondSubmitted,Measure.Mark());
+        TestEqual(TEXT("warm second read adds no executor launch"),PersistenceCounters().Launched.load(),BeforeSecondLaunches);
+        const bool SecondActuallyRefused=PersistenceCounters().Launched.load()==BeforeSecondLaunches;
+        TestEqual(TEXT("warm first reservation remains owned"),PersistencePendingBytesForTest(),112LL*1024*1024);
+        if (!TestTrue(TEXT("warm second exact own bytes"),Second->Value.IsSet() && Second->Value.GetValue()==TEXT("m7-second-own-scripted-transport") && !Second->Response.bFromCache && !SecondHandle.IsActive())) return false;
+        TestFalse(TEXT("warm first still held"),First->IsDone());
+        const auto ReleaseAt=Measure.Mark(true);WarmBarrier->Released=true;
+        if (!TestTrue(TEXT("warm first owned read drained"),Disk.Drain()) || !TestTrue(TEXT("warm first result"),WarmRig.Wait(First))) return false;
+        const auto FirstDone=Measure.Mark();Measure.Record(TEXT("warm_first_read_includes_explicit_test_barrier"),FirstBefore,FirstSubmitted,FirstDone);
+        if (!TestTrue(TEXT("warm first retains seeded bytes"),First->Response.bFromCache && First->Value.IsSet() && First->Value.GetValue()==TEXT("/m7-first") && !FirstHandle.IsActive())) return false;
+        TestFalse(TEXT("warm barrier did not time out"),WarmBarrier->TimedOut.load());
+        TestEqual(TEXT("warm comparison adds exactly one scripted response"),WarmRig.Fake->NumCalls(),SeedTransportCalls+1);
+        if (!TestTrue(TEXT("warm comparison owned cleanup"),Disk.Drain() && WarmRig.Drain())) return false;
+        Measure.Data.Set(TEXT("warm_concurrent_eligible_requests"),2);Measure.Data.Set(TEXT("warm_concurrent_hits"),int32(First->Response.bFromCache)+int32(Second->Response.bFromCache));
+        Measure.Data.Set(TEXT("warm_concurrent_hit_rate"),(int32(First->Response.bFromCache)+int32(Second->Response.bFromCache))/2.0);
+        Measure.Data.Set(TEXT("warm_concurrent_scripted_transport_calls"),WarmRig.Fake->NumCalls()-SeedTransportCalls);
+        Measure.Data.Set(TEXT("warm_seed_scripted_transport_calls_excluded"),SeedTransportCalls);Measure.Data.Set(TEXT("warm_exact_admission_refusals"),int32(SecondActuallyRefused));
+        Measure.Data.Set(TEXT("warm_first_timing_includes_intentional_hold"),true);Measure.Data.Set(TEXT("warm_hold_release_to_first_completion_ms"),(FirstDone.At-ReleaseAt.At)*1000.0);
+        Measure.Data.Set(TEXT("warm_pending_logical_bytes_after_cleanup"),PersistencePendingBytesForTest());
+        if (!TestTrue(TEXT("write fresh M7 disk report"),Measure.Finish())) return false;
+    }
     TestTrue(TEXT("drained"),Disk.Drain() && Rig.Drain()); return true;
 }
 

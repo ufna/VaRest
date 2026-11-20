@@ -9,6 +9,14 @@
 #include "Misc/AutomationTest.h"
 #include "Misc/ScopeExit.h"
 #include "Misc/Paths.h"
+#include "VaRestJson.h"
+#include "HAL/FileManager.h"
+#include "HAL/PlatformTime.h"
+#include "HAL/LowLevelMemTracker.h"
+#include "Containers/StringConv.h"
+#include "Misc/CommandLine.h"
+#include "Misc/Parse.h"
+#include "Misc/FileHelper.h"
 #if PLATFORM_LINUX
 #include <sys/stat.h>
 #include <unistd.h>
@@ -253,6 +261,190 @@ bool FVaRestQueuePrepareRefusalTest::RunTest(const FString& Parameters)
         TestEqual(TEXT("refusal never launches worker"),PersistenceCounters().Launched.load(),Before);
     }
     return true;
+}
+
+
+namespace VaRest::Http::QueueCapBenchPrivate
+{
+    // This is the production scanner's work count, not a general JSON parser. The body is empty here.
+    struct FQueueCapShape { int32 Units=0,MaxDepth=0; bool bOk=false; };
+    FQueueCapShape Shape(TConstArrayView<uint8> Encoded)
+    {
+        FQueueCapShape Result; int32 Depth=0,Bodies=0;
+        const auto White=[](uint8 Byte) { return Byte==' ' || Byte=='\t' || Byte=='\r' || Byte=='\n'; };
+        for (int32 Index=0;Index<Encoded.Num();)
+        {
+            const uint8 Byte=Encoded[Index]; if (White(Byte)) { ++Index; continue; }
+            ++Result.Units;
+            if (Byte=='"')
+            {
+                const int32 Start=++Index; bool bEscaped=false;
+                while (Index<Encoded.Num() && Encoded[Index]!='"')
+                {
+                    if (Encoded[Index]=='\\') { bEscaped=true;Index+=2; } else ++Index;
+                }
+                if (Index>=Encoded.Num()) return Result;
+                const int32 Length=Index-Start; ++Index;
+                if (Depth==1 && !bEscaped && Length==4 && FMemory::Memcmp(Encoded.GetData()+Start,"body",4)==0)
+                {
+                    while (Index<Encoded.Num() && White(Encoded[Index])) ++Index;
+                    if (Index>=Encoded.Num() || Encoded[Index++]!=':') return Result;
+                    while (Index<Encoded.Num() && White(Encoded[Index])) ++Index;
+                    if (Index+1>=Encoded.Num() || Encoded[Index]!='"' || Encoded[Index+1]!='"') return Result;
+                    Index+=2; ++Bodies; // SplitRecord skips this colon and body-value token too.
+                }
+                continue;
+            }
+            if (Byte=='{' || Byte=='[') Result.MaxDepth=FMath::Max(Result.MaxDepth,++Depth);
+            else if (Byte=='}' || Byte==']') { if (--Depth<0) return Result; }
+            ++Index;
+        }
+        Result.bOk=Depth==0 && Bodies==1; return Result;
+    }
+    int32 HeaderChars(const FQueueItem& Value)
+    {
+        int32 Total=0; for (const auto& Pair : Value.Headers) Total+=Pair.Key.Len()+Pair.Value.Len(); return Total;
+    }
+    FQueueItem Make(int32 EscapedChars,bool bAsciiTail)
+    {
+        FQueueItem Value=QueueStoreTestPrivate::Item();
+        Value.CreatedUtc=FDateTime(2026,10,23,12,0,0);
+        Value.Url=FString(TEXT("https://api.test/"))+FString::ChrN(8192-17,TEXT('a'));
+        Value.IdempotencyKey=FString::ChrN(4096,TEXT('i'));
+        Value.Tag=FString::ChrN(256,TEXT('t')); Value.Endpoint=FString::ChrN(256,TEXT('e'));
+        const FString ContentType=FString(TEXT("application/"))+FString::ChrN(1024-12,TEXT('a'));
+        Value.Body=FVaRestRequestBody::FromBytes(TArray<uint8>(),EVaRestBodyKind::Binary,ContentType);
+        Value.Headers=FVaRestHeaders();
+        Value.Headers.Add(TEXT("Idempotency-Key"),Value.IdempotencyKey);
+        Value.Headers.Add(TEXT("Content-Type"),ContentType);
+        for (int32 Header=0;Header<126;++Header)
+        {
+            const int32 Count=FMath::Min(EscapedChars,8192); EscapedChars-=Count;
+            FString Text=FString::ChrN(Count,TEXT('\\'));
+            if (Header==125 && bAsciiTail) Text.AppendChar(TEXT('a'));
+            Value.Headers.Add(FString::Printf(TEXT("X%03d"),Header),Text);
+        }
+        check(EscapedChars==0); return Value;
+    }
+    double Median(TArray<double> Values)
+    { Values.Sort();const int32 Middle=Values.Num()/2;return Values.Num()%2 ? Values[Middle] : (Values[Middle-1]+Values[Middle])*0.5; }
+    double Maximum(const TArray<double>& Values)
+    { double Value=0;for (double Sample : Values) Value=FMath::Max(Value,Sample);return Value; }
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestM7QueueMetadataCapBenchTest,"Bench.VaRest.Http.QueueMetadataAdmission",
+ EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::PerfFilter)
+bool FVaRestM7QueueMetadataCapBenchTest::RunTest(const FString& Parameters)
+{
+    using namespace VaRest::Http;
+    using namespace VaRest::Http::QueueCapBenchPrivate;
+    using namespace VaRest::Http::Testing;
+    if (!TestTrue(TEXT("queue metadata benchmark runs on GT"),IsInGameThread())
+        || !TestFalse(TEXT("timing excludes runtime LLM instrumentation"),LLM_IS_ENABLED())) return false;
+    FString ReportPath;
+    if (!FParse::Value(FCommandLine::Get(),TEXT("VaRestM7QueueCapReport="),ReportPath)
+        || FPaths::IsRelative(ReportPath) || !IFileManager::Get().DirectoryExists(*FPaths::GetPath(ReportPath))
+        || IFileManager::Get().FileExists(*ReportPath))
+    { AddError(TEXT("Supply a fresh absolute -VaRestM7QueueCapReport= JSON file in an existing owned output directory"));return false; }
+    const FVaRestOfflinePolicy Policy;
+    FQueueItem CapItem; TArray<uint8> CapEncoded;
+    // Preparation/search is untimed. Two parities let a one-byte ASCII tail reach an odd size too.
+    for (bool bAsciiTail : {false,true})
+    {
+        const FQueueItem Empty=Make(0,bAsciiTail);
+        int32 Low=0,High=32768-HeaderChars(Empty);
+        while (Low<High)
+        {
+            const int32 Middle=Low+(High-Low+1)/2;
+            if (EncodeQueueRecord(Make(Middle,bAsciiTail)).IsEmpty()) High=Middle-1; else Low=Middle;
+        }
+        FQueueItem Candidate=Make(Low,bAsciiTail);TArray<uint8> Bytes=EncodeQueueRecord(Candidate);
+        if (Bytes.Num()>CapEncoded.Num()) { CapItem=MoveTemp(Candidate);CapEncoded=MoveTemp(Bytes); }
+    }
+    if (!TestEqual(TEXT("actual successful encoded metadata reaches 64KiB"),CapEncoded.Num(),65536)
+        || !TestEqual(TEXT("maximum canonical header count"),CapItem.Headers.Num(),128)
+        || !TestTrue(TEXT("body-free, no fake reserved charge or part-name padding"),CapItem.Body.Bytes.IsEmpty() && CapItem.Body.ContentLength==0 && CapItem.MetadataCharge==0 && CapItem.OriginalPartNames.IsEmpty())
+        || !TestTrue(TEXT("valid header character cap"),HeaderChars(CapItem)<32768)
+        || !TestTrue(TEXT("live DTO obeys existing charge gate"),QueueMetadataCharge(CapItem)<=256*1024)) return false;
+    const FQueueCapShape CapShape=Shape(CapEncoded);
+    if (!TestTrue(TEXT("real canonical scanner shape"),CapShape.bOk && CapShape.MaxDepth==3 && CapShape.Units<2048)) return false;
+    auto Canonical=DecodeQueueRecord(CapEncoded,TEXT("https://api.test"),Policy,0);
+    if (!TestTrue(TEXT("real body-free recovery accepts cap"),Canonical.HasValue())) return false;
+    const int64 InputCharge=QueueMetadataCharge(CapItem),RecoveredCharge=QueueMetadataCharge(Canonical.GetValue());
+    const auto Normalized=MeasureQueueAdmissionMetadata(CapItem,TEXT("https://api.test"),Policy);
+    if (!TestTrue(TEXT("genuine normalization succeeds with exact live/recovered charge"),Normalized.IsSet() && Normalized.GetValue()==FMath::Max(InputCharge,RecoveredCharge))
+        || !TestTrue(TEXT("canonical re-encode preserves actual record bytes"),EncodeQueueRecord(Canonical.GetValue())==CapEncoded)) return false;
+    // Independent adjacent-size witness: change one legal, unescaped ASCII byte in the same header.
+    FQueueItem TooLarge=CapItem;TooLarge.Headers.Set(TEXT("X125"),FString(TEXT("a"))+CapItem.Headers.Get(TEXT("X125")));
+    TArray<uint8> TooLargeRecord=CapEncoded;const FTCHARToUTF8 Needle(TEXT("[\"X125\",\""));int32 Position=INDEX_NONE,Matches=0;
+    for (int32 Index=0;Index+Needle.Length()<=CapEncoded.Num();++Index)
+        if (FMemory::Memcmp(CapEncoded.GetData()+Index,Needle.Get(),Needle.Length())==0) { Position=Index+Needle.Length();++Matches; }
+    if (!TestEqual(TEXT("one exact canonical header insertion location"),Matches,1)) return false;
+    TooLargeRecord.Insert(uint8('a'),Position);
+    if (!TestEqual(TEXT("adjacent raw metadata byte count"),TooLargeRecord.Num(),65537)
+        || !TestTrue(TEXT("adjacent DTO remains within other size gates"),HeaderChars(TooLarge)<=32768 && TooLarge.Headers.Num()==128 && QueueMetadataCharge(TooLarge)<=256*1024)
+        || !TestTrue(TEXT("encoder and genuine normalization refuse one byte beyond cap"),EncodeQueueRecord(TooLarge).IsEmpty() && !MeasureQueueAdmissionMetadata(TooLarge,TEXT("https://api.test"),Policy).IsSet())
+        || !TestTrue(TEXT("strict decoder refuses actual 65537-byte record"),DecodeQueueRecord(TooLargeRecord,TEXT("https://api.test"),Policy,0).HasError())
+        || !TestTrue(TEXT("same-origin oracle remains active"),!MeasureQueueAdmissionMetadata(CapItem,TEXT("https://other.test"),Policy).IsSet())) return false;
+    int64 CodecPeak[3]={0,0,0};
+    {
+        FScopedQueueCodecBuffers Probe;
+        const auto Observed=MeasureQueueAdmissionMetadata(CapItem,TEXT("https://api.test"),Policy);
+        if (!TestTrue(TEXT("untimed resource observation succeeds"),Observed.IsSet())) return false;
+        for (int32 Account=0;Account<3;++Account)
+        {
+            CodecPeak[Account]=Probe.Buffers.Peak[Account];
+            if (!TestEqual(TEXT("annotated codec owners drain"),Probe.Buffers.Current[Account],int64(0))) return false;
+        }
+    }
+    if (!TestTrue(TEXT("actual encoded owner observed"),CodecPeak[0]>=CapEncoded.Num())
+        || !TestEqual(TEXT("no body backing allocated"),CodecPeak[1],int64(0))
+        || !TestTrue(TEXT("annotated additional backing within allowance"),CodecPeak[2]>0 && CodecPeak[2]<=2LL*1024*1024)) return false;
+    // All 64 caller DTOs and every result/timing slot are prepared outside the timed calls.
+    TArray<FQueueItem> Inputs;Inputs.Reserve(64);
+    for (int32 Index=0;Index<64;++Index)
+    { FQueueItem Value=CapItem;Value.QueueId=FGuid::NewGuid().ToString(EGuidFormats::DigitsLower);Inputs.Add(MoveTemp(Value)); }
+    FVaRestJson BurstRows=FVaRestJson::Array();
+    for (int32 Burst : {1,8,64})
+    {
+        TArray<double> Totals,PerCall;Totals.Reserve(31);PerCall.Reserve(31*Burst);
+        TArray<double> CallMs;CallMs.SetNumUninitialized(Burst);TArray<TOptional<int64>> Charges;Charges.SetNum(Burst);
+        int64 MinCharge=MAX_int64,MaxCharge=0;
+        for (int32 Sample=-1;Sample<31;++Sample)
+        {
+            if (!TestTrue(TEXT("each sequential burst is on GT"),IsInGameThread())) return false;
+            for (int32 Index=0;Index<Burst;++Index)
+            {
+                const double Start=FPlatformTime::Seconds();
+                const auto Charge=MeasureQueueAdmissionMetadata(Inputs[Index],TEXT("https://api.test"),Policy);
+                const double Elapsed=FPlatformTime::Seconds()-Start;
+                Charges[Index]=Charge;CallMs[Index]=Elapsed*1000.0;
+            }
+            double Total=0;
+            for (int32 Index=0;Index<Burst;++Index)
+            {
+                if (!TestTrue(TEXT("every measured call succeeds, finite time and bounded charge"),Charges[Index].IsSet() && Charges[Index].GetValue()<=256*1024 && FMath::IsFinite(CallMs[Index]) && CallMs[Index]>=0)) return false;
+                Total+=CallMs[Index];MinCharge=FMath::Min(MinCharge,Charges[Index].GetValue());MaxCharge=FMath::Max(MaxCharge,Charges[Index].GetValue());
+                if (Sample>=0) PerCall.Add(CallMs[Index]);
+            }
+            if (Sample>=0) Totals.Add(Total); // The complete first burst is an excluded warm-up.
+        }
+        FVaRestJson Row=FVaRestJson::Object();Row.Set(TEXT("burst"),Burst);Row.Set(TEXT("warmup_bursts_excluded"),1);Row.Set(TEXT("measured_bursts"),31);
+        Row.Set(TEXT("measured_calls"),31*Burst);Row.Set(TEXT("normalization_only_burst_ms_median"),Median(Totals));Row.Set(TEXT("normalization_only_burst_ms_max"),Maximum(Totals));
+        Row.Set(TEXT("per_call_ms_median"),Median(PerCall));Row.Set(TEXT("per_call_ms_max"),Maximum(PerCall));Row.Set(TEXT("returned_charge_bytes_min"),MinCharge);Row.Set(TEXT("returned_charge_bytes_max"),MaxCharge);
+        FVaRestJson Samples=FVaRestJson::Array();for (double Value : Totals) Samples.Add(Value);Row.Set(TEXT("normalization_only_burst_samples_ms"),Samples);BurstRows.Add(Row);
+    }
+    if (!TestTrue(TEXT("normalization leaves input unchanged and completes on GT"),IsInGameThread() && EncodeQueueRecord(CapItem)==CapEncoded)) return false;
+    FVaRestJson QueueCapReport=FVaRestJson::Object();QueueCapReport.Set(TEXT("schema"),TEXT("VaRest.M7.QueueMetadataCap.1"));QueueCapReport.Set(TEXT("genuine_body_free_normalization"),true);
+    QueueCapReport.Set(TEXT("encoded_bytes"),CapEncoded.Num());QueueCapReport.Set(TEXT("header_count"),CapItem.Headers.Num());QueueCapReport.Set(TEXT("header_chars"),HeaderChars(CapItem));
+    QueueCapReport.Set(TEXT("queue_scanner_lexical_units"),CapShape.Units);QueueCapReport.Set(TEXT("canonical_depth"),CapShape.MaxDepth);QueueCapReport.Set(TEXT("input_DTO_charge_bytes"),InputCharge);QueueCapReport.Set(TEXT("canonical_DTO_charge_bytes"),RecoveredCharge);
+    QueueCapReport.Set(TEXT("annotated_encoded_peak_bytes"),CodecPeak[0]);QueueCapReport.Set(TEXT("annotated_body_peak_bytes"),CodecPeak[1]);QueueCapReport.Set(TEXT("annotated_additional_backing_peak_bytes"),CodecPeak[2]);
+    QueueCapReport.Set(TEXT("temporary_logical_allowance_bytes"),2*1024*1024);QueueCapReport.Set(TEXT("full_temporary_arena_or_RSS_peak_measured"),false);QueueCapReport.Set(TEXT("timed_codec_probe_active"),false);QueueCapReport.Set(TEXT("runtime_LLM_enabled"),false);
+    QueueCapReport.Set(TEXT("game_thread"),true);QueueCapReport.Set(TEXT("adjacent_65537_refused"),true);QueueCapReport.Set(TEXT("wrong_origin_refused"),true);QueueCapReport.Set(TEXT("bursts"),BurstRows);
+    QueueCapReport.Set(TEXT("limits"),TEXT("Timing sums only synchronous MeasureQueueAdmissionMetadata calls; excludes fixture prep, assertions, result processing and dispatch gaps. One warm-up burst excluded. Codec resource pass is untimed and observes annotated backing only, not JSON arena/DTO allocations or RSS; no full2MiB saturation/peak claim. Valid19-field schema with128 two-string header pairs reaches depth3 and fewer than2048 scanner units, not depth8/2048. No frame-time, throughput floor or end-to-end admission/persistence guarantee."));
+    const FString QueueCapText=QueueCapReport.ToString();
+    if (!TestTrue(TEXT("write fresh owned cap report without overwriting"),FFileHelper::SaveStringToFile(QueueCapText,*ReportPath,FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM,&IFileManager::Get(),FILEWRITE_NoReplaceExisting))) return false;
+    AddInfo(FString::Printf(TEXT("VAREST_M7_QUEUE_METADATA_CAP_REPORT %s"),*ReportPath));return true;
 }
 
 #endif

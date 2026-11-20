@@ -1,5 +1,90 @@
 # JSON benchmark and spec 7.3 gate (2026-10-19)
 
+## Current quiet rerun: Source436 binaries, recorded with Source437 documentation
+
+This section records seven JSON invocations and three separate HTTP invocations after the
+original benchmark protocol. The historical measurements below remain evidence for their
+producing versions. These runs use the ordinary Linux x86_64 Development Editor consumer,
+UE 5.8.1, `UnrealEditor-Cmd -nullrhi`, and the SDK clang 20.1.8 toolchain. They are
+`--no-build` runs of the qualified Source436 binaries; Source437 changes documentation only.
+Later Source438 edits add private HTTP queue/disk measurement code and do not produce these numbers.
+
+Root selected observed low-load windows with all other owned SDK/runtime/Git jobs drained.
+Host aggregate/per-core counters and load are retained per invocation; these were shared-host
+observations, without exclusive CPU ownership, a fixed clock or a cleared OS cache. Each run
+used a fresh private network namespace, loopback UP and zero effective capabilities. Every
+protected input remained byte-identical for its invocation. All Editor and supervisor exits
+were zero and unforced, and their owned process groups drained. Startup warnings were retained;
+these results do not claim pristine output or absence of all engine network attempts.
+
+### Parse and write, without LLM
+
+Three independent invocations of `Bench.VaRest.Json.ParseAndWrite`, explicit `-nollm`.
+Each value is the median of the three per-invocation medians. The original test uses
+51 timed runs for the two smaller fixtures, 15 for the next and 7 for the largest;
+it does not have an explicit excluded warm-up. Fixture names are approximate size labels.
+
+| Input bytes | Engine FString parse ms | Engine UTF-8 parse ms | VaRest Parse ms | ParseOwned ms | Engine write ms | VaRest write ms |
+|---|---|---|---|---|---|---|
+| 59092 | 1.44 | 1.41 | 0.25 | 0.25 | 0.97 | 0.13 |
+| 235991 | 5.86 | 5.50 | 1.02 | 1.01 | 3.82 | 0.52 |
+| 944204 | 23.76 | 22.69 | 4.10 | 4.03 | 15.52 | 2.15 |
+| 9448081 | 261.00 | 238.78 | 44.57 | 41.48 | 199.86 | 32.17 |
+
+For the 9,448,081-byte fixture, Engine FString / VaRest Parse is 261.00 / 44.57 ms
+(about 5.86x). These are measurements on this host and configuration, not latency guarantees.
+The tiny-document case takes 0.865 ms for Engine and 0.248 ms for VaRest per 1,000 parses
+(median of the three invocations, 15 samples each).
+
+### Typed DOM versus SAX: default stays DOM
+
+Three independent `Bench.VaRest.Json.TypedConvert` invocations used explicit `-nollm`, one
+excluded warm-up and the original 15/7 timed samples. Native decoded values, including int64,
+matched the DOM path, and the SAX-use assertion passed. The small-fixture DOM/SAX times
+were 8.40/9.27, 8.52/9.28 and 8.18/8.57 ms. The large-fixture times were
+97.43/106.83, 94.84/105.27 and 88.98/90.65 ms.
+
+The ratio of the independent medians is 8.40/9.27 = 0.906 for the small fixture and
+94.84/105.27 = 0.901 for the large fixture. The median of the three individual ratios
+is a different statistic: 0.918 and 0.912 respectively. The conditional 1.5x trigger
+for changing the default is missed in all three invocations. DOM therefore remains the
+default; SAX remains an explicit candidate. This trigger is not a release performance floor.
+
+### Retained DOM memory, separate instrumented invocation
+
+One additional `-llm` invocation passed both calibrations: 8.0 MiB for the known 8 MiB
+allocation and exactly 6,400,000 bytes for 100,000 allocations of 64 bytes. Its timings
+are excluded from every throughput and default-switch comparison above.
+
+| Input bytes | Engine retained MiB | VaRest retained MiB | VaRest arena used bytes | Arena reserved bytes |
+|---|---|---|---|---|
+| 59092 | 0.5 | 0.3 | 225320 | 229400 |
+| 235991 | 2.0 | 1.2 | 897296 | 1015856 |
+| 944204 | 7.9 | 4.4 | 3569928 | 3637376 |
+| 9448081 | 78.4 | 43.0 | 35455936 | 35638376 |
+
+These are rounded tagged allocated bytes while the DOM is alive, with arena used/reserved
+reported separately. They are not process RSS, peak allocation, SAX tape/capacity, or a
+causal before/after optimization estimate. The tiny DOM retains 364 bytes per document for
+Engine and 372 for VaRest; VaRest's tiny arena uses 128/reserves 264 bytes plus a 20-byte
+allocated input buffer. Small-document allocation overhead is retained in the report.
+
+The seven JSON runs reported 621, 616, 616, 617, 621, 617 and 599 warning lines, with
+zero global error lines. Recorded categories include pre-initialization Wayland output,
+Python exposed-name collisions, UDP namespace setup and engine curl DNS attempts.
+
+Evidence: retained Root aggregate `source437-M7-seven-JSON-quiet-Root-readback-001.json`
+(`c0cb8268d3b1da5ae4499deaa7b770f6a6baf02fb34180e0d949431f55077737`),
+typed aggregate `source437-M7-typed-three-invocation-Root-001.json`
+(`c18d7e078ce9ba3a43b29f4baeec0d33e0455d463c8c6643d5789052e144699f`),
+under `/w/Unreal/VaRest-recovery/takeover-20261118-from-01441/`.
+They pin all seven raw reports, actual process outcomes, host conditions and custody maps.
+The HTTP rerun is in [the HTTP passport](2026-10-21-http-request-path.md).
+These finite measurements do not close queue/disk measurement, platform, build or whole-release gates.
+
+---
+
+
 > **Correction (2026-10-21).** The timing tables below were taken with `-llm`, which slows the engine path about 4.4x.
 > Without LLM the 10 MiB parse ratio is **6.2x**, not 24-26x; see "Correction (2026-10-21): timings without LLM" at the
 > end. The memory columns and the spec 7.3 verdict (PASS) stand.

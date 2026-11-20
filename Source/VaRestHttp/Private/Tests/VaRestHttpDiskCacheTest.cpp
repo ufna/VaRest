@@ -6,6 +6,12 @@
 #include "VaRestJson.h"
 #include "Misc/AutomationTest.h"
 #include "Misc/Paths.h"
+#include "HAL/FileManager.h"
+#include "HAL/PlatformTime.h"
+#include "HAL/LowLevelMemTracker.h"
+#include "Misc/CommandLine.h"
+#include "Misc/Parse.h"
+#include "Misc/FileHelper.h"
 #include "Misc/ScopeExit.h"
 #include "HAL/PlatformFileManager.h"
 #if PLATFORM_LINUX
@@ -15,6 +21,56 @@
 #include <dirent.h>
 #include <cerrno>
 #endif
+
+
+namespace
+{
+    // Opt-in observations of existing test-owned work; this never changes executor limits or admission.
+    struct FVaRestM7DiskMeasure
+    {
+        struct FMark { double At=0;uint64 Launched=0,Delivered=0;int64 Pending=0; };
+        bool Enabled=false;FString Directory,Path;FVaRestJson Data,Rows;
+        explicit FVaRestM7DiskMeasure(const TCHAR* Selector,const TCHAR* Leaf)
+        {
+            Enabled=FParse::Value(FCommandLine::Get(),TEXT("VaRestM7DiskReportDir="),Directory);
+            if (!Enabled) return;
+            Path=FPaths::Combine(Directory,Leaf);Data=FVaRestJson::Object();Rows=FVaRestJson::Array();
+            Data.Set(TEXT("schema"),TEXT("VaRest.M7.DiskAdmissionMeasurement.1"));Data.Set(TEXT("selector"),Selector);
+            Data.Set(TEXT("default_disk_policy_bytes"),64LL*1024*1024);Data.Set(TEXT("default_read_logical_reservation_bytes"),112LL*1024*1024);
+            Data.Set(TEXT("executor_logical_limit_bytes"),128LL*1024*1024);Data.Set(TEXT("runtime_LLM_enabled"),bool(LLM_IS_ENABLED()));
+            Data.Set(TEXT("notes"),TEXT("Existing test workloads; no timing threshold. GT submission and time through owned completion/drain are separate; asynchronous time includes IO, queue and GT pumping, not pure disk service. Fixture preparation is outside measured submissions. Existing Find observation-helper setup is included where that helper is the named submitted operation. Logical charges are not RSS. A successful physical12MiB read is unmeasured. Scripted HTTP counts, where present, use fake transport; no physical network claim. Report write is outside measured cache work."));
+        }
+        bool Valid() const { return !Enabled || (!FPaths::IsRelative(Directory) && IFileManager::Get().DirectoryExists(*Directory) && !IFileManager::Get().FileExists(*Path)); }
+        FMark Mark(bool bBefore=false) const
+        {
+            if (!Enabled) return {};
+            FMark Result;if (!bBefore) Result.At=FPlatformTime::Seconds();
+            Result.Launched=VaRest::Http::PersistenceCounters().Launched.load();Result.Delivered=VaRest::Http::PersistenceCounters().Delivered.load();Result.Pending=VaRest::Http::Testing::PersistencePendingBytesForTest();
+            if (bBefore) Result.At=FPlatformTime::Seconds();return Result;
+        }
+        void Record(const TCHAR* Name,const FMark& Before,const FMark& Submitted,const FMark& Completed,bool bCompletion=true)
+        {
+            if (!Enabled) return;
+            FVaRestJson Row=FVaRestJson::Object();Row.Set(TEXT("stage"),Name);Row.Set(TEXT("GT_submission_ms"),(Submitted.At-Before.At)*1000.0);
+            Row.Set(TEXT("executor_launches_during_submission"),Submitted.Launched-Before.Launched);Row.Set(TEXT("pending_logical_bytes_after_submission"),Submitted.Pending);
+            Row.Set(TEXT("owned_completion_observed"),bCompletion);
+            if (bCompletion)
+            {
+                Row.Set(TEXT("submission_to_owned_completion_or_drain_ms"),(Completed.At-Before.At)*1000.0);
+                Row.Set(TEXT("after_submission_to_owned_completion_or_drain_ms"),(Completed.At-Submitted.At)*1000.0);
+                Row.Set(TEXT("executor_launches_through_completion"),Completed.Launched-Before.Launched);Row.Set(TEXT("executor_deliveries_through_completion"),Completed.Delivered-Before.Delivered);
+                Row.Set(TEXT("pending_logical_bytes_after_completion"),Completed.Pending);
+            }
+            Rows.Add(Row);
+        }
+        bool Finish()
+        {
+            if (!Enabled) return true;
+            Data.Set(TEXT("stages"),Rows);
+            return FFileHelper::SaveStringToFile(Data.ToString(),*Path,FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM,&IFileManager::Get(),FILEWRITE_NoReplaceExisting);
+        }
+    };
+}
 
 namespace VaRest::Http::CacheStoreTestPrivate
 {
@@ -159,6 +215,8 @@ bool FVaRestCacheDiskRecoveryTest::RunTest(const FString& Parameters)
     using namespace VaRest::Http;
     using namespace VaRest::Http::Testing;
     using namespace VaRest::Http::CacheStoreTestPrivate;
+    FVaRestM7DiskMeasure Measure(TEXT("VaRest.Http.CacheStore.DiskRecovery"),TEXT("CacheStore-DiskRecovery.json"));
+    if (Measure.Enabled && !TestTrue(TEXT("fresh absolute M7 disk report destination"),Measure.Valid())) return false;
     FScopedPersistenceTest Disk;
     const uint64 Before=PersistenceCounters().OperationsOnGameThread.load();
     const FString Root=FPaths::Combine(Disk.Root,TEXT("Store"));
@@ -185,15 +243,27 @@ bool FVaRestCacheDiskRecoveryTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("retained encoded bytes cap"),Names->bOk && Names->Names.Num()==2);
     Store->Clear(); if (!TestTrue(TEXT("clear"),Disk.Drain())) return false;
     // Default-policy usability is separate from the deliberately tiny LRU budget.
+    const auto DefaultPutBefore=Measure.Mark(true);
     Store.Reset(); Store=FDiskCache::Open(Root,64LL*1024*1024);
-    Store->Put(A,FPersistenceGuard()); if (!TestTrue(TEXT("default write"),Disk.Drain())) return false;
-    Found=Find(Store.ToSharedRef(),A.Key); if (!TestTrue(TEXT("default read"),Disk.Drain())) return false;
+    Store->Put(A,FPersistenceGuard()); const auto DefaultPutSubmitted=Measure.Mark();
+    if (!TestTrue(TEXT("default write"),Disk.Drain())) return false;
+    Measure.Record(TEXT("default_reopen_and_small_put"),DefaultPutBefore,DefaultPutSubmitted,Measure.Mark());
+    const auto DefaultReadBefore=Measure.Mark(true);
+    Found=Find(Store.ToSharedRef(),A.Key); const auto DefaultReadSubmitted=Measure.Mark();
+    if (!TestTrue(TEXT("default read"),Disk.Drain())) return false;
+    Measure.Record(TEXT("default_small_find"),DefaultReadBefore,DefaultReadSubmitted,Measure.Mark());
+    if (Measure.Enabled) Measure.Data.Set(TEXT("default_small_find_hit"),Found->Value.IsValid());
     TestTrue(TEXT("default64MiB small roundtrip"),Found->Value.IsValid());
+    const auto ReopenBefore=Measure.Mark(true);
     Store.Reset(); Store=FDiskCache::Open(Root,64LL*1024*1024);
-    Found=Find(Store.ToSharedRef(),A.Key); if (!TestTrue(TEXT("default restart"),Disk.Drain())) return false;
+    Found=Find(Store.ToSharedRef(),A.Key); const auto ReopenSubmitted=Measure.Mark();
+    if (!TestTrue(TEXT("default restart"),Disk.Drain())) return false;
+    Measure.Record(TEXT("default_reopen_and_find"),ReopenBefore,ReopenSubmitted,Measure.Mark());
+    if (Measure.Enabled) { Measure.Data.Set(TEXT("default_reopen_hit"),Found->Value.IsValid());Measure.Data.Set(TEXT("small_body_bytes"),A.Body.Num());Measure.Data.Set(TEXT("last_callback_count"),Found->Calls); }
     TestTrue(TEXT("default64MiB recovery"),Found->Value.IsValid());
     TestTrue(TEXT("GT-only handback"),Found->bGameThread && Found->Calls==1);
     TestEqual(TEXT("all store disk IO off GT"),PersistenceCounters().OperationsOnGameThread.load(),Before);
+    if (Measure.Enabled && !TestTrue(TEXT("write fresh M7 disk report"),Measure.Finish())) return false;
     return true;
 }
 
@@ -454,6 +524,8 @@ bool FVaRestCacheCountTest::RunTest(const FString& Parameters)
     using namespace VaRest::Http;
     using namespace VaRest::Http::Testing;
     using namespace VaRest::Http::CacheStoreTestPrivate;
+    FVaRestM7DiskMeasure Measure(TEXT("VaRest.Http.CacheStore.EmptyBodyCountCap"),TEXT("CacheStore-EmptyBodyCountCap.json"));
+    if (Measure.Enabled && !TestTrue(TEXT("fresh absolute M7 disk report destination"),Measure.Valid())) return false;
     FScopedPersistenceTest Disk;
     const FString Root=FPaths::Combine(Disk.Root,TEXT("Store"));
     const auto Count=MakeShared<int32,ESPMode::ThreadSafe>(0);
@@ -471,16 +543,23 @@ bool FVaRestCacheCountTest::RunTest(const FString& Parameters)
     },[](FIoResult&&){},16*1024*1024);
     if (!TestTrue(TEXT("4097 encoded empty fixtures"),Disk.Drain(60))) return false;
     if (!TestEqual(TEXT("all fixtures exist"),*Count,4097)) return false;
-    auto Store=FDiskCache::Open(Root,64LL*1024*1024);
+    const auto TrimBefore=Measure.Mark(true);auto Store=FDiskCache::Open(Root,64LL*1024*1024);const auto TrimSubmitted=Measure.Mark();
     if (!TestTrue(TEXT("bounded recovery trim"),Disk.Drain(30))) return false;
+    Measure.Record(TEXT("actual_4097_record_recovery_trim"),TrimBefore,TrimSubmitted,Measure.Mark());
+    if (Measure.Enabled) { Measure.Data.Set(TEXT("fixture_records_written_before_timing"),*Count);Measure.Data.Set(TEXT("fixture_preparation_timed"),false); }
     auto Names=List(Root); if (!TestTrue(TEXT("bounded listing"),Disk.Drain())) return false;
     TestTrue(TEXT("4096 record cap and abandoned temp cleaned"),Names->bOk && Names->Names.Num()==4096);
-    auto Fresh=Entry(TEXT("new-empty")); Fresh.Body.Reset(); Store->Put(Fresh,FPersistenceGuard());
+    auto Fresh=Entry(TEXT("new-empty")); Fresh.Body.Reset();const auto ReplaceBefore=Measure.Mark(true);
+    Store->Put(Fresh,FPersistenceGuard());const auto ReplaceSubmitted=Measure.Mark();
     if (!TestTrue(TEXT("count-cap replacement"),Disk.Drain(30))) return false;
-    Names=List(Root); auto Found=Find(Store,Fresh.Key);
+    Measure.Record(TEXT("put_at_4096_record_cap"),ReplaceBefore,ReplaceSubmitted,Measure.Mark());
+    const auto CountReadBefore=Measure.Mark(true);Names=List(Root); auto Found=Find(Store,Fresh.Key);const auto CountReadSubmitted=Measure.Mark();
     if (!TestTrue(TEXT("new empty record observed"),Disk.Drain(30))) return false;
+    Measure.Record(TEXT("4096_record_listing_and_find"),CountReadBefore,CountReadSubmitted,Measure.Mark());
     TestTrue(TEXT("count remains bounded"),Names->bOk && Names->Names.Num()==4096);
     TestTrue(TEXT("empty body is a valid hit"),Found->Value.IsValid() && Found->Value->Body.IsEmpty());
+    if (Measure.Enabled) { Measure.Data.Set(TEXT("record_count_after_replacement"),Names->Names.Num());Measure.Data.Set(TEXT("empty_body_hit"),Found->Value.IsValid() && Found->Value->Body.IsEmpty());Measure.Data.Set(TEXT("callback_count"),Found->Calls); }
+    if (Measure.Enabled && !TestTrue(TEXT("write fresh M7 disk report"),Measure.Finish())) return false;
     return true;
 }
 
@@ -491,6 +570,8 @@ bool FVaRestCacheGuardBudgetTest::RunTest(const FString& Parameters)
     using namespace VaRest::Http;
     using namespace VaRest::Http::Testing;
     using namespace VaRest::Http::CacheStoreTestPrivate;
+    FVaRestM7DiskMeasure Measure(TEXT("VaRest.Http.CacheStore.GuardAndWorkspace"),TEXT("CacheStore-GuardAndWorkspace.json"));
+    if (Measure.Enabled && !TestTrue(TEXT("fresh absolute M7 disk report destination"),Measure.Valid())) return false;
     FScopedPersistenceTest Disk;
     const FString Root=FPaths::Combine(Disk.Root,TEXT("Store"));
     auto Store=FDiskCache::Open(Root,64LL*1024*1024);
@@ -522,20 +603,30 @@ bool FVaRestCacheGuardBudgetTest::RunTest(const FString& Parameters)
     }
     auto Huge=Entry(TEXT("over-workspace")); Huge.Body.Init('a',8*1024*1024); Huge.ContentType=TEXT("application/json");
     const uint64 Launched=PersistenceCounters().Launched.load();
-    Store->Put(MoveTemp(Huge),FPersistenceGuard());
+    const auto WorkspaceBefore=Measure.Mark(true);
+    Store->Put(MoveTemp(Huge),FPersistenceGuard()); const auto WorkspaceAfter=Measure.Mark();
+    Measure.Record(TEXT("existing_8MiB_JSON_candidate_refusal"),WorkspaceBefore,WorkspaceAfter,WorkspaceAfter,false);
     TestEqual(TEXT("overworkspace candidate refused before worker"),PersistenceCounters().Launched.load(),Launched);
-    auto Oversized=Entry(TEXT("over-record")); Oversized.Body.Init(1,13*1024*1024); Store->Put(MoveTemp(Oversized),FPersistenceGuard());
+    auto Oversized=Entry(TEXT("over-record")); Oversized.Body.Init(1,13*1024*1024);
+    const auto OversizedBefore=Measure.Mark(true);Store->Put(MoveTemp(Oversized),FPersistenceGuard());const auto OversizedAfter=Measure.Mark();
+    Measure.Record(TEXT("existing_13MiB_body_candidate_refusal"),OversizedBefore,OversizedAfter,OversizedAfter,false);
     TestEqual(TEXT("oversized record refused before worker"),PersistenceCounters().Launched.load(),Launched);
     // The same immutable read cap backs the worker and its reservation through handback.
     FScopedCacheStoreHooks Hooks(Root); auto Gate=MakeShared<FPersistenceBarrier,ESPMode::ThreadSafe>(); Hooks.Hooks->AfterRead=Gate;
     ON_SCOPE_EXIT { Gate->Released=true; Disk.Drain(); };
-    Found=Find(Store,Safe.Key);
+    const auto HeldReadBefore=Measure.Mark(true);Found=Find(Store,Safe.Key);const auto HeldReadSubmitted=Measure.Mark();
     if (!TestTrue(TEXT("read holds result"),WaitEntered(Gate))) return false;
+    if (Measure.Enabled) Measure.Data.Set(TEXT("actual_held_read_logical_bytes"),PersistencePendingBytesForTest());
     TestEqual(TEXT("default read logical reservation"),PersistencePendingBytesForTest(),112LL*1024*1024);
+    const auto BudgetBefore=Measure.Mark(true);
     TestFalse(TEXT("independent executor budget prevents another128MiB admission"),LaunchPersistence([]{ return FIoResult(); },[](FIoResult&&){},128LL*1024*1024));
-    Gate->Released=true; if (!TestTrue(TEXT("bounded read release"),Disk.Drain())) return false;
+    const auto BudgetAfter=Measure.Mark();Measure.Record(TEXT("128MiB_candidate_while_112MiB_owned"),BudgetBefore,BudgetAfter,BudgetAfter,false);
+    const auto ReleaseAt=Measure.Mark(true);Gate->Released=true; if (!TestTrue(TEXT("bounded read release"),Disk.Drain())) return false;
+    const auto ReleasedDone=Measure.Mark();Measure.Record(TEXT("held_small_read_includes_explicit_test_barrier"),HeldReadBefore,HeldReadSubmitted,ReleasedDone);
+    if (Measure.Enabled) { Measure.Data.Set(TEXT("hold_release_to_owned_drain_ms"),(ReleasedDone.At-ReleaseAt.At)*1000.0);Measure.Data.Set(TEXT("held_read_hit"),Found->Value.IsValid());Measure.Data.Set(TEXT("physical_12MiB_successful_read_measured"),false); }
     TestTrue(TEXT("held safe read returns"),Found->Value.IsValid());
     TestEqual(TEXT("charge retired after closure/result disposal"),PersistencePendingBytesForTest(),int64(0));
+    if (Measure.Enabled && !TestTrue(TEXT("write fresh M7 disk report"),Measure.Finish())) return false;
     return true;
 }
 
@@ -546,6 +637,8 @@ bool FVaRestCacheControlLimitsTest::RunTest(const FString& Parameters)
     using namespace VaRest::Http;
     using namespace VaRest::Http::Testing;
     using namespace VaRest::Http::CacheStoreTestPrivate;
+    FVaRestM7DiskMeasure Measure(TEXT("VaRest.Http.CacheStore.ControlLimitsAndStop"),TEXT("CacheStore-ControlLimitsAndStop.json"));
+    if (Measure.Enabled && !TestTrue(TEXT("fresh absolute M7 disk report destination"),Measure.Valid())) return false;
     FScopedPersistenceTest Disk;
     {
         FScopedCacheControls Controls;
@@ -572,11 +665,15 @@ bool FVaRestCacheControlLimitsTest::RunTest(const FString& Parameters)
         TestTrue(TEXT("hold byte budget for root boundary"),LaunchPersistence([] { return FIoResult(); },[](FIoResult&&){},128LL*1024*1024));
         FString LongRoot=FPaths::ConvertRelativePathToFull(Disk.Root)+TEXT("/");
         LongRoot+=FString::ChrN(4096-LongRoot.Len(),TEXT('x'));
-        auto AtLimit=FDiskCache::Open(LongRoot,1024);
+        const auto LongBefore=Measure.Mark(true);auto AtLimit=FDiskCache::Open(LongRoot,1024);const auto LongAfter=Measure.Mark();
+        Measure.Record(TEXT("4096_character_control_intent"),LongBefore,LongAfter,LongAfter,false);
         TestEqual(TEXT("4096-character intent accepted within control bound"),DirtyCacheControlsForTest(),1);
         auto Ordinary=FDiskCache::Open(FPaths::Combine(Disk.Root,TEXT("boundary-control")),1024);
         TestEqual(TEXT("boundary does not trigger process fallback"),DirtyCacheControlsForTest(),2);
-        auto Beyond=FDiskCache::Open(LongRoot+TEXT("x"),1024);
+        const FString BeyondRoot=LongRoot+TEXT("x");const auto BeyondBefore=Measure.Mark(true);
+        auto Beyond=FDiskCache::Open(BeyondRoot,1024);const auto BeyondAfter=Measure.Mark();
+        Measure.Record(TEXT("4097_character_control_fallback"),BeyondBefore,BeyondAfter,BeyondAfter,false);
+        if (Measure.Enabled) { Measure.Data.Set(TEXT("root_boundary_chars"),LongRoot.Len());Measure.Data.Set(TEXT("root_boundary_allocated_bytes"),int64(LongRoot.GetAllocatedSize()));Measure.Data.Set(TEXT("long_root_physical_directory_created"),false); }
         TestEqual(TEXT("4097-character root not retained"),DirtyCacheControlsForTest(),2);
         TestTrue(TEXT("overbound triggers fallback"),Beyond->IsQuarantined());
         if (!TestTrue(TEXT("root-boundary held bytes drained"),Disk.Drain())) return false;
@@ -586,8 +683,20 @@ bool FVaRestCacheControlLimitsTest::RunTest(const FString& Parameters)
         FScopedCacheControls Controls;
         // Saturate byte ownership, not production counters. Intent is retained without IO.
         TestTrue(TEXT("reserve entire executor budget"),LaunchPersistence([] { return FIoResult(); },[](FIoResult&&){},128LL*1024*1024));
+        if (Measure.Enabled)
+        {
+            TArray<FString> Roots;Roots.Reserve(4097);
+            for (int32 Index=0;Index<4097;++Index) Roots.Add(FPaths::Combine(Disk.Root,FString::Printf(TEXT("dirty-%d"),Index)));
+            const auto IntentBefore=Measure.Mark(true);
+            for (const FString& Root : Roots) FDiskCache::Open(Root,1024)->Clear();
+            const auto IntentAfter=Measure.Mark();Measure.Record(TEXT("existing_4097_control_intent_submissions"),IntentBefore,IntentAfter,IntentAfter,false);
+            Measure.Data.Set(TEXT("control_intent_attempts"),Roots.Num());Measure.Data.Set(TEXT("dirty_controls_after_attempts"),DirtyCacheControlsForTest());Measure.Data.Set(TEXT("registry_after_attempts"),CacheRegistryForTest());
+        }
+        else
+        {
         for (int32 Index=0;Index<4097;++Index)
             FDiskCache::Open(FPaths::Combine(Disk.Root,FString::Printf(TEXT("dirty-%d"),Index)),1024)->Clear();
+        }
         TestEqual(TEXT("dirty namespace count bounded"),DirtyCacheControlsForTest(),4096);
         TestTrue(TEXT("retained registry bounded"),CacheRegistryForTest()<=4097);
         auto Reopened=FDiskCache::Open(FPaths::Combine(Disk.Root,TEXT("dirty-0")),1024);
@@ -602,6 +711,7 @@ bool FVaRestCacheControlLimitsTest::RunTest(const FString& Parameters)
         Reopened->Clear();
         TestEqual(TEXT("no post-Stop retry"),PersistenceCounters().Launched.load(),Before);
     }
+    if (Measure.Enabled && !TestTrue(TEXT("write fresh M7 disk report"),Measure.Finish())) return false;
     return true;
 }
 
@@ -735,6 +845,8 @@ bool FVaRestCacheRootCaseTest::RunTest(const FString& Parameters)
     using namespace VaRest::Http;
     using namespace VaRest::Http::Testing;
     using namespace VaRest::Http::CacheStoreTestPrivate;
+    FVaRestM7DiskMeasure Measure(TEXT("VaRest.Http.CacheStore.LinuxRootCase"),TEXT("CacheStore-LinuxRootCase.json"));
+    if (Measure.Enabled && !TestTrue(TEXT("fresh absolute M7 disk report destination"),Measure.Valid())) return false;
     FScopedPersistenceTest Disk;
     FScopedCacheControls Controls;
     const FString Base=FPaths::ConvertRelativePathToFull(Disk.Root);
@@ -752,35 +864,47 @@ bool FVaRestCacheRootCaseTest::RunTest(const FString& Parameters)
         return Result;
     },[](FIoResult&&){});
     if (!TestTrue(TEXT("directory fixture worker"),Disk.Drain()) || !TestTrue(TEXT("two independently witnessed actual directory inodes"),*Distinct)) return false;
+    const auto OpenBefore=Measure.Mark(true);
     TSharedPtr<FDiskCache,ESPMode::ThreadSafe> A=FDiskCache::Open(RootA,1024*1024);
-    auto B=FDiskCache::Open(RootB,1024*1024);
+    auto B=FDiskCache::Open(RootB,1024*1024);const auto OpenAfter=Measure.Mark();
+    Measure.Record(TEXT("two_witnessed_Linux_root_opens"),OpenBefore,OpenAfter,OpenAfter,false);
     TestTrue(TEXT("Linux case-distinct roots have distinct stores"),A!=B);
     TestTrue(TEXT("exact root shares live store"),FDiskCache::Open(RootA,1024*1024)==A);
     auto First=Entry(TEXT("same-key")),Second=First; First.Body={1,2,3}; Second.Body={9,8,7};
-    A->Put(First,FPersistenceGuard()); B->Put(Second,FPersistenceGuard());
+    const auto PutBefore=Measure.Mark(true);A->Put(First,FPersistenceGuard()); B->Put(Second,FPersistenceGuard());const auto PutSubmitted=Measure.Mark();
     if (!TestTrue(TEXT("independent writes"),Disk.Drain())) return false;
-    auto ReadA=Find(A.ToSharedRef(),First.Key),ReadB=Find(B,Second.Key);
+    Measure.Record(TEXT("two_root_puts_and_existing_maintenance"),PutBefore,PutSubmitted,Measure.Mark());
+    const auto ReadsBefore=Measure.Mark(true);auto ReadA=Find(A.ToSharedRef(),First.Key),ReadB=Find(B,Second.Key);const auto ReadsSubmitted=Measure.Mark();
     if (!TestTrue(TEXT("independent reads"),Disk.Drain())) return false;
+    Measure.Record(TEXT("existing_two_root_reads_1MiB_policy"),ReadsBefore,ReadsSubmitted,Measure.Mark());
+    if (Measure.Enabled) { Measure.Data.Set(TEXT("actual_distinct_directory_witness"),*Distinct);Measure.Data.Set(TEXT("two_root_hits"),int32(ReadA->Value.IsValid())+int32(ReadB->Value.IsValid()));Measure.Data.Set(TEXT("root_test_policy_bytes"),1024*1024); }
     TestTrue(TEXT("first root owns first bytes"),ReadA->Value.IsValid() && ReadA->Value->Body==First.Body);
     TestTrue(TEXT("second root owns second bytes"),ReadB->Value.IsValid() && ReadB->Value->Body==Second.Body);
     {
         FScopedCacheStoreHooks Hooks(RootA); Hooks.Hooks->bFailList=true;
-        A->Clear(); if (!TestTrue(TEXT("first root failed clear"),Disk.Drain())) return false;
+        const auto ClearBefore=Measure.Mark(true);A->Clear();const auto ClearSubmitted=Measure.Mark();
+        if (!TestTrue(TEXT("first root failed clear"),Disk.Drain())) return false;
+        Measure.Record(TEXT("one_root_clear_with_existing_list_failure_hook"),ClearBefore,ClearSubmitted,Measure.Mark());
         TestTrue(TEXT("first root quarantined"),A->IsQuarantined());
         TestFalse(TEXT("second root not quarantined"),B->IsQuarantined());
-        A.Reset(); A=FDiskCache::Open(RootA,1024*1024);
-        ReadB=Find(B,Second.Key);
+        const auto DirtyReopenBefore=Measure.Mark(true);A.Reset(); A=FDiskCache::Open(RootA,1024*1024);
+        ReadB=Find(B,Second.Key);const auto DirtyReopenSubmitted=Measure.Mark();
         if (!TestTrue(TEXT("reopened dirty root and independent other"),Disk.Drain())) return false;
+        Measure.Record(TEXT("reopen_dirty_root_and_other_root_find"),DirtyReopenBefore,DirtyReopenSubmitted,Measure.Mark());
         TestTrue(TEXT("other root usable while first control fails"),ReadB->Value.IsValid() && ReadB->Value->Body==Second.Body);
     }
-    ReadA=Find(A.ToSharedRef(),First.Key);
+    const auto RetryBefore=Measure.Mark(true);ReadA=Find(A.ToSharedRef(),First.Key);const auto RetrySubmitted=Measure.Mark();
     if (!TestTrue(TEXT("first root clear retry"),Disk.Drain())) return false;
+    Measure.Record(TEXT("clear_retry_and_find"),RetryBefore,RetrySubmitted,Measure.Mark());
     TestFalse(TEXT("first root cleared"),ReadA->Value.IsValid());
-    A.Reset(); A=FDiskCache::Open(RootA,1024*1024);
-    ReadA=Find(A.ToSharedRef(),First.Key); ReadB=Find(B,Second.Key);
+    const auto FinalReopenBefore=Measure.Mark(true);A.Reset(); A=FDiskCache::Open(RootA,1024*1024);
+    ReadA=Find(A.ToSharedRef(),First.Key); ReadB=Find(B,Second.Key);const auto FinalReopenSubmitted=Measure.Mark();
     if (!TestTrue(TEXT("complete reopen observation"),Disk.Drain())) return false;
+    Measure.Record(TEXT("reopened_cleared_root_and_other_root_find"),FinalReopenBefore,FinalReopenSubmitted,Measure.Mark());
     TestFalse(TEXT("first stays empty after complete reopen"),ReadA->Value.IsValid());
     TestTrue(TEXT("other root bytes survive clear release and reopen"),ReadB->Value.IsValid() && ReadB->Value->Body==Second.Body);
+    if (Measure.Enabled) { Measure.Data.Set(TEXT("other_root_hit_after_clear_reopen"),ReadB->Value.IsValid() && ReadB->Value->Body==Second.Body);Measure.Data.Set(TEXT("cleared_root_empty_after_reopen"),!ReadA->Value.IsValid()); }
+    if (Measure.Enabled && !TestTrue(TEXT("write fresh M7 disk report"),Measure.Finish())) return false;
 #endif
     return true;
 }
