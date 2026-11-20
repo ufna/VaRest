@@ -2,10 +2,14 @@
 #include "VaRestM5EndpointRunner.h"
 #include "VaRestM5EndpointContract.h"
 #include "CoreGlobals.h"
+#include "HAL/FileManager.h"
 #include "HAL/PlatformMisc.h"
 #include "HAL/PlatformTime.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Parse.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
+#include "Templates/Function.h"
 #include "UObject/UnrealType.h"
 #include "VaRestApi.h"
 #include "VaRestApiClient.h"
@@ -13,10 +17,38 @@
 #include "VaRestJson.h"
 #include "VaRestJsonConvert.h"
 DEFINE_LOG_CATEGORY_STATIC(LogVaRestM5Endpoint,Log,All);
+namespace
+{
+bool WriteEndpointProof(bool bCreate, TFunctionRef<FVaRestJson()> MakeRow)
+{
+    FString ProofPath;
+    if (!FParse::Value(FCommandLine::Get(),TEXT("VaRestM5EndpointProof="),ProofPath)) return true;
+    if (ProofPath.IsEmpty() || FPaths::IsRelative(ProofPath)
+        || !IFileManager::Get().DirectoryExists(*FPaths::GetPath(ProofPath))
+        || (bCreate ? IFileManager::Get().FileExists(*ProofPath) : !IFileManager::Get().FileExists(*ProofPath))) return false;
+    const auto Encoded=MakeRow().TryToString(EVaRestJsonFormat::Condensed);
+    if (!Encoded.HasValue()) return false;
+    return FFileHelper::SaveStringToFile(Encoded.GetValue()+TEXT("\n"),*ProofPath,
+        FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM,&IFileManager::Get(),
+        bCreate ? FILEWRITE_NoReplaceExisting : FILEWRITE_Append);
+}
+bool EndpointProofWriteFailure()
+{
+    UE_LOG(LogVaRestM5Endpoint,Error,TEXT("VAREST_M5_ENDPOINT_PROOF_WRITE_FAILED"));
+    FPlatformMisc::RequestExitWithStatus(false,72,TEXT("VaRestM5EndpointProof"));
+    return false;
+}
+}
 AVaRestM5EndpointRunner::AVaRestM5EndpointRunner() { PrimaryActorTick.bCanEverTick=true; }
 bool AVaRestM5EndpointRunner::Fail(const FString& Reason)
 {
+    const bool bWasArmed=bArmed;
     bArmed=false;
+    if (bWasArmed && !WriteEndpointProof(false,[this,&Reason]
+        { return FVaRestJson::Object().Set(TEXT("schema"),TEXT("VaRest.M5.EndpointProof.1"))
+            .Set(TEXT("event"),TEXT("FAIL")).Set(TEXT("case"),NextCase)
+            .Set(TEXT("reason"),Reason).Set(TEXT("gameThread"),IsInGameThread()); }))
+        return EndpointProofWriteFailure();
     UE_LOG(LogVaRestM5Endpoint,Error,TEXT("VAREST_M5_ENDPOINT_FAIL case=%d reason=%s"),NextCase,*Reason);
     if (!GIsEditor && FParse::Param(FCommandLine::Get(),TEXT("VaRestM5EndpointsExit"))) FPlatformMisc::RequestExitWithStatus(false,72,TEXT("VaRestM5Endpoints"));
     return false;
@@ -47,6 +79,12 @@ bool AVaRestM5EndpointRunner::Arm()
         || !FVaRestJsonConvert::StructToString(Payload->Struct,Payload->ContainerPtrToValuePtr<void>(this)).Equals(VaRestM5Endpoint::WireBody(),ESearchCase::CaseSensitive))
         return Fail(TEXT("Serialized Blueprint payload lost exact default-conversion semantics"));
     bArmed=true; Deadline=FPlatformTime::Seconds()+30;
+    if (!WriteEndpointProof(true,[this]
+        { return FVaRestJson::Object().Set(TEXT("schema"),TEXT("VaRest.M5.EndpointProof.1"))
+            .Set(TEXT("event"),TEXT("ARM")).Set(TEXT("cases"),8).Set(TEXT("nextCase"),NextCase)
+            .Set(TEXT("actor"),GetPathName()).Set(TEXT("class"),GetClass()->GetPathName())
+            .Set(TEXT("api"),Api.GetPathName()).Set(TEXT("gameThread"),IsInGameThread()); }))
+    { bArmed=false; return EndpointProofWriteFailure(); }
     UE_LOG(LogVaRestM5Endpoint,Display,TEXT("VAREST_M5_ENDPOINT_ARMED mode=GameThread reflectedWorkers=disabled UDSNativeOps=0 requests=realBlueprintNodes cases=8"));
     return true;
 }
@@ -80,11 +118,27 @@ bool AVaRestM5EndpointRunner::CheckCase(int32 Case,const FVaRestResponseData& Ht
         if (!DecodeOnly || !Ignored || !DecodeOnly->GetPropertyValue_InContainer(Memory).Equals(TEXT("server"),ESearchCase::CaseSensitive)
             || !Ignored->GetPropertyValue_InContainer(Memory).Equals(TEXT("kept"),ESearchCase::CaseSensitive)) return Fail(TEXT("Real DecodeOnly/Ignore typed storage differs"));
     }
+    if (!WriteEndpointProof(false,[Case,&Http,&Replies,&Actual]
+        {
+            auto Headers=FVaRestJson::Array();
+            for (const auto& Reply:Replies) Headers.Add(Reply);
+            return FVaRestJson::Object().Set(TEXT("schema"),TEXT("VaRest.M5.EndpointProof.1"))
+                .Set(TEXT("event"),TEXT("CASE")).Set(TEXT("case"),Case).Set(TEXT("status"),Http.Status)
+                .Set(TEXT("requestId"),Http.RequestId).Set(TEXT("typedOutput"),true).Set(TEXT("typedJson"),Actual)
+                .Set(TEXT("rawBytes"),true).Set(TEXT("rawBodyBytes"),Http.Body.Num())
+                .Set(TEXT("repeatedHeaders"),true).Set(TEXT("replyHeaders"),Headers).Set(TEXT("gameThread"),IsInGameThread());
+        }))
+    { bArmed=false; return EndpointProofWriteFailure(); }
     RequestIds.Add(Http.RequestId); ++NextCase;
     UE_LOG(LogVaRestM5Endpoint,Display,TEXT("VAREST_M5_ENDPOINT_CASE case=%d status=%d typedOutput=1 rawBytes=1 repeatedHeaders=1 mode=GameThread"),Case,Http.Status);
     if (NextCase==8)
     {
         bArmed=false; bPassed=true;
+        if (!WriteEndpointProof(false,[this]
+            { return FVaRestJson::Object().Set(TEXT("schema"),TEXT("VaRest.M5.EndpointProof.1"))
+                .Set(TEXT("event"),TEXT("PASS")).Set(TEXT("cases"),NextCase)
+                .Set(TEXT("uniqueRequestIds"),RequestIds.Num()).Set(TEXT("gameThread"),IsInGameThread()); }))
+        { bPassed=false; return EndpointProofWriteFailure(); }
         UE_LOG(LogVaRestM5Endpoint,Display,TEXT("VAREST_M5_ENDPOINT_PASS proof=A cases=8 realBlueprintNodes=1 mode=GameThread workerClosure=UNPROVED wholeTask14=OPEN"));
         if (!GIsEditor && FParse::Param(FCommandLine::Get(),TEXT("VaRestM5EndpointsExit"))) FPlatformMisc::RequestExitWithStatus(false,0,TEXT("VaRestM5Endpoints"));
     }

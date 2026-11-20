@@ -1,6 +1,7 @@
 // Copyright 2014-2026 Vladimir Alyamkin. All Rights Reserved.
 #include "VaRestM5SettingsOnlyProof.h"
 #include "VaRestM5NativeClosureProof.h"
+#include "VaRestM5O4WireProof.h"
 #include "CoreGlobals.h"
 #include "Engine/Engine.h"
 #include "Engine/GameEngine.h"
@@ -43,6 +44,13 @@ class FVaRestM5SmokeModule final : public IModuleInterface
 public:
     virtual void StartupModule() override
     {
+        const bool bO4Cooked = FParse::Param(FCommandLine::Get(), TEXT("VaRestO4WireCooked"));
+        const bool bO4Editor = FParse::Param(FCommandLine::Get(), TEXT("VaRestO4WireEditor"));
+        if (bO4Cooked || bO4Editor)
+        {
+            VaRestM5O4::Start(bO4Cooked);
+            return;
+        }
         if (FParse::Param(FCommandLine::Get(), TEXT("VaRestM5NativeClosureProof")))
         {
             NativeClosure = MakeUnique<FVaRestM5NativeClosureProof>();
@@ -71,6 +79,7 @@ public:
     }
     virtual void ShutdownModule() override
     {
+        VaRestM5O4::Stop();
         NativeClosure.Reset();
         FCoreDelegates::GetOnPostEngineInit().Remove(PostInit);
         DropWitness();

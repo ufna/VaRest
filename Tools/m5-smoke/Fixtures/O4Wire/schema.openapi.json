@@ -1,0 +1,94 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "VaRest O4 imported wire fixture",
+    "version": "1.0"
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:18765"
+    }
+  ],
+  "paths": {
+    "/echo/o4wire": {
+      "post": {
+        "operationId": "o4Echo",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Official echo envelope; runtime decodes its body as Payload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Payload"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "State": {
+        "type": "string",
+        "enum": [
+          "wire-ONE",
+          "wire-TWO"
+        ]
+      },
+      "Payload": {
+        "type": "object",
+        "required": [
+          "Wire.Score",
+          "@type",
+          "nullCount",
+          "pretty"
+        ],
+        "properties": {
+          "Wire.Score": {
+            "type": "integer",
+            "format": "int32",
+            "default": 7
+          },
+          "@type": {
+            "type": "string",
+            "default": "alpha"
+          },
+          "omitCount": {
+            "type": "integer",
+            "format": "int32",
+            "default": 42
+          },
+          "nullCount": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true,
+            "default": 42
+          },
+          "state": {
+            "$ref": "#/components/schemas/State"
+          },
+          "pretty": {
+            "type": "string",
+            "enum": [
+              "wire-ONE",
+              "wire-TWO"
+            ],
+            "default": "wire-ONE"
+          }
+        }
+      }
+    }
+  }
+}
