@@ -86,6 +86,13 @@ uint32 GetTypeHash(const FVaRestDynamicLifecycleRoot& Value)
 #include "VaRestHttpTesting.h"
 #include "CoreGlobals.h"
 #include "HAL/PlatformTime.h"
+#include "HAL/FileManager.h"
+#include "Misc/CommandLine.h"
+#include "Misc/Parse.h"
+#include "Misc/Paths.h"
+#include "Serialization/Archive.h"
+#include "VaRestJsonConvert.h"
+#include "VaRestJsonRules.h"
 #include "Misc/AutomationTest.h"
 #include "UObject/Class.h"
 #include "UObject/UnrealType.h"
@@ -131,6 +138,7 @@ public:
 			const auto* Array = FindFProperty<FArrayProperty>(FVaRestDynamicLifecycleDestinations::StaticStruct(), GET_MEMBER_NAME_CHECKED(FVaRestDynamicLifecycleDestinations, Array));
 			const auto* Map = FindFProperty<FMapProperty>(FVaRestDynamicLifecycleDestinations::StaticStruct(), GET_MEMBER_NAME_CHECKED(FVaRestDynamicLifecycleDestinations, Map));
 			if (!Test.TestTrue(TEXT("all actual generated destination properties exist"), Scalar && Array && Map)) { Cleanup(); return true; }
+			if (bMeasureComponents && !MeasureComponents(Json, Scalar)) { Cleanup(); return true; }
 			Finalize(EVaRestTypeContainer::None, Json, Scalar, &Destination->Scalar, true);
 			TestValue(Destination->Scalar, TEXT("alpha"), true);
 			Finalize(EVaRestTypeContainer::Array, FVaRestJson::Array().Add(Json).Add(Object(TEXT("second"), false)), Array, &Destination->Array, true);
@@ -156,8 +164,17 @@ public:
 				Test.TestTrue(TEXT("each real native initialization/copy/assignment/destruction/equality/hash operation ran"), Seen.Operations[static_cast<uint8>(Operation)] > 0);
 			Test.TestEqual(TEXT("all observed actual native value operations ran on GT"), Seen.WrongThread, int64(0));
 			Test.TestEqual(TEXT("all tracked reflected carriers return to the real baseline"), Testing::LiveDynamicCarriersOnGT(), CarrierBaseline);
+			if (bMeasureComponents)
+			{
+				auto Operations = FVaRestJson::Object();
+				const TCHAR* Names[] = {TEXT("default_construct"), TEXT("copy_construct"), TEXT("assign"), TEXT("destroy"), TEXT("equal"), TEXT("hash")};
+				for (uint8 Index = 0; Index < static_cast<uint8>(EOperation::Count); ++Index) Operations.Set(Names[Index], Seen.Operations[Index]);
+				CostReport.Set(TEXT("native_operations_total"), Operations).Set(TEXT("wrong_thread_total"), Seen.WrongThread)
+					.Set(TEXT("tracked_carriers_after_cleanup"), Testing::LiveDynamicCarriersOnGT());
+			}
 			Advance(); return false;
 		}
+		if (bMeasureComponents) WriteComponentReport();
 		return true; // Intrinsic() above proves cleanup has really settled.
 	}
 private:
@@ -213,6 +230,130 @@ private:
 		Test.TestEqual(TEXT("native finalizer has no retained reflected carrier"), Testing::LiveDynamicCarriersOnGT(), CarrierBaseline);
 		Lease.Reset(); Test.TestEqual(TEXT("owned test output admission releases"), Budget->NumPending(), 0);
 	}
+	static bool ComponentValueMatches(const FVaRestDynamicLifecycleRoot& Value)
+	{
+		return Value.Name == TEXT("alpha") && Value.Maybe.IsSet() &&
+			Value.Maybe->Text == TEXT("nested") && Value.Maybe->Number == 23;
+	}
+	static FVaRestJson Samples(TArray<double> Values)
+	{
+		auto Raw = FVaRestJson::Array();
+		for (double Value : Values) Raw.Add(Value);
+		Values.Sort();
+		return FVaRestJson::Object().Set(TEXT("median_seconds"), Values[Values.Num() / 2]).Set(TEXT("samples_seconds"), Raw);
+	}
+	bool MeasureComponents(const FVaRestJson& Json, const FStructProperty* Property)
+	{
+		check(IsInGameThread());
+		if (!Test.TestTrue(TEXT("opt-in component report requires an explicit absolute JSON path"),
+			FParse::Value(FCommandLine::Get(), TEXT("VaRestM5GTComponentCostReport="), CostReportPath) &&
+			!FPaths::IsRelative(CostReportPath) && FPaths::GetExtension(CostReportPath) == TEXT("json"))) return false;
+		constexpr int32 Warmup = 1, Repetitions = 31;
+		const auto* Type = FVaRestDynamicLifecycleRoot::StaticStruct();
+		TArray<uint8> Input; Json.ToUtf8(Input);
+		FVaRestDynamicLimits Limits; auto Budget = FVaRestDynamicBudget::Create(Limits, Error);
+		if (!Test.TestTrue(TEXT("opt-in uses the real finite dynamic budget"), Budget.IsValid())) return false;
+		FVaRestJsonConvertOptions Options; Options.Rules = FVaRestJsonRules::DefaultSnapshot();
+		Options.MaxOutputBytes = Limits.MaxOutputBytes; Options.MaxValues = Limits.MaxValues; Options.MaxWorkUnits = Limits.MaxWorkUnits;
+		TArray<double> Initialize, Convert, Copy, Reset, TakeCombined;
+		int32 SemanticSamples = 0, PreparedSamples = 0, ConfirmedSamples = 0, ReleasedSamples = 0;
+		int32 PeakTrackedCarriers = CarrierBaseline;
+		int64 PeakReservedOutput = 0;
+		for (int32 Iteration = -Warmup; Iteration < Repetitions; ++Iteration)
+		{
+			// Prebuilt JSON/destination, checks, sample storage and setup are outside each timed span.
+			FVaRestDynamicLifecycleRoot Copied;
+			FInstancedStruct Carrier;
+			double Start = FPlatformTime::Seconds();
+			Carrier.InitializeAs(Type);
+			const double InitializeSeconds = FPlatformTime::Seconds() - Start;
+			const auto* Initialized = reinterpret_cast<const FVaRestDynamicLifecycleRoot*>(Carrier.GetMemory());
+			if (!Test.TestTrue(TEXT("timed initialization preserves the actual native defaults"),
+				Carrier.IsValid() && Initialized->Name == TEXT("native-default") && !Initialized->Maybe.IsSet())) return false;
+			FVaRestJsonDecodeReport Issues;
+			Start = FPlatformTime::Seconds();
+			const bool bConverted = FVaRestJsonConvert::JsonToStruct(Json, Type, Carrier.GetMutableMemory(), Options, &Issues);
+			const double ConvertSeconds = FPlatformTime::Seconds() - Start;
+			if (!Test.TestTrue(TEXT("timed conversion materializes all qualified Optional values"),
+				bConverted && Issues.Errors.IsEmpty() && Issues.Warnings.IsEmpty() &&
+				ComponentValueMatches(*reinterpret_cast<const FVaRestDynamicLifecycleRoot*>(Carrier.GetMemory())))) return false;
+			Start = FPlatformTime::Seconds();
+			Property->CopyCompleteValue(&Copied, Carrier.GetMemory());
+			const double CopySeconds = FPlatformTime::Seconds() - Start;
+			if (!Test.TestTrue(TEXT("timed preparation component copies every actual native field"), ComponentValueMatches(Copied))) return false;
+			Start = FPlatformTime::Seconds();
+			Carrier.Reset();
+			const double ResetSeconds = FPlatformTime::Seconds() - Start;
+			if (!Test.TestTrue(TEXT("timed reset ends carrier ownership while destination remains independent"),
+				!Carrier.IsValid() && ComponentValueMatches(Copied))) return false;
+			++SemanticSamples;
+			// This separate real bridge observation is intentionally combined: Take resets before returning.
+			FVaRestDynamicLifecycleRoot Taken;
+			auto State = Capture(EVaRestTypeContainer::None);
+			FVaRestDynamicBudgetLease Lease;
+			if (!Test.TestTrue(TEXT("timed private Take owns a real state and admission"), State.IsValid() && Budget->TryReserve(Lease))) return false;
+			bool bTaken = false, bConfirmed = false;
+			double TakeSeconds = 0;
+			if (!Test.TestTrue(TEXT("timed private Take binds the existing synchronous preparation"), State->SetPreparationOnGT([&](FDynamicPrepareToken& Token) {
+				++PreparedSamples;
+				PeakTrackedCarriers = FMath::Max(PeakTrackedCarriers, Testing::LiveDynamicCarriersOnGT());
+				PeakReservedOutput = FMath::Max(PeakReservedOutput, Budget->OutputBytes());
+				const double TakeStart = FPlatformTime::Seconds();
+				bTaken = Token.Take(Property, &Taken);
+				TakeSeconds = FPlatformTime::Seconds() - TakeStart;
+				Test.TestEqual(TEXT("timed actual Take resets its tracked carrier"), Testing::LiveDynamicCarriersOnGT(), CarrierBaseline);
+				Test.TestFalse(TEXT("timed actual Take cannot publish twice"), Token.Take(Property, &Taken));
+				bConfirmed = Token.ConfirmPrepared();
+				if (bConfirmed) ++ConfirmedSamples;
+			}))) return false;
+			FFinish Finish; FVaRestDynamicTypeInfo Response, ErrorInfo;
+			State->FinalizeOnGT(Finish, Json, Response, ErrorInfo, Limits, Lease);
+			Lease.Reset();
+			if (!Test.TestTrue(TEXT("timed private transfer preserves actual success and complete values"),
+				bTaken && bConfirmed && !Finish.Error.IsError() && Response.Availability == EVaRestDynamicAvailability::Available && ComponentValueMatches(Taken))) return false;
+			if (!Test.TestTrue(TEXT("each timed admission releases all owned logical charges"),
+				Budget->NumPending() == 0 && Budget->InputBytes() == 0 && Budget->ParseEstimateBytes() == 0 &&
+				Budget->OutputBytes() == 0 && Testing::LiveDynamicCarriersOnGT() == CarrierBaseline)) return false;
+			++ReleasedSamples;
+			for (double Duration : {InitializeSeconds, ConvertSeconds, CopySeconds, ResetSeconds, TakeSeconds})
+				if (!Test.TestTrue(TEXT("observed component duration is finite and nonnegative"), FMath::IsFinite(Duration) && Duration >= 0)) return false;
+			if (Iteration >= 0)
+			{
+				Initialize.Add(InitializeSeconds); Convert.Add(ConvertSeconds); Copy.Add(CopySeconds);
+				Reset.Add(ResetSeconds); TakeCombined.Add(TakeSeconds);
+			}
+		}
+		CostReport = FVaRestJson::Object().Set(TEXT("schema"), TEXT("VaRest.M5.GTComponentCosts.1"))
+			.Set(TEXT("test"), TEXT("VaRest.Http.Dynamic.OptionalMaterialization")).Set(TEXT("scope"), TEXT("qualified scalar struct with Optional leaf; component observations only"))
+			.Set(TEXT("type"), Type->GetPathName()).Set(TEXT("struct_bytes"), Type->GetStructureSize()).Set(TEXT("destination_property_bytes"), Property->GetSize())
+			.Set(TEXT("input"), Json).Set(TEXT("input_utf8_bytes"), Input.Num()).Set(TEXT("warmup_excluded"), Warmup).Set(TEXT("repetitions"), Repetitions)
+			.Set(TEXT("timer"), TEXT("FPlatformTime::Seconds; seconds; single-operation wall intervals"))
+			.Set(TEXT("timer_limits"), TEXT("uncalibrated near-resolution observations; scheduling and native fixture atomic-counter overhead remain; no exclusive-CPU or speed claim"))
+			.Set(TEXT("initialize_as"), Samples(MoveTemp(Initialize))).Set(TEXT("json_to_struct"), Samples(MoveTemp(Convert)))
+			.Set(TEXT("property_copy_complete_value"), Samples(MoveTemp(Copy))).Set(TEXT("carrier_reset"), Samples(MoveTemp(Reset)))
+			.Set(TEXT("actual_private_take_copy_and_reset_combined"), Samples(MoveTemp(TakeCombined)))
+			.Set(TEXT("semantic_samples_including_warmup"), SemanticSamples).Set(TEXT("actual_preparations"), PreparedSamples)
+			.Set(TEXT("actual_confirmations"), ConfirmedSamples).Set(TEXT("released_admissions"), ReleasedSamples)
+			.Set(TEXT("tracked_carrier_baseline"), CarrierBaseline).Set(TEXT("peak_tracked_carriers_observed"), PeakTrackedCarriers)
+			.Set(TEXT("peak_logical_output_reservation_observed"), PeakReservedOutput).Set(TEXT("budget_pending_after"), Budget->NumPending())
+			.Set(TEXT("budget_input_after"), Budget->InputBytes()).Set(TEXT("budget_parse_estimate_after"), Budget->ParseEstimateBytes()).Set(TEXT("budget_output_after"), Budget->OutputBytes())
+			.Set(TEXT("test_success_external_required"), true).Set(TEXT("instrumented_pipeline_subspans"), false)
+			.Set(TEXT("exclusions"), TEXT("not actual pipeline subspans; excludes parse/dispatch/rule-lookup/bag/container costs, setup/destination cleanup and report IO; no RSS/peak/allocator/default/caller bound or performance threshold; reused native fixture counters add overhead"));
+		return true;
+	}
+	void WriteComponentReport()
+	{
+		check(IsInGameThread());
+		if (!Test.TestTrue(TEXT("opt-in report owns completed finite component observations"), CostReport.IsObject())) return;
+		// Root supplies a precreated owned directory. NoReplaceExisting refuses an old report.
+		TUniquePtr<FArchive> Writer(IFileManager::Get().CreateFileWriter(*CostReportPath, FILEWRITE_NoReplaceExisting));
+		if (!Test.TestTrue(TEXT("opt-in report creates a fresh owned file"), Writer.IsValid())) return;
+		TArray<uint8> Bytes; CostReport.ToUtf8(Bytes);
+		Writer->Serialize(Bytes.GetData(), Bytes.Num());
+		const bool bWriteOk = !Writer->IsError();
+		const bool bClosed = Writer->Close();
+		Test.TestTrue(TEXT("opt-in machine-readable report writes and closes"), bWriteOk && bClosed);
+	}
 	void Advance() { PublicationFrame = GFrameCounter; ++Phase; }
 	void Cleanup()
 	{
@@ -229,6 +370,9 @@ private:
 	uint64 PublicationFrame = 0;
 	int32 Phase = 0;
 	bool bRoot = false, bLeaf = false, bObserving = false;
+	const bool bMeasureComponents = FParse::Param(FCommandLine::Get(), TEXT("VaRestM5GTComponentCosts"));
+	FString CostReportPath;
+	FVaRestJson CostReport;
 };
 }
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVaRestDynamicOptionalLifecycleTest, "VaRest.Http.Dynamic.OptionalMaterialization",
