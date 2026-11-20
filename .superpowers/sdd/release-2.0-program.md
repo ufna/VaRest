@@ -1,5 +1,105 @@
 # VaRest 2.0 release program ledger (controller-level; per-plan ledgers live in sibling dirs)
 
+Source436 final finite results / Task32 closure (2026-11-20; broader Goal OPEN):
+
+The published, remote-verified Source436 checkpoint is
+`42fb5a5bc32e7c46b3a735fdf944534fa3f41a85` (973 curated members;
+Root `7ba6db28`). This proposed Source437 checkpoint changes documentation
+only; C++ and Tools remain Source436.
+
+HTTP/Tests NoPCH Compile/Link is qualified (`d1e8b0f1`): two corrected
+fresh compiles, 12 links and 43 products, with the separately checked 216
+prior finite observations. Source435's failed whole interval stays failed;
+this is not an all-fresh or cache-independent claim. Exact normal rule
+restoration and the normal 11-Compile/2-Link build pass (`0483cc05`).
+The opt-in scalar Optional GT case passes with 31 samples after one excluded
+warmup and five actual spans, including combined Take copy+reset
+(`3878a3c8`/`615412fc`). Its observations are uncalibrated, not production
+pipeline subspans, peak/RSS or performance thresholds. DOM stays default;
+reflected workers remain disabled.
+
+The normal API GUI/module phase before the Task32 variants passes
+`VaRest.Http.Module.Loads`, genuine Root-viewed PNGs, saved `O4_Api` left
+open, and main File → Exit with normal Editor0 (`c5e73b68`). That phase
+retains 25 warnings/0 errors. Official TLS-free proxy6 + route8 Python
+selftests all pass with no skips (`f4ff70c8`); they do not substitute for
+the full Linux/TLS suite.
+
+**Task32 is CLOSED in its existing declared finite scope**
+(`5d1ad8ec`), combining eight carried finite rows with the two actual
+source-author controls. Original negative test states stay **Fail**:
+Pin3 has one intended case error, four genuine partial saves and normal
+Editor0 (`0425ff7d`/`2b7eb67a`); Rule2 has two intended case errors, no
+saves and normal Editor0 (`d0e9ece9`/`df46efc6`). Fresh HealthyRule2 is
+Success with six real saved packages, eight real K2 checks and normal
+Editor0 (`da214bb2`/`278073fd`). The exact two original CP source files
+are restored (`9330a81d`), then fresh final native/post (`3e543fd2`)
+and final normal Module.Loads case Success/0 case errors/Editor0 with
+preservation (`cb53ad45`) pass.
+
+The final module process nevertheless records **two Engine Dataflow
+startup ERROR lines**, source-attributed at `42028bf2`. The original
+broader zero-global-errors reader (exec1295) remains **FAILED**; the whole
+Editor output is not pristine. All three earlier failed Author intervals
+stay failed, including the original Pin VT shutdown crash of unestablished
+cause. Fourteen earlier owned payload files are retained outside CP.
+The Task32 closure does not relabel historical producing versions, old
+negative SDK failures or the original O4Cook whole-guard failure.
+
+M6's own accepted criteria are now accepted (`e11f5203`): the existing
+original-tag fixtures load/compile/run, the saved request performs its real
+GET, and the accepted legacy/menu/migration and package-omission evidence
+retains its producing scope. No missing M6 fixture or additional M6-only
+runtime gap was identified. The tracker parent `VaRest-xsh` nevertheless
+remains **in progress**, blocked solely by M5 `VaRest-ajz`: its actual close
+attempt returned1, and no force override was used (`dd9e29dd`).
+
+M7 remains **OPEN** with the accepted measurement carries, not a new
+performance floor (`25b3861b`/`d2807b0b`):
+
+- Rerun both existing JSON and HTTP request-path passports in an actually
+  established quiet window. Prior measurements retain their source,
+  instrumentation and load limits. The >=1.5x condition only controls the
+  typed SAX default switch; it is not a release floor, and DOM stays default.
+- Measure the original bounded GT queue-metadata cap and representative
+  bursts: encoded64KiB, depth8,2048lexical units,temp2MiB logical allocation.
+  The M5 scalar Optional31-sample component result does not cover this work.
+- Measure the carried concurrent disk-admission/hit-rate and cap/root/count
+  availability/cost workloads. Task5/7 already record bounded codec/default
+  roundtrip/root/count and two-read-refusal-to-own-wire functional controls;
+  they do not replace this M7 measurement. Default112MiB read reservation
+  under128MiB can reduce hits/increase transport. No fairness, exactRSS,
+  frame-time or universal/non-Linux root-alias guarantee is inferred.
+  No new cache scheme, benchmark framework or semantic rerun is required
+  merely because the historical note remains open.
+
+Whole Goal, M5 and release remain **OPEN**. The full Linux/TLS gate still
+awaits owner permission for exactly the named test-server.pem,
+test-server.key and test-ca.pem fixtures; no material access is inferred.
+An available Win64/MSVC node remains pending. Task15's approved full
+bundle/current carry and final Task16 handoff remain unfinished.
+These finite Linux results do not establish other platforms or universal
+shutdown/module-unload/network behaviour.
+
+Primary retained records are under
+`/w/Unreal/VaRest-recovery/takeover-20261118-from-01441/`:
+
+- `source436-checkpoint-Root-readback-001.json` (`7ba6db28`).
+- `source436-NoPCH-native-001/native-Root-readback-001.json` (`d1e8b0f1`).
+- `source436-normal-restore-native-001/native-Root-readback-001.json` (`0483cc05`).
+- `source435-M5-GT-component-cost-runtime-001/runtime-custody-Root-readback-001.json` (`3878a3c8`).
+- `source436-current-API-UI-001/current-API-module-Root-readback-001.json` (`c5e73b68`).
+- `source436-tls-free-proxy-route-selftests-001/python14-Root-readback-001.json` (`f4ff70c8`).
+- `source436-Task32-final-qualification-Root-001.json` (`5d1ad8ec`).
+- `source436-Task32-final-original-module-smoke-001/module-smoke-Root-readback-001.json` (`cb53ad45`).
+- `source436-Task32-final-module-Dataflow-startup-source-Root-001.json` (`42028bf2`).
+
+- `source436-M6-final-aggregate-Root-readback-001.json` (`e11f5203`).
+- `source436-M6-parent-close-dependency-result-Root-001.json` (`dd9e29dd`).
+- `source436-M7-existing-gates-reconciliation-001/FINAL.json` (`25b3861b`).
+- `source436-M7-hqx-current-Root-capture-001.json` (`d2807b0b`).
+
+
 Source433 current finite Linux qualification (2026-11-20; broader Goal OPEN):
 
 Published checkpoint 5cc7e5c3db3c423467245744bdbce4a3c2f42d19 has971 curated
