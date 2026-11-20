@@ -2,7 +2,7 @@
 
 HTTP, JSON, WebSocket and Socket.IO for Unreal Engine, with C++ and Blueprint APIs.
 
-This branch is **2.0.0-dev**, targeting **Unreal Engine 5.8**. It contains the new implementation and migration shims. Release qualification, packaged Blueprint checks and the platform pass are still in progress; see the [development passport](docs/passport/2026-11-04-varest2-development.md).
+This branch is **2.0.0-dev**, targeting **Unreal Engine 5.8**. Linux Editor, selected packaged Development and Shipping Blueprint checks, and real Socket.IO reference interop have measured passes. Remaining platform and release qualification continue; see the [development passport](docs/passport/2026-11-04-varest2-development.md) for their scope and limits.
 
 ## What is in 2.0
 
@@ -20,7 +20,7 @@ This branch is **2.0.0-dev**, targeting **Unreal Engine 5.8**. It contains the n
 - OpenAPI import accepts JSON. YAML and Swagger 2.0 input need conversion before import.
 - Socket.IO uses WebSocket transport; HTTP polling is not implemented. WebRTC is outside the 2.0 scope.
 - Reflected response conversion uses the game-thread path. Reflected worker/cooked-worker modes remain disabled pending transfer qualification.
-- The explicit streaming typed decoder is a performance candidate; ordinary typed responses still use DOM conversion.
+- The explicit streaming UTF-8 typed decoder remains opt-in. The nominal 10 MB pilot (9,448,081 B) misses the 1.5x default-switch condition; ordinary typed responses retain DOM conversion.
 - HTTP `CONNECT` requests are refused before transport.
 
 ## Get started

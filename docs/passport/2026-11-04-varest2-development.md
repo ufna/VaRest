@@ -1,5 +1,162 @@
 # VaRest 2.0 development passport — 2026-11-04
 
+## Current Linux checkpoint — Source433, 2026-11-20
+
+The published Source433 checkpoint is
+`5cc7e5c3db3c423467245744bdbce4a3c2f42d19`: 971 curated members,
+860 plugin Source members and 186 admission rows. The 860-member plugin Source
+projection remains byte-identical to Source431. Source432 added the opt-in
+O4 fixture and portable endpoint witness under Tools; Source433 corrects two
+SDK compile expressions in the existing O4 Editor author. The current Editor,
+ordinary Game Development and ordinary Game Shipping native closures are
+qualified separately (Root `88f74e7a`, `43ade9b8`, `00540999`).
+Each uses its own fresh complete graph, recursive responses, unity/header/link
+closure, saved preimages and post-build dependency/image checks. This is
+ordinary Linux source-SDK evidence with recorded PCH/unity reuse, not a clean
+or cache-independent build, NoPCH qualification or another platform's result.
+
+### Real Socket.IO reference interop
+
+The unchanged Source431 plugin code passes all ten real reference cases in
+plain-loopback Linux Editor/default Vulkan: seven against Socket.IO 4.8.4,
+Recovery against 4.5.4, Payload against 4.4.1 and UnsupportedV2 against 2.5.1.
+All Editor/Node children and the supervisor exit 0 unforced; the finite four
+profile sequence takes 172.286 s, with 24 warning lines and zero error lines.
+All 51,378 guarded inputs remain unchanged. Root `0d0a601d` records the
+actual offline package and separately admitted installed Node identities.
+This establishes the native reference matrix, without a WSS, Blueprint,
+cooked Socket.IO, other-platform or all-Engine-network claim.
+
+### Saved public OpenAPI fixture and cooked parity
+
+The public importer saves four real packages in the owned
+`/Game/VaRestO4Wire001` namespace. The original manifest and member GUID
+survive the struct-editor rename and enum-display edits. The existing §14.3
+fixture exercises imported naming, `@type`, omit/null defaults, unset enum
+state and prettified enum rules. Cold Editor default conversion occurs before
+explicit API load/CallEndpoint. One ordinary official echo and default
+decode/reencode then pass; the archived Development Game passes the same
+69-byte body, HTTP 200 and exactly one callback:
+
+```json
+{"Wire.Score":7,"@type":"alpha","nullCount":null,"pretty":"wire-TWO"}
+```
+
+Author Root `4715a46d`, cold Editor custody `0d27d0bd` and Game Root
+`fa2b3020` retain the actual saved, early-conversion and byte-parity
+evidence. Game/server exit 0 unforced in 14.706 s; namespace exit 0 takes
+14.997 s. Cold Editor retains 618 warnings/zero errors; Development Game retains
+one EnhancedInput warning/zero errors. The original CP10, NP7 and four O4
+assets remain protected; no registry GUID-column measurement is claimed.
+
+The earlier O4 cook's whole strict preservation gate remains **false**:
+the SDK deleted two old CP backup logs. Its normal SDK exit and 1,138
+remeasured outputs were admitted only as finite actual cook/stage/archive
+products for subsequent inspection/Game (Root `bc4728b2`); neither the raw
+wrapper failure nor the two recorded None identities is rewritten. The
+temporary source config was then restored exactly from 258 B to the original
+309 B (`6d67b829`, restore Root `1801040f`), with all 21 assets and native
+products unchanged. SDK temporary config/cache was not restored or repaired.
+
+### Current healthy packaged Shipping endpoint gate
+
+The genuine Source433 Shipping native closure and exact four-file NP update
+are recorded by Roots `00540999` and `807d43c5`. The fresh Shipping
+cook passes its own prospectively declared preservation contract: three
+declared differences, including one predeclared old NP backup becoming None,
+and zero unexpected changes. It produces 1,110 outputs, with one known
+multiple-uproject warning and zero errors. The other eight admitted old
+backup logs remain unchanged; the earlier O4 whole-guard failure remains
+separate (cook Root `4dd4d075`).
+
+Four actual inspection tools confirm seven healthy packages, 22 byte-equal
+Stage/Archive pairs and preserved source identities; all 56,839 inspection
+inputs remain unchanged (Root `08219468`). The new archived Shipping executable
+is observed as the genuine native `6c131318` image. One actual packaged run
+then passes the strict portable witness: ARM, eight ordered checked CASE
+rows and PASS, plus eight independently accepted canonical wire requests.
+Every checked case retains typed conversion, raw body, repeated headers,
+game-thread delivery and unique request identity, including the 422 case.
+Game/peer exit 0 unforced in 7.382 s; namespace exit 0 takes 7.616 s.
+All 56,864 runtime inputs remain unchanged and the owned groups are absent
+(Root `e64d19ac`).
+
+Ordinary Shipping has no UE log available in this run. Warning/error category
+counts are **unavailable/null**, not zero or pristine. The earlier Source431
+run passed process/wire checks but lacked the compiled-out UE_LOG witness;
+that verifier failure remains unqualified. The current result is the finite
+healthy Shipping eight-case gate. The cooked missing-rule negative retains
+its genuine Source430 interval and is not rerun or rebound to Source433.
+
+### Remaining scope
+
+The Source431 measurements below retain their actual fixture sizes, conditions
+and source interval. DOM stays the production default; 1.5x is only the
+default-switch condition. Full Linux qualification still awaits the owner's
+answer for the three TLS fixtures; no permission is inferred. Mac,
+LinuxArm64 and I1 Tasks16–17 remain owner-deferred. No current Win64/MSVC or
+mobile qualification, blind SSH or whole-platform acceptance is implied.
+Task15/UI/Task16 carry and whole M5/M7/release/Goal remain open. Reflected
+worker/cooked-worker modes stay disabled.
+
+## Measured JSON checkpoint — Source431
+
+### JSON semantics and typed throughput
+
+The actual no-build JSON phase passes all 133 selected, started and completed
+cases, including StreamingParity: 97 clean and 36 with warnings, 37 case warnings
+total and zero case errors. Editor/supervisor exit 0 unforced in 47.190/47.234 s,
+with nonroot cap0, genuine startup HomeScreen CVar0 and 50,339 protected inputs
+differing only by two declared SDK metadata transitions (a3b7e10c). Source416's
+older warning counts and outcomes retain their own interval.
+
+One unchanged TypedConvert pilot then passes with LLM off, actual SAX selection,
+full native-value equality and every int64 exact. One warm-up per path is
+excluded; medians include native result destruction. The fixture filenames are
+nominal sizes; their actual byte counts are shown.
+
+| Fixture | Actual bytes | Measured runs | DOM+walk decode median | Explicit SAX median | DOM/SAX ratio |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| bench_1mb.json | 944204 | 15 | 7.88 ms | 8.92 ms | 0.883x |
+| bench_10mb.json | 9448081 | 7 | 93.61 ms | 106.30 ms | 0.881x |
+
+Editor/supervisor exit 0 unforced in 49.091/49.139 s, with all 50,360 inputs
+unchanged (0141921f; raw typed results 4d19facb). Immediate aggregate load was
+2.016/2.250/1.974 on 32 logical CPUs. This is one pilot with recorded conditions;
+it does not establish quiet per-core isolation or a causal improvement/regression
+against an earlier source version.
+
+On the nominal 10 MB fixture (9,448,081 B, not 10 MiB), the 1.5x production-default switch threshold is not met, so ordinary typed
+responses retain DOM. That threshold is not an M7 release minimum. M7 exit
+remains passport published/builds green with its required target/runtime scope.
+
+### Calibrated retained DOM memory
+
+A separate unchanged ParseAndWrite phase passes with LLM on. Both instrument
+calibrations are verified: 8.0 MiB for the 8 MiB allocation and 6,400,000 B for
+100,000 allocations of 64 B. It measures tagged bytes still allocated while the
+DOM result is alive; the displayed MiB figures are rounded.
+
+| Fixture | Actual bytes | Engine retained | VaRest retained |
+| --- | ---: | ---: | ---: |
+| bench_64kb.json | 59092 | 0.5 MiB | 0.3 MiB |
+| bench_256kb.json | 235991 | 2.0 MiB | 1.2 MiB |
+| bench_1mb.json | 944204 | 7.9 MiB | 4.4 MiB |
+| bench_10mb.json | 9448081 | 78.4 MiB | 43.0 MiB |
+
+For 1,000 tiny two-field documents, retained allocations are 364 B/engine and
+372 B/VaRest per document. The large VaRest arena uses 35,455,936 B and reserves
+35,638,376 B. Editor/supervisor exit 0 unforced in 67.120/67.215 s, all 50,382
+inputs unchanged (bd755753; raw results a55704eb). Instrumented timings are
+excluded from throughput/default-switch comparisons.
+
+These are retained allocated DOM measurements, not process peak or temporary
+SAX tape memory. Source431 packs written/replayed event bytes but preserves
+conservative 16 B/event growth accounting and Reserve capacity; no lower SAX
+allocation/peak memory or causal DOM-memory improvement is claimed.
+
+Historical records below retain their producing versions, warnings and limits.
+
 ## Source398 — actual eight stop variants and four Editor-authored settings-only packages, 2026-11-18
 
 Code397 now has a genuine stock SDK fixture-plus-dependency build:57actions0/unforced311.260898s,39 own C++ compiles/15 own Links/1 owned receipt action and exactly2 normal SDK shared PCHs in owned project Intermediate. All26805 protected inputs remain exact, all130 products exist,41 fresh dependency records join4877 PRE paths with0postonly/changed inputs, and15 SO/debug GNU pairs match. No Engine/Host C++ Compile or Link, handwritten Engine/Host/Target/Game patch or native-owner activation. This is a normal PCH build, not NoPCH qualification. Failed396 compile and397metadata001–004 remain separately preserved; stock foreign-Smoke plus declared VaRest dependencies graph005 supplies the actual successful closure.
@@ -376,13 +533,13 @@ This implementation/qualification inventory is not release acceptance. Version i
 
 | Area | Authored source | Evidence and remaining qualification |
 | --- | --- | --- |
-| M5 assets/Hubs/Blueprint | API/client assets, game/editor Hubs, typed handoff, nodes and teardown | Linux Editor modules compile/link. On compact DOM248, compiled Endpoint integration passes1/0, actions8/0 and G005 Construction1/0 across22 GTK schedules. This includes managed custom-refresh owner retirement. Recompile is user-requested inside the callback and performed after VM return; synchronous self-bytecode recompilation is not qualified. Broader transfer/cooked gates remain open and reflected worker/cooked-worker modes stay disabled. |
+| M5 assets/Hubs/Blueprint | API/client assets, game/editor Hubs, typed handoff, nodes and teardown | Current433 ordinary Linux native Editor/Development/Shipping and finite healthy packagedShipping8K2/8wire pass with strict ARM+8CASE+PASS portable proof; Shipping UE log categories unavailable/null. Earlier negatives/stop/typed-transfer results keep their source intervals. Broader transfer/Task14/platform/release remain open; reflected worker/cooked-worker modes stay disabled. |
 | M6 compatibility | v1 identities/storage, v2-backed parser/request facade, 109 deprecated functions, copy bridges | On compact DOM248, Legacy passes4/0, including eight native engine-mock HTTP/lifetime/reentrancy cases. A fixture authored from the frozen tag API passes separate-process Load1/0 again after fixture-module migration258, including original custom-node execution; it is not an old-v1-produced binary. Broader request/lifetime and platform gates remain open. |
 | WebSocket | Lifecycle, send/decode, routing/request/reply, Hubs/Blueprint and trace | Public native client/reconnect fake scenarios pass2/0 and the compiled asset-declared graph passes1/0. The selected WS219/Tests NoPCH and exact normal restoration pass. Broader real-server/TLS/proxy/pressure/lifetime and resolver/platform gates remain open. Historical unestablished IPv6 probes are not passing production evidence. |
-| Socket.IO | Namespaces, events/acks, attachments, recovery/auth, Hubs/Blueprint and trace | Codec/native fake checks pass5/0 and Blueprint checks5/0, including compiled declared/generic nodes and real actor-component lifecycle. Selected SIO226/Tests NoPCH and exact normal restoration pass. Real-server/auth pressure, broader lifecycle and platform qualification remain open. |
-| OpenAPI | JSON resolution/planning, generated assets, previews, identity-aware reimport, reports, controlled URL fetch and commandlet | Offline checks pass4/0, covering saved/cold-loaded assets/reimport, query-only references and counted URI boundary refusal. Browser/undo, URL/network, broader merge/performance and release acceptance remain open. JSON-only support is the accepted release scope; YAML and Swagger2 are unimplemented. |
+| Socket.IO | Namespaces, events/acks, attachments, recovery/auth, Hubs/Blueprint and trace | Source431 real plain Linux Editor reference10/10:4.8.4seven,4.5.4Recovery,4.4.1Payload,2.5.1UnsupportedV2;172.286s/24warnings/0errors. Existing native/BP and NoPCH gates retain their intervals. WSS/cooked/reference-pressure/platform and whole-release scope remain separate. |
+| OpenAPI | JSON resolution/planning, generated assets, previews, identity-aware reimport, reports, controlled URL fetch and commandlet | Source433 public-imported four-package §14.3 fixture saves/reloads, preserves memberGUID/import manifest through designer edits, converts before explicit APIload and passes one69B echo200/callback1 with coldEditor/archiveDevelopment parity. OriginalO4Cook wholeguard remainsfalse/twologsNone; finite1138actualproducts admitted only. URL/undo/broader merge/performance/platform/release remain open; JSON-only release scope unchanged. |
 | Inspector I2–I5 | Desktop panel, HTTP/body/socket/namespace views, links, Stats, console/BP, HAR/cURL | Guarded Editor Compile/Link; targeted body/filter models pass 2/0 and socket/Stats/HAR scenarios pass 1/0. GUI/clipboard/redaction-pressure/BP/GC runtime gates remain open. I1 Tasks16–17 stay explicitly deferred. |
-| M7 candidates | Process-key SipHash-2-4 index, enum-name reuse, compact24-byte nodes, explicit streaming typed UTF-8 conversion with DOM fallback | Current full JSON passes132/0, including fixture-module ownership. The same-fixture large arena uses11.108% fewer bytes; calibrated retained memory falls47.2→43.0MiB, without a process-peak or parse-speedup claim. SAX still misses adoption and DOM remains default. Quiet-machine benchmarks, full parity/adoption and non-Linux entropy/platform gates remain open. |
+| M7 candidates | Process-key SipHash index, enum-name reuse, compact DOM/event records, explicit streaming typed UTF-8 conversion with DOM fallback | Source431 JSON133/0 and unchanged typed/retained pilots pass. Nominal10MB actual9448081B:DOM93.61ms/SAX106.30ms=0.881x, so DOM remainsdefault;1.5x is onlydefault-switch condition. Calibrated large retainedDOM Engine78.4/VaRest43.0MiB; no peak/SAXcapacity/causal improvement claim. Quiet isolation and broader platform/release remain open. |
 
 Local source archives and graph/native receipts live outside the repository under `/w/Unreal/VaRest-recovery/`. They identify working source, not commits or portable benchmark data. No commit, push or remote sync is implied.
 

@@ -24,7 +24,7 @@ if (Parsed.HasValue())
 
 Blueprint exposes **Parse Json**, **Make Json**, field/array operations, struct conversion and file helpers. Use conversion rules for aliases, naming and explicit field mappings. Cooked field names must come from supported rules/field maps rather than editor-only property metadata.
 
-The explicit streaming UTF-8 typed decoder is a performance candidate. Ordinary typed responses retain DOM conversion until semantic checks and the specified 10 MiB gate pass. The safe game-thread path remains the route for reflected results; worker/cooked-worker reflected modes are disabled pending transfer qualification.
+The explicit streaming UTF-8 typed decoder is opt-in; ordinary typed responses use DOM conversion. The nominal 10 MB fixture is actually 9,448,081 B. Its Linux LLM-off pilot measures DOM+walk at 93.61 ms and explicit SAX at 106.30 ms (0.881x), so the 1.5x condition for changing the production default is not met. This is a default-switch condition, not a release minimum. Measurements and retained-memory limits are in the [development passport](../passport/2026-11-04-varest2-development.md). Reflected results use the game-thread path; reflected worker/cooked-worker modes remain disabled.
 
 ## HTTP and API assets
 
@@ -60,6 +60,8 @@ Namespaces share the underlying connection. An empty namespace argument selects 
 
 API assets describe entries, namespace defaults and auth. Public namespace/session information shown in Inspector is scrubbed at capture. Recovery metadata is internal protocol state.
 
+The current Linux Editor reference run passes seven real cases against Socket.IO 4.8.4, Recovery against 4.5.4, Payload against 4.4.1 and UnsupportedV2 against 2.5.1. This plain-loopback ten-case result retains 24 warnings and zero errors; WSS, cooked Socket.IO and other platforms retain separate qualification scope.
+
 ## OpenAPI import
 
 `VaRestOpenApi` is an Editor module. Import an OpenAPI JSON file through Content Browser, or use `UVaRestOpenApiLibrary::ImportFromFile` / `ImportFromUrl` from editor utilities. Choose an unused destination package such as `/Game/Backend/Api`.
@@ -78,7 +80,9 @@ The commandlet accepts these alternatives:
 -run=VaRestOpenApi -Import=/absolute/path/openapi.json -Dest=/Game/Backend/Api
 ```
 
-Check reports drift without modifying packages. Import/reimport can save changed packages in the commandlet workflow. Exit code 0 means success/no drift, 1 reports a failed operation, diagnostics or drift, and 2 reports invalid arguments. URL, undo/package and cooked behavior still needs release qualification.
+Check reports drift without modifying packages. Import/reimport can save changed packages in the commandlet workflow. Exit code 0 means success/no drift, 1 reports a failed operation, diagnostics or drift, and 2 reports invalid arguments.
+
+A finite Linux fixture now saves four packages through the public importer, retains imported rules and member identity through designer rename/enum-display edits, and verifies default conversion before explicit API load. Cold Editor and the archived Development Game produce the same 69-byte echo body and decode/reencode result. This qualifies the recorded imported-fixture route; URL, undo, broader merge/package behavior and release acceptance retain their separate scope. See the [passport](../passport/2026-11-04-varest2-development.md#saved-public-openapi-fixture-and-cooked-parity) for warnings and the earlier cook-preservation failure.
 
 ## Existing projects
 

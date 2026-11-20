@@ -176,3 +176,109 @@ defence for a non-idempotent call is `.Idempotent()` plus a server-side Idempote
 `http.CurlReuseConnectionEnabled=false` (`CurlHttp.cpp:204-207`, `CurlHttpManager.cpp:131-141`) turns reuse off for new
 connections but does not evict connections already idle in the pool; `VaRest.Integration.Http.Retry` sends a burst of
 requests under it first for that reason.
+
+## M5 dynamic results: GT materialization and frame-terminal completion
+
+The platform policy above controls transport completion. Its background-decode description does not move M5
+reflected conversion off the game thread. `FVaRestClient::RequestDynamic(Verb, Path, Config&&)` takes
+`FVaRestDynamicResultConfig` and returns `TVaRestRequest<FVaRestDynamicResult>`; include
+`VaRestDynamicRequest.h`. Activation is GT-only. Its native work parses/envelopes bytes using captured plain
+options; reflected initialization, conversion, preparation and destruction run on GT. Dynamic
+`.OnHttpThread()` is refused as Config. Ordinary compile-time `Request<T>` keeps its existing decode and delivery
+contract; this new dynamic lifecycle registry does not change it.
+
+### Ordering and terminal exceptions
+
+An admitted dynamic request reserves its budget and completion frame before retaining work. Readiness in frame N
+cannot invoke that completion in N: the GT dispatcher uses a finite ready snapshot and requires an older
+`GFrameCounter`. A worker only signals readiness; GT stamps the frame. A completion becoming ready during a drain
+waits for a later drain.
+
+On that later turn, the pipeline checks cancellation, owner and managed-gate state; finalizes a usable result;
+performs the private typed preparation; and resets the private reflected carriers. It samples type/rule validity
+and cancellation/owner/gate state again after finalizer, clock and cleanup callouts. Only then does it accept the
+terminal outcome, finish accounting and emit `Completed`. User delivery follows `Completed`; moving only the
+Blueprint callback to a later frame would not satisfy this ordering.
+
+Admitted local Config/error outcomes, cancellation and queued acknowledgements use the same completion policy.
+Queued acknowledgement and canceled/silent outcomes skip reflected materialization; queued delivery reports the
+queue ID rather than a typed success. Owner loss, Hub/client retirement or HTTP shutdown can suppress user
+delivery. Cancellation preserves a file/queue commit already selected by the native pipeline; it does not turn an
+actual committed side effect into an uncommitted one. Refusal before frame admission uses ordinary asynchronous
+Config notification, without an admitted frame-slot guarantee or coverage by the admitted-operation count.
+
+### Editor and cooked availability
+
+Editor materialization requires current pre-change/transactor bindings. Struct and enum pre-change, undo/redo
+before deserialization, package reload before fixup, target Blueprint precompile, and rule changes invalidate the
+GT state before old reflected layouts are used. The editor waits for a strictly later settling frame. Missing or
+replaced required editor bindings refuse typed activation with `Config/EditorMutationHooksUnavailable`;
+a stale success before terminal acceptance becomes `Config/DynamicTypeChanged`. A valid type whose JSON does
+not fit produces Decode diagnostics; finite parser/converter admission refusal uses `Config/DecodeBudget`.
+Typed error-body conversion preserves the original primary error and its raw response diagnostics.
+
+Cooked dynamic reflected conversion also uses the GT path. It validates the complete supported transitive closure,
+including Optional values, container members, enum references and required imported rules. A project/native struct
+needs an explicit GT lifecycle declaration through
+`FVaRestDynamicNativeTypes::RegisterGameThreadType(Type, Contract, NativeTypeDependencies)` and corresponding
+`UnregisterGameThreadType(Type)`. The declaration covers initialization/defaults, copy, destruction, relevant
+hash/equality and nonreflected dependencies; it is a project qualification obligation, not an inference from
+`IsNative`, a root pin or zero-constructor flags. It does not enable reflected worker conversion. Cooked reflected
+workers remain disabled; the accepted GT fallback is distinct from a qualified worker closure and its shutdown
+contract. Callers can select raw JSON/text/bytes without reflected materialization; an admission refusal does not
+promise a response body.
+
+### Native shell and the private GT Take
+
+`FVaRestDynamicResult` is a copyable immutable native shell. `GetType()` and `GetErrorType()` return plain
+`FVaRestDynamicTypeInfo`; `GetJson()`, `GetErrorJson()`, `GetText()` and `GetBytes()` expose native payloads.
+The shell owns no UObject/type/property pointer, reflected carrier, config/clock, budget lease or GT release token.
+Copies and final destruction may occur on any thread. The byte view is borrowed for the lifetime of an owning shell
+copy. JSON retains its existing shared-document contract: clone before independent or concurrent mutation.
+`GetText()` is raw String mode; JSON-value String/Bytes payloads are exposed as JSON and through internal typed
+preparation. `HasBody()` describes retained payload, not request success: `TVaRestResult::Error` is authoritative.
+
+There is no public retained-shell getter for reflected output. The generated action expansion uses a noncopyable
+private `FDynamicPrepareToken` during one synchronous GT preparation. Its `Take` checks the current descriptor and
+destination, copies immediately and resets the carrier even on refusal; no destination address is retained.
+Confirmation and the generated continuation's request cookie permit one matching consumer. Preparation ends and
+all private carriers are reset before `Completed`. Native shell retention cannot keep or reopen them.
+`UVaRestRequestAction::GetNativeResult()` and `TakeNativeResultOnGT()` return the same plain shell, not this
+preparation capability. The Blueprint-internal `TakeResponse`/`TakeErrorBody` thunks are not general late getters.
+
+### Availability after the terminal cutoff
+
+The two availability enums have different roles:
+
+| API | Frozen values and meaning |
+| --- | --- |
+| `FVaRestDynamicTypeInfo::Availability` (`EVaRestDynamicAvailability`) | `None`, `Available`, `Unavailable`, `TypeChanged`, `BudgetRefused`: plain declared-output validation/preparation metadata. `Available` is not a retained reflected value or a promise that a later Blueprint destination is still current. |
+| `UVaRestRequestAction::GetTypedOutputUnavailable` / `OnTypedOutputUnavailable` (`EVaRestTypedOutputUnavailableReason`) | `TypeChangedAfterCompletion`, `TargetChangedAfterCompletion`, `OutputSuperseded`, `OutputNotBound`: the accepted result cannot be transferred to that typed action continuation. |
+
+A `Completed` listener may edit a type, recompile the target or retire its owner. After that terminal cutoff the
+pipeline does not rewrite an accepted Success into Config. It rechecks the action's current target/type and
+one-shot cookie before user execution. A stale typed continuation reports the explicit unavailable reason with
+the original HTTP/error metadata when the target can still receive it; owner/Hub/module closure can instead
+suppress delivery. It never substitutes a default typed success. Retained native shell metadata is a snapshot,
+not a live reflected-availability query. Action metadata/raw getters remain subject to their GT API contract.
+
+### Bounds and lifetime limits
+
+The limits cover admitted count, retained input, parser nodes/work and converter requested/logical output.
+They do not prove a universal heap, RSS, CPU or latency ceiling: authored defaults/native lifecycle functions,
+allocator/container slack, engine-owned destination copies, upstream buffers and caller-retained shells can add
+cost. Caller-created actions and refused asynchronous notifications are outside the admitted-state count.
+`SaveTo` remains streaming; ordinary dynamic `SaveTo` requires a live multithreaded native scheduler.
+
+Module-owned GT payloads dispose callbacks, preparations and reflected state on GT. Native worker tickets and
+retained public shells are separate from those affine owners. Keep externally held managed client/builders and
+affine configuration within their GT retirement contract and release them before HTTP Stop; a weak client identity
+only becomes a normal strong client when `PinOnGT` succeeds. This does not promise forced runtime DLL unmapping,
+arbitrary global scheduler cancellation or a global task-graph drain. The accepted bounded mapped-exit retention
+of unresolved native work is not reflected-worker qualification.
+
+The declarations and ordering above are defined by the current
+[dynamic API](../../Source/VaRestHttp/Public/VaRestDynamicRequest.h),
+[native shell](../../Source/VaRestHttp/Public/VaRestDynamicResult.h),
+[GT lifecycle declaration](../../Source/VaRestHttp/Public/VaRestDynamicTypes.h) and
+[action availability API](../../Source/VaRestHttp/Public/VaRestRequestAction.h).
