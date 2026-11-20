@@ -9,6 +9,7 @@
 #include "Misc/AutomationTest.h"
 #include "UObject/Class.h"
 #include "UObject/ObjectRedirector.h"
+#include "UObject/Package.h"
 #include "UObject/StrongObjectPtr.h"
 #include "UObject/UObjectGlobals.h"
 
