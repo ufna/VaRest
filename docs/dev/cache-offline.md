@@ -2,6 +2,38 @@
 
 VaRest 2 caching and durable queueing are opt-in. Configure clients and send requests on the game thread. Keep the client alive for future queue replay and result subscriptions; a request handle is weak and does not provide that lifetime.
 
+## Measured GT cost and disk-admission tradeoff
+
+The Source438 Linux Editor measurements keep the policies above unchanged.
+Body-free queue normalization of an actual 65,536-byte record with 128 headers
+cost a median **0.562 / 4.489 / 35.461 ms on GT for 1 / 8 / 64 calls**. Each burst
+size used 31 samples after one excluded warm-up. These times sum only synchronous
+normalization calls; fixture preparation and assertions were outside timing.
+A burst can consume material GT time even when every record fits the cap.
+This is an observation, not a frame-time guarantee or a new limit.
+
+Two eligible warm disk keys hit 2/2 sequentially. With the first 112 MiB logical
+read reservation deliberately held under the 128 MiB executor budget, the second
+optional read refused: 1/2 hits and one labelled scripted fallback. This
+demonstrates the conservative admission tradeoff described in this guide, not a
+general workload hit rate or real-network measurement. The existing
+4097-control-intent batch cost **43.336 ms on GT**. Recovery trim of 4097 records
+submitted in 0.015989 ms and completed/drained in 66.310 ms; that interval includes
+IO, queueing and GT pumping, not pure disk-worker service time. Logical ownership
+returned to zero and owned test roots were removed.
+
+The queue's measured depth3/846 scanner units do not saturate the depth8/2048
+limits. Its 139,881 bytes of annotated additional backing do not measure full
+temporary allocation, RSS or 2 MiB saturation. No policy, default, numerical
+acceptance threshold or production optimization follows automatically. All seven
+cases passed with zero case/global errors and 641 retained warning lines; this
+finite Linux Editor result does not establish pristine output or other platforms.
+The development [passport](../passport/2026-11-04-varest2-development.md) records
+the producing version and build qualification. The separate quiet
+[JSON](../passport/2026-10-19-json-bench.md) and
+[HTTP](../passport/2026-10-21-http-request-path.md) passports were produced by
+Source436 binaries, not these Source438 test edits.
+
 ## Configure a client
 
 ```cpp

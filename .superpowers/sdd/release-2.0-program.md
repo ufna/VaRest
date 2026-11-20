@@ -1,5 +1,45 @@
 # VaRest 2.0 release program ledger (controller-level; per-plan ledgers live in sibling dirs)
 
+## Source438 measurements and published Source439 checkpoint — 2026-11-21
+
+The remote-verified checkpoint is 4b060a36afbbc3a5ea2e21101eb77c2ab8fd83e7
+(Root deaefc69, 975 curated members). It contains the three Source438 private
+HTTP test changes and the two quiet passports. The quiet [JSON](../../docs/passport/2026-10-19-json-bench.md)
+and [HTTP](../../docs/passport/2026-10-21-http-request-path.md) timings were produced
+by Source436 binaries and recorded during Source437. JSON retains three independent
+typed and three parse/write timing invocations plus one separate calibrated LLM
+retained-DOM invocation; HTTP retains three independent plain-loopback invocations.
+DOM stays default: >=1.5x controls the conditional SAX default switch, not a release floor.
+
+Seven Source438 queue/disk cases pass normally with zero case/global errors and
+641 retained warning lines (Root 33162162, strict 7cb463f0). A 65,536-byte body-free
+queue record with 128 headers measured median summed synchronous GT costs of
+**0.562 / 4.489 / 35.461 ms for 1 / 8 / 64 calls**, each with 31 samples after one
+excluded warm-up. This is material burst cost, not a frame-time guarantee. The
+observed shape is depth3/846 scanner units; 139,881 bytes of annotated additional
+backing do not measure full temporary allocation, RSS or 2 MiB saturation.
+
+The disk fixture hit 2/2 eligible keys sequentially, then 1/2 with the first
+112 MiB logical reservation deliberately held under the 128 MiB executor budget:
+one optional read refused and used a labelled scripted fallback. The existing
+4097-control batch cost **43.336 ms on GT**. Recovery trim of 4097 records took
+0.015989 ms to submit and 66.310 ms through owned completion/drain, including IO,
+queueing and GT pumping. These finite observations are not pure disk-worker
+service time or a general hit-rate estimate; defaults are unchanged.
+
+Fresh HTTP/Tests NoPCH verification passes **201 Compile + 2 Link / 408 products**
+(2c3e11bb), followed by exact rule restoration and the ordinary **11 Compile +
+2 Link / 28-product** build (86f0c10b). No Engine/host Compile/Link or PCH creation
+was admitted. Restored VaRest.Http.Module.Loads is Success with normal Editor0,
+zero case/global errors and 11 warnings (c24ffe15). Failed measurement001, whole
+Source435, the original Source437 whole adopter and broader Task32 reader1295
+remain failed; the newer finite passes do not relabel those intervals.
+
+Task15 full965 producing-version carry and final Task16 handoff await explicit
+reconciliation. This entry does not close M5, whole M7, release or Goal; full
+Linux/TLS permission and shared platform/release gates remain separate. The
+accepted whole review and scoped correction are retained without repeating them.
+
 Source436 final finite results / Task32 closure (2026-11-20; broader Goal OPEN):
 
 The published, remote-verified Source436 checkpoint is

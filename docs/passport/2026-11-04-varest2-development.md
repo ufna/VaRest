@@ -1,5 +1,51 @@
 # VaRest 2.0 development passport — 2026-11-04
 
+## Source438 measurements and Source439 publication — 2026-11-21
+
+The published checkpoint is 4b060a36afbbc3a5ea2e21101eb77c2ab8fd83e7
+(Root deaefc69, 975 curated members; C++/Tools Source438). The published
+[JSON](2026-10-19-json-bench.md) and [HTTP request-path](2026-10-21-http-request-path.md)
+quiet passports retain **Source436** binary provenance and Source437 recording.
+JSON has three independent typed and three parse/write timing invocations plus
+one separate calibrated retained-DOM LLM invocation; HTTP has three independent
+plain-loopback invocations. Shared-host conditions and warnings remain recorded.
+DOM stays default; >=1.5x controls the conditional SAX default switch, not release
+acceptance.
+
+Seven Source438 queue/disk scenarios passed in one no-build Linux Editor
+invocation: normal Editor/supervisor0, zero case/global errors, 641 warnings,
+unchanged protected inputs and drained owned groups (33162162 / 7cb463f0).
+
+| Observed work | Result and measurement boundary |
+| --- | --- |
+| Body-free queue normalization, 65,536 encoded bytes / 128 headers | Median summed GT cost **0.562 / 4.489 / 35.461 ms** for bursts of **1 / 8 / 64**; 31 samples after one excluded warm-up per size. The 64-call maximum was 38.567 ms. Preparation, assertions and report writing were outside timing. |
+| Eligible warm disk reads | 2/2 hits sequentially; 1/2 with the first 112 MiB logical reservation intentionally held under the 128 MiB executor budget, one optional refusal and one labelled scripted fallback. |
+| Existing 4097 control-intent submissions | **43.336 ms** synchronous GT submission. |
+| Recovery trim of 4097 existing records | **0.015989 ms** GT submission; **66.310 ms** through owned completion/drain, including IO, queueing and GT pumping. Fixture generation was outside timing. |
+
+The queue shape reaches depth3/846 scanner units, not the depth8/2048 limits.
+Its 88,440-byte DTO charge and 139,881-byte annotated additional backing do not
+measure full temporary allocation, RSS or 2 MiB saturation. These observations
+show material bounded GT cost and the conservative disk-admission tradeoff;
+they add no performance floor, frame-time guarantee, pure disk-worker timing,
+real-network hit-rate estimate or automatic optimization/default change. Logical
+ownership and owned test roots drain cleanly. Interpretation d8316bcf retains
+these limits.
+
+The edited version also passes fresh HTTP/Tests NoPCH **201 Compile + 2 Link /
+408 products**, with 201 fresh dependency records (2c3e11bb), followed by exact
+rule restoration and ordinary **11 Compile + 2 Link / 28 products** (86f0c10b).
+Both inspect their fresh full closure and create no Engine/host Compile/Link or
+PCH. Restored VaRest.Http.Module.Loads is Success, normal Editor0, zero case/global
+errors and 11 retained warnings (c24ffe15). These Linux Editor intervals do not
+prove other targets/platforms or pristine output. Earlier failed measurement001,
+whole435, whole437-adopter and Task32 reader1295 stay failed.
+
+Task15 full965 carry and final Task16 handoff await explicit reconciliation;
+M5, whole M7, release and Goal are not closed by these records. Full Linux/TLS
+permission and shared platform/release work remain separate. Historical producing
+versions and the accepted whole review/scoped correction are preserved.
+
 ## Source436 finite results and Task32 closure — 2026-11-20
 
 The published, remote-verified Source436 checkpoint is
