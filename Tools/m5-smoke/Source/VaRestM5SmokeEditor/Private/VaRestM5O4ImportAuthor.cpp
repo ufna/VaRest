@@ -135,7 +135,7 @@ bool Author(FAutomationTestBase& Test)
         || FPaths::IsRelative(SchemaFile) || FPaths::IsRelative(ProofFile)
         || IFileManager::Get().FileExists(*ProofFile)
         || !IFileManager::Get().DirectoryExists(*FPaths::GetPath(ProofFile))
-        || !FPackageName::TryConvertLongPackageNameToFilename(Folder, OutputFolder)
+        || !FPackageName::TryConvertLongPackageNameToFilename(FString(Folder), OutputFolder)
         || IFileManager::Get().DirectoryExists(*OutputFolder)
         || FindObject<UObject>(nullptr, ApiPath) || FPackageName::DoesPackageExist(ApiPackage))
         return Fail(TEXT("Opt-in/nowrite, exact source input, fresh proof and unused owned O4 namespace are required"));
@@ -305,7 +305,7 @@ bool FVaRestO4ImportedWireTest::RunTest(const FString& Parameters)
         return VaRestM5O4Author::Author(*this);
     if (Parameters == TEXT("EditorWire") && FParse::Param(FCommandLine::Get(), TEXT("VaRestO4WireEditor"))
         && !FParse::Param(FCommandLine::Get(), TEXT("VaRestO4FixtureAuthor")))
-    { AddCommand(MakeShared<VaRestM5O4Author::FWaitEditorWire>(this)); return true; }
+    { AddCommand(new VaRestM5O4Author::FWaitEditorWire(this)); return true; }
     AddError(TEXT("Only the explicitly opted-in O4 role is executable")); return false;
 }
 #endif
